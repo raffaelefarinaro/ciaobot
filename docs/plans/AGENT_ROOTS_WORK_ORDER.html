@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Agent Roots Work Order</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:#F5F4F8; --surface:#FFFFFF; --sunken:#EDEBF2;
+    --ink:#1A1826; --ink-soft:#443F5C; --muted:#6C6885; --faint:#8F8BA6;
+    --rule:#DCD9E5; --rule-soft:#E8E5EF;
+    --sealed:#0E6B66;  --sealed-bg:#DCEFEE;
+    --logic:#A32A5C;   --logic-bg:#F8E2EA;
+    --shared:#5546C4;  --shared-bg:#E6E2FA;
+    --done:#0E6B66;    --done-bg:#DCEFEE;
+    --shadow:0 1px 2px rgba(26,24,38,.05), 0 8px 24px -12px rgba(26,24,38,.18);
+    --measure:70ch;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#121121; --surface:#1B1A2A; --sunken:#161524;
+      --ink:#EAE8F2; --ink-soft:#C3BFD6; --muted:#9894AE; --faint:#736F8C;
+      --rule:#2E2C43; --rule-soft:#252336;
+      --sealed:#4ECDC2; --sealed-bg:#12332F;
+      --logic:#F0789E;  --logic-bg:#38182A;
+      --shared:#A093FF; --shared-bg:#221E3F;
+      --done:#4ECDC2;   --done-bg:#12332F;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#121121; --surface:#1B1A2A; --sunken:#161524;
+    --ink:#EAE8F2; --ink-soft:#C3BFD6; --muted:#9894AE; --faint:#736F8C;
+    --rule:#2E2C43; --rule-soft:#252336;
+    --sealed:#4ECDC2; --sealed-bg:#12332F;
+    --logic:#F0789E;  --logic-bg:#38182A;
+    --shared:#A093FF; --shared-bg:#221E3F;
+    --done:#4ECDC2;   --done-bg:#12332F;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.6);
+  }
+
+  *,*::before,*::after { box-sizing:border-box; }
+  img,svg { max-width:100%; height:auto; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+    font-size:1rem; line-height:1.62; -webkit-font-smoothing:antialiased;
+  }
+  code,pre,.mono { font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; }
+  p code,li code,td code,dd code {
+    font-size:.86em; background:var(--sunken); color:var(--ink-soft);
+    padding:.1em .34em; border-radius:3px; border:1px solid var(--rule-soft);
+  }
+  a { color:var(--sealed); text-underline-offset:2px; }
+  :focus-visible { outline:2px solid var(--sealed); outline-offset:3px; border-radius:3px; }
+
+  .shell { max-width:74rem; margin:0 auto; padding:0 clamp(1rem,4vw,3rem); }
+
+  header.masthead { padding:clamp(2.5rem,7vw,5rem) 0 2rem; border-bottom:1px solid var(--rule); }
+  .eyebrow {
+    font-family:"IBM Plex Mono",monospace; font-size:.75rem; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted);
+    display:flex; flex-wrap:wrap; gap:.5rem 1.25rem; margin-bottom:1.25rem;
+  }
+  h1 {
+    font-family:Newsreader,Georgia,serif; font-weight:500;
+    font-size:clamp(2rem,5.5vw,2.75rem); line-height:1.07; letter-spacing:-.02em;
+    margin:0 0 1rem; text-wrap:balance; max-width:26ch;
+  }
+  .standfirst {
+    font-family:Newsreader,Georgia,serif; font-size:clamp(1.05rem,2.3vw,1.1875rem);
+    line-height:1.5; color:var(--ink-soft); max-width:62ch; margin:0;
+  }
+  .standfirst strong { color:var(--ink); font-weight:600; }
+
+  /* progress meter */
+  .meter { margin-top:2rem; padding:1rem 1.15rem; background:var(--surface);
+           border:1px solid var(--rule); border-radius:6px; box-shadow:var(--shadow); }
+  .meter-top { display:flex; flex-wrap:wrap; align-items:baseline; gap:.6rem 1rem; }
+  .meter-count { font-family:"IBM Plex Mono",monospace; font-size:1.5rem; font-weight:600;
+                 font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+  .meter-label { font-family:"IBM Plex Mono",monospace; font-size:.6875rem; letter-spacing:.12em;
+                 text-transform:uppercase; color:var(--muted); }
+  .meter-reset { margin-left:auto; font-size:.8125rem; background:none; border:1px solid var(--rule);
+                 color:var(--muted); border-radius:4px; padding:.25rem .6rem; cursor:pointer;
+                 font-family:inherit; }
+  .meter-reset:hover { color:var(--ink); border-color:var(--muted); }
+  .track { height:6px; border-radius:3px; background:var(--sunken); margin-top:.85rem; overflow:hidden; }
+  .track > span { display:block; height:100%; width:0%; background:var(--done);
+                  transition:width .28s ease; }
+
+  main { padding-bottom:6rem; }
+  section { padding-top:3.25rem; scroll-margin-top:1rem; }
+  h2 {
+    font-family:Newsreader,Georgia,serif; font-weight:500;
+    font-size:clamp(1.4rem,3.2vw,1.9rem); line-height:1.16; letter-spacing:-.015em;
+    margin:0 0 .3rem; text-wrap:balance;
+  }
+  h2 .num { font-family:"IBM Plex Mono",monospace; font-size:.6875rem; font-weight:500;
+            letter-spacing:.12em; color:var(--faint); display:block; margin-bottom:.65rem; }
+  h3 { font-weight:600; font-size:1.1rem; margin:2.25rem 0 .5rem; letter-spacing:-.005em; }
+  h4 { font-family:"IBM Plex Mono",monospace; font-weight:500; font-size:.6875rem;
+       letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:1.75rem 0 .7rem; }
+  .lede { font-size:1.1rem; line-height:1.55; color:var(--ink-soft); margin:.9rem 0 0; max-width:62ch; }
+  p { margin:1rem 0 0; max-width:var(--measure); }
+  ul,ol { margin:1rem 0 0; padding-left:1.3rem; max-width:var(--measure); }
+  li { margin-top:.45rem; }
+  li::marker { color:var(--faint); }
+  strong { font-weight:600; color:var(--ink); }
+
+  .chip {
+    display:inline-flex; align-items:center; gap:.35rem; white-space:nowrap;
+    font-family:"IBM Plex Mono",monospace; font-size:.6875rem; font-weight:500;
+    letter-spacing:.06em; text-transform:uppercase; padding:.18rem .48rem;
+    border-radius:3px; border:1px solid;
+  }
+  .chip::before { content:""; width:.4rem; height:.4rem; border-radius:50%; background:currentColor; }
+  .chip.sealed { color:var(--sealed); background:var(--sealed-bg); border-color:color-mix(in oklab,var(--sealed) 35%,transparent); }
+  .chip.logic  { color:var(--logic);  background:var(--logic-bg);  border-color:color-mix(in oklab,var(--logic) 35%,transparent); }
+  .chip.shared { color:var(--shared); background:var(--shared-bg); border-color:color-mix(in oklab,var(--shared) 35%,transparent); }
+  .chip.plain  { color:var(--muted);  background:var(--sunken);    border-color:var(--rule); }
+
+  /* tables */
+  .table-wrap { margin:1.5rem 0 0; overflow-x:auto; background:var(--surface);
+                border:1px solid var(--rule); border-radius:6px; box-shadow:var(--shadow); }
+  table { border-collapse:collapse; width:100%; min-width:33rem; font-size:.9375rem; }
+  caption { caption-side:top; text-align:left; padding:.8rem 1.05rem;
+            font-family:"IBM Plex Mono",monospace; font-size:.6875rem; letter-spacing:.12em;
+            text-transform:uppercase; color:var(--muted); background:var(--sunken);
+            border-bottom:1px solid var(--rule-soft); }
+  th,td { text-align:left; padding:.65rem 1.05rem; border-bottom:1px solid var(--rule-soft); vertical-align:top; }
+  thead th { font-size:.6875rem; font-family:"IBM Plex Mono",monospace; letter-spacing:.1em;
+             text-transform:uppercase; color:var(--muted); font-weight:500; border-bottom:1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom:0; }
+  td.ctr { text-align:center; font-family:"IBM Plex Mono",monospace; }
+  .yes { color:var(--sealed); font-weight:600; }
+  .no  { color:var(--logic);  font-weight:600; }
+
+  /* callouts */
+  .callout { margin:1.5rem 0 0; padding:1.05rem 1.3rem; border-radius:6px;
+             background:var(--surface); border:1px solid var(--rule);
+             border-left:3px solid var(--muted); max-width:var(--measure); }
+  .callout.cost { border-left-color:var(--logic); }
+  .callout.key  { border-left-color:var(--sealed); }
+  .callout.note { border-left-color:var(--shared); }
+  .callout > :first-child { margin-top:0; }
+
+  /* queue depth viz */
+  .depth { margin:1.5rem 0 0; background:var(--surface); border:1px solid var(--rule);
+           border-radius:6px; box-shadow:var(--shadow); padding:1.25rem 1.35rem; }
+  .depth-row { display:grid; grid-template-columns:minmax(9rem,auto) minmax(0,1fr) auto;
+               gap:.5rem .9rem; align-items:center; margin-top:.85rem; }
+  .depth-row:first-of-type { margin-top:0; }
+  .depth-name { font-family:"IBM Plex Mono",monospace; font-size:.8125rem; color:var(--ink-soft); }
+  .depth-bar { height:1.4rem; border-radius:3px; background:var(--sunken); overflow:hidden; display:flex; }
+  .depth-bar i { display:block; height:100%; }
+  .depth-bar i.seen   { background:color-mix(in oklab,var(--sealed) 55%, transparent); }
+  .depth-bar i.unseen { background:color-mix(in oklab,var(--logic) 60%, transparent);
+                        background-image:repeating-linear-gradient(45deg,transparent 0 4px,rgba(255,255,255,.28) 4px 8px); }
+  .depth-num { font-family:"IBM Plex Mono",monospace; font-size:.8125rem; font-variant-numeric:tabular-nums;
+               color:var(--muted); white-space:nowrap; }
+  .depth-key { display:flex; flex-wrap:wrap; gap:.5rem 1.25rem; margin-top:1.15rem;
+               padding-top:.9rem; border-top:1px solid var(--rule-soft); font-size:.8125rem; color:var(--muted); }
+  .depth-key span { display:flex; align-items:center; gap:.45rem; }
+  .swatch { width:.85rem; height:.85rem; border-radius:2px; flex:none; }
+  .swatch.seen { background:color-mix(in oklab,var(--sealed) 55%, transparent); }
+  .swatch.unseen { background:color-mix(in oklab,var(--logic) 60%, transparent);
+                   background-image:repeating-linear-gradient(45deg,transparent 0 4px,rgba(255,255,255,.28) 4px 8px); }
+
+  /* trees */
+  .tree-wrap { margin:1.5rem 0 0; background:var(--surface); border:1px solid var(--rule);
+               border-radius:6px; box-shadow:var(--shadow); overflow:hidden; }
+  .tree-head { padding:.65rem 1rem; border-bottom:1px solid var(--rule-soft); background:var(--sunken);
+               font-family:"IBM Plex Mono",monospace; font-size:.8125rem; color:var(--ink-soft); font-weight:500; }
+  .tree-scroll { overflow-x:auto; }
+  pre.tree { margin:0; padding:1.1rem 1.2rem 1.25rem; font-size:.8125rem; line-height:1.72; color:var(--ink-soft); }
+  pre.tree b { color:var(--ink); font-weight:600; }
+  pre.tree .g { color:var(--muted); }
+  pre.tree .ws { color:var(--sealed); font-weight:600; }
+  pre.tree .sh { color:var(--shared); font-weight:600; }
+  pre.tree .ann { color:var(--faint); }
+  pre.tree .warn { color:var(--logic); }
+
+  /* phases */
+  .phase { margin:1.5rem 0 0; background:var(--surface); border:1px solid var(--rule);
+           border-radius:6px; box-shadow:var(--shadow); overflow:hidden; }
+  .phase.is-complete { border-color:color-mix(in oklab,var(--done) 45%,var(--rule)); }
+  .phase-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:.5rem .85rem;
+                padding:.9rem 1.15rem; background:var(--sunken); border-bottom:1px solid var(--rule-soft); }
+  .phase-id { font-family:"IBM Plex Mono",monospace; font-size:.75rem; font-weight:600;
+              color:var(--faint); letter-spacing:.06em; }
+  .phase-title { font-weight:600; font-size:1.05rem; letter-spacing:-.005em; }
+  .phase-meta { margin-left:auto; display:flex; align-items:center; gap:.6rem; }
+  .phase-tally { font-family:"IBM Plex Mono",monospace; font-size:.75rem; color:var(--muted);
+                 font-variant-numeric:tabular-nums; }
+  .phase-body { padding:.35rem 1.15rem 1.05rem; }
+  .phase-why { font-size:.9375rem; color:var(--ink-soft); margin:.9rem 0 .25rem; max-width:var(--measure); }
+
+  ul.steps { list-style:none; margin:.75rem 0 0; padding:0; }
+  ul.steps > li { border-top:1px solid var(--rule-soft); }
+  ul.steps > li:first-child { border-top:0; }
+  .step { display:grid; grid-template-columns:1.6rem minmax(0,1fr); gap:0 .75rem;
+          padding:.7rem 0; cursor:pointer; align-items:start; }
+  .step input { appearance:none; -webkit-appearance:none; margin:.22rem 0 0; width:1.05rem; height:1.05rem;
+                border:1.5px solid var(--muted); border-radius:3px; background:var(--surface);
+                cursor:pointer; flex:none; position:relative; }
+  .step input:checked { background:var(--done); border-color:var(--done); }
+  .step input:checked::after { content:"✓"; position:absolute; inset:0; display:flex;
+                               align-items:center; justify-content:center; font-size:.75rem;
+                               color:var(--surface); font-weight:700; }
+  .step-text { min-width:0; }
+  .step-id { font-family:"IBM Plex Mono",monospace; font-size:.6875rem; color:var(--faint);
+             letter-spacing:.06em; margin-right:.5rem; }
+  .step-what { font-weight:500; }
+  .step-detail { display:block; font-size:.875rem; color:var(--ink-soft); margin-top:.2rem; }
+  .step-files { display:block; font-family:"IBM Plex Mono",monospace; font-size:.75rem;
+                color:var(--muted); margin-top:.35rem; word-break:break-word; }
+  .step.is-done .step-what { color:var(--muted); text-decoration:line-through;
+                             text-decoration-color:color-mix(in oklab,var(--muted) 45%,transparent); }
+  .step.is-done .step-detail, .step.is-done .step-files { opacity:.6; }
+
+  .gate { margin:1.5rem 0 0; padding:.9rem 1.2rem; border-radius:6px;
+          background:var(--logic-bg); border:1px solid color-mix(in oklab,var(--logic) 30%,transparent);
+          max-width:var(--measure); font-size:.9375rem; }
+  .gate strong { color:var(--logic); }
+
+  footer.end { border-top:1px solid var(--rule); margin-top:4rem; padding:1.75rem 0 4rem;
+               font-size:.8125rem; color:var(--muted); max-width:var(--measure); }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header class="masthead">
+    <div class="eyebrow">
+      <span>Ciaobot</span><span>Implementation work order</span><span>2026‑08‑19</span>
+    </div>
+    <h1>Agent Roots Work Order</h1>
+    <p class="standfirst">
+      Ten phases from a global-artifact leak to per-workspace agent roots — with the two
+      things the design docs left out: <strong>a surface the user actually sees</strong>,
+      and <strong>proof the destructive migration works</strong> before it runs on every
+      install at once. Check steps off as they land.
+    </p>
+
+    <div class="meter">
+      <div class="meter-top">
+        <span class="meter-count" id="pct">0%</span>
+        <span class="meter-label" id="tally">0 of 0 steps</span>
+        <button class="meter-reset" id="reset" type="button">Reset progress</button>
+      </div>
+      <div class="track"><span id="fill"></span></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ══ Why ══════════════════════════════════════════════════ -->
+    <section id="why">
+      <h2><span class="num">The problem</span>One disease, three surfacing failures</h2>
+      <p class="lede">
+        Five bugs turned out to be one: <strong>a global artifact with per-workspace
+        consumers.</strong> The damage was 96 contact notes in <code>personal/People/</code>,
+        57 mentioning work, and no <code>work/People/</code> at all. But the fix cannot ship
+        until the app can tell someone it happened.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <caption>Three failures, increasing severity</caption>
+          <thead><tr><th>Failure</th><th>Evidence in the tree</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Detected but unsurfaced</strong></td>
+              <td><code>audit_upgrade_notices</code> exists and its docstring says <em>“so the PWA can show them”</em> — but <strong>zero <code>web/src</code> references</strong> to <code>upgrade_notices</code>. Terminal, or the weekly hygiene chat. Nothing else.</td>
+            </tr>
+            <tr>
+              <td><strong>Visible but not actionable</strong></td>
+              <td>Three review queues holding <strong>417 items</strong>. One has a count and no buttons; two have nothing. Telling someone there is work and giving no way to do it is worse than silence.</td>
+            </tr>
+            <tr>
+              <td><strong>Written but uncountable</strong></td>
+              <td><strong>Three divergent copies</strong> of one regex mean <strong>64 of the 417</strong> are invisible to every counter.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ══ Queues ═══════════════════════════════════════════════ -->
+    <section id="queues">
+      <h2><span class="num">Measured</span>417 items, nothing draining them</h2>
+      <p class="lede">
+        Counted on the reference vault. Three features — memory curation, re-homing, skill
+        evolution — all terminate in “a human reviews proposals”, and none finish the sentence.
+      </p>
+
+      <div class="depth">
+        <div class="depth-row">
+          <span class="depth-name">work / memory</span>
+          <span class="depth-bar" role="img" aria-label="353 items, all counted"><i class="seen" style="width:100%"></i></span>
+          <span class="depth-num">353 counted</span>
+        </div>
+        <div class="depth-row">
+          <span class="depth-name">personal / rehome</span>
+          <span class="depth-bar" role="img" aria-label="15 items, none counted"><i class="unseen" style="width:100%"></i></span>
+          <span class="depth-num">15 → app says 0</span>
+        </div>
+        <div class="depth-row">
+          <span class="depth-name">personal / skills</span>
+          <span class="depth-bar" role="img" aria-label="49 files, no counter exists"><i class="unseen" style="width:100%"></i></span>
+          <span class="depth-num">49 files, no counter</span>
+        </div>
+        <div class="depth-key">
+          <span><i class="swatch seen"></i> counted somewhere</span>
+          <span><i class="swatch unseen"></i> invisible to every counter</span>
+          <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;">64 / 417 invisible · batches back to 2026‑07‑29</span>
+        </div>
+      </div>
+
+      <div class="callout cost">
+        <h4>The drain rate is one item per session</h4>
+        <p>
+          A review run on 2026‑08‑19 resolved <strong>exactly one</strong> of the 353. That is
+          the measured rate at which agent-driven, one-at-a-time review actually empties a
+          queue — so the work queue is <strong>353 sessions</strong> of work. It is not
+          evidence that agents are bad at reviewing; it is evidence that
+          <em>“we write it to a queue for the user to review”</em> was never a finished
+          workflow. Any design that only handles items one at a time inherits that rate
+          (<a href="#phases">P5.2</a>).
+        </p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <caption>What you can do with each queue today</caption>
+          <thead><tr><th>Queue</th><th>Written by</th><th>Read surface</th><th>Act surface</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Memory proposals</td><td><code>memory_proposals.append_proposals</code></td>
+              <td>a <em>count</em> in Settings → Context</td>
+              <td><code>memory_proposal_resolve</code> over MCP only — ask an agent, one item at a time</td>
+            </tr>
+            <tr>
+              <td>Skill proposals</td><td><code>skill_evolution.py</code> weekly</td>
+              <td class="no">none</td><td class="no">none</td>
+            </tr>
+            <tr>
+              <td>Re‑home proposals</td><td><code>vault_rehome.py</code> → same file</td>
+              <td class="no">none — counted as zero</td><td class="no">none</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>The regex defect is three copies that disagree</h3>
+      <div class="table-wrap">
+        <table>
+          <caption>Which bullet kinds each copy matches</caption>
+          <thead><tr><th>Definition</th><th class="ctr">[memory]</th><th class="ctr">[user]</th><th class="ctr">[profile]</th><th class="ctr">[rehome]</th></tr></thead>
+          <tbody>
+            <tr><td><code>os_audit._PROPOSAL_BULLET_RE</code></td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr no">✗</td></tr>
+            <tr><td><code>control_plane._PROPOSAL_BULLET_RE</code></td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr no">✗</td></tr>
+            <tr><td><code>agent_assets._PROPOSAL_BULLET_RE</code></td><td class="ctr yes">✓</td><td class="ctr yes">✓</td><td class="ctr no">✗</td><td class="ctr no">✗</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout cost">
+        <h4>Not one bad pattern — an undiscoverable type registry</h4>
+        <p>
+          <code>[rehome]</code> is invisible to all three, and <strong><code>[profile]</code>
+          is additionally invisible to the Settings count.</strong> The queue has an implicit
+          kind registry that a new producer cannot discover. <code>vault_rehome</code> became
+          that producer and silently wrote 15 uncountable rows. The fix is one shared
+          definition, not three patched ones.
+        </p>
+      </div>
+    </section>
+
+    <!-- ══ Corrections ══════════════════════════════════════════ -->
+    <section id="corrections">
+      <h2><span class="num">Verified</span>Four claims that did not survive the tree</h2>
+      <p class="lede">
+        Re‑anchored by symbol, not line number. Anyone implementing this should re‑verify —
+        the checkout is edited concurrently.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <caption>Corrections to the incoming briefs</caption>
+          <thead><tr><th>Claim</th><th>What the tree says</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>“The queue header instructs promotion to <code>~/.ciao/memory.md</code>”</td>
+              <td>The <em>code</em> is correct — <code>_STUB_HEADER</code> names the <code>ciao:memory</code> regions. The <strong>on‑disk file</strong> is stale, naming <code>~/.ciao/memory.md</code>, <code>~/.ciao/user.md</code> <em>and</em> <code>ciao memory add</code>, none of which exist. Real bug: the header is <strong>write‑once</strong> (<code>existing if exists() else _STUB_HEADER</code>), so a corrected header never reaches an existing install.</td>
+            </tr>
+            <tr>
+              <td>“353 items / personal 15 pending”</td>
+              <td>Conflates two queues. <strong>353 in <em>work</em></strong>, 15 <code>[rehome]</code> in <em>personal</em>, 49 skill files in <em>personal</em>.</td>
+            </tr>
+            <tr>
+              <td><code>vault_rehome</code> has “no mention anywhere”</td>
+              <td>Overstated — it <em>is</em> in <code>ARCHITECTURE.md</code> and the curation plan, and the CLI already prints the inverse command. Narrower and still real: <strong>no notice, no offer, nothing automatic.</strong></td>
+            </tr>
+            <tr>
+              <td>“87 to move, 15 needing a decision”</td>
+              <td>The curation plan records <strong>42 mechanical + 53 judgement</strong>. Hardcode neither — read live counts from <code>plan_rehome</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout cost">
+        <h4>One conflict no brief anticipated</h4>
+        <p>
+          <code>plan_rehome</code> walks every person note. The surfaced‑actions contract
+          forbids vault walks on the detection path, so <strong>a detector cannot call it.</strong>
+          Resolved by D4 — survey at boot, detector reads only the receipt.
+        </p>
+      </div>
+    </section>
+
+    <!-- ══ Decisions ════════════════════════════════════════════ -->
+    <section id="decisions">
+      <h2><span class="num">Settled</span>Seven decisions the implementer inherits</h2>
+
+      <div class="callout key">
+        <h4>D1 · The auto‑apply rule, stated once</h4>
+        <p>
+          Already articulated in exactly one place — <code>memory_actionable_count</code>'s
+          docstring: <em>“a judgement the user may decline … a finding that can never be
+          cleared would hold the audit at needs_attention until people stop reading it.”</em>
+          Promote it to policy:
+        </p>
+        <p style="border-left:2px solid var(--sealed);padding-left:.9rem;font-style:italic;">
+          A migration may auto‑apply only if it can name <strong>exactly one correct outcome
+          for every affected item</strong>, and the change is confined to metadata Ciaobot
+          generates. Anything that moves or rewrites the user's own prose, or has even one
+          ambiguous case, is surfaced and never applied.
+        </p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <caption>D1 applied — explains all three existing behaviours without special pleading</caption>
+          <thead><tr><th>Migration</th><th>One outcome per item?</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr><td><code>vault_migration.py</code> — <code>type:</code> aliases</td><td class="yes">Yes — <code>TYPE_ALIASES</code> maps to one target; unmapped is reported, not guessed</td><td><span class="chip sealed">auto-apply</span> correct today</td></tr>
+            <tr><td><code>vault_migrate_links.py</code></td><td class="no">No — rewrites link syntax through the user's prose</td><td><span class="chip plain">surface</span> correct today</td></tr>
+            <tr><td><code>vault_rehome.py</code></td><td class="no">No, by construction — <code>needs_judgement</code> is non‑empty</td><td><span class="chip logic">surface</span> missing today</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout cost">
+        <h4>D2 · Separate pending actions from defects</h4>
+        <p>
+          <code>run_os_audit</code>'s <code>actionable_count</code> sums
+          <code>notices_found</code> with orphans, duplicates, frontmatter errors, broken
+          links and failed runs — so <strong>a healthy vault with one optional migration
+          reports <code>needs_attention</code></strong>. Split into <code>defect_count</code>
+          and <code>pending_action_count</code>; <code>status</code> keys off defects only.
+        </p>
+      </div>
+
+      <div class="callout key">
+        <h4>D3 · One shared proposal‑kind registry</h4>
+        <p>
+          Replace all three regexes with one module owning the kinds <em>and their accept
+          semantics</em>. <strong>Each kind declares its own accept action:</strong>
+          <code>[memory]</code>/<code>[profile]</code> edit a bounded region;
+          <code>[rehome]</code> is a <em>file move with a destination and a reason</em> and must
+          never inherit an “add to memory” button. An unregistered kind is a registration
+          error, not a silent zero.
+        </p>
+      </div>
+
+      <div class="callout note">
+        <h4>D4 · Survey‑then‑apply receipts, generalised</h4>
+        <p>
+          Survey at boot with <code>apply=False</code>, write <code>status: "surveyed"</code>
+          plus counts, detector reads only the receipt.
+          <strong><code>read_receipt</code> must gate on <code>status == "migrated"</code>, not
+          on receipt existence</strong> — <code>vault_migration.migrate_if_needed</code> has
+          that bug today, so a survey receipt would permanently block the real migration.
+        </p>
+      </div>
+
+      <div class="callout note">
+        <h4>D5 · <code>Logs/</code> stays global; <code>Templates/</code> becomes a mirror source</h4>
+        <p>
+          Census found <code>Logs/</code> holding <strong>1423 of 1985 vault notes (72%)</strong>
+          as a sibling of the workspaces. Promote to <code>&lt;install&gt;/Logs/</code>
+          <strong>unmoved</strong>: derived output, not curated content; not moving it removes
+          72% of the migration's file‑count risk; and 1350 chat ids cannot all resolve to a
+          workspace. <code>Templates/</code> (5 files) becomes
+          <code>&lt;install&gt;/templates-src/</code>.
+        </p>
+      </div>
+
+      <div class="callout note">
+        <h4>D6 · Missed <code>once</code> schedules become a tile</h4>
+        <p>
+          <code>catch_up()</code> is right for recurring reconcilers — late is harmless and the
+          next run subsumes it. Wrong for <code>once</code>: those catch up <em>across days</em>,
+          so a missed 3pm Monday reminder fires whenever the server next starts, un‑backdated,
+          with nothing telling the agent it is stale.
+        </p>
+      </div>
+
+      <div class="callout cost">
+        <h4>D7 · Accept still leaks until phase 9 — gate the button</h4>
+        <p>
+          There is one <code>CLAUDE.md</code>. So an accept button on a <em>work</em> proposal
+          writes a region injected into every <em>personal</em> session. Until phase 9, accepts
+          for <code>[memory]</code>/<code>[profile]</code> must <strong>warn explicitly</strong>
+          that the fact becomes visible in every workspace, or be disabled outside the primary.
+        </p>
+      </div>
+    </section>
+
+    <!-- ══ Target ═══════════════════════════════════════════════ -->
+    <section id="target">
+      <h2><span class="num">Destination</span>The layout phase 10 produces</h2>
+      <div class="tree-wrap">
+        <div class="tree-head">~/repos/ciao — global layer is a <em>sibling</em> of every workspace, never a parent</div>
+        <div class="tree-scroll"><pre class="tree">
+<b>ciao/</b>
+├── <span class="g">.env</span>  <span class="g">.runtime/</span>          <span class="ann">global: credentials, schedules, job_runs, state, FTS</span>
+│   └── <span class="g">workspaces.json</span>      <span class="ann">the load-bearing map: name → agent root</span>
+├── <span class="g">Logs/</span>                    <span class="ann">D5 — 72% of notes, derived, NOT moved</span>
+├── <span class="sh">skills-src/</span>              <span class="sh">mirror source, not a workspace</span>
+├── <span class="sh">templates-src/</span>           <span class="sh">D5 — the 5 shared templates</span>
+├── <span class="ws">personal/</span>                <span class="ws">← agent root</span>
+│   ├── <span class="ws">CLAUDE.md</span>  <span class="ws">AGENTS.md</span>→  <span class="ann">its own ciao:memory + ciao:profile</span>
+│   ├── <span class="ws">.mcp.json</span>            <span class="ann">composed; nothing credentialed is implicit</span>
+│   ├── <span class="ws">.claude/{skills,agents,commands}/</span>  <span class="ann">generated: stock + skills-src</span>
+│   └── <span class="ws">memory-vault/</span>        <span class="ann">INDEX.md · one per root · no prefix, no filter</span>
+└── <span class="ws">work/</span>                    <span class="ann">same shape, its own everything</span>
+</pre></div>
+      </div>
+      <p>
+        Design rationale is not repeated here — see the companion design record. This page is
+        the order of operations.
+      </p>
+    </section>
+
+    <!-- ══ Phases ═══════════════════════════════════════════════ -->
+    <section id="phases">
+      <h2><span class="num">Execution</span>Ten phases</h2>
+      <p class="lede">
+        Phases 0–9 ship independently. <strong>Phase 10 is one indivisible release</strong> —
+        the deletions make a partial re‑root fail‑open, so it cannot be decomposed.
+      </p>
+
+      <div class="phase" data-phase="P1">
+        <div class="phase-head">
+          <span class="phase-id">P1</span>
+          <span class="phase-title">Proposal‑kind registry &amp; the undercount fix</span>
+          <span class="phase-meta"><span class="chip sealed">ships alone</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">Everything downstream counts proposals. Fix the counting before building a UI on top of it.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P1.1"><span class="step-text"><span class="step-id">P1.1</span><span class="step-what">New <code>ciao/proposal_kinds.py</code></span><span class="step-detail">One <code>KINDS</code> table (<code>memory</code>, <code>profile</code>, <code>user</code>, <code>rehome</code>), one bullet regex built from it, one <code>parse_bullet</code>, and a per‑kind accept descriptor (D3).</span><span class="step-files">ciao/proposal_kinds.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P1.2"><span class="step-text"><span class="step-id">P1.2</span><span class="step-what">Replace all three regex copies</span><span class="step-detail">Delete the local definitions; import from the registry. Behaviour must become identical across all three.</span><span class="step-files">ciao/os_audit.py · ciao/control_plane.py · ciao/web/agent_assets.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P1.3"><span class="step-text"><span class="step-id">P1.3</span><span class="step-what">Refresh the stale on‑disk header</span><span class="step-detail"><code>append_proposals</code> writes the header only when the file is absent, so existing installs keep pointing at <code>~/.ciao/memory.md</code> and <code>ciao memory add</code> — neither of which exists. Rewrite the header in place, leaving bullets untouched.</span><span class="step-files">ciao/memory_proposals.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P1.4"><span class="step-text"><span class="step-id">P1.4</span><span class="step-what">Tests</span><span class="step-detail"><code>[rehome]</code> and <code>[profile]</code> counted everywhere; all three former call sites agree on one fixture; an unregistered kind raises; the stale header is rewritten without touching bullets.</span><span class="step-files">tests/test_proposal_kinds.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P2">
+        <div class="phase-head">
+          <span class="phase-id">P2</span>
+          <span class="phase-title">The audit split (D2)</span>
+          <span class="phase-meta"><span class="chip sealed">ships alone</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">Without this, the weekly hygiene routine can never report a healthy workspace while any migration is outstanding — and the cut makes that permanent for every install.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P2.1"><span class="step-text"><span class="step-id">P2.1</span><span class="step-what">Split <code>actionable_count</code></span><span class="step-detail">Into <code>defect_count</code> and <code>pending_action_count</code>. <code>status</code> becomes <code>needs_attention</code> on defects only; notices surface via a new <code>has_pending_actions</code> flag. Model it on <code>memory_actionable_count</code>, which already applies this reasoning.</span><span class="step-files">ciao/os_audit.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P2.2"><span class="step-text"><span class="step-id">P2.2</span><span class="step-what">Exit codes and rendering</span><span class="step-detail">Keep 2 for unreliable scans and 1 for defects; pending‑only exits 0 with a distinct summary line. <code>## Upgrade Actions</code> renders as pending, not as a finding.</span><span class="step-files">ciao/cli.py · ciao/os_audit.py (format_audit_markdown)</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P2.3"><span class="step-text"><span class="step-id">P2.3</span><span class="step-what">Update the audit consumers</span><span class="step-detail">The <code>/api/agent-assets/audit</code> response shape changes; the Settings audit view changes with it.</span><span class="step-files">ciao/web/app.py · web/src/components/SettingsView.vue</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P2.4"><span class="step-text"><span class="step-id">P2.4</span><span class="step-what">Tests</span><span class="step-detail">Pending‑only → <code>healthy</code>, exit 0. A defect → exit 1. An unreliable scan → exit 2.</span><span class="step-files">tests/test_os_audit.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P3">
+        <div class="phase-head">
+          <span class="phase-id">P3</span>
+          <span class="phase-title"><code>unrehomed_people</code> notice (D1, D4)</span>
+          <span class="phase-meta"><span class="chip sealed">safe alongside OKF</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">The bug <code>vault_rehome</code> repairs shipped in every version until 2026‑08‑19. Every multi‑workspace install has some version of it and no way to learn that.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P3.1"><span class="step-text"><span class="step-id">P3.1</span><span class="step-what">Survey mode in <code>vault_rehome</code></span><span class="step-detail">Write <code>status: "surveyed"</code> with the <code>mechanical</code> / <code>needs_judgement</code> / <code>conflicts</code> counts. Fix <code>read_receipt</code> to gate on <code>status == "migrated"</code> (D4) — check <code>vault_migration</code> and <code>vault_migrate_links</code> for the same shape.</span><span class="step-files">ciao/vault_rehome.py · ciao/vault_migration.py · ciao/vault_migrate_links.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P3.2"><span class="step-text"><span class="step-id">P3.2</span><span class="step-what">The notice</span><span class="step-detail">Shaped like <code>unmigrated_vault_links</code>. <code>detail</code> carries <strong>live counts from the receipt</strong> — the numbers are what make it actionable. <code>remedy</code> names dry‑run → <code>--apply</code> → the exact inverse, mirroring what the CLI already prints. <strong>Never auto‑applies</strong> (D1).</span><span class="step-files">ciao/os_audit.py (audit_upgrade_notices)</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P3.3"><span class="step-text"><span class="step-id">P3.3</span><span class="step-what">Tests</span><span class="step-detail">Fires when the receipt is absent; silent once <code>migrated</code>; counts come from the receipt and never from a live scan; <code>remedy</code> names the inverse command.</span><span class="step-files">tests/test_os_audit.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P4">
+        <div class="phase-head">
+          <span class="phase-id">P4</span>
+          <span class="phase-title">The surfaced‑actions strip</span>
+          <span class="phase-meta"><span class="chip logic">gates phase 10</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">Also fixes “weekly is too slow” as a side effect: the strip polls on app open and window focus, so an upgrade action appears the day of the upgrade rather than the following Sunday.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P4.1"><span class="step-text"><span class="step-id">P4.1</span><span class="step-what">Registry and detectors</span><span class="step-detail"><code>OperatorAction</code> dataclass, registry, <code>detect_actions</code>. Detectors: <code>package-update</code>, <code>vault-vocabulary</code>, <code>vault-location</code>, <code>unrehomed-people</code>, <code>unmigrated-links</code>, <code>missed-schedules</code>, <code>review-queue-depth</code>.</span><span class="step-files">ciao/operator_actions.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.2"><span class="step-text"><span class="step-id">P4.2</span><span class="step-what">One <code>remedy</code>, two surfaces</span><span class="step-detail">Refactor <code>audit_upgrade_notices</code> to build actions <em>from</em> the registry and render its notices <em>from</em> them — so the CLI's advice and the tile's action can never drift.</span><span class="step-files">ciao/os_audit.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.3"><span class="step-text"><span class="step-id">P4.3</span><span class="step-what">Cheap detection — enforce it</span><span class="step-detail">No <code>scan_vault</code>, no directory walks to decide whether to draw a button. Compare a generation counter in the receipt; never diff mirrored trees. Stable ids: <code>workspace-root-missing:work</code>.</span><span class="step-files">ciao/operator_actions.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.4"><span class="step-text"><span class="step-id">P4.4</span><span class="step-what"><code>dismiss_label</code> for missed schedules (D6)</span><span class="step-detail">Stop auto‑firing <code>once</code> in <code>catch_up()</code>. <strong>One collapsed tile</strong> for all missed one‑timers, not one each. Run and dismiss both converge on the schedule's existing <code>last_triggered_on</code> sentinel — no dismissal store, no <code>done</code> flag.</span><span class="step-files">ciao/schedules.py · ciao/operator_actions.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.5"><span class="step-text"><span class="step-id">P4.5</span><span class="step-what">Endpoints</span><span class="step-detail"><code>GET /api/housekeeping</code>; <code>POST /api/housekeeping/{id}/run</code> performs the work then <strong>re‑runs detection and returns the new list in the same response</strong>, so the client cannot render a stale strip. No <code>POST .../chat</code> — the prompt ships in the GET payload.</span><span class="step-files">ciao/web/routes_api.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.6"><span class="step-text"><span class="step-id">P4.6</span><span class="step-what">Store and component</span><span class="step-detail">Best‑effort like <code>checkPackageStatus</code> — failures leave the strip empty. Refresh on bootstrap, interval, window focus, and after every run. <strong>Renders nothing at all</strong> with zero actions: no wrapper, no “all clear” row.</span><span class="step-files">web/src/stores/housekeeping.ts · web/src/components/HousekeepingStrip.vue</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.7"><span class="step-text"><span class="step-id">P4.7</span><span class="step-what">Mount in <em>both</em> home branches</span><span class="step-detail"><code>ChatLayout.vue</code> builds the home screen twice. A strip added only to the desktop branch is invisible on a phone and existing tests will not notice. Insert before <code>&lt;HomeRecentChats&gt;</code> in each, inside <code>--home-max</code>.</span><span class="step-files">web/src/components/ChatLayout.vue</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.8"><span class="step-text"><span class="step-id">P4.8</span><span class="step-what">No <code>done</code> flag, no first‑run suppression</span><span class="step-detail">A tile disappears only because the condition changed. A failed run returns the same id with its detail replaced by the failure — never silently re‑offer the button. No grace period or message‑count gate: tiles before the first message are correct.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P4.9"><span class="step-text"><span class="step-id">P4.9</span><span class="step-what">Tests</span><span class="step-detail">Empty on a healthy install; each detector fires only on its condition; id stability; every action offers run/chat/dismiss; a raising detector is logged and skipped; <strong>a <code>scan_vault</code> spy proves no detector touches the vault</strong>; no wrapper element at zero actions; strip present in both home branches.</span><span class="step-files">tests/test_operator_actions.py · tests/test_web_housekeeping.py · HousekeepingStrip.test.ts · ChatLayout.test.ts</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P5">
+        <div class="phase-head">
+          <span class="phase-id">P5</span>
+          <span class="phase-title">Queue review UI — making an action actionable</span>
+          <span class="phase-meta"><span class="chip logic">the 417 items</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">A surfaced action that cannot be acted on is a notification, not a workflow. The queue depth is the measure of the gap.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P5.1"><span class="step-text"><span class="step-id">P5.1</span><span class="step-what">Endpoints</span><span class="step-detail"><code>GET /api/proposals</code> (kind, text, source, workspace, path, line) and <code>POST /api/proposals/{id}/{accept|dismiss}</code>, dispatching through the P1 accept descriptors so each kind gets its own action.</span><span class="step-files">ciao/web/routes_api.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.2"><span class="step-text"><span class="step-id">P5.2</span><span class="step-what">Batch operations — required, not a nicety</span><span class="step-detail"><strong>Measured drain rate: one item per agent session.</strong> A review run on 2026‑08‑19 resolved exactly 1 of the 353. At that rate the work queue is <strong>353 sessions</strong> of work — which is the number that makes batch non‑optional rather than a convenience. Offer select‑all‑in‑batch and dismiss‑older‑than; a July proposal about a forgotten chat is probably not worth promoting. Without a way for the pile to shrink honestly, the surface only makes a backlog more visible.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.3"><span class="step-text"><span class="step-id">P5.3</span><span class="step-what">Surface <code>Skill-Proposals/</code></span><span class="step-detail">Its first read surface ever — 49 files that no counter, API, or view has ever mentioned.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.4"><span class="step-text"><span class="step-id">P5.4</span><span class="step-what">Honour D7's leak warning</span><span class="step-detail">Accepts for <code>[memory]</code>/<code>[profile]</code> warn that the fact becomes visible in every workspace, or are disabled outside the primary, until phase 9 lands.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.6"><span class="step-text"><span class="step-id">P5.6</span><span class="step-what">Build against the three real cases, not invented ones</span><span class="step-detail">The reference vault's 15 <code>[rehome]</code> rows already contain one of each state the accept button has to handle. Use them as the fixtures — they are why the <code>User.md</code> defect below was found at all.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.7"><span class="step-text"><span class="step-id">P5.7</span><span class="step-what">Case A — no signal (13 rows): accept must offer no default</span><span class="step-detail"><code>Christian-Baier</code>, <code>Federica</code>, <code>Finn-Cummins</code>, <code>Francesca-Fortique</code>, <code>Gerrit-Merz</code>, <code>Hellen-Hohoff</code>, <code>Ipek</code>, <code>Justin-Misleh</code>, <code>Peter</code>, <code>Tania</code>, <code>Vikrant</code>, <code>Zeynep-Savaseri</code> — all <em>“no tag names a workspace”</em>. The proposal text already names a destination, but nothing justifies it. The UI must present the destination as a <strong>question</strong>, never as a pre‑filled accept.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.8"><span class="step-text"><span class="step-id">P5.8</span><span class="step-what">Case B — conflicting signal (2 rows): accept is a choice, not a button</span><span class="step-detail"><code>Mo</code> (<code>ex-colleague, friend</code>) and <code>Oliver</code> (<code>colleague, friend, scandit</code>) carry tags naming <strong>both</strong> workspaces. Two valid destinations means a single accept action is wrong by construction — this is the case that proves D3's “each kind declares its own accept action”, because <code>[rehome]</code> needs a destination picker where <code>[memory]</code> needs none.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.9"><span class="step-text"><span class="step-id">P5.9</span><span class="step-what">Case C — must never move: <code>People/User.md</code></span><span class="step-detail"><strong>A real defect, found only by reading the real queue.</strong> Row 14 proposes moving <code>personal/People/User.md</code> → <code>work/People/User.md</code>. That is the operator's own identity note, which <code>memory_proposals</code> names in three places as the canonical home for durable identity facts — and <code>vault_rehome</code> imports <code>EXCLUDED_TOP_DIRS = {"Logs","Templates",".obsidian"}</code>, which excludes <em>directories only</em>, so <code>User.md</code> is an ordinary movable contact. In any list UI it looks identical to <code>Peter</code>. <strong>A generic accept button moves the operator's self‑note out of personal.</strong> Fix the detector before the UI can be trusted.</span><span class="step-files">ciao/vault_rehome.py (detect_misfiled_people)</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P5.5"><span class="step-text"><span class="step-id">P5.5</span><span class="step-what">Tests</span><span class="step-detail">Shape; accept dispatches the kind's own action and never a generic one; dismiss does not mutate the guide; batch dismiss is atomic; unknown id → 404. Plus one test per real case: a no‑signal row renders no default destination; a dual‑tag row renders a picker; <code>User.md</code> is never proposed at all.</span><span class="step-files">tests/test_web_proposals.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P6">
+        <div class="phase-head">
+          <span class="phase-id">P6</span>
+          <span class="phase-title">Vocabulary and the resolver</span>
+          <span class="phase-meta"><span class="chip plain">no behaviour change</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why"><code>ARCHITECTURE.md</code> uses “workspace” for both the install directory and the logical workspace, in adjacent paragraphs. 375 <code>workspace_root</code> references across ~40 modules mostly mean the <em>install</em> root — renaming what an existing name means is how this ends up half‑rooted.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P6.1"><span class="step-text"><span class="step-id">P6.1</span><span class="step-what">Fix the words first</span><span class="step-detail">Establish <code>workspace_root</code> (install root, unchanged) / <code>workspace</code> (logical name, unchanged) / <strong><code>agent_root</code></strong> (new). Correct the <code>Logs/Chats/</code> location claim per D5.</span><span class="step-files">docs/ARCHITECTURE.md</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P6.2"><span class="step-text"><span class="step-id">P6.2</span><span class="step-what"><code>CiaoConfig.agent_root(name)</code></span><span class="step-detail">Derived as <code>workspace_root / name</code>; returns <code>workspace_root</code> for every workspace until phase 10, so nothing changes behaviourally. Reject names that are not one path segment, mirroring <code>canonical_workspace_vault_root</code>.</span><span class="step-files">ciao/config.py · tests/test_config_agent_root.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P7">
+        <div class="phase-head">
+          <span class="phase-id">P7</span>
+          <span class="phase-title">Thread it through the seam</span>
+          <span class="phase-meta"><span class="chip plain">no behaviour change</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">The seam is one line, and the call site already knows the workspace — it just discards it.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P7.1"><span class="step-text"><span class="step-id">P7.1</span><span class="step-what"><code>ProviderService</code> takes an <code>agent_root</code></span><span class="step-detail"><code>_ensure_provider</code> passes it to the factory instead of <code>self._config.workspace_root</code>.</span><span class="step-files">ciao/provider_service.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P7.2"><span class="step-text"><span class="step-id">P7.2</span><span class="step-what">Resolve it per chat</span><span class="step-detail"><code>_get_provider(chat_id)</code> already holds <code>chat</code> → <code>chat.project_id</code> → <code>project.workspace</code>. Fall back to <code>primary_workspace()</code> when a project has none.</span><span class="step-files">ciao/web/project_chats.py</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P8">
+        <div class="phase-head">
+          <span class="phase-id">P8</span>
+          <span class="phase-title">Session paths — the silent‑breakage guard</span>
+          <span class="phase-meta"><span class="chip logic">do not skip</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why"><code>_claude_projects_dir</code> slugs the cwd into <code>~/.claude/projects/-Users-me-repos-ciao</code>. Change cwd and that path moves: <code>_validated_resume_session</code> gets <code>None</code>, logs “stale locally”, and <strong>starts fresh</strong>. Silent amnesia, not an error.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P8.1"><span class="step-text"><span class="step-id">P8.1</span><span class="step-what">Six readers take an <code>agent_root</code></span><span class="step-detail">Otherwise Session insights, trajectory capture, CLI transcript archiving and the background‑subagent running count that <code>_await_schedule_subagents</code> polls all silently read an empty directory.</span><span class="step-files">ciao/insights.py (×2) · ciao/subagent_tracking.py · ciao/web/routes_api.py · ciao/web/project_chats.py · ciao/transcripts.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P8.2"><span class="step-text"><span class="step-id">P8.2</span><span class="step-what">Tests</span><span class="step-detail">With a monkeypatched <code>HOME</code> and fake session JSONL: the slug differs per root, and each reader resolves its own root's directory.</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P9">
+        <div class="phase-head">
+          <span class="phase-id">P9</span>
+          <span class="phase-title">Per‑root memory tools &amp; the MCP allowlist</span>
+          <span class="phase-meta"><span class="chip sealed">closes the worst leak</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">The sixth leak is the sharpest: every MCP server is reachable from every workspace, scoped only by a <strong>denylist</strong> — fail‑open. What leaks is credentialed authority, not text. And it is the only leak fixable before the cut.</p>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P9.1"><span class="step-text"><span class="step-id">P9.1</span><span class="step-what">Memory tools resolve per root</span><span class="step-detail"><code>memory_status</code> / <code>memory_update</code> already call <code>_workspace(principal)</code> and discard it. Resolve the guide from <code>config.agent_root(workspace)</code>.</span><span class="step-files">ciao/control_plane.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P9.2"><span class="step-text"><span class="step-id">P9.2</span><span class="step-what">Audits report per guide</span><span class="step-detail"><code>audit_memory</code> and <code>ciao memory-audit</code> become N guides. The <code>memory_hygiene</code> shape changes, so budget for the Settings view too. Caps become N × cap in total while each session pays only its own — a win, but over‑cap reporting must become per guide.</span><span class="step-files">ciao/os_audit.py · ciao/cli.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P9.3"><span class="step-text"><span class="step-id">P9.3</span><span class="step-what">Flip <code>mcp__*</code> to an allowlist</span><span class="step-detail">Enumerate the servers in <code>.mcp.json</code> and deny everything the active workspace did not opt into. Retires D7's warning. Note the limit: this scopes <em>reachability</em>, not authority — a shared account still holds full authority behind the server.</span><span class="step-files">ciao/config.py (disallowed_tools_for_workspace)</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase" data-phase="P10">
+        <div class="phase-head">
+          <span class="phase-id">P10</span>
+          <span class="phase-title">The cut — one indivisible release</span>
+          <span class="phase-meta"><span class="chip logic">not decomposable</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <p class="phase-why">Deleting <code>_entity_visible_in_workspace</code> while an un‑rooted install exists leaves <em>no filter</em> over a still‑prefixed index — every entity visible in every session. Fail‑open, strictly worse than today. So the deletions and the re‑rooting are one release, atomic per install.</p>
+          <div class="gate">
+            <strong>Gate:</strong> do not start P10 until every box in P1–P9 and V1–V3 is checked.
+            A migration that can stop halfway is worse than one that refuses outright.
+          </div>
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="P10.1"><span class="step-text"><span class="step-id">P10.1</span><span class="step-what">Engine</span><span class="step-detail"><code>plan()</code> / <code>apply()</code> / <code>repair()</code> / <code>undo()</code> / <code>rehearse()</code>, receipt at <code>.runtime/migration/workspace-rooting.json</code> (git tag, source→destination map, region decisions, invalidated session count, refusal reason). CLI wired like <code>package-smoke</code>.</span><span class="step-files">ciao/workspace_reroot.py · ciao/cli.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.2"><span class="step-text"><span class="step-id">P10.2</span><span class="step-what">Clean‑tree gate: tracked changes only</span><span class="step-detail">Staged or modified <em>tracked</em> files block; untracked do not. The reference workspace has ~700 untracked <code>Logs/Chats/chat-*</code> dirs right now — a strict gate would refuse on every used install and nothing would ever migrate.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.3"><span class="step-text"><span class="step-id">P10.3</span><span class="step-what">Move, never rewrite</span><span class="step-detail"><code>git mv</code> each vault into its root so history follows. Ciaobot's own artifacts migrate automatically; <strong>the user's content is moved but never re‑filed.</strong></span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.4"><span class="step-text"><span class="step-id">P10.4</span><span class="step-what">Split <code>CLAUDE.md</code> without guessing</span><span class="step-detail">Unbounded body copied verbatim to every root. Bounded regions to the <strong>primary root only</strong>; other roots' left empty with the original content queued into their <code>Memory-Proposals.md</code>. <strong>No automatic classification</strong> — a heuristic split reproduces the misfiling this exists to fix.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.5"><span class="step-text"><span class="step-id">P10.5</span><span class="step-what">Skills: triage, do not copy</span><span class="step-detail">Move the catalog to the primary root and emit <code>Workspace/Skill-Triage.md</code> with every destination blank. 16 of 20 are work‑scoped, so copying into every root rebuilds the global catalog this change ends. Create <code>skills-src/</code> and <code>templates-src/</code>.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.6"><span class="step-text"><span class="step-id">P10.6</span><span class="step-what">Indexes, FTS, sessions</span><span class="step-detail">Rebuild each root's <code>INDEX.md</code>/<code>VOCABULARY.md</code> with no prefix; <code>_index_cache</code> becomes a dict keyed by path; drop and rebuild FTS; set <code>handover_context_pending</code> on every open chat and report the count.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.7"><span class="step-text"><span class="step-id">P10.7</span><span class="step-what">Refuse safely, never half‑root</span><span class="step-detail">On dirty tree / unreadable registry / non‑empty destination / no disk: boot the old layout, record why in the receipt, surface <code>workspace-unmigrated</code>. Every registered workspace re‑roots or none does.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.8"><span class="step-text"><span class="step-id">P10.8</span><span class="step-what">Routines</span><span class="step-detail">Fold <code>system-vault-index</code> into hygiene — it has no global artifact left to write. Split <code>run_os_audit</code> global/per‑root: hygiene is <em>already</em> <code>per_workspace: true</code>, so global findings are <em>already</em> reported N times. Present bug. <code>_resolve_skills_roots</code> becomes a per‑root argument, not an import‑time constant.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.9"><span class="step-text"><span class="step-id">P10.9</span><span class="step-what">All eight deletions</span><span class="step-detail"><code>_entity_visible_in_workspace</code> · <code>legacy_entity_workspace()</code> · <code>vault_index._workspace_of</code> · <code>_per_workspace_vault_paths</code> · the <code>INDEX.md</code> prefix branch · <code>_entity_index_root</code>'s special case · the four <code>*_personal</code>/<code>*_work</code> config fields and their env vars.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.10"><span class="step-text"><span class="step-id">P10.10</span><span class="step-what">Replace <code>_legacy_workspaces()</code> with <code>_bootstrap_workspace()</code></span><span class="step-detail">It is misnamed — the bootstrap default, not a fallback: nothing else seeds a registry for an install that skipped <code>ciao setup</code>, so deleting it outright yields zero workspaces. But it manufactures <code>personal</code> <em>and</em> <code>work</code> — a phantom entry today, a real unwanted directory tree after the cut. Return exactly <strong>one</strong>. Keep <code>primary_workspace()</code>.</span><span class="step-files">ciao/config.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="P10.11"><span class="step-text"><span class="step-id">P10.11</span><span class="step-what"><code>--repair</code> and <code>--undo</code></span><span class="step-detail">Idempotent reconciliation to the registry: missing roots, unlinked <code>AGENTS.md</code>, un‑mirrored sources, stale <code>.mcp.json</code>, prefixed <code>INDEX.md</code>, FTS at moved paths. A root with no vault is <strong>reported, not guessed</strong>. <code>--undo</code> stays <strong>CLI‑only</strong> — “revert the architecture” is not a housekeeping button.</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Verification ═════════════════════════════════════════ -->
+    <section id="verify">
+      <h2><span class="num">Proof</span>Verification gates</h2>
+      <p class="lede">
+        Fixtures prove the logic; real data proves the assumptions; a census keeps the fixtures
+        honest. <strong>V1–V3 gate P10.</strong>
+      </p>
+
+      <div class="phase" data-phase="V">
+        <div class="phase-head">
+          <span class="phase-id">V</span>
+          <span class="phase-title">Gates</span>
+          <span class="phase-meta"><span class="chip logic">blocks the cut</span><span class="phase-tally"></span></span>
+        </div>
+        <div class="phase-body">
+          <ul class="steps">
+            <li><label class="step"><input type="checkbox" data-step="V1"><span class="step-text"><span class="step-id">V1</span><span class="step-what"><code>ciao workspace-census</code> — turn the vault into a test spec</span><span class="step-detail">New, read‑only. Notes per top‑level dir, non‑<code>.md</code> counts, symlinks, max depth, duplicate stems, frontmatter‑less notes, registry contents, and top‑level dirs that are not registered workspaces. <strong>Every shape it reports needs a fixture counterpart</strong>; one that does not is a coverage hole. This is what found D5's two gaps before any code was written.</span><span class="step-files">ciao/workspace_census.py · tests/test_workspace_census.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="V2"><span class="step-text"><span class="step-id">V2</span><span class="step-what">Fixture assertions — the proofs</span><span class="step-detail"><strong>Conservation</strong> (each file appears exactly once after) · <strong>content untouched</strong> (hash every file before and after — the direct test that the automated part moves and never rewrites; one changed hash fails the release) · <code>git log --follow</code> survives · no root for an unregistered workspace · one index per root, zero prefixed paths · regions neither leaked nor lost · idempotence · refuses on modified <em>tracked</em> files but <strong>not</strong> untracked · <strong><code>--undo</code> restores a byte‑identical tree</strong> · session slugs differ and invalidated sessions are reported.</span><span class="step-files">tests/test_workspace_reroot.py</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="V3"><span class="step-text"><span class="step-id">V3</span><span class="step-what">Real‑data rehearsal on the 3.3 GB workspace</span><span class="step-detail"><code>cp -c -R</code> (APFS copy‑on‑write — instant, no extra space), delete <code>.env</code>, <code>.credentials/</code>, <code>.runtime/</code> (847 MB), <code>node_modules/</code>, <code>.venv/</code> inside the copy, restore only <code>.runtime/workspaces.json</code>. <strong>Not <code>git clone</code></strong> — ~700 chat dirs are untracked, so a clone under‑tests conservation. Guard with <code>evals._reject_workspace_overlap</code> / <code>_require_within</code>. Confirm source <code>git status</code> unchanged after.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="V4"><span class="step-text"><span class="step-id">V4</span><span class="step-what">Full suites</span><span class="step-detail"><code>pytest tests/</code>; <code>cd web &amp;&amp; npm test</code> on <strong>Node ≥20.19</strong> (on 20.18 <code>npx vitest</code> silently skips component files while printing green); <code>npm run build</code>.</span></span></label></li>
+            <li><label class="step"><input type="checkbox" data-step="V5"><span class="step-text"><span class="step-id">V5</span><span class="step-what">End‑to‑end drain</span><span class="step-detail">On a copy of the real vault, accept/dismiss all 417 items through the UI and confirm the counters reach zero and <code>os-audit</code> reports healthy. This is the test that the queues are a workflow rather than a notification.</span></span></label></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Reuse ════════════════════════════════════════════════ -->
+    <section id="reuse">
+      <h2><span class="num">Before writing new code</span>Reuse, don't re‑derive</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Existing helpers this plan depends on</caption>
+          <thead><tr><th>Need</th><th>Already exists as</th></tr></thead>
+          <tbody>
+            <tr><td>Copying safely out of a live workspace</td><td><code>evals._reject_workspace_overlap</code> · <code>_require_within</code> · <code>_validate_materialized_tree</code></td></tr>
+            <tr><td>Re‑home planning, receipts, git rail</td><td><code>vault_rehome.plan_rehome</code> · <code>read_receipt</code> · <code>write_receipt</code> · <code>remove_receipt</code> · <code>vault_git_state</code></td></tr>
+            <tr><td>Accept semantics to lift into the registry</td><td><code>control_plane.memory_proposals_list</code> · <code>memory_proposal_resolve</code></td></tr>
+            <tr><td>The count‑split reasoning</td><td><code>os_audit.memory_actionable_count</code> — its docstring is the policy</td></tr>
+            <tr><td>Per‑root asset install and guide linking</td><td><code>sync_skills.sync_workspace_skills</code> · <code>_ensure_linked_workspace_guides</code> — both already take a root</td></tr>
+            <tr><td>Rehearsal-in-a-throwaway-install pattern</td><td><code>package_smoke.run_package_smoke</code> + its CLI wiring</td></tr>
+            <tr><td>Per‑node telemetry, git sync, per‑root audit half</td><td><code>job_runs.track_sync</code> · <code>git_sync.sync_workspace</code> · <code>os_audit.audit_setup</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout cost">
+        <h4>Do not bundle with the OKF link migration</h4>
+        <p>
+          <code>OKF_ADOPTION_PLAN.md</code> is in flight over <code>vault_index.py</code>,
+          <code>vault_lint.py</code>, <code>routes_api.py</code> and <code>vaultLinks.ts</code>.
+          Both rewrite link and path resolution over the same files and both need
+          receipt‑gated migrations; interleaving makes a regression un‑bisectable.
+          <strong>P1–P3 are safe alongside it</strong>; land OKF before P6.
+        </p>
+      </div>
+    </section>
+
+    <footer class="end">
+      <p>
+        Progress is stored in this browser only — hand the step ids (<code>P4.6</code>,
+        <code>V2</code>) to another session rather than the checkbox state. Every claim here was
+        re‑verified against the working tree; re‑anchor by symbol name, never line number,
+        because the checkout is edited concurrently.
+      </p>
+    </footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  var KEY = 'ciao-agent-roots-work-order-v1';
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('input[data-step]'));
+  var store = {};
+  try { store = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { store = {}; }
+
+  function persist() {
+    try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) { /* session-only */ }
+  }
+
+  function paint() {
+    var done = 0;
+    boxes.forEach(function (b) {
+      var row = b.closest('.step');
+      if (row) row.classList.toggle('is-done', b.checked);
+      if (b.checked) done++;
+    });
+    var total = boxes.length;
+    var pct = total ? Math.round((done / total) * 100) : 0;
+    document.getElementById('pct').textContent = pct + '%';
+    document.getElementById('tally').textContent = done + ' of ' + total + ' steps complete';
+    document.getElementById('fill').style.width = pct + '%';
+
+    document.querySelectorAll('.phase[data-phase]').forEach(function (phase) {
+      var local = Array.prototype.slice.call(phase.querySelectorAll('input[data-step]'));
+      var hit = local.filter(function (b) { return b.checked; }).length;
+      var tally = phase.querySelector('.phase-tally');
+      if (tally) tally.textContent = hit + '/' + local.length;
+      phase.classList.toggle('is-complete', local.length > 0 && hit === local.length);
+    });
+  }
+
+  boxes.forEach(function (b) {
+    var id = b.getAttribute('data-step');
+    b.checked = !!store[id];
+    b.addEventListener('change', function () {
+      if (b.checked) { store[id] = 1; } else { delete store[id]; }
+      persist();
+      paint();
+    });
+  });
+
+  document.getElementById('reset').addEventListener('click', function () {
+    store = {};
+    persist();
+    boxes.forEach(function (b) { b.checked = false; });
+    paint();
+  });
+
+  paint();
+})();
+</script>
+</body>
+</html>

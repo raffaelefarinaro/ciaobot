@@ -4,7 +4,7 @@ import { Marked, Renderer, type Tokens } from 'marked'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { COMMENT_TAGS } from './commentContext'
 import { linkifyHtml } from './filePaths'
-import { linkifyWikilinksInMarkdown } from './wikilinks'
+import { buildMarkdownIndex, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
 
 type FileMarkdownOptions = {
   resolveImageSrc: (href: string) => string
@@ -77,20 +77,42 @@ export function renderMarkdown(text: string, knownPaths: string[] = []): string 
 }
 
 export function renderFileMarkdown(text: string, options: FileMarkdownOptions): string {
-  const source = options.filePath && options.markdownPaths?.length
-    ? linkifyWikilinksInMarkdown(text, options.filePath, options.markdownPaths)
-    : text
+  // Cross-note links are relative markdown links (`[Mo](./People/Mo.md)`).
+  // Left to the default renderer they would emit `<a href="./People/Mo.md">`,
+  // and the viewer only intercepts `a.file-link` (`onMdClick`), so clicking one
+  // would do nothing useful. The `link()` override below is what makes an
+  // in-vault link navigate; it is not cosmetic.
+  const filePath = options.filePath || ''
+  const vaultPaths = filePath && options.markdownPaths?.length ? options.markdownPaths : null
+  const linkIndex = vaultPaths ? buildMarkdownIndex(vaultPaths) : null
+  const linkPathSet = vaultPaths ? new Set(vaultPaths) : null
+
   const renderer = {
     image({ href, title, text: alt }: { href: string; title: string | null; text: string }): string {
       const src = href ? options.resolveImageSrc(href) : ''
       const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
       return `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt ?? '')}"${titleAttr} loading="lazy" />`
     },
+    link(this: Renderer, token: Tokens.Link): string {
+      if (!linkIndex || !linkPathSet) return Renderer.prototype.link.call(this, token)
+      const ref = vaultNoteRefFromHref(token.href)
+      // External URLs, absolute paths, in-page anchors and non-note targets
+      // stay ordinary anchors.
+      if (ref === null) return Renderer.prototype.link.call(this, token)
+      const label = this.parser.parseInline(token.tokens)
+      const target = resolveVaultLinkTarget(ref, filePath, linkIndex, linkPathSet)
+      // A dangling link stays visibly non-clickable rather than becoming a
+      // dead anchor that swallows the tap.
+      if (!target) {
+        return `<span class="vault-link-unresolved" title="${escapeAttr(token.href)}">${label}</span>`
+      }
+      return `<a class="file-link" href="#" data-file-path="${escapeAttr(target)}">${label}</a>`
+    },
   }
   const parser = new Marked({ ...MARKDOWN_OPTIONS, renderer })
   try {
-    return sanitizeHtml(parser.parse(source) as string)
+    return sanitizeHtml(parser.parse(text) as string)
   } catch {
-    return sanitizeHtml(source)
+    return sanitizeHtml(text)
   }
 }

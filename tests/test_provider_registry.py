@@ -2,7 +2,7 @@
 
 These tests guard the contract the rest of the app now relies on: every
 descriptor's dotted paths resolve, and the enumerations that used to be
-``{"claude", "codex"}`` literals derive from the registry.
+``{"claude", "opencode"}`` literals derive from the registry.
 """
 
 from __future__ import annotations
@@ -25,8 +25,6 @@ def test_descriptor_paths_resolve(descriptor):
     if descriptor.system_skills_path:
         module, _, attr = descriptor.system_skills_path.partition(":")
         assert attr and module
-    if descriptor.upgrade_path:
-        assert callable(descriptor.upgrade_callable())
 
 
 @pytest.mark.parametrize("descriptor", provider_registry.descriptors(), ids=lambda d: d.id)
@@ -49,7 +47,6 @@ def test_capabilities_for_unknown_provider_is_all_false():
     """A stale chat record degrades to 'supports nothing', never a crash."""
     capabilities = capabilities_for("no-such-provider")
     assert not capabilities.resume
-    assert not capabilities.steer
     assert not capabilities.background_subagents
 
 
@@ -67,12 +64,10 @@ def test_every_provider_is_installable_and_inspectable(descriptor):
     """A provider users can pick must also be one they can set up.
 
     Without this, a provider can be added to the registry and appear in the
-    chat picker while Settings shows no connection row and `ciao upgrade`
-    silently skips it.
+    chat picker while Settings shows no connection row.
     """
     assert descriptor.auth_command_path, f"{descriptor.id} has no login command"
     assert descriptor.status_probe_path, f"{descriptor.id} has no readiness probe"
-    assert descriptor.upgrade_path, f"{descriptor.id} has no upgrade hook"
 
 
 @pytest.mark.parametrize("descriptor", provider_registry.descriptors(), ids=lambda d: d.id)

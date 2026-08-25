@@ -285,3 +285,52 @@ async def test_schedule_attention_classifier_records_context_overflow(
     row = _job_rows(tmp_path)[0]
     assert row["status"] == "error"
     assert row["extra"]["context_overflow"] is True
+
+
+async def test_schedule_attention_classifier_parses_prose_wrapped_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that wraps its JSON in prose or fences must still be parsed.
+
+    The classifier previously did a bare ``json.loads`` after stripping fences,
+    so prose-wrapped output (or empty output) raised a JSONDecodeError and the
+    run was recorded as an error even though the verdict was recoverable.
+    """
+    async def fake_oneshot(*args, **kwargs):
+        return 'Here is my assessment:\n```json\n{"needs_user": false, "reason": "routine"}\n```\nNo action needed.'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    )
+
+    assert needs_user is False
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "ok"
+    assert row["extra"]["needs_user"] is False
+    assert row["extra"]["reason"] == "routine"
+
+
+async def test_schedule_attention_classifier_empty_output_keeps_chat_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty model output must degrade to the conservative keep-visible default.
+
+    This is the exact failure seen in production: the model returned nothing,
+    ``json.loads("")`` raised, and the run was logged as an error. It should
+    still keep the chat visible, but without a spurious traceback.
+    """
+    async def fake_oneshot(*args, **kwargs):
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    )
+
+    assert needs_user is True
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "error"
+    assert row["error"] == "classifier returned no parseable JSON"

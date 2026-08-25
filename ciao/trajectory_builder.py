@@ -413,13 +413,17 @@ def list_trajectories(
     month: str | None = None,
     since: datetime | None = None,
     skill: str | None = None,
+    workspace: str | None = None,
     root: Path | None = None,
 ) -> list[Path]:
     """List trajectory files, optionally filtered.
 
     ``month`` is ``YYYY-MM``. ``since`` filters by stored ``timestamp``.
     ``skill`` keeps only records whose ``skills_loaded`` includes that
-    skill name. Filters compose.
+    skill name. ``workspace`` keeps only records recorded in that workspace —
+    every record stores one, and without this filter a caller reading "recent
+    sessions" silently reads every workspace's, which is how work-session
+    evidence ended up quoted into the personal vault. Filters compose.
     """
     base = root or trajectories_root()
     if not base.exists():
@@ -429,7 +433,7 @@ def list_trajectories(
     else:
         candidates = sorted(base.glob("*/*.json"))
 
-    if since is None and skill is None:
+    if since is None and skill is None and workspace is None:
         return candidates
 
     kept: list[Path] = []
@@ -448,6 +452,9 @@ def list_trajectories(
                 continue
         if skill is not None and skill not in (rec.get("skills_loaded") or []):
             continue
+        if workspace is not None:
+            if str(rec.get("workspace", "") or "").strip() != workspace:
+                continue
         kept.append(path)
     return kept
 

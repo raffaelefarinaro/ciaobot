@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +157,20 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
     assert str(called[0].vault_root) == "/tmp/vault"
 
 
+def test_cli_workspace_census_dispatches_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_workspace_census_command", lambda args: called.append(args) or 0
+    )
+
+    assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
+    assert str(called[0].vault_root) == "/tmp/vault"
+    assert called[0].json is True
+
+
 def _write_healthy_audit_workspace(root: Path) -> None:
     from ciao.memory_tool import ensure_regions
 
@@ -212,6 +227,73 @@ def test_cli_os_audit_exit_codes_distinguish_findings_and_errors(
     ]) == 2
 
 
+def test_cli_os_audit_pending_only_exits_zero_with_a_distinct_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pending-only audit exits 0 and prints its own line, not the healthy one."""
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    legacy = workspace / "research"
+    (legacy / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "research", "vault_root": "research"}]),
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    assert cli.main(["os-audit", "--workspace", str(workspace)]) == 0
+    out = capsys.readouterr().out
+    assert "Pending actions" in out
+    assert "Upgrade Actions (optional)" in out
+
+
+def test_cli_os_audit_explicit_workspace_beats_an_ambient_runtime_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An absolute CIAO_RUNTIME_ROOT must not escape an explicit --workspace.
+
+    A running Ciaobot chat exports CIAO_RUNTIME_ROOT for its own install. When
+    the env won, `--workspace` still selected the vault but the registry, job
+    runs and migration receipts came from the surrounding install, so the audit
+    reported on a different workspace than the one it was asked about, without
+    saying so.
+    """
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    (workspace / "research" / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "research", "vault_root": "research"}]),
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    # Another install's runtime root, exactly as a Ciaobot chat exports it.
+    foreign = tmp_path / "other-install" / ".runtime"
+    foreign.mkdir(parents=True)
+    (foreign / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(foreign))
+
+    assert cli.main(["os-audit", "--workspace", str(workspace), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["job_runs_audit"]["runtime_root"] == str(workspace / ".runtime")
+    # The named workspace's own registry was read, so its nonstandard vault is
+    # still detected rather than the foreign install's healthy one.
+    assert report["pending_action_count"] == 1
+    assert report["upgrade_notices"]["notices"][0]["workspace"] == "research"
+
+
 def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -229,13 +311,28 @@ def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     memory_dir.mkdir()
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
 
+    # A pending upgrade notice is an optional action the operator may decline.
+    # Under D2 it must not raise the status: this exits 0, and the notice is
+    # surfaced on its own line instead of the healthy one.
+    assert cli.main([
+        "os-audit",
+        "--workspace",
+        str(workspace),
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "Pending actions" in out
+    assert "Upgrade Actions (optional)" in out
+
     assert cli.main([
         "os-audit",
         "--workspace",
         str(workspace),
         "--json",
-    ]) == 1
+    ]) == 0
     report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] == 1
     notices = report["upgrade_notices"]["notices"]
     assert notices[0]["workspace"] == "research"
     assert "Open a Ciaobot chat" in notices[0]["remedy"]
@@ -325,29 +422,37 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         "PWA_AUTH_REQUIRED=true",
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
-    assert (workspace / ".claude" / "agents" / "memory.md").is_file()
-    assert (workspace / "commands" / "remember.md").is_file()
+    # Agent assets belong to the WORKSPACE root, not the install root: a fresh
+    # setup now builds the per-workspace layout directly instead of the shared one
+    # that then had to be migrated.
+    root = workspace / "research"
+    assert (root / ".claude" / "agents" / "memory.md").is_file()
+    assert (root / "commands" / "remember.md").is_file()
     assert "ciao:memory" in (
-        workspace / "commands" / "remember.md"
+        root / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
-    assert (workspace / "CLAUDE.md").is_file()
-    assert (workspace / "AGENTS.md").is_symlink()
-    assert (workspace / "AGENTS.md").readlink() == Path("CLAUDE.md")
-    assert (workspace / "AGENTS.md").resolve() == (workspace / "CLAUDE.md").resolve()
-    customization = workspace / "CIAO_CUSTOMIZATION.md"
+    assert (root / "CLAUDE.md").is_file()
+    assert (root / "AGENTS.md").is_symlink()
+    assert (root / "AGENTS.md").readlink() == Path("CLAUDE.md")
+    assert (root / "AGENTS.md").resolve() == (root / "CLAUDE.md").resolve()
+    customization = root / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
     assert (workspace / ".runtime" / "schedules.json").is_file()
     assert json.loads((workspace / ".runtime" / "schedules.json").read_text(encoding="utf-8")) == {"schedules": []}
     # Canonical user-asset sources exist so Workspace Health starts warning-free.
-    assert (workspace / "subagents").is_dir()
-    assert (workspace / "commands").is_dir()
-    assert (workspace / "memory-vault" / "research" / "MEMORY.md").is_file()
+    assert (root / "subagents").is_dir()
+    assert (root / "commands").is_dir()
+    # Nothing agent-shaped is left at the install root for the migration to move.
+    assert not (workspace / "CLAUDE.md").exists()
+    assert not (workspace / "subagents").exists()
+    assert (root / "memory-vault" / "MEMORY.md").is_file()
+    assert not (workspace / "memory-vault").exists()
     registry = json.loads(
         (workspace / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert registry[0]["name"] == "research"
-    assert registry[0]["vault_root"] == "memory-vault/research"
+    assert registry[0]["vault_root"] == "research/memory-vault"
     plist = launch_agents / "com.ciao.server.plist"
     assert plist.is_file()
     plist_text = plist.read_text(encoding="utf-8")
@@ -906,17 +1011,6 @@ def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
     assert calls == [["/opt/ciao/claude", "login"]]
 
 
-def test_auth_codex_supports_device_authorization(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        "ciao.providers.codex.resolve_codex_binary",
-        lambda: "/opt/ciao/codex",
-    )
-
-    assert cli.main(["auth", "codex", "--device-auth", "--print-only"]) == 0
-
-    assert capsys.readouterr().out.strip() == "/opt/ciao/codex login --device-auth"
-
-
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli, "_vault_index_command", lambda args: called.append(args) or 0)
@@ -1031,3 +1125,168 @@ def test_setup_does_not_download_or_install_the_desktop_app(
     assert written
     assert not (apps / "Ciaobot.app").exists()
     assert not (apps / "Ciaobot Server.app").exists()
+
+
+# -- skill-proposal-remove --------------------------------------------------
+
+
+def _skill_proposal_workspace(root: Path, name: str = "2026-08-09-defuddle") -> Path:
+    """A workspace whose vault holds one skill proposal in the personal queue."""
+    vault = root / "memory-vault"
+    personal = vault / "personal"
+    # A workspace evidence dir so the bootstrap registry sees a `personal` vault.
+    (personal / "Workspace").mkdir(parents=True, exist_ok=True)
+    source = personal / "Workspace" / "Skill-Proposals" / f"{name}.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f"# {name}\n\nA proposed skill.\n", encoding="utf-8")
+    return source
+
+
+def test_cli_skill_proposal_remove_deletes_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
+
+    assert not source.exists()
+    assert "Removed skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_json_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "2026-08-09-defuddle", "--json"]) == 0
+
+    assert not source.exists()
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"removed": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
+
+
+def test_cli_skill_proposal_remove_refuses_ambiguous_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    _skill_proposal_workspace(workspace, "2026-08-09-defuddle")
+    _skill_proposal_workspace(workspace, "2026-08-16-defuddle")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 1
+
+    err = capsys.readouterr().err
+    assert "more than one" in err
+    # Nothing was deleted.
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert len(list(queue.glob("*.md"))) == 2
+
+
+def _search_note(vault: Path, name: str) -> None:
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / f"{name}.md").write_text(
+        f"---\ntype: person\ntitle: {name}\n---\n# {name}\n\nLoves kiteboarding.\n",
+        encoding="utf-8",
+    )
+
+
+def test_cli_vault_search_logs_never_returns_a_sibling_agent_roots_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same cross-workspace leak, by way of `--logs`.
+
+    Scoping the note query left the transcript query unscoped, because
+    `search_logs` had no `path_prefix` at all — so `vault-search --logs` still
+    printed another workspace's archived chats out of the shared database.
+    """
+    from ciao import fts_search
+
+    install = tmp_path / "install"
+    work_vault = install / "work" / "memory-vault"
+    personal_vault = install / "personal" / "memory-vault"
+    work_vault.mkdir(parents=True)
+    personal_logs = personal_vault / "Logs" / "Chats"
+    personal_logs.mkdir(parents=True)
+    (personal_logs / "chat-alba.md").write_text(
+        "# Chat\n\nWe talked about kiteboarding with Alba.\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    # The sibling root's transcripts are already indexed, as the migration
+    # rebuild leaves them.
+    conn = sqlite3.connect(fts_search.get_db_path())
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_logs(
+            conn,
+            personal_vault,
+            logs_root=personal_logs,
+            path_base=install,
+        )
+    finally:
+        conn.close()
+
+    assert (
+        cli.main(
+            ["vault-search", "kiteboarding", "--logs", "--vault-root", str(work_vault)]
+        )
+        == 0
+    )
+
+    assert "Alba" not in capsys.readouterr().out
+
+
+def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Cross-workspace leak: the FTS database is shared by every re-rooted agent
+    root — the migration rebuild fills it that way on purpose — and the prune is
+    now scoped, so it keeps the sibling roots' rows. An unscoped query therefore
+    printed another workspace's note titles and snippets."""
+    from ciao import fts_search
+
+    install = tmp_path / "install"
+    work_vault = install / "work" / "memory-vault"
+    personal_vault = install / "personal" / "memory-vault"
+    _search_note(work_vault, "Aymen")
+    _search_note(personal_vault, "Alba")
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    # The other root's rows are already in the shared database, exactly as the
+    # migration rebuild leaves them.
+    conn = sqlite3.connect(fts_search.get_db_path())
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, personal_vault, path_base=install)
+    finally:
+        conn.close()
+
+    assert cli.main(["vault-search", "kiteboarding", "--vault-root", str(work_vault)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Aymen" in out  # this workspace's own note still resolves
+    assert "Alba" not in out
+    # And the link points at the note that actually exists on disk.
+    assert str(work_vault / "People" / "Aymen.md") in out

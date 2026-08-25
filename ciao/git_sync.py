@@ -91,14 +91,3 @@ async def sync_workspace(workspace: Path) -> str | None:
 
     logger.info("Startup sync: %s", pull_out)
     return f"Startup sync: pulled latest changes.\n{pull_out}"
-
-
-async def pull_before_push(workspace: Path) -> tuple[bool, str]:
-    """Pull before pushing. Used by snapshot to avoid push failures.
-
-    Returns (success, error_message).
-    """
-    rc, out, err = await _git(workspace, "pull")
-    if rc != 0:
-        return False, err
-    return True, ""

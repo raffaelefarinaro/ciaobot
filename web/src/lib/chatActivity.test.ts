@@ -81,6 +81,18 @@ describe('formatTokenUsage', () => {
     expect(formatTokenUsage(undefined))
       .toBe('')
   })
+
+  it('appends the context-window occupancy when present', () => {
+    expect(formatTokenUsage({ input_tokens: '2', output_tokens: '1079', context_pct: '42.3%' }))
+      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out · <span class="context-pct">42.3%</span> ctx')
+  })
+
+  it('renders context_pct alone when token sides are missing', () => {
+    expect(formatTokenUsage({ context_pct: '8.4%' }))
+      .toBe('Tokens <span class="context-pct">8.4%</span> ctx')
+    expect(formatTokenUsage({ context_pct: '' }))
+      .toBe('')
+  })
 })
 
 describe('isProgressCommentary', () => {
@@ -127,14 +139,6 @@ describe('findFinalAnswerIndex', () => {
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
 
-  it('respects Codex final_answer phase', () => {
-    const buffer = [
-      text('working', { phase: 'commentary' }),
-      text('Done.', { phase: 'final_answer' }),
-      text('Now tidy up:'),
-    ]
-    expect(findFinalAnswerIndex(buffer)).toBe(1)
-  })
 })
 
 describe('isAnswerBubble', () => {
@@ -217,13 +221,6 @@ describe('buildTurnParts', () => {
     ])
   })
 
-  it('keeps Codex commentary folded in the trace, not promoted to a bubble', () => {
-    const buffer = [text('narration', { phase: 'commentary' }), activity('Read'), text('final')]
-    expect(buildTurnParts(buffer, 2)).toEqual([
-      { kind: 'trace', steps: [buffer[0], buffer[1]] },
-    ])
-  })
-
   it('emits no trailing trace when adjacent text blocks precede the final answer', () => {
     const buffer = [text('t1'), text('t2')]
     expect(buildTurnParts(buffer, 1)).toEqual([
@@ -281,5 +278,4 @@ describe('traceSummaryMeta', () => {
     ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
   })
 })
-
 

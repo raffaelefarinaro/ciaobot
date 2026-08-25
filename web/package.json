@@ -1,7 +1,7 @@
 {
   "name": "ciaobot-pwa",
   "private": true,
-  "version": "0.9.1",
+  "version": "0.10.0",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
@@ -15,23 +15,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@excalidraw/excalidraw": "^0.18.1",
     "dompurify": "^3.4.12",
-    "highlight.js": "^11.11.1",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
     "marked": "^18.0.6",
-    "marked-highlight": "^2.2.4",
     "papaparse": "^5.5.4",
     "pinia": "^3.0.4",
     "qrcode-generator": "^1.5.2",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "vue": "^3.5.40",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@types/papaparse": "^5.5.2",
-    "@types/react": "^18.3.31",
-    "@types/react-dom": "^18.3.7",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vitejs/plugin-vue": "^5.2.0",

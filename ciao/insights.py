@@ -53,9 +53,9 @@ def resolve_insights_model(
     without workspace context fall back to ``config.insights_model``.
 
     ``provider``, when given, is the chat's actual provider; it is passed
-    through to ``default_model_for_workspace`` so a Codex/opencode chat in a
+    through to ``default_model_for_workspace`` so an opencode chat in a
     Claude-default workspace resolves that provider's own default model
-    instead of a Claude tier alias (which those providers cannot run).
+    instead of a Claude tier alias.
     """
     if config.insights_model_override:
         return config.insights_model_override
@@ -170,12 +170,12 @@ def _resolve_insights_call(
     """
     # Routine settings qualify runtime-provider overrides so a global choice
     # is not accidentally sent through Claude (the default one-shot provider).
-    for routed_provider in ("codex", "opencode"):
+    for routed_provider in ("opencode",):
         prefix = f"{routed_provider}:"
         if model.startswith(prefix):
             return model[len(prefix):] or "sonnet", routed_provider, None
 
-    if provider in ("codex", "opencode") and not native_sidecar.is_apple_model(model):
+    if provider == "opencode" and not native_sidecar.is_apple_model(model):
         return model, provider, None
 
     # An insights_model that is itself the sentinel cannot serve as the
@@ -245,31 +245,50 @@ Cite the message index `[idx=N]` for every claim. Do not invent facts.
 Do not summarise the conversation - that is already saved.
 
 Rules:
+- Emit ONLY durable, cross-session facts. A fact is worth keeping only if it
+  will matter in a future session: a standing preference, a reusable lesson, a
+  real error pattern, a recurring tool, a new person/project. Omit a section
+  entirely rather than fill it with session-local noise — a one-off choice
+  about this one repo, a single loop, or a phrasing pushback that was only
+  about this session has no place here.
+- End every bullet with exactly one destination tag, after the citation:
+  - [memory] - true regardless of which project is open: a standing
+    preference, an environment fact, a cross-project lesson.
+  - [profile] - who the user is: identity, role, communication style.
+  - [project] - true only within this project/repo: its decisions,
+    constraints, status. When unsure whether a fact is project-scoped or
+    global, use [review] instead of guessing.
+  - [people: <Name>] - a durable fact about a person; use their name.
+  - [learnings] - reusable how-to knowledge that spans projects.
+  - [review] - durable, but you are not sure where it belongs.
 - Skip routine successful tool calls.
 - Skip anything obvious from user/assistant text alone.
 - "Errors" = tool/model/system failure, not just things the user disliked.
-- "User corrections" = the user pushed back, redirected, or rejected an approach.
-  Append the "Durable rule:" sentence only when the correction implies a
-  preference that should hold in future sessions, phrased as a present-tense
-  standing rule; omit it for one-off fixes.
-- "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
-- When citing wikilinks, use bare [[Target]] or [[Target|Display]] syntax. Do NOT wrap wikilinks in backticks, quotes, or other formatting.
+- "User corrections" = a correction that implies a preference the user wants to
+  hold in future sessions. Drop corrections that only fixed this session's
+  output. Append the "Durable rule:" sentence ONLY when the user stated a
+  present-tense standing rule; if the correction has no durable rule, do NOT
+  write the bullet at all.
+- "New entities" = people, phrases, places, or products mentioned for the first
+  time that the user will keep dealing with — not generic nouns, not one-off
+  references to something in this transcript.
+- "Decisions" = choices that set a precedent for future sessions ("chose X over
+  Y, and we should keep doing X"). Drop one-off picks about this transcript.
+- When citing a vault link, use a relative Markdown link with the path from the
+  vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
 
 ## Errors
-- <what failed> -> <how it was resolved, or "unresolved"> [idx=N]
-
-## Dead ends
-- Tried <approach>; blocked by <reason>; switched to <alternative>. [idx=N]
+- <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>. [idx=N]
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. [idx=N] <tag>
 
 ## New entities
-- <type>: <name> - <one-line context>. [idx=N]
+- <type>: <name> - <one-line context>. Only recurring names. [idx=N] <tag>
 
 ## Decisions
-- Chose <X> over <Y> because <reason>. [idx=N]
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. [idx=N] <tag>
 
 ## Reusable snippets
 - <one-line description>:
@@ -278,14 +297,19 @@ Rules:
   ```
 
 ## Open loops
-- <thing left undone, with any deadline or condition>. [idx=N]
+- <thing left undone, with any deadline or condition>. [idx=N] <tag>
 
 ## Vault changes
 - <path> - <one-line summary of edit>. [idx=N]
 """
 
 
-def filter_session_jsonl(workspace_root: Path, session_id: str) -> str | None:
+def filter_session_jsonl(
+    workspace_root: Path,
+    session_id: str,
+    *,
+    agent_root: Path | None = None,
+) -> str | None:
     """Read and pre-filter a Claude Code session JSONL into a compact string.
 
     Returns None when the file doesn't exist or can't be parsed.
@@ -299,10 +323,15 @@ def filter_session_jsonl(workspace_root: Path, session_id: str) -> str | None:
     - Keep any tool_result with is_error=true in full.
     - Truncate Read/Glob/Grep/WebFetch tool_result bodies to a head + size.
     - Annotate every kept message with a sequential ``idx`` for citation.
+
+    ``agent_root`` is the per-workspace agent root whose session directory to
+    read; it defaults to ``workspace_root`` so callers that supply nothing
+    keep today's behaviour.
     """
     if not session_id:
         return None
-    path = _claude_projects_dir(workspace_root) / f"{session_id}.jsonl"
+    root = agent_root if agent_root is not None else workspace_root
+    path = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if not path.exists():
         return None
 
@@ -459,6 +488,7 @@ async def extract_and_append(
     provider: str = "claude",
     project_doc_path: str = "",
     text_mode: bool = False,
+    guide_path: Path | None = None,
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
 
@@ -475,7 +505,7 @@ async def extract_and_append(
     must never crash the route or leave the archive corrupted.
 
     The model call goes through ``run_oneshot``, which dispatches to the
-    runtime provider that owns the model (Claude Code, Codex, or opencode) or
+    runtime provider that owns the model (Claude Code or opencode) or
     to the bundled Apple helper.
 
     When ``trajectories_enabled" and ``session_id`` are set, a JSON
@@ -501,6 +531,12 @@ async def extract_and_append(
     # out of the `extra` it is given at entry (not from the handle mid-block),
     # so it has to be resolved before the first tracked step opens.
     chat_id = str((trajectory_meta or {}).get("chat_id") or "")
+    # The project-doc fold runs before memory proposals, and the proposal step
+    # needs its outcome: facts the fold consumed must not also be queued for a
+    # region, while facts it skipped stay reviewable. Both are hoisted because
+    # the proposal step runs in the `finally` below.
+    doc_fold_wrote = False
+    resolved_doc_path = ""
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -565,6 +601,7 @@ async def extract_and_append(
                 doc = Path(project_doc_path)
                 if not doc.is_absolute() and workspace_root is not None:
                     doc = workspace_root / project_doc_path
+                resolved_doc_path = str(doc)
                 async with job_runs.track(
                     "project_doc_update", "Project doc update",
                     model=doc_model,
@@ -582,6 +619,7 @@ async def extract_and_append(
                         cwd=workspace_root,
                     )
                     run.extra["wrote"] = wrote
+                    doc_fold_wrote = wrote
                     if not wrote:
                         run.skip("no material changes for the project doc")
             except Exception:  # noqa: BLE001 — never crash the loop
@@ -621,10 +659,11 @@ async def extract_and_append(
                     "Trajectory persist failed for session %s", session_id
                 )
         # Memory proposals: scan the freshly-appended insights section and
-        # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # "User corrections" are auto-promoted straight into the CLAUDE.md
-        # ``ciao:memory``/``ciao:profile`` regions; everything else waits for
-        # the curator agent to promote via Edit on the next session.
+        # route each fact to its destination. Confident, state-shaped facts
+        # are auto-applied straight to their destination (CLAUDE.md regions,
+        # People notes, Learnings); `[project]` facts the doc fold consumed
+        # are dropped; everything unsure or failed waits in
+        # ``Workspace/Memory-Proposals.md``.
         if (
             memory_proposals_enabled
             and proposal_vault_root is not None
@@ -640,17 +679,18 @@ async def extract_and_append(
                     # The count is what the archived chat reports back to the
                     # user ("3 memory proposals"); a bare bool cannot say that.
                     proposal_stats: dict[str, int] = {}
+                    # The guide is the archive owner's workspace agent root,
+                    # threaded from the caller: region auto-promotion must
+                    # write the workspace the chat ran in, never an
+                    # install-root file.
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
                         auto_promote_memory=True,
-                        guide_path=(
-                            Path(config.workspace_root) / "CLAUDE.md"
-                            if config is not None
-                            and getattr(config, "workspace_root", None)
-                            else None
-                        ),
+                        guide_path=guide_path,
                         stats=proposal_stats,
+                        project_doc_path=resolved_doc_path,
+                        project_fold_wrote=doc_fold_wrote,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
@@ -771,8 +811,28 @@ def _has_insights_section(path: Path) -> bool:
         return False
 
 
+def _indent_body_fences(text: str) -> str:
+    """Indent any line-start ``` in the body we are about to append.
+
+    `_is_appended_tail` treats a line-start fence after the stamp as proof the
+    stamp is quoted transcript content, and its docstring asserts that the
+    appended body's own fences are always indented. The prompt's "## Reusable
+    snippets" template does indent them - but the model does not reliably
+    preserve that, and one unindented fence made the whole section invisible:
+    `locate_insights_section` returned None, so memory proposals filed nothing
+    and every backfill run appended ANOTHER copy of the section.
+
+    Indenting here makes that invariant true by construction instead of by
+    convention. Two spaces is what the template already uses, and is still a
+    fence to any CommonMark renderer (up to three spaces of indent).
+    """
+    return "\n".join(
+        f"  {line}" if line.startswith("```") else line for line in text.split("\n")
+    )
+
+
 def _append_section(path: Path, body: str) -> None:
-    text = body.strip()
+    text = _indent_body_fences(body.strip())
     if not text:
         return
     with path.open("a", encoding="utf-8") as f:
@@ -1022,30 +1082,49 @@ Do not invent facts. Do not summarise the conversation - that is the
 transcript itself.
 
 Rules:
-- Skip anything obvious from the transcript prose alone.
-- "User corrections" = the user pushed back, redirected, or rejected an approach.
-  Append the "Durable rule:" sentence only when the correction implies a
-  present-tense standing preference; omit it for one-off fixes.
-- "New entities" = people/projects/places/products mentioned for the first time.
+- Emit ONLY durable, cross-session facts: a standing preference, a reusable
+  lesson, a real error pattern, a recurring name. Omit a section entirely
+  rather than fill it with session-local noise — a one-off choice about this
+  one repo, a single exchange, or a phrasing pushback that only fixed this
+  session has no place here.
+- End every bullet with exactly one destination tag:
+  - [memory] - true regardless of which project is open: a standing
+    preference, an environment fact, a cross-project lesson.
+  - [profile] - who the user is: identity, role, communication style.
+  - [project] - true only within this project/repo: its decisions,
+    constraints, status. When unsure whether a fact is project-scoped or
+    global, use [review] instead of guessing.
+  - [people: <Name>] - a durable fact about a person; use their name.
+  - [learnings] - reusable how-to knowledge that spans projects.
+  - [review] - durable, but you are not sure where it belongs.
+- "User corrections" = a correction that implies a preference the user wants to
+  hold in future sessions. Drop corrections that only fixed this session's
+  output. Append the "Durable rule:" sentence ONLY when the user stated a
+  present-tense standing rule; if there is no durable rule, do NOT write the
+  bullet at all.
+- "New entities" = people/projects/places/products the user will keep dealing
+  with, not one-off references in this transcript.
+- "Decisions" = choices that set a precedent for future sessions; drop one-off
+  picks about this transcript.
 - Be terse. One line per item where possible.
 
 Your entire response must be Markdown using only the section headers below. Never
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 
 ## User corrections
-- User said: "<short quote>" -> assistant changed <what>. Durable rule: <present-tense standing preference, if any>.
+- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. <tag>
 
 ## New entities
-- <type>: <name> - <one-line context>.
+- <type>: <name> - <one-line context>. Only recurring names. <tag>
 
 ## Decisions
-- Chose <X> over <Y> because <reason>.
+- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. <tag>
 
 ## Open loops
-- <thing left undone, with any deadline or condition>.
+- <thing left undone, with any deadline or condition>. <tag>
 
 ## Errors
-- <if the transcript itself describes a failure resolution that's worth keeping>
+- <if the transcript itself describes a failure resolution that's worth keeping> <tag>
 
 ## Reusable snippets
 - <only if a fully formed command or query appears in the assistant text>
@@ -1060,21 +1139,26 @@ async def backfill_insights_task(
     concurrency: int = 2,
     workspace: str = "",
     model_override: str = "",
+    agent_root: Path | None = None,
 ) -> dict[str, int]:
     """Scan archived transcripts and return counts for the completed run.
 
     *model_override* runs this pass with an explicit model instead of the
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing.
+
+    *agent_root* is the per-workspace agent root whose session directory to
+    read; it defaults to ``config.workspace_root`` so callers that supply
+    nothing keep today's behaviour.
     """
     stats = _empty_backfill_stats()
-    vault_root = config.vault_root
-    # Archives live at <vault_root>/Logs/Chats (see main.py:transcript_root),
-    # NOT <vault_root>/memory-vault/Logs/Chats — vault_root is already the
-    # container that holds Logs/, MEMORY.md, etc.
-    base = vault_root / "Logs" / "Chats"
+    # Archives live under the promoted logs root (see main.py:transcript_root),
+    # which is <vault_root>/Logs before the re-rooting and <install>/Logs after
+    # it. `config.logs_root` is the one place that distinction is made.
+    base = config.logs_root / "Chats"
 
-    project_dir = _claude_projects_dir(config.workspace_root)
+    root = agent_root if agent_root is not None else config.workspace_root
+    project_dir = _claude_projects_dir(root)
 
     def _discover() -> tuple[list[tuple[Path, str, bool]], int, int]:
         """Walk the archive tree and decide what needs backfilling.
@@ -1088,7 +1172,10 @@ async def backfill_insights_task(
         """
         found: list[tuple[Path, str, bool]] = []
         # Sorted for a deterministic order (oldest first / alphabetic).
-        archives = sorted(base.glob("*/claude/*.md"))
+        # All providers (claude and opencode) — the previous
+        # `*/claude/*.md` made opencode transcripts invisible to
+        # backfill and to the scheduled insights run.
+        archives = sorted(base.glob("*/*/*.md"))
         done = 0
         for md in archives:
             # Cheap filters first. _has_insights_section reads the whole file,
@@ -1154,7 +1241,15 @@ async def backfill_insights_task(
     if dry_run:
         for md, _, hj in todo[:20]:
             m = "full" if hj else "text"
-            logger.info("  [%s] %s", m, md.relative_to(vault_root))
+            # Relative to the ARCHIVE root, not the vault: the re-rooting
+            # promotes Logs/ out of the vault, so `relative_to(vault_root)`
+            # raises ValueError and takes down the dry run from inside a log
+            # call. Total, because a log line must never be the thing that fails.
+            try:
+                shown: object = md.relative_to(base)
+            except ValueError:
+                shown = md
+            logger.info("  [%s] %s", m, shown)
         if len(todo) > 20:
             logger.info("  ... and %d more", len(todo) - 20)
         return stats
@@ -1166,7 +1261,7 @@ async def backfill_insights_task(
             try:
                 insights_model = model_override or resolve_insights_model(config)
                 if has_jsonl:
-                    filtered = filter_session_jsonl(config.workspace_root, session_id)
+                    filtered = filter_session_jsonl(root, session_id)
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
                         return "skipped"
@@ -1180,6 +1275,11 @@ async def backfill_insights_task(
                         vault_root=config.vault_root,
                         proposal_vault_root=(
                             config.workspace_vault_root(workspace)
+                            if workspace and config.workspace(workspace) is not None
+                            else None
+                        ),
+                        guide_path=(
+                            Path(config.agent_root(workspace)) / "CLAUDE.md"
                             if workspace and config.workspace(workspace) is not None
                             else None
                         ),

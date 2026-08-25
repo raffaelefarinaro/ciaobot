@@ -142,6 +142,33 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
     assert len(flagged) == payload["attention_count"]
 
 
+def test_a_pending_permission_flags_needs_input() -> None:
+    work = SimpleNamespace(workspace="work")
+    chats = [
+        SimpleNamespace(
+            chat_id="blocked-on-approval",
+            project_id="p-work",
+            title="Waiting on approval",
+            archived=False,
+            last_activity_at="2026-07-27T11:00:00Z",
+            last_read_at="2026-07-27T11:30:00Z",
+            pending_question="",
+            pending_permission=json.dumps({
+                "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?",
+            }),
+        ),
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: work if project_id == "p-work" else None,
+    )
+
+    payload = _client(pcm=pcm).get("/api/menubar-chats").json()
+
+    assert payload["attention_count"] == 1
+    assert payload["chats"][0]["needs_input"] is True
+
+
 def test_nested_delegate_completion_does_not_create_a_second_unread_row() -> None:
     work = SimpleNamespace(workspace="work")
     chats = [

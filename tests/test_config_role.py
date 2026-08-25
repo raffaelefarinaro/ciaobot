@@ -62,27 +62,63 @@ def test_insights_min_turns_defaults_to_multiturn(tmp_path: Path) -> None:
     assert overridden.insights_size_gate_turns == 4
 
 
-def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> None:
-    # CIAO_RUNTIME_ROOT must be explicit: with bootstrap_mode False (a token
-    # and CIAO_WORKSPACE are both set here), from_env resolves the default
-    # ".runtime" relative to the CWD, not tmp_path — so without this, the
-    # test silently reads whatever real workspaces.json happens to exist in
-    # the repo checkout the tests run from, instead of the tmp fixture.
+def test_the_bootstrap_registry_is_read_off_the_vault(tmp_path: Path) -> None:
+    """An install with no `workspaces.json` gets one workspace per vault folder.
+
+    It used to manufacture `personal` AND `work` unconditionally, plus four
+    `*_PERSONAL`/`*_WORK` env vars to configure them. Both are gone: a registered
+    workspace with no vault directory makes the re-rooting plan refuse, so the
+    phantom entry left such an install permanently unable to migrate. Per-workspace
+    model and tool settings live in `workspaces.json`, which works for any name.
+
+    CIAO_RUNTIME_ROOT must be explicit: with bootstrap_mode False (a token and
+    CIAO_WORKSPACE are both set here), from_env resolves the default ".runtime"
+    relative to the CWD, not tmp_path — so without this the test silently reads
+    whatever real workspaces.json exists in the checkout the tests run from.
+    """
+    for name in ("personal", "work"):
+        (tmp_path / "memory-vault" / name / "People").mkdir(parents=True)
+
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
         CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
-        CLAUDE_DEFAULT_MODEL_PERSONAL="deepseek-v4-flash:0731-cloud",
-        CLAUDE_DEFAULT_MODEL_WORK="opus",
-        CIAO_DISALLOWED_TOOLS_WORK="Bash",
     )
 
     assert list(config.workspaces) == ["personal", "work"]
     assert config.workspace("personal").vault_root == "memory-vault/personal"
     assert config.workspace("work").gws_profile == "work"
-    assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:0731-cloud"
-    assert config.default_model_for_workspace("work") == "opus"
-    assert config.disallowed_tools_for_workspace("work") == ["Bash"]
 
+
+def test_the_bootstrap_registry_claims_only_what_exists(tmp_path: Path) -> None:
+    """A vault with one workspace folder yields one workspace, not two."""
+    (tmp_path / "memory-vault" / "personal" / "People").mkdir(parents=True)
+
+    config = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+    )
+
+    assert list(config.workspaces) == ["personal"]
+
+
+def test_a_note_folder_is_not_mistaken_for_a_workspace(tmp_path: Path) -> None:
+    """A single-workspace vault keeps its notes directly under `People/`.
+
+    The evidence test is nested for exactly this: `memory-vault/personal/People/`
+    makes `personal` a workspace, while `memory-vault/People/` is a note folder
+    and must not become a workspace called "People".
+    """
+    (tmp_path / "memory-vault" / "People").mkdir(parents=True)
+    (tmp_path / "memory-vault" / "People" / "Sam.md").write_text(
+        "---\ntype: person\n---\n# Sam\n", encoding="utf-8"
+    )
+
+    config = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+    )
+
+    assert list(config.workspaces) == ["personal"]
 
 def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     raw = json.dumps(

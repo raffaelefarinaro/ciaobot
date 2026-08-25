@@ -6,20 +6,18 @@ export type WorkspaceName = string
  * autocomplete for the providers that ship today while still accepting any id
  * the backend reports, so adding a provider does not mean editing this union.
  */
-export type RuntimeProvider = 'claude' | 'codex' | (string & {})
+export type RuntimeProvider = 'claude' | 'opencode' | (string & {})
 
 /**
  * What a runtime provider supports, mirroring `ProviderCapabilities` in
  * `ciao/providers/base.py`. The PWA gates affordances on these rather than on
- * provider ids — e.g. no "steer" control renders for a provider that reports
- * `steer: false`.
+ * provider ids.
  */
 export interface ProviderCapabilities {
   resume: boolean
   fork: boolean
   images: boolean
   stop: boolean
-  steer: boolean
   permissions: boolean
   structured_questions: boolean
   dynamic_models: boolean
@@ -172,6 +170,13 @@ export interface ChatInfo {
   // an unanswered question. Lets the PWA rebuild the picker after a reload.
   // Cleared by the server on the next user send.
   pending_question?: string
+  // Raw PermissionRequestEvent JSON (`{request_id, tool_name, message,
+  // tool_input}`) when the chat is blocked mid-turn on an unanswered
+  // Approve/Deny prompt. Lets the PWA rebuild the card after a reload and
+  // count the chat as needing attention even when it isn't the foreground
+  // chat receiving the live WS stream. Cleared by the server on answer or
+  // turn end.
+  pending_permission?: string
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
   forked_from_turn_index?: number | null
@@ -266,10 +271,16 @@ export interface ChatMessage {
   file_path?: string
   action?: string
   tool?: string
-  // Codex-native assistant-message phase. Commentary stays in the reasoning
+  // Provider-native assistant-message phase. Commentary stays in the reasoning
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
+  // Paginated-history annotations (envelope mode only). `i` is the row's
+  // absolute index in the server's full assembled history; `lazy` marks a
+  // pruned row whose full content must be fetched from the part endpoint.
+  i?: number
+  lazy?: boolean
+  full_length?: number
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -352,7 +363,6 @@ export type WsEvent =
   | { type: 'tool_denied'; tool_use_id: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
-  | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
   // The local client proxy could not open the remote host socket. This is a
   // connection state, not a chat/model failure, so the PWA renders one
@@ -511,27 +521,19 @@ export interface StatusResponse {
 export interface ModelsResponse {
   models: string[]
   default: string
-  // Keyed by provider id: claude, codex, opencode.
+  // Keyed by provider id: claude, opencode.
   provider_models: Record<string, string[]>
   provider_defaults: Record<string, string>
-  // Account-visible Codex models and their app-server metadata.
-  codex_models?: string[]
   // Models reachable through opencode's connected backends, already
   // namespaced as `providerID/modelID`. Empty when nothing is authenticated.
   opencode_models?: string[]
   // Registry-driven provider descriptors, so the PWA never has to hard-code
   // the set of runtime providers. See `ciao/provider_registry.py`.
   providers?: ProviderDescriptor[]
-  codex_model_metadata?: Record<string, {
-    display_name: string
-    description: string
-    default_reasoning_effort: string
-    input_modalities: string[]
-  }>
   model_reasoning_levels?: Record<string, string[]>
   backends?: Record<string, boolean>
-  // Keyed by runtime provider; Claude buckets share the SDK effort levels,
-  // while Codex is additionally narrowed by model_reasoning_levels.
+  // Keyed by runtime provider; Claude and opencode levels may be narrowed by
+  // model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
 }
 
@@ -549,11 +551,6 @@ export interface RoutineSettings {
   provider_default_thinking?: Record<string, string>
   // Per-provider session-insights models; missing = provider default.
   provider_insights_models?: Record<string, string>
-  // Per-provider default execution mode for new chats (Settings → Providers).
-  // Missing entry = the app-wide default mode.
-  provider_default_modes?: Record<string, string>
-  // Resolved effective default mode per provider, after built-in defaults.
-  provider_default_modes_effective?: Record<string, string>
   // What actually runs right now, after defaults.
   insights_model_effective: string
   // On Automatic this resolves from the chat's workspace, so *_effective above
@@ -763,21 +760,10 @@ export interface CommandsResponse {
 
 // ── Settings agent assets ────────────────────────────────────────────────
 
-export interface PromptAsset {
-  id: string
-  title: string
-  description: string
-  source: string
-  path: string
-  editable: boolean
-  content: string
-  scope?: string
-  parent_id?: string
-  level?: number
-  status?: 'ok' | 'missing' | 'blocked' | string
-  imports?: string[]
-  provider?: 'claude' | 'codex' | 'shared' | string
-  workspace?: string
+export interface AgentAssetsResponse {
+  subagents: SubagentAsset[]
+  commands: CommandAsset[]
+  health?: WorkspaceHealthResponse
 }
 
 export interface SubagentAsset {
@@ -801,13 +787,6 @@ export interface CommandAsset {
   editable: boolean
   vault_path: string
   content: string
-}
-
-export interface AgentAssetsResponse {
-  context: PromptAsset[]
-  subagents: SubagentAsset[]
-  commands: CommandAsset[]
-  health?: WorkspaceHealthResponse
 }
 
 export interface CreatedAgentAssetResponse<T> {
@@ -1049,4 +1028,105 @@ export interface PackageStatus {
   update_available?: boolean
   mode?: string
   error?: string
+}
+
+/** One home-screen operator action (see `ciao/operator_actions.py`). */
+export interface OperatorAction {
+  id: string
+  kind: string
+  severity: number
+  title: string
+  detail: string
+  glyph: string
+  workspace: string
+  run_label: string
+  chat_label: string
+  chat_prompt: string
+  /** A purpose-built surface for this action, when one already exists. */
+  view_label: string
+  view_route: string
+  /** A precondition the install cannot get past on its own: unmissable and not
+   *  dismissible. Deliberately not an app-wide lock. */
+  blocking: boolean
+}
+
+export interface HousekeepingResponse {
+  actions: OperatorAction[]
+}
+
+export interface HousekeepingRunResponse {
+  ok: boolean
+  action_id: string
+  error?: string
+  summary: string
+  result?: Record<string, unknown>
+  actions: OperatorAction[]
+}
+
+// ── Proposal review (agent roots) ────────────────────────────────────────
+
+/** Live rehome signal for a `[rehome]` row, from `ciao/vault_rehome`. */
+export interface RehomeSignal {
+  /** The note this row is about (`personal/People/Mo.md`), for a clean label. */
+  note: string
+  /** The destination named in the bullet. A guess unless `justified`. */
+  destination: string
+  /** Every workspace the note's tags name. Empty when no tag backs it. */
+  candidates: string[]
+  /** True only when a single clean tag signal backs the destination. */
+  justified: boolean
+  /**
+   * The bullet outlived its cause: the note was tagged, moved, or a later rule
+   * settled it, and nothing re-detects it now. Distinct from "undecided", which
+   * is a row still asking the operator something.
+   */
+  stale?: boolean
+  reason: string
+}
+
+/**
+ * One queued proposal row from `GET /api/proposals`. Region kinds
+ * (`memory`/`profile`/`user`) carry `region` and `leak_warning`; `rehome`
+ * rows carry `rehome`; destination kinds carry `target` (the person name for
+ * `people`, the doc path for `project`); `skill` rows are files and carry
+ * none of these.
+ */
+export interface ProposalRow {
+  id: string
+  kind: string
+  text: string
+  source: string
+  workspace: string
+  path: string
+  line: number
+  region?: string
+  leak_warning?: boolean
+  rehome?: RehomeSignal
+  target?: string
+}
+
+export interface ProposalsResponse {
+  rows: ProposalRow[]
+}
+
+/** One per-row outcome from `POST /api/proposals/batch` or `/{id}/{action}`. */
+export interface ProposalActionResult {
+  id: string
+  action: string
+  dismissed: boolean
+  region?: string
+  leak_warning?: boolean
+  destination?: string
+  justified?: boolean
+}
+
+export interface ProposalBatchResponse {
+  ok: boolean
+  action: 'accept' | 'dismiss'
+  results: ProposalActionResult[]
+}
+
+export interface ProposalDismissOlderResponse {
+  ok: boolean
+  removed: number
 }

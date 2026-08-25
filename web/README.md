@@ -2,7 +2,7 @@
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 
-The file viewer is Vue-first, with one intentional React bridge: `ExcalidrawViewer.vue` mounts `@excalidraw/excalidraw` through `react-dom/client` so `.excalidraw` JSON files can render as read-only diagrams in the Preview tab. History and Diff still operate on the raw JSON snapshots. CSV files use `CsvViewer.vue` (PapaParse) for table Preview and cell Edit in the same modal / pinned panel.
+The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
 
 ## Dev workflow
 

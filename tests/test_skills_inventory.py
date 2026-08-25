@@ -90,14 +90,14 @@ def test_build_skill_inventory_reads_yaml_block_descriptions(tmp_path: Path) -> 
     )
 
 
-def test_build_skill_inventory_reports_codex_install_target(tmp_path: Path) -> None:
+def test_build_skill_inventory_reports_supported_install_targets(tmp_path: Path) -> None:
     _write_skill(tmp_path / "skills", "demo", "Demo")
     _write_skill(tmp_path / ".claude" / "skills", "demo", "Demo")
     _write_skill(tmp_path / ".agents" / "skills", "demo", "Demo")
 
     inventory = build_skill_inventory(tmp_path)
 
-    assert inventory["skills"][0]["installed_targets"] == ["claude", "codex", "opencode"]
+    assert inventory["skills"][0]["installed_targets"] == ["claude", "opencode"]
 
 
 def test_build_skill_inventory_can_omit_skill_content(tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ def test_build_skill_inventory_can_omit_skill_content(tmp_path: Path) -> None:
 
 
 def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Path) -> None:
-    _write_skill(tmp_path / ".agents" / "skills", "brainstorming", "Installed for Codex")
+    _write_skill(tmp_path / ".agents" / "skills", "brainstorming", "Installed for opencode")
     tmp_path.joinpath("skills-lock.json").write_text(
         json.dumps(
             {
@@ -130,10 +130,10 @@ def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Pat
     inventory = build_skill_inventory(tmp_path)
 
     skill = inventory["skills"][0]
-    assert skill["description"] == "Installed for Codex"
+    assert skill["description"] == "Installed for opencode"
     assert "# brainstorming" in skill["content"]
     # opencode discovers .agents/skills natively, so it needs no projection.
-    assert skill["installed_targets"] == ["codex", "opencode"]
+    assert skill["installed_targets"] == ["opencode"]
 
 
 def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) -> None:

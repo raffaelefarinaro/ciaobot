@@ -13,7 +13,7 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
-import { archiveFailedToast, archiveProcessingToast, archiveStoppedToast } from '../lib/archiveCopy'
+import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsInsights } from '../lib/postprocessView'
@@ -30,6 +30,7 @@ import type {
   EventsWsMessage,
   VoiceResult,
   InAppToast,
+  PackageStatus,
   PendingPermission,
   RuntimeProvider,
   WorkspaceInfo,
@@ -56,6 +57,21 @@ export function chatWsReconnectDelayMs(attempt: number): number {
 /** Compatibility check for host proxies from before `host_unreachable` existed. */
 export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
+}
+
+const PROTOTYPE_HAZARD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
+ * Checked element write for comment lists whose index comes from stored data.
+ * Skips prototype-hazardous keys and out-of-range indices, and writes through
+ * `splice` rather than property assignment, so even a guard bypass could not
+ * turn the write into a `__proto__` assignment on the array or its prototype.
+ */
+export function setListIndex<T>(list: T[], key: number | string, value: T): void {
+  if (typeof key === 'string' && PROTOTYPE_HAZARD_KEYS.has(key)) return
+  const index = typeof key === 'number' ? key : Number(key)
+  if (!Number.isInteger(index) || index < 0 || index >= list.length) return
+  list.splice(index, 1, value)
 }
 
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
@@ -89,6 +105,10 @@ export const useProjectStore = defineStore('projects', () => {
   // authoritative session history is still on the way.
   const loadingMessages = ref<Record<string, boolean>>({})
   const messageLoadGenerations = new Map<string, number>()
+  // Pagination state for envelope-mode history loads (see loadMessagesFromServer).
+  const historyMeta = ref<Record<string, { total: number; hasMore: boolean; nextOffset: number | null; limit: number } | undefined>>({})
+  const loadingOlder = ref<Record<string, boolean>>({})
+  const partRequests = new Map<string, Promise<void>>()
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
@@ -221,6 +241,34 @@ export const useProjectStore = defineStore('projects', () => {
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
+  // Optimistic archiving: chats whose archive POST is in flight. They are
+  // removed from active lists immediately and shown in the home "archiving…"
+  // queue so the chat panel can close without waiting for the server's disk
+  // work (transcript write + delegate cascade). The map is keyed by chat_id
+  // and cleared on success (archived stays true, tidying takes over) or on
+  // failure (archived is rolled back, row reappears).
+  const archivingChats = ref<Record<string, boolean>>({})
+  // Chats this client has flipped to `archived: true` locally — optimistically
+  // in `archiveChat`, or from a `chat_archived` event — that no `/api/chats`
+  // payload has confirmed yet. Every list refresh replaces `chats.value`
+  // wholesale, so a GET issued before the archive landed on the server (the 15s
+  // poll, or the refresh the `chat_result_ready` / `chat_subagents_ready`
+  // handlers fire) resolves with `archived: false` and puts the row back in the
+  // sidebar until the next refresh — the archive flicker. `applyPendingArchived`
+  // re-applies the local truth to every payload; entries clear as soon as the
+  // server agrees (or the chat is gone), and on rollback when the POST fails.
+  // A Set, not a Record: the keys are chat ids straight off the websocket, and
+  // `obj[id] = true` with `id === "__proto__"` walks up Object.prototype.
+  const pendingArchived = ref<Set<string>>(new Set())
+  // Not reactive UI state, just an in-flight guard: `creatingChatProjectIds`
+  // is a display flag consumers can ignore (a second click landing before
+  // Vue re-renders, a duplicated keyboard handler), so a second createChat()
+  // call for the same project could still fire before the first POST
+  // resolves. The server's create_chat sweeps other empty "New Chat" shells
+  // on every call, so two overlapping calls raced each other's chat out of
+  // existence right as the panel switched to it. Keying the pending promise
+  // by project makes a second call join the first instead of double-posting.
+  const pendingChatCreations: Record<string, Promise<ChatInfo>> = {}
   // the tool call with empty answers, so the PWA renders its own picker above
   // the composer. Cleared the next time the user sends a message (their reply
   // implicitly answers, regardless of whether they clicked an option).
@@ -251,7 +299,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Stable identity for a picker, computable identically from the live
   // `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
-  // (at rebuild time). Native providers (Codex) carry a `requestId`; Claude's
+  // (at rebuild time). Some providers carry a `requestId`; Claude's
   // picker has none, so fall back to the question content.
   function questionsSignature(qs: ActiveQuestion[] | undefined): string {
     if (!qs || !qs.length) return ''
@@ -282,7 +330,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!Array.isArray(parsed?.questions)) return []
       const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
       if (parsed.questions.length === 0) {
-        // Some Codex/Claude-compatible turns emit the AskUserQuestion tool
+        // Some provider turns emit the AskUserQuestion tool
         // with an empty questions array. Do not silently demote that event to
         // a trace row: surface a free-form response so the user can unblock
         // the turn and the provider still receives the native request id.
@@ -389,9 +437,40 @@ export const useProjectStore = defineStore('projects', () => {
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     activeQuestions.value[chatId] = qs
   }
+
+  // Same idea as `rebuildPendingQuestion`, for the Approve/Deny card: it
+  // lives in ephemeral `pendingPermissions` (set only by the live stream),
+  // but the server persists the unanswered request on the chat so a chat
+  // opened after the prompt already fired (reload, other device, chat
+  // switch) still shows the card instead of nothing.
+  function rebuildPendingPermission(chatId: string) {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    const raw = chat?.pending_permission
+    if (!raw) return
+    let parsed: { request_id?: string; tool_name?: string; message?: string; tool_input?: string }
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return
+    }
+    if (!parsed.request_id) return
+    const list = pendingPermissions.value[chatId] || []
+    if (list.some(p => p.request_id === parsed.request_id)) return
+    pendingPermissions.value[chatId] = [
+      ...list,
+      {
+        request_id: parsed.request_id,
+        tool_name: parsed.tool_name || '',
+        tool_input: parsed.tool_input || '',
+        message: parsed.message || '',
+        received_at: Date.now(),
+      },
+    ]
+  }
   const eventsSocket = ref<WebSocket | null>(null)
   const toasts = ref<InAppToast[]>([])
   let toastCounter = 0
+  const packageStatus = ref<PackageStatus | null>(null)
 
   // Reactive mirror of document.visibilityState so `chatUnread` (and any other
   // computed that cares about foreground/background) re-evaluates correctly
@@ -412,9 +491,117 @@ export const useProjectStore = defineStore('projects', () => {
   // sends a message. The watchdog below force-reconnects such sockets.
   const WS_STALE_MS = 12000 // ~2 missed keepalives + margin
   const WS_LIVENESS_CHECK_MS = 2000
+  // Cheap GET; frequent enough that a background-app-store style badge
+  // reflects reality without checking on every render or route change.
+  const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000
   let lastEventsFrameAt = 0
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+
+  // ── Unacknowledged sends ────────────────────────────────────────────
+  // A send is handed to the per-chat WebSocket fire-and-forget: WS frames
+  // have no delivery guarantee, and WKWebView suspension can close the
+  // socket right after the send frame is written (the server log shows the
+  // message frame arriving and the CLOSE frame in the same instant). The
+  // server never started a turn, the optimistic bubble is the only copy,
+  // and the reconnect's authoritative history reload wipes it — the
+  // "page refreshed and removed my message" report. Track the latest send
+  // per chat until the server proves receipt (a user_echo replay, or the
+  // turn visible in /messages) and re-send it once on reconnect if it
+  // never landed. Only the most recent send is tracked: an earlier frame
+  // in the same burst to a dying socket is rare next to the common
+  // single-message case, and the queue path already persists server-side
+  // when its frame arrives.
+  interface UnackedSend { text: string; images?: string[]; at: number; attempts: number }
+  const unackedSends: Record<string, UnackedSend> = {}
+  const unackedRecoveryTimers: Record<string, number> = {}
+  // Grace before declaring a send lost: a turn that DID start replays its
+  // buffered user_echo immediately after reconnect, and /messages can lag
+  // the provider session write by a moment.
+  const UNACKED_RECOVERY_DELAY_MS = 1500
+
+  function persistUnackedSends() {
+    try {
+      localStorage.setItem('ciao-unacked-sends', JSON.stringify(unackedSends))
+    } catch { /* ignore */ }
+  }
+
+  // Server proof of receipt: the echoed turn (user_echo) or the hydrated
+  // history row. Whichever lands first clears the tracking.
+  function acknowledgeSend(chatId: string, text: string) {
+    const unacked = unackedSends[chatId]
+    if (unacked && unacked.text.trim() === text.trim()) {
+      delete unackedSends[chatId]
+      persistUnackedSends()
+    }
+  }
+
+  function reconcileUnackedSend(chatId: string) {
+    const unacked = unackedSends[chatId]
+    if (!unacked) return
+    const rows = messages.value[chatId] || []
+    // Only a SERVER-stamped row proves delivery: hydrated user bubbles carry
+    // the server-assigned turn_index, while our own optimistic bubble (which
+    // can survive a history reload against an older server, or simply look
+    // identical to an older repeated message) never has one.
+    if (rows.some(m => m.role === 'user' && m.turn_index != null && (m.content || '').trim() === unacked.text.trim())) {
+      delete unackedSends[chatId]
+      persistUnackedSends()
+    }
+  }
+
+  // Called after a reconnect's history reload. Waits out the grace window,
+  // then either recovers the send or gives up visibly — never silently.
+  function scheduleUnackedSendRecovery(chatId: string) {
+    if (!unackedSends[chatId]) return
+    if (unackedRecoveryTimers[chatId]) window.clearTimeout(unackedRecoveryTimers[chatId])
+    unackedRecoveryTimers[chatId] = window.setTimeout(() => {
+      delete unackedRecoveryTimers[chatId]
+      recoverUnackedSend(chatId)
+    }, UNACKED_RECOVERY_DELAY_MS)
+  }
+
+  function recoverUnackedSend(chatId: string) {
+    reconcileUnackedSend(chatId)
+    const unacked = unackedSends[chatId]
+    if (!unacked) return
+    // A running turn owns the answer: either the original frame landed and
+    // the echo/history checks raced it, or a newer send already started.
+    // Never duplicate into a server-reported active stream. The client-local
+    // optimistic `streaming` flag cannot veto here — after a lost message no
+    // result ever arrives to clear it, so it would block recovery forever.
+    if (projectStreaming.value[chatId]) return
+    if (unacked.attempts >= 1) {
+      // One silent recovery is enough; surface the failure rather than loop.
+      delete unackedSends[chatId]
+      persistUnackedSends()
+      const errorMsgs = messages.value[chatId] || []
+      errorMsgs.push({
+        role: 'system',
+        content: "Error: a message didn't reach the engine and its automatic retry failed. Please send it again.",
+        timestamp: new Date().toISOString(),
+      })
+      messages.value[chatId] = errorMsgs
+      return
+    }
+    unacked.attempts += 1
+    persistUnackedSends()
+    // The stale optimistic streaming state belongs to a turn that never
+    // started; leaving it set would route this resend into the local queue
+    // (no server stream will ever drain it) instead of starting a real turn.
+    clearStreamingState(chatId)
+    // The optimistic bubble from the lost send is gone with the history
+    // reload, so this re-renders it fresh; a successful delivery clears the
+    // tracking via the echoed user_echo. Empty comment buckets: the original
+    // send already consumed them via consumePreparedAttachments.
+    sendMessage(chatId, unacked.text, {
+      composed: unacked.text,
+      imageRefs: unacked.images,
+      fileComments: [],
+      chatComments: [],
+    })
+  }
+
   // Per-chat WS auto-reconnect bookkeeping. A dropped per-chat socket used to
   // recover only via the 15s syncLatest poll (up to 15s of stale messages /
   // missed turn result). We now reconnect the *active* chat immediately on an
@@ -632,6 +819,19 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
+  // True when a delegate nested under this chat (or under one of its own
+  // delegates) is streaming or has background agents. A supervisor chat with
+  // no live turn of its own still has real work in flight while a delegate is
+  // busy, and the home lanes / per-row signal only checked the chat's own
+  // state — a project full of working subchats read as "quiet".
+  function chatHasActiveDelegates(chatId: string, seen: Set<string> = new Set()): boolean {
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(
+      d => isChatStreaming(d.chat_id) || chatHasBackgroundAgents(d.chat_id) || chatHasActiveDelegates(d.chat_id, seen),
+    )
+  }
+
   // ── Post-archive pipeline ────────────────────────────────────────────────
   // Archiving a chat starts insights extraction, a project-doc fold, a
   // trajectory and memory proposals. The state lives on the chat itself (so an
@@ -689,6 +889,29 @@ export const useProjectStore = defineStore('projects', () => {
   function projectPostprocessingCount(projectId: string): number {
     return chats.value.filter(
       c => c.project_id === projectId && isPostprocessing(c.postprocess),
+    ).length
+  }
+
+  // ── Archiving (optimistic) ────────────────────────────────────────────
+  // Chats whose archive POST is in flight. They are already marked
+  // `archived:true` optimistically (so they vanish from active lists / the
+  // sidebar) but are listed in the home "archiving…" queue until the server
+  // confirms. A failed POST rolls `archived` back and clears the entry.
+  function isArchiving(chatId: string): boolean {
+    return Boolean(archivingChats.value[chatId])
+  }
+
+  function archivingChatsList(): ChatInfo[] {
+    return chatsMatching(c => Boolean(archivingChats.value[c.chat_id]))
+  }
+
+  function workspaceArchivingCount(ws: WorkspaceName): number {
+    return workspaceCountMatching(ws, c => Boolean(archivingChats.value[c.chat_id]))
+  }
+
+  function projectArchivingCount(projectId: string): number {
+    return chats.value.filter(
+      c => c.project_id === projectId && Boolean(archivingChats.value[c.chat_id]),
     ).length
   }
 
@@ -764,6 +987,37 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) toasts.value.splice(idx, 1)
   }
 
+  // Keyed by version so the toast fires once per newly-available release, not
+  // once per session for an update the user already knows about and hasn't
+  // installed yet. The Settings nav badge (ProjectSidebar.vue) is intentionally
+  // not gated the same way: it just mirrors packageStatus.update_available for
+  // as long as that stays true, the way the bell badge mirrors unread count.
+  const UPDATE_TOAST_SEEN_KEY = 'ciao-update-toast-seen-version'
+
+  async function checkPackageStatus() {
+    try {
+      const status = await api.get<PackageStatus>('/api/package/status')
+      packageStatus.value = status
+      if (status.update_available && status.latest_version) {
+        const seen = typeof localStorage !== 'undefined'
+          ? localStorage.getItem(UPDATE_TOAST_SEEN_KEY)
+          : null
+        if (seen !== status.latest_version) {
+          pushToast({
+            chat_id: '',
+            title: 'Update available',
+            body: `Ciaobot ${status.latest_version} is ready to install — see Settings.`,
+          })
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(UPDATE_TOAST_SEEN_KEY, status.latest_version)
+          }
+        }
+      }
+    } catch {
+      // Best-effort: the update badge just stays off if the check fails.
+    }
+  }
+
   // Open a fresh chat in the active workspace's auto-managed General project,
   // pre-filled with a prompt asking the agent to diagnose and fix `errorText`
   // (falling back to a GitHub issue if the bug is in Ciaobot itself).
@@ -792,7 +1046,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
     const chat = await createChat(general.project_id, opts.title || 'Fix error')
     const prompt = buildFixPrompt({ errorText: opts.errorText, context: opts.context })
-    await sendMessage(chat.chat_id, prompt, 'queue')
+    await sendMessage(chat.chat_id, prompt)
     return chat
   }
 
@@ -1083,6 +1337,28 @@ export const useProjectStore = defineStore('projects', () => {
       if (pcc) pendingChatCommentsByChat.value = normalizePendingBuckets<PendingChatComment>(JSON.parse(pcc), activeChatId.value)
       const ssa = localStorage.getItem('ciao-stream-started-at')
       if (ssa) streamStartedAt.value = JSON.parse(ssa)
+      const ua = localStorage.getItem('ciao-unacked-sends')
+      if (ua) {
+        // Sends that outlived a full page reload (the suspension → refresh
+        // path). Recovered when the chat's socket reconnects and history
+        // reloads; dropped if the turn meanwhile landed server-side.
+        try {
+          const parsed: unknown = JSON.parse(ua)
+          if (parsed && typeof parsed === 'object') {
+            for (const [cid, entry] of Object.entries(parsed as Record<string, unknown>)) {
+              const row = entry as Partial<UnackedSend> | null
+              if (row && typeof row.text === 'string' && row.text.trim()) {
+                unackedSends[cid] = {
+                  text: row.text,
+                  images: Array.isArray(row.images) ? row.images.map(String) : undefined,
+                  at: typeof row.at === 'number' ? row.at : Date.now(),
+                  attempts: typeof row.attempts === 'number' ? row.attempts : 0,
+                }
+              }
+            }
+          }
+        } catch { /* malformed cache; drop it */ }
+      }
     } catch { /* ignore */ }
   }
 
@@ -1210,13 +1486,26 @@ export const useProjectStore = defineStore('projects', () => {
     return activity && activity > read ? 1 : 0
   }
 
-  // A chat blocked on AskUserQuestion — persisted on the chat and mirrored in
-  // ephemeral activeQuestions while the picker is live. Unlike unread, this
-  // stays visible even when the chat is the active tab.
-  function chatNeedsInput(chatId: string): boolean {
+  // A chat blocked on AskUserQuestion or an Approve/Deny prompt — persisted
+  // on the chat and mirrored in ephemeral activeQuestions/pendingPermissions
+  // while the picker/card is live. Unlike unread, this stays visible even
+  // when the chat is the active tab.
+  //
+  // Also true when a delegate nested under this chat (recursively) is
+  // blocked the same way: a supervisor whose subagent is stuck on an
+  // Approve/Deny prompt is exactly as blocked as one asked a question
+  // directly, and mirroring only chatHasActiveDelegates's "still working"
+  // signal left an approval request reading as mere background activity
+  // instead of something the user must act on.
+  function chatNeedsInput(chatId: string, seen: Set<string> = new Set()): boolean {
     if (activeQuestions.value[chatId]?.length) return true
+    if (pendingPermissions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
-    return parseQuestions(chat?.pending_question).length > 0
+    if (parseQuestions(chat?.pending_question).length > 0) return true
+    if (chat?.pending_permission) return true
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(d => chatNeedsInput(d.chat_id, seen))
   }
 
   // The first outstanding question is useful on the home card, where it can
@@ -1252,6 +1541,16 @@ export const useProjectStore = defineStore('projects', () => {
 
   const totalUnread = computed(() =>
     chats.value.reduce((sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)), 0),
+  )
+
+  // One chat can contribute at most one attention item. Keep this aggregate
+  // global because the rail is not workspace-scoped; workspace toggles expose
+  // the same underlying signals within their selected workspace.
+  const attentionChatCount = computed(() =>
+    chats.value.reduce(
+      (sum, c) => sum + (!c.archived && (chatNeedsInput(c.chat_id) || chatUnread(c.chat_id) > 0) ? 1 : 0),
+      0,
+    ),
   )
 
   // Cross-device read: optimistic local clear + POST to server. The server
@@ -1363,7 +1662,7 @@ export const useProjectStore = defineStore('projects', () => {
         // fetch result overwriting messages[chatId].
         const bootChatId = activeChatId.value
         void (async () => {
-          await loadMessages(bootChatId)
+          await loadMessages(bootChatId, { waitForSettledReply: true })
           connectWs(bootChatId)
           requestReentrySummaryIfUseful(bootChatId)
         })()
@@ -1374,13 +1673,39 @@ export const useProjectStore = defineStore('projects', () => {
       // notificationclick didn't fire (iOS quirk), the SW still has the
       // target chat cached. Query it and navigate if present.
       checkPendingTarget()
+      if (!bootstrapped.value) {
+        void checkPackageStatus()
+        window.setInterval(checkPackageStatus, UPDATE_CHECK_INTERVAL_MS)
+      }
     } finally {
       bootstrapped.value = true
     }
   }
 
+  /**
+   * Re-apply local archive intent to a server chat-list payload. A payload that
+   * still reports a pending-archive chat as active is stale (its GET raced the
+   * archive POST), so the row is kept archived rather than flickering back into
+   * the sidebar. Confirmed (or vanished) ids drop out of the pending map.
+   */
+  function applyPendingArchived(nextChats: ChatInfo[]): ChatInfo[] {
+    if (!pendingArchived.value.size) return nextChats
+    const present = new Set(nextChats.map(c => c.chat_id))
+    for (const id of [...pendingArchived.value]) {
+      if (!present.has(id)) pendingArchived.value.delete(id)
+    }
+    return nextChats.map(c => {
+      if (!pendingArchived.value.has(c.chat_id)) return c
+      if (c.archived) {
+        pendingArchived.value.delete(c.chat_id)
+        return c
+      }
+      return { ...c, archived: true }
+    })
+  }
+
   function reconcileChatList(nextChats: ChatInfo[]) {
-    chats.value = nextChats
+    chats.value = applyPendingArchived(nextChats)
 
     // Prune messages for deleted chats.
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
@@ -1438,13 +1763,49 @@ export const useProjectStore = defineStore('projects', () => {
     persistUnread()
   }
 
+  /**
+   * Reconcile against a lightweight `?active_only=1` poll. The server omits
+   * archived chats (the archive can be thousands of rows), so archived rows are
+   * preserved from what we already hold locally instead of being dropped by a
+   * wholesale array replace. Active rows replace their peers in place.
+   */
+  function reconcileActiveChats(activeChats: ChatInfo[]) {
+    const merged: ChatInfo[] = []
+    const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
+    for (const existing of chats.value) {
+      if (existing.archived) {
+        // Archived rows are kept as-is; an active-only poll must never
+        // resurrect them. Consume any matching payload id so it isn't
+        // re-appended below.
+        merged.push(existing)
+        activeById.delete(existing.chat_id)
+      } else if (activeById.has(existing.chat_id)) {
+        merged.push(activeById.get(existing.chat_id)!)
+        activeById.delete(existing.chat_id)
+      }
+      // else: an active row that vanished server-side is dropped.
+    }
+    for (const c of activeById.values()) merged.push(c)
+    chats.value = merged
+    // Reuse reconcileChatList's side effects (message pruning, unread, overlay).
+    reconcileChatList(merged)
+  }
+
   function hasSettledHistory(chatId: string): boolean {
     // Server still streaming this chat — session files already contain
     // mid-turn assistant progress text, which must not look "settled".
     if (projectStreaming.value[chatId]) return false
     const localMessages = messages.value[chatId] || []
     const last = localMessages[localMessages.length - 1]
-    if (!last) return false
+    if (!last) {
+      // Empty history is settled too: some turns end without producing any
+      // row (the image-capability pre-flight aborts before dispatch, so no
+      // provider session or transcript is ever written). Requiring a trailing
+      // assistant/system row here left the spinner running forever on those
+      // turns — every caller already gates on !projectStreaming, so an empty
+      // transcript with the server idle can only mean the turn is over.
+      return true
+    }
     if (last.role === 'assistant') return true
     return last.role === 'system' && last.tool_name !== '_activity'
   }
@@ -1468,7 +1829,11 @@ export const useProjectStore = defineStore('projects', () => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
     latestSyncInFlight = true
     try {
-      const latestChats = await api.get<ChatInfo[]>('/api/chats')
+      // Active-only: the server skips the (possibly thousands of) archived
+      // chats, which this poll never needs — archived rows are held locally.
+      // This keeps the every-15s refresh light instead of re-shipping the
+      // whole registry to the client on each tick.
+      const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
       // In client mode this request is proxied to the host, so a successful
       // response proves the host is back. The banner was only cleared from a
       // chat WebSocket frame, which never arrives if the socket stays down or
@@ -1476,7 +1841,7 @@ export const useProjectStore = defineStore('projects', () => {
       // working connection until the user reloaded. This poll is the
       // connection-independent recovery signal.
       hostConnectionUnavailable.value = false
-      reconcileChatList(latestChats)
+      reconcileActiveChats(latestChats)
 
       const chatId = activeChatId.value
       const chatStillOpen = chatId
@@ -1737,27 +2102,37 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Chat actions ────────────────────────────────────────────────────
 
   async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
-    creatingChatProjectIds.value[projectId] = true
-    try {
-      const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
-      // The server also broadcasts chat_created for this same chat. The
-      // broadcast can arrive before the POST response, so reconcile through
-      // the ID-aware helper instead of pushing a possible duplicate.
-      replaceChat(c)
-      messages.value[c.chat_id] = []
-      // Write before switching: ChatPanel reads the draft once at mount, so
-      // this must already be in storage before the new panel mounts below.
-      if (seedDraft) {
-        const seedWorkspace = projects.value.find(p => p.project_id === projectId)?.workspace
-          ?? activeWorkspace.value
-        writeChatDraft(c.chat_id, seedDraft, undefined, { projectId, workspace: seedWorkspace })
+    // Join an already-in-flight creation for this project instead of firing
+    // a second POST: see the comment on pendingChatCreations above.
+    const pending = pendingChatCreations[projectId]
+    if (pending) return pending
+
+    const promise = (async () => {
+      creatingChatProjectIds.value[projectId] = true
+      try {
+        const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
+        // The server also broadcasts chat_created for this same chat. The
+        // broadcast can arrive before the POST response, so reconcile through
+        // the ID-aware helper instead of pushing a possible duplicate.
+        replaceChat(c)
+        messages.value[c.chat_id] = []
+        // Write before switching: ChatPanel reads the draft once at mount, so
+        // this must already be in storage before the new panel mounts below.
+        if (seedDraft) {
+          const seedWorkspace = projects.value.find(p => p.project_id === projectId)?.workspace
+            ?? activeWorkspace.value
+          writeChatDraft(c.chat_id, seedDraft, undefined, { projectId, workspace: seedWorkspace })
+        }
+        // We just created it, so there is no history to fetch.
+        switchChat(c.chat_id, { skipHistory: true })
+        return c
+      } finally {
+        delete creatingChatProjectIds.value[projectId]
+        delete pendingChatCreations[projectId]
       }
-      // We just created it, so there is no history to fetch.
-      switchChat(c.chat_id, { skipHistory: true })
-      return c
-    } finally {
-      delete creatingChatProjectIds.value[projectId]
-    }
+    })()
+    pendingChatCreations[projectId] = promise
+    return promise
   }
 
   async function renameChat(chatId: string, title: string) {
@@ -1974,6 +2349,9 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function archiveChat(chatId: string) {
+    // Guard against double-clicks: the button is already disabled while the
+    // optimistic state is live, but event handlers can still double-fire.
+    if (archivingChats.value[chatId]) return
     // The server cascades archival to delegate subchats. Note this filter has
     // no `local !== false` guard, unlike activeDelegatesFor(): the cascade
     // covers remote delegates too, so the socket bookkeeping here has to as
@@ -1981,11 +2359,38 @@ export const useProjectStore = defineStore('projects', () => {
     const childIds = chats.value
       .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
       .map(c => c.chat_id)
+    const allIds = [chatId, ...childIds]
     // Remember which sockets we actually closed. If the POST fails these chats
     // are all still live, and a closed socket is marked as an intentional close
     // so nothing auto-reconnects it — the chat would go silent, with no tokens,
     // permission cards or AskUserQuestion prompts, and no sign anything broke.
-    const closedIds = [chatId, ...childIds].filter(id => Boolean(sockets.value[id]))
+    const closedIds = allIds.filter(id => Boolean(sockets.value[id]))
+    // Snapshot for rollback if the POST fails. A failure must not leave the
+    // chat hidden from the sidebar with archived:true and no transcript.
+    const prevArchived = new Map<string, boolean>()
+    for (const id of allIds) {
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) prevArchived.set(id, c.archived)
+    }
+    const wasActive = activeChatId.value === chatId
+    // Optimistic UI: hide from active lists immediately and show in the
+    // home "archiving…" queue so the panel can close without waiting for
+    // the server's disk work (transcript write + delegate cascade).
+    for (const id of allIds) {
+      archivingChats.value[id] = true
+      pendingArchived.value.add(id)
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) c.archived = true
+    }
+    if (wasActive) {
+      activeChatId.value = null
+      persistState()
+      // Keep the URL in sync with the optimistically closed pane. Fire-and-
+      // forget so the POST is not blocked on a router import.
+      import('../router').then(({ router }) => {
+        if (router.currentRoute.value.params.chatId === chatId) router.push('/')
+      }).catch(() => {})
+    }
     disconnectWs(chatId)
     for (const childId of childIds) disconnectWs(childId)
 
@@ -1993,7 +2398,26 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       res = await api.post<ArchiveChatResponse>(`/api/chats/${chatId}/archive`)
     } catch (e) {
+      // Roll back optimistic mutation: chat reappears in the sidebar / home
+      // active lanes and its socket is put back so streaming resumes.
+      for (const [id, prev] of prevArchived) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prev
+        delete archivingChats.value[id]
+        pendingArchived.value.delete(id)
+      }
+      for (const id of allIds) {
+        delete archivingChats.value[id]
+        pendingArchived.value.delete(id)
+      }
       for (const id of closedIds) connectWs(id)
+      if (wasActive && activeChatId.value === null) {
+        activeChatId.value = chatId
+        persistState()
+        import('../router').then(({ router }) => {
+          if (!router.currentRoute.value.params.chatId) router.push(`/chat/${chatId}`)
+        }).catch(() => {})
+      }
       pushErrorToast('Could not archive chat', `${errorMessage(e)}`)
       throw e
     }
@@ -2001,25 +2425,32 @@ export const useProjectStore = defineStore('projects', () => {
     // Mark only what the server confirms. Flipping every child on a bare 2xx
     // dropped skipped delegates out of the sidebar, recentChats and
     // activeChatsAll while they were still streaming, and listed them in the
-    // archive with no transcript behind them.
+    // archive with no transcript behind them. Optimistic already flipped them,
+    // so revert any id the server did not confirm.
     const confirmed = new Set(
       Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
     )
-    for (const chat of chats.value) {
-      if (confirmed.has(chat.chat_id)) {
-        chat.archived = true
-        if (chat.chat_id === chatId && res?.postprocess) {
+    for (const id of allIds) {
+      if (!confirmed.has(id)) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prevArchived.get(id) ?? false
+        pendingArchived.value.delete(id)
+      } else if (id === chatId && res?.postprocess) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) {
           // The response closes the race where the chat_postprocess event is
           // emitted after the archive request has already cleared this pane.
-          chat.postprocess = res.postprocess
+          c.postprocess = res.postprocess
         }
       }
+      delete archivingChats.value[id]
     }
-    if (res?.postprocess?.state === 'running') {
-      const { title, body } = archiveProcessingToast(
-        (res.postprocess.expected || []).includes('insights'),
-      )
-      pushToast({ chat_id: chatId, title, body })
+    // Any child the entry never listed stays removed from archiving map
+    // (it was not an optimistic id, but guard anyway).
+    for (const chat of chats.value) {
+      if (confirmed.has(chat.chat_id) && chat.chat_id !== chatId && res?.postprocess) {
+        // Delegates' postprocess arrives via /ws/events, not the response.
+      }
     }
     // A child the server did not archive is still running: put its socket back.
     for (const id of closedIds) {
@@ -2037,14 +2468,11 @@ export const useProjectStore = defineStore('projects', () => {
       const toast = archiveFailedToast(failed.length)
       pushErrorToast(toast.title, toast.body)
     }
-    // Clear the active chat instead of auto-jumping to another one.
-    // Auto-jumping caused a half-mounted state where the header showed
-    // the newly-selected chat's title but the message list hadn't
-    // loaded yet. Closing the chat (and letting ChatLayout open the
-    // sidebar on mobile via the `close` event from ChatPanel) lets the
-    // user pick the next chat themselves.
+    // Active already cleared optimistically; keep the guard for races where
+    // the user switched chats between the optimistic clear and the response.
     if (activeChatId.value === chatId) {
       activeChatId.value = null
+      persistState()
     }
   }
 
@@ -2103,6 +2531,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function newSession(chatId: string) {
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/new`)
+    // A reset clears `archived` server-side on the same chat_id, so any stale
+    // local archive intent for it must go with it.
+    pendingArchived.value.delete(chatId)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     messages.value[chatId] = []
@@ -2120,13 +2551,42 @@ export const useProjectStore = defineStore('projects', () => {
    * a chat with nothing to render yet (a brand-new one) the flag paints the
    * full-size "Loading conversation" skeleton — so an idle empty chat blinked
    * through that card on every tick. A user-initiated open still shows it.
+   *
+   * `waitForSettledReply: true` (switchChat's own open, not background polls)
+   * keeps that same loading flag held past the first fetch when the chat's
+   * last turn is an unanswered user message: the history endpoint can resolve
+   * before the SDK session file catches up with the just-finished reply (e.g.
+   * opening a chat right as its turn settles, or from a push notification),
+   * which used to clear the loading flag and show an incomplete transcript
+   * with no visible sign anything was still pending. Retries on the same
+   * cadence as reconcileAfterResult until the reply lands, streaming visibly
+   * takes over, or the budget runs out. A chat with no messages, or one
+   * already ending in a settled reply, skips this — every open must not pay
+   * for a wait nothing is actually pending.
    */
-  async function loadMessages(chatId: string, opts?: { background?: boolean }) {
+  async function loadMessages(
+    chatId: string,
+    opts?: { background?: boolean; waitForSettledReply?: boolean },
+  ) {
     const generation = (messageLoadGenerations.get(chatId) || 0) + 1
     messageLoadGenerations.set(chatId, generation)
     if (!opts?.background) loadingMessages.value[chatId] = true
     try {
       await loadMessagesFromServer(chatId)
+      if (opts?.waitForSettledReply && !opts?.background) {
+        const last = (messages.value[chatId] || []).at(-1)
+        const awaitingReply = last?.role === 'user'
+          && !streaming.value[chatId]
+          && !projectStreaming.value[chatId]
+        if (awaitingReply) {
+          for (const delay of [300, 700, 1500, 3000]) {
+            if (messageLoadGenerations.get(chatId) !== generation) return
+            await new Promise(r => setTimeout(r, delay))
+            await loadMessagesFromServer(chatId)
+            if (hasSettledHistory(chatId) || streaming.value[chatId] || projectStreaming.value[chatId]) break
+          }
+        }
+      }
     } finally {
       // A refresh can overlap a chat switch or a reconnect. Only the newest
       // request owns the loading flag, otherwise an older response can hide
@@ -2138,47 +2598,181 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number }
+  const toChatMessage = (m: ServerRow) => ({
+    role: m.role as 'user' | 'assistant' | 'system',
+    content: m.content,
+    // sent_at is the persisted send-time (user) or completion-time
+    // (assistant) recorded at the orchestration layer. Empty string for
+    // pre-feature chats — the renderer treats it as "no time".
+    timestamp: m.sent_at || '',
+    tool_name: m.tool_name,
+    images: m.images,
+    // Preserve server-assigned turn_index so user_echo replays (from WS
+    // reconnect mid-turn or right after) can dedup against hydrated
+    // history. Dropping this caused duplicate user bubbles: the dedup at
+    // the user_echo handler matches by turn_index first, and when every
+    // hydrated bubble has turn_index: undefined, the replayed echo falls
+    // through to msgs.push and renders a second copy of the same turn.
+    turn_index: m.turn_index,
+    duration_ms: m.duration_ms,
+    is_error: m.is_error,
+    // _filecard fields. Empty/undefined for non-file rows.
+    file_path: m.file_path,
+    action: m.action,
+    tool: m.tool,
+    phase: m.phase,
+    // Envelope annotations (absolute index + lazy marker). Undefined on
+    // legacy flat responses.
+    i: m.i,
+    lazy: m.lazy,
+    full_length: m.full_length,
+  })
+
   async function loadMessagesFromServer(chatId: string) {
     // Restore the AskUserQuestion picker before touching history. Runs on every
     // chat open / reconnect, so a reloaded chat paused on a question shows the
     // interactive picker again instead of the dead trace row. Independent of
     // server history, so it survives the early returns below.
     rebuildPendingQuestion(chatId)
+    rebuildPendingPermission(chatId)
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
+    // `limit=50` asks for the paginated envelope (newest tail window); an
+    // older server answers with the legacy flat array and the code below
+    // handles both transparently.
+    type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
     try {
-      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer' }[]>(
-        `/api/chats/${chatId}/messages`
+      const serverMsgs = await api.get<ServerRow[] | ServerEnvelope>(
+        `/api/chats/${chatId}/messages?limit=50`
       )
-      if (!serverMsgs.length) {
+      if (Array.isArray(serverMsgs) && !serverMsgs.length) {
         reconcileQueuedWithMessages(chatId)
         return
       }
 
-      let normalizedServer = normalizeMessages(serverMsgs.map(m => ({
-        role: m.role as 'user' | 'assistant' | 'system',
-        content: m.content,
-        // sent_at is the persisted send-time (user) or completion-time
-        // (assistant) recorded at the orchestration layer. Empty string for
-        // pre-feature chats — the renderer treats it as "no time".
-        timestamp: m.sent_at || '',
-        tool_name: m.tool_name,
-        images: m.images,
-        // Preserve server-assigned turn_index so user_echo replays (from WS
-        // reconnect mid-turn or right after) can dedup against hydrated
-        // history. Dropping this caused duplicate user bubbles: the dedup at
-        // the user_echo handler matches by turn_index first, and when every
-        // hydrated bubble has turn_index: undefined, the replayed echo falls
-        // through to msgs.push and renders a second copy of the same turn.
-        turn_index: m.turn_index,
-        duration_ms: m.duration_ms,
-        is_error: m.is_error,
-        // _filecard fields. Empty/undefined for non-file rows.
-        file_path: m.file_path,
-        action: m.action,
-        tool: m.tool,
-        phase: m.phase,
-      })))
+      // ── Envelope mode: merge the newest window into the cached timeline ──
+      if (!Array.isArray(serverMsgs)) {
+        const env = serverMsgs
+        historyMeta.value[chatId] = {
+          total: env.total,
+          hasMore: Boolean(env.hasMore),
+          nextOffset: env.nextOffset ?? null,
+          limit: env.limit || 50,
+        }
+
+        let windowRows = normalizeMessages(env.items.map(toChatMessage))
+
+        // Mid-stream guard, window-scoped version of the legacy rule below:
+        // while the chat streams, the live trace owns the in-flight turn, so
+        // drop trailing history past the last known user bubble unless the
+        // window already ends in a settled reply.
+        if (projectStreaming.value[chatId] && windowRows.length) {
+          const lastServer = windowRows[windowRows.length - 1]
+          const serverTurnSettled = Boolean(
+            lastServer
+            && lastServer.role === 'assistant'
+            && !lastServer.is_error
+            && lastServer.timestamp,
+          )
+          if (!serverTurnSettled) {
+            const localMsgs = messages.value[chatId] || []
+            let lastLocalUserIdx = -1
+            for (let i = localMsgs.length - 1; i >= 0; i--) {
+              if (localMsgs[i].role === 'user') {
+                lastLocalUserIdx = i
+                break
+              }
+            }
+            if (lastLocalUserIdx >= 0) {
+              const lastLocalUser = localMsgs[lastLocalUserIdx]
+              let serverLastUserIdx = -1
+              for (let i = windowRows.length - 1; i >= 0; i--) {
+                if (windowRows[i].role === 'user' && windowRows[i].content === lastLocalUser.content) {
+                  serverLastUserIdx = i
+                  break
+                }
+              }
+              if (serverLastUserIdx >= 0) {
+                windowRows = windowRows.slice(0, serverLastUserIdx + 1)
+              }
+            }
+          }
+        }
+
+        const local = messages.value[chatId] || []
+        const firstIndex = local.length ? local[0].i : undefined
+        // How far the cache claims to reach, from its last INDEXED row: rows
+        // added locally (a failed-send notice, say) carry no index and must not
+        // inflate it, or a shrink check built on length would discard them.
+        let cachedEnd = 0
+        for (const row of local) {
+          if (typeof row.i === 'number' && row.i + 1 > cachedEnd) cachedEnd = row.i + 1
+        }
+        if (
+          !local.length ||
+          typeof firstIndex !== 'number' ||
+          env.total <= firstIndex ||
+          // The server assembled FEWER rows than we hold - a pruned or
+          // unreadable session segment. Merging by index would refresh the
+          // prefix and leave the stale tail untouched, showing messages that
+          // are no longer part of the chat, so the window wins outright.
+          env.total < cachedEnd
+        ) {
+          // Empty cache, cache from a pre-envelope server, or the session
+          // reset/shrank: adopt the window wholesale.
+          messages.value[chatId] = windowRows
+        } else {
+          // Index-addressed merge: refresh rows we already hold, append new
+          // tail rows, keep older pages loaded via loadOlderMessages.
+          //
+          // Rows are looked up by their ABSOLUTE index, never by `abs -
+          // firstIndex`: `local` is not a contiguous run of server-indexed
+          // rows. An optimistic user bubble, flushed streaming rows and the
+          // failed-send notice pushed by recoverUnackedSend all sit in it with
+          // `i === undefined`, and every one of them shifted the position
+          // arithmetic by one - so the window's rows landed on the wrong slots,
+          // rendering an assistant reply twice and silently overwriting the
+          // failed-send warning on the next refresh.
+          const posByIndex = new Map<number, number>()
+          local.forEach((row, pos) => {
+            if (typeof row.i === 'number') posByIndex.set(row.i, pos)
+          })
+          const merged = local.slice()
+          for (const item of windowRows) {
+            const abs = item.i
+            if (typeof abs !== 'number') continue
+            const pos = posByIndex.get(abs)
+            if (pos !== undefined) {
+              merged[pos] = item
+            } else if (abs >= cachedEnd) {
+              // Beyond the cached extent: genuinely new tail rows, appended in
+              // the window's own ascending order (after any un-indexed local
+              // rows, which are older than anything arriving now).
+              posByIndex.set(abs, merged.length)
+              merged.push(item)
+            }
+            // An index below cachedEnd that we don't hold is a hole in the
+            // cache (loadOlderMessages fills those); skip it rather than
+            // appending it out of order at the tail.
+          }
+          messages.value[chatId] = merged
+        }
+        persistMessages()
+        if (streaming.value[chatId]
+          && !projectStreaming.value[chatId]
+          && !queuedMessages.value[chatId]?.length
+        ) {
+          const last = messages.value[chatId]?.at(-1)
+          if (last && ((last.role === 'assistant' && !last.is_error) || (last.role === 'system' && last.tool_name !== '_activity'))) {
+            clearStreamingState(chatId)
+          }
+        }
+        reconcileQueuedWithMessages(chatId)
+        return
+      }
+
+      let normalizedServer = normalizeMessages(serverMsgs.map(toChatMessage))
 
       // While the server declares this chat is actively streaming, don't let
       // /messages pull in the assistant's progress into the historical timeline:
@@ -2293,6 +2887,113 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  // ── Paginated history: older pages + lazy part expansion ────────────
+
+  function canLoadOlder(chatId: string): boolean {
+    return Boolean(historyMeta.value[chatId]?.hasMore)
+  }
+
+  function isLoadingOlder(chatId: string): boolean {
+    return Boolean(loadingOlder.value[chatId])
+  }
+
+  /** Fetch the previous page above the loaded window and prepend it. The
+   * caller (ChatPanel) preserves scroll position across the prepend. */
+  async function loadOlderMessages(chatId: string): Promise<void> {
+    const meta = historyMeta.value[chatId]
+    if (!meta?.hasMore || meta.nextOffset == null || loadingOlder.value[chatId]) return
+    loadingOlder.value[chatId] = true
+    type OlderPage = { items: Parameters<typeof toChatMessage>[0][]; total: number; limit: number; hasMore: boolean; nextOffset: number | null }
+    try {
+      const local = messages.value[chatId] || []
+      const firstIndex = local.length ? local[0].i : undefined
+      const fetchPage = (offset: number) => api.get<OlderPage>(
+        `/api/chats/${chatId}/messages?offset=${offset}&limit=${meta.limit}`
+      )
+      // `offset` counts BACKWARD from the server's CURRENT total, so
+      // `meta.nextOffset` — computed when the tail window was loaded — aims at
+      // the wrong boundary as soon as the session grows in between. A 75-row
+      // history loaded as indices 25-74 asks for offset 50; once two more rows
+      // exist that same offset answers with 0-26, the continuity check below
+      // rejects the overlap, and the rejected page's `hasMore: false` used to
+      // be persisted — freezing pagination so the oldest messages became
+      // permanently unreachable. Address the page by the index we actually
+      // need (`total - firstIndex`) and, when the response reveals a newer
+      // total, retry once against that index-stable boundary.
+      let requestedTotal = meta.total
+      let offset = typeof firstIndex === 'number'
+        ? Math.max(0, meta.total - firstIndex)
+        : meta.nextOffset
+      let env = await fetchPage(offset)
+      if (Array.isArray(env)) return
+      if (typeof firstIndex === 'number' && env.total !== requestedTotal) {
+        const corrected = Math.max(0, env.total - firstIndex)
+        if (corrected !== offset) {
+          requestedTotal = env.total
+          offset = corrected
+          env = await fetchPage(offset)
+          if (Array.isArray(env)) return
+        }
+      }
+      const older = normalizeMessages(env.items.map(toChatMessage))
+      const pageMeta = {
+        total: env.total,
+        hasMore: Boolean(env.hasMore),
+        nextOffset: env.nextOffset ?? null,
+        limit: env.limit || meta.limit,
+      }
+      if (!older.length || typeof firstIndex !== 'number') {
+        historyMeta.value[chatId] = pageMeta
+        return
+      }
+      // The page must continue directly above the loaded window; anything
+      // else means the session changed underneath us and the next full
+      // refresh will resync — don't splice misaligned rows in.
+      if (older[0].i === firstIndex - older.length) {
+        historyMeta.value[chatId] = pageMeta
+        messages.value[chatId] = [...older, ...local]
+        persistMessages()
+        return
+      }
+      // Still misaligned after the retry: take the fresher total, but keep the
+      // previous `hasMore`/`nextOffset` so scrolling can try again. Adopting a
+      // rejected page's `hasMore: false` is what made the remaining history
+      // unreachable for the rest of the session.
+      historyMeta.value[chatId] = { ...meta, total: env.total }
+    } catch {
+      // Transient failure: leave state so the user can retry by scrolling.
+    } finally {
+      delete loadingOlder.value[chatId]
+    }
+  }
+
+  /** Fetch the full content of one pruned row by absolute index and splice
+   * it back into the timeline. Concurrent expands of the same row dedup. */
+  function expandMessagePart(chatId: string, index: number): Promise<void> {
+    const key = `${chatId}:${index}`
+    const existing = partRequests.get(key)
+    if (existing) return existing
+    const request = (async () => {
+      try {
+        const row = await api.get<{ content: string }>(`/api/chats/${chatId}/messages/part?i=${index}`)
+        const list = messages.value[chatId] || []
+        const pos = list.findIndex(m => m.i === index)
+        if (pos >= 0) {
+          const next = list.slice()
+          next[pos] = { ...next[pos], content: row.content, lazy: false }
+          messages.value[chatId] = next
+          persistMessages()
+        }
+      } catch {
+        // Leave the row collapsed; the marker stays so the user can retry.
+      } finally {
+        partRequests.delete(key)
+      }
+    })()
+    partRequests.set(key, request)
+    return request
+  }
+
   // Post-result reconciliation: the SDK session file is sometimes a beat
   // behind the result event (buffered writes, WS reconnect races). Retry
   // loadMessages until the server's history ends with a final assistant
@@ -2310,7 +3011,18 @@ export const useProjectStore = defineStore('projects', () => {
       // Stop once the turn is capped by a non-error assistant reply or an
       // explicit error/system note — anything that isn't a trailing user msg
       // or tool-activity entry means the final state is rendered.
-      if (!last) continue
+      if (!last) {
+        // A turn can legitimately end with nothing on the transcript (the
+        // image-capability pre-flight aborts before dispatch, so /messages
+        // stays empty). Retrying cannot change that: clear the stale spinner
+        // instead of running out the retry budget with "Thinking…" on screen.
+        if (!projectStreaming.value[chatId]) {
+          clearStreamingState(chatId)
+          void loadSubagents(chatId)
+          return
+        }
+        continue
+      }
       if (last.role === 'assistant' && !last.is_error) {
         clearStreamingState(chatId)
         void loadSubagents(chatId)
@@ -2354,6 +3066,21 @@ export const useProjectStore = defineStore('projects', () => {
   async function openChatFromDeepLink(chatId: string) {
     if (!chatExistsInList(chatId)) return
     await ensureWorkspaceForChat(chatId)
+    if (activeChatId.value === chatId) {
+      // switchChat's "already active" fast path only marks read — fine for
+      // e.g. re-clicking the same sidebar entry, but arriving via a
+      // notification is exactly the signal that local state may be stale
+      // (the socket can go half-open while backgrounded, leaving `streaming`
+      // stuck true and the finished reply never pulled in). Force the same
+      // reconcile the liveness watchdog and resume-from-background path use.
+      const { router } = await import('../router')
+      if (router.currentRoute.value.params.chatId !== chatId) {
+        router.push(`/chat/${chatId}`)
+      }
+      void markRead(chatId)
+      await reloadAndReconnectChat(chatId)
+      return
+    }
     await switchChat(chatId)
   }
 
@@ -2383,7 +3110,7 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    if (!opts?.skipHistory) await loadMessages(chatId)
+    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
     requestReentrySummaryIfUseful(chatId)
@@ -2427,7 +3154,9 @@ export const useProjectStore = defineStore('projects', () => {
   function connectWs(chatId: string) {
     if (sockets.value[chatId]) return
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${chatId}`)
+    // chatId comes from server state; pinning it to one encoded path segment
+    // keeps a crafted id from rewriting the rest of the WebSocket URL.
+    const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${encodeURIComponent(chatId)}`)
     sockets.value[chatId] = ws
     lastChatFrameAt[chatId] = nowMs()
     let opened = false
@@ -2558,6 +3287,11 @@ export const useProjectStore = defineStore('projects', () => {
     } finally {
       void loadSubagents(chatId)
     }
+    // History is authoritative now: a send the server never received has no
+    // row here. Give the just-reconnected socket a moment to replay any
+    // buffered user_echo, then recover the provably-lost send.
+    reconcileUnackedSend(chatId)
+    scheduleUnackedSendRecovery(chatId)
   }
 
   // Detect and recover half-open sockets (readyState OPEN, no keepalive for
@@ -2908,7 +3642,9 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats?active_only=1')
+          .then(c => reconcileActiveChats(c))
+          .catch(() => { /* ignore */ })
         break
       }
       case 'chat_subagents_ready': {
@@ -2940,7 +3676,9 @@ export const useProjectStore = defineStore('projects', () => {
           void loadSubagents(msg.chat_id)
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
-        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
+        api.get<ChatInfo[]>('/api/chats?active_only=1')
+          .then(c => reconcileActiveChats(c))
+          .catch(() => { /* ignore */ })
         break
       }
       case 'chat_read': {
@@ -3001,8 +3739,13 @@ export const useProjectStore = defineStore('projects', () => {
           chat.archived = true
           if (msg.archive_path) chat.archive_path = msg.archive_path
         }
+        if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
+        // Hold the local flag until a chat-list payload agrees: a GET that left
+        // before the archive committed can still resolve after this event.
+        pendingArchived.value.add(msg.chat_id)
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
+          persistState()
         }
         break
       }
@@ -3161,12 +3904,115 @@ export const useProjectStore = defineStore('projects', () => {
     persistPendingChatComments()
   }
 
+  // Deferred-send retry limit. When the chat WS is down, sendMessage defers
+  // the actual WS send by 500ms and retries. Without a cap this loops forever
+  // when the server is unreachable, keeping the composer frozen and never
+  // surfacing an error. After this many attempts the deferred send is
+  // abandoned and a system error bubble tells the user the message didn't go.
+  const DEFERRED_SEND_MAX_RETRIES = 20
+
+  // ── Deferred sends ──────────────────────────────────────────────────
+  // A send made while the chat socket is down waits on that 500ms retry
+  // chain. It used to render *nothing at all* in the meantime: no bubble, no
+  // pending marker, and the composer kept the text because sendMessage
+  // returned false. For up to 10s the user had no evidence their message was
+  // accepted, so they pressed send again — and each press started its own
+  // independent chain with no de-duplication. When the socket finally opened
+  // every chain fired; a turn was running by then, so they all took the
+  // `alreadyStreaming` queue branch and N identical entries appeared in the
+  // queue at once ("many times the same message queued").
+  //
+  // Two things fix that: render the message immediately as an optimistic
+  // bubble, and keep a per-chat registry of the sends still waiting so a
+  // re-send can collapse into the one already in flight.
+  //
+  // `pendingSend` marks a bubble that is rendered but not yet on the wire, so
+  // the send-out path can promote that exact bubble in place instead of
+  // pushing a second copy. It deliberately carries no `turn_index`, which is
+  // the invariant the `user_echo` handler relies on to reconcile an
+  // optimistic bubble rather than duplicate the turn.
+  type PendingUserMessage = ChatMessage & { pendingSend?: true }
+  interface DeferredSend { composed: string; images?: string[] }
+  const deferredSends: Record<string, DeferredSend[]> = {}
+
+  function sameDeferredPayload(a: DeferredSend, b: DeferredSend): boolean {
+    if (a.composed.trim() !== b.composed.trim()) return false
+    const ai = a.images || []
+    const bi = b.images || []
+    return ai.length === bi.length && ai.every((v, i) => v === bi[i])
+  }
+
+  function findDeferredSend(chatId: string, entry: DeferredSend): DeferredSend | undefined {
+    return deferredSends[chatId]?.find(d => sameDeferredPayload(d, entry))
+  }
+
+  function registerDeferredSend(chatId: string, entry: DeferredSend) {
+    if (!deferredSends[chatId]) deferredSends[chatId] = []
+    deferredSends[chatId].push(entry)
+  }
+
+  function dropDeferredSend(chatId: string, entry: DeferredSend) {
+    const list = deferredSends[chatId]
+    if (!list) return
+    const idx = list.findIndex(d => sameDeferredPayload(d, entry))
+    if (idx === -1) return
+    list.splice(idx, 1)
+    if (!list.length) delete deferredSends[chatId]
+  }
+
+  function pushPendingSendBubble(chatId: string, entry: DeferredSend) {
+    const msgs = messages.value[chatId] || []
+    const bubble: PendingUserMessage = {
+      role: 'user',
+      content: entry.composed,
+      timestamp: new Date().toISOString(),
+      images: entry.images,
+      pendingSend: true,
+    }
+    msgs.push(bubble)
+    messages.value[chatId] = msgs
+    persistMessages()
+  }
+
+  // A history reload (mergeMetadata keeps only turns the server knows about)
+  // can wipe the optimistic bubble while the retry chain is still waiting, so
+  // every caller must tolerate "not found". Matching on the whole payload, not
+  // just the text, keeps two same-text sends carrying different attachments
+  // from promoting or deleting each other's bubble.
+  function findPendingSendBubble(chatId: string, entry: DeferredSend): number {
+    const msgs = messages.value[chatId] || []
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i] as PendingUserMessage
+      if (m.role !== 'user' || !m.pendingSend) continue
+      if (sameDeferredPayload({ composed: m.content || '', images: m.images }, entry)) return i
+    }
+    return -1
+  }
+
+  // The frame is on the wire (or the send was abandoned): this is an ordinary
+  // optimistic bubble now. Clearing the marker keeps a later deferred send
+  // from promoting or deleting a bubble that is not its own, and guarantees
+  // no bubble can stay "pending" forever.
+  function settlePendingSendBubble(chatId: string, entry: DeferredSend): boolean {
+    const idx = findPendingSendBubble(chatId, entry)
+    if (idx === -1) return false
+    delete (messages.value[chatId][idx] as PendingUserMessage).pendingSend
+    return true
+  }
+
+  function dropPendingSendBubble(chatId: string, entry: DeferredSend) {
+    const idx = findPendingSendBubble(chatId, entry)
+    if (idx === -1) return
+    messages.value[chatId].splice(idx, 1)
+  }
+
   function sendMessage(
     chatId: string,
     text: string,
-    mode: 'queue' | 'steer' = 'queue',
     prepared?: PreparedMessage,
-  ) {
+    onSent?: () => void,
+    _deferredAttempt = 0,
+  ): boolean {
     // A re-entry summary is a transient orientation aid, not a new chat
     // message. The first send is the user's signal that it has done its job.
     clearReentrySummary(chatId)
@@ -3193,39 +4039,100 @@ export const useProjectStore = defineStore('projects', () => {
     // message's staged attachments from the shared composer bucket.
     if (!prepared) consumePreparedAttachments(chatId, message)
     const { composed, imageRefs } = message
+    // Only a retry can own an optimistic pending bubble / registry entry: the
+    // first call either sends straight away or creates them below.
+    const wasDeferred = _deferredAttempt > 0
+    const deferredEntry: DeferredSend = { composed, images: imageRefs }
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!wasDeferred) {
+        // Re-send de-duplication. An identical payload already waiting on the
+        // socket collapses into that send instead of starting a second retry
+        // chain — that stacking is what produced N copies of the same message
+        // in the queue. Only an *identical* payload collapses; a genuinely
+        // different message still gets its own chain, so nothing is dropped.
+        if (findDeferredSend(chatId, deferredEntry)) {
+          // The message is already visible as a pending bubble, so treat the
+          // press as accepted: clearing the composer stops it from holding
+          // text that invites yet another re-send.
+          onSent?.()
+          return true
+        }
+        registerDeferredSend(chatId, deferredEntry)
+        // Render it now. Nothing appeared here until the socket opened, which
+        // is exactly what "I sent the message, nothing happens" meant.
+        pushPendingSendBubble(chatId, deferredEntry)
+        onSent?.()
+      }
+      // Retry limit: if the socket stays down, abandon the deferred send and
+      // surface a system error bubble so the user knows the message didn't
+      // go through.
+      if (_deferredAttempt >= DEFERRED_SEND_MAX_RETRIES) {
+        dropDeferredSend(chatId, deferredEntry)
+        // Keep the user's message in the transcript — the composer was cleared
+        // when we accepted it, so this bubble is their only copy, and
+        // ChatPanel's error retry resends the user turn above the error — but
+        // stop calling it pending now that no further attempt is coming.
+        settlePendingSendBubble(chatId, deferredEntry)
+        const errorMsgs = messages.value[chatId] || []
+        errorMsgs.push({
+          role: 'system',
+          content: 'Error: Could not send — chat connection is down. Please retry.',
+          timestamp: new Date().toISOString(),
+        })
+        messages.value[chatId] = errorMsgs
+        streaming.value[chatId] = false
+        delete streamStartedAt.value[chatId]
+        persistStreamStartedAt()
+        return false
+      }
       connectWs(chatId)
-      setTimeout(() => sendMessage(chatId, text, mode, message), 500)
-      return
+      setTimeout(
+        () => sendMessage(chatId, text, message, onSent, _deferredAttempt + 1),
+        500,
+      )
+      // Accepted, not sent: the bubble is on screen and the composer is
+      // clear. Returning false here left the text in the composer with no
+      // bubble anywhere, which read as "nothing happened".
+      return true
     }
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
-      // Queue or steer: don't push to the main messages list yet. Queued
-      // messages live in queuedMessages until the server echoes them; steered
-      // ones arrive as a `steered` event which we fold into messages.
-      let queueId: string | undefined
-      if (mode === 'queue') {
-        if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
-        queueId = makeQueuedId()
-        queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
+      // Queue: don't push to the main messages list yet. Queued messages live
+      // in queuedMessages until the server echoes them.
+      if (wasDeferred) {
+        // This deferred send is becoming a real queue entry. Drop its
+        // optimistic bubble so the message isn't rendered twice (bubble in
+        // the transcript *and* a queued chip).
+        dropDeferredSend(chatId, deferredEntry)
+        dropPendingSendBubble(chatId, deferredEntry)
       }
-      const payload: Record<string, unknown> = { type: 'message', text: composed, mode }
+      if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
+      const queueId = makeQueuedId()
+      queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
+      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue' }
       if (imageRefs) payload.images = imageRefs
-      if (queueId) payload.entry_id = queueId
+      payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
-      return
+      onSent?.()
+      return true
     }
 
-    const msgs = messages.value[chatId] || []
-    msgs.push({
-      role: 'user',
-      content: composed,
-      timestamp: new Date().toISOString(),
-      images: imageRefs,
-    })
-    messages.value[chatId] = msgs
+    // A deferred send already rendered its message; promote that same bubble
+    // in place rather than pushing a second copy. `settlePending…` returns
+    // false when a history reload wiped it, in which case we push fresh.
+    if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
+    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry)) {
+      const msgs = messages.value[chatId] || []
+      msgs.push({
+        role: 'user',
+        content: composed,
+        timestamp: new Date().toISOString(),
+        images: imageRefs,
+      })
+      messages.value[chatId] = msgs
+    }
     // Persist immediately so the user's own message survives app close even
     // if the assistant response never arrives (dropped WS, closed window).
     persistMessages()
@@ -3239,7 +4146,18 @@ export const useProjectStore = defineStore('projects', () => {
 
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
+    // Track until the server proves receipt. Cleared by the echoed user_echo,
+    // by the turn showing up in /messages, or recovered once on reconnect.
+    // An identical pending entry (the recovery path resending this very
+    // message) keeps its attempt count so the one-retry cap holds.
+    const tracked = unackedSends[chatId]
+    if (!tracked || tracked.text !== composed) {
+      unackedSends[chatId] = { text: composed, images: imageRefs, at: Date.now(), attempts: 0 }
+      persistUnackedSends()
+    }
     ws.send(JSON.stringify(payload))
+    onSent?.()
+    return true
   }
 
   function removeQueued(chatId: string, index: number) {
@@ -3315,7 +4233,13 @@ export const useProjectStore = defineStore('projects', () => {
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'stop' }))
+      return
     }
+    // The socket can be mid-reconnect (liveness watchdog, a network blip)
+    // right when the user clicks Stop, silently dropping the WS message with
+    // no way to retry from here. Fall back to the HTTP route so Stop always
+    // reaches the server even while the socket is unusable.
+    void api.post(`/api/chats/${chatId}/stop`, {})
   }
 
   function respondPermission(
@@ -3337,6 +4261,11 @@ export const useProjectStore = defineStore('projects', () => {
         delete activeQuestions.value[chatId]
       }
     }
+    // Clear the persisted attention flag optimistically too, so a
+    // GET /api/chats refresh that lands before the server's own clear
+    // round-trips doesn't resurrect the card via rebuildPendingPermission.
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_permission) chat.pending_permission = ''
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
@@ -3622,7 +4551,7 @@ export const useProjectStore = defineStore('projects', () => {
   function updatePendingChatComment(id: string, comment: string): void {
     const idx = pendingChatComments.value.findIndex(c => c.id === id)
     if (idx === -1) return
-    pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], comment }
+    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], comment })
     persistPendingChatComments()
   }
   function addPendingChatCommentImage(id: string, imageRef: string): void {
@@ -3630,7 +4559,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx === -1) return
     const existing = pendingChatComments.value[idx].images || []
     if (!existing.includes(imageRef)) {
-      pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], images: [...existing, imageRef] }
+      setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: [...existing, imageRef] })
       persistPendingChatComments()
     }
   }
@@ -3639,7 +4568,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx === -1) return
     const existing = pendingChatComments.value[idx].images || []
     const next = existing.filter(img => img !== imageRef)
-    pendingChatComments.value[idx] = { ...pendingChatComments.value[idx], images: next.length ? next : undefined }
+    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: next.length ? next : undefined })
     persistPendingChatComments()
   }
   function addFileCommentImage(path: string, id: string, imageRef: string): void {
@@ -3655,7 +4584,7 @@ export const useProjectStore = defineStore('projects', () => {
       // Sync to pending if it exists there
       const pIdx = pendingComments.value.findIndex(c => c.id === id)
       if (pIdx !== -1) {
-        pendingComments.value[pIdx] = { ...pendingComments.value[pIdx], images: [...existing, imageRef] }
+        setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: [...existing, imageRef] })
         persistPendingComments()
       }
       persistFileComments()
@@ -3673,7 +4602,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileComments.value[path] = next
     const pIdx = pendingComments.value.findIndex(c => c.id === id)
     if (pIdx !== -1) {
-      pendingComments.value[pIdx] = { ...pendingComments.value[pIdx], images: nextImages.length ? nextImages : undefined }
+      setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: nextImages.length ? nextImages : undefined })
       persistPendingComments()
     }
     persistFileComments()
@@ -3843,16 +4772,15 @@ export const useProjectStore = defineStore('projects', () => {
     const msgs = messages.value[chatId] || []
 
     // A summary belongs only to the moment the user re-enters a quiet chat.
-    // `queued` and `steered` always represent new user activity (a new prompt
-    // is now waiting or has been redirected at the current turn), so they
-    // always invalidate the summary.
+    // `queued` always represents new user activity (a new prompt is now
+    // waiting), so it always invalidates the summary.
     //
     // `user_echo` and `result` are handled inside their switch cases below:
     // the broker replays them on every WS reconnect, and a no-op replay
     // (turn already rendered, or no final text on a result) must NOT clear
     // the summary. The user opens a chat, scrolls to re-orient, and the
     // summary disappearing on a broker replay is the wrong behavior.
-    if (event.type === 'queued' || event.type === 'steered') {
+    if (event.type === 'queued') {
       clearReentrySummary(chatId)
     }
 
@@ -3888,6 +4816,8 @@ export const useProjectStore = defineStore('projects', () => {
         // Queued follow-ups are drained as individual turns. Remove only the
         // entry that just started so later messages remain visible/editable.
         removeEchoedQueued(chatId, event.entry_id, trimmed)
+        // The server received and started the send: drop the recovery copy.
+        acknowledgeSend(chatId, trimmed)
         const turnIndex = event.turn_index
         // Dedup by server-assigned turn_index when available. Covers the
         // mid-stream reload case: /messages hydrates user bubbles with their
@@ -4018,30 +4948,11 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
-      case 'steered': {
-        // Steered messages enter the current turn immediately as a user bubble.
-        _commitStreamingTextToTimeline(chatId)
-        const trimmed = (event.text || '').trim()
-        if (!trimmed) break
-        const last = msgs[msgs.length - 1]
-        if (!(last && last.role === 'user' && last.content === trimmed)) {
-          msgs.push({
-            role: 'user',
-            content: trimmed,
-            timestamp: new Date().toISOString(),
-            images: event.images?.length ? event.images : undefined,
-          })
-          messages.value[chatId] = normalizeMessages([...msgs])
-          persistMessages()
-        }
-        break
-      }
-
       case 'text_delta':
         // Visible text starts: any pending thinking block has ended, lock it
         // into the timeline so the Reasoning bubble renders it after the turn.
         _commitStreamingThinkingToTimeline(chatId)
-        // Codex starts a new agent-message item when it moves from progress
+        // Some providers start a new agent-message item when moving from progress
         // commentary to the terminal answer. Preserve that boundary instead
         // of concatenating both items into the final response buffer.
         if (
@@ -4218,7 +5129,7 @@ export const useProjectStore = defineStore('projects', () => {
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
         _commitStreamingThinkingToTimeline(chatId)
-        // A completed/interrupted Codex turn may legitimately end after a
+        // A completed/interrupted turn may legitimately end after a
         // commentary item with no final answer. Keep that text in the trace;
         // never promote it into the response bubble via the defensive merge.
         //
@@ -4502,10 +5413,11 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
-    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markAllRead,
+    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
+    archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
@@ -4523,8 +5435,10 @@ export const useProjectStore = defineStore('projects', () => {
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, setReentrySummaryEnabled,
+    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
-    beginServerRestart,
+    beginServerRestart, restoreState,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
+    packageStatus, checkPackageStatus,
   }
 })

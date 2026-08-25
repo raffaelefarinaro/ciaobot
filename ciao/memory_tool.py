@@ -504,6 +504,19 @@ def update_region(
     Direct ``Edit`` remains supported. This helper is the typed control-plane
     equivalent for agents that cannot reliably express a file edit, and never
     creates a second memory database.
+
+    ``char_limit`` is ADVISORY, which is what it was always documented to be:
+    "Nothing refuses a write at edit time; os_audit and nightly memory curation
+    report/consolidate when over cap." The code refused anyway, and that turned a
+    budget into a wall — on a real vault it made the accept button dead for 67 of
+    130 queued proposals, with no way past it from the queue and nothing saying
+    why. Worse, refusing does not keep the region small: the fact stays queued and
+    the region stays exactly as full as it was.
+
+    So the write goes through and the result carries ``over_cap`` with
+    ``used_chars`` and ``char_limit``, for callers that want to surface it. Bounding
+    the region is the job of the thing that can actually shrink it — consolidation
+    during memory curation — not of the write that noticed.
     """
     canonical = resolve_region(region)
     normalized_entry = _normalize(entry)
@@ -533,19 +546,21 @@ def update_region(
                 del candidate[index]
             else:
                 candidate[index] = normalized_entry
-        if char_limit is not None and total_chars(candidate) > char_limit:
-            raise ValueError(
-                f"{canonical} region would exceed its {char_limit}-character limit"
-            )
+        used = total_chars(candidate)
+        over_cap = char_limit is not None and used > char_limit
         write_region(guide, canonical, candidate)
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "changed": True,
             "action": action,
             "region": canonical,
             "entry_count": len(candidate),
-            "used_chars": total_chars(candidate),
+            "used_chars": used,
         }
+        if char_limit is not None:
+            result["char_limit"] = char_limit
+            result["over_cap"] = over_cap
+        return result
     finally:
         import fcntl
 

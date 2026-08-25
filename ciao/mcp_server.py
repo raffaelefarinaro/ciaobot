@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Callable, cast
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
@@ -129,6 +129,37 @@ _DESTRUCTIVE = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=False,
 )
+
+# Create-time defaults for the merged `schedule` and `loop` tools. Their
+# signatures default every field to None instead, so an "update" can tell a
+# field the caller left out from one the caller set to the create default.
+# Encoding the defaults in the signature made those two cases identical, and
+# update stripped every field equal to a default: daily_time="09:00",
+# frequency="weekly", archive_policy="manual" and every ""-clear vanished, so
+# "move the daily report to 09:00" called schedule_update with an empty payload
+# and still returned ok. The same comparison left loop's start=False in the
+# payload (False != True), where loop_update rejected it as
+# `invalid_fields: start`.
+_SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
+    "prompt": "",
+    "daily_time": "09:00",
+    "timezone": "UTC",
+    "frequency": "weekly",
+    "title": "",
+    "description": "",
+    "provider": "",
+    "model": "",
+    "archive_policy": "manual",
+    "workspace": "",
+}
+_LOOP_CREATE_DEFAULTS: dict[str, Any] = {
+    "prompt": "",
+    "chat_id": "",
+    "interval_minutes": 10,
+    "title": "",
+    "autostart": False,
+    "start": True,
+}
 
 
 @dataclass(slots=True)
@@ -930,28 +961,6 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
-        async def memory_proposals_list() -> dict[str, Any]:
-            """List reviewable memory proposals produced from archived chats."""
-            return await self._invoke(
-                "memory_proposals_list", lambda cp, p: cp.memory_proposals_list(p)
-            )
-
-        @tool(name="memory_proposal_resolve", annotations=_WRITE, structured_output=True)
-        async def memory_proposal_resolve(text: str, action: str) -> dict[str, Any]:
-            """Dismiss one proposal selected by a unique text substring.
-
-            Never writes memory: Edit the matching CLAUDE.md region first, then
-            dismiss here (the reverse order can lose the fact).
-            """
-            return await self._invoke(
-                "memory_proposal_resolve",
-                lambda cp, p: cp.memory_proposal_resolve(
-                    p, text, action=action  # type: ignore[arg-type]
-                ),
-                mutating=True,
-            )
-
         @tool(name="vault_search", annotations=_READ, structured_output=True)
         async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
             """Full-text search the active workspace vault."""
@@ -969,46 +978,91 @@ class CiaoMcpService:
             """Get one project by ID or name within the active workspace. Omit to get the active project."""
             return await self._invoke("project_get", lambda cp, p: cp.project_get(p, project_id))
 
-        @tool(name="project_create", annotations=_WRITE, structured_output=True)
-        async def project_create(name: str, context: str = "") -> dict[str, Any]:
-            """Create a project in the active workspace."""
-            return await self._invoke("project_create", lambda cp, p: cp.project_create(p, name, context), mutating=True)
-
-        @tool(name="project_update", annotations=_WRITE, structured_output=True)
-        async def project_update(
-            project_id: str = "",
-            name: str | None = None,
-            context: str | None = None,
+        @tool(name="project", annotations=_WRITE, structured_output=True)
+        async def project(
+            action: str,
+            name: str = "",
+            context: str = "",
             vault_folder: str | None = None,
+            project_id: str = "",
+            stem: str = "",
         ) -> dict[str, Any]:
-            """Update project metadata or its safe vault-folder binding. Omit project_id for active project."""
-            return await self._invoke(
-                "project_update",
-                lambda cp, p: cp.project_update(
-                    p, project_id, name=name, context=context, vault_folder=vault_folder
-                ),
-                mutating=True,
-            )
+            """Create, update, or restore a project in the active workspace.
 
-        @tool(name="project_complete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_complete(project_id: str = "") -> dict[str, Any]:
-            """Move a vault-backed project to completed and archive its active project record."""
-            return await self._invoke("project_complete", lambda cp, p: cp.project_complete(p, project_id), mutating=True)
+            action:
+                "create"  — create a project. name is the new project name;
+                    context is optional. project_id is ignored.
+                "update"  — update project metadata or its safe vault-folder
+                    binding. Omit project_id for the active project. Pass
+                    name/context/vault_folder as overrides; None means "keep
+                    current value" (the control plane skips None fields).
+                "restore" — restore a completed vault project into the active
+                    workspace. stem is the completed-project stem to restore.
 
-        @tool(name="project_restore", annotations=_WRITE, structured_output=True)
-        async def project_restore(stem: str) -> dict[str, Any]:
-            """Restore a completed vault project into the active workspace."""
-            return await self._invoke("project_restore", lambda cp, p: cp.project_restore(p, stem), mutating=True)
+            Args:
+                name: (create) The new project name. (update) The new name, or
+                    empty to keep the current one.
+                context: (create/update) Optional project context string.
+                vault_folder: (update) Safe vault-folder binding, or None to
+                    keep the current value.
+                project_id: (update) Project id or case-insensitive name. Omit
+                    for the active project.
+                stem: (restore) The completed-project stem to restore.
+            """
+            if action == "create":
+                return await self._invoke(
+                    "project",
+                    lambda cp, p: cp.project_create(p, name, context),
+                    mutating=True,
+                )
+            if action == "update":
+                return await self._invoke(
+                    "project",
+                    lambda cp, p: cp.project_update(
+                        p, project_id, name=name or None, context=context or None,
+                        vault_folder=vault_folder,
+                    ),
+                    mutating=True,
+                )
+            if action == "restore":
+                if not stem:
+                    raise ControlPlaneError("invalid_action", "stem is required for restore.")
+                return await self._invoke(
+                    "project",
+                    lambda cp, p: cp.project_restore(p, stem),
+                    mutating=True,
+                )
+            raise ControlPlaneError("invalid_action", "action must be create, update, or restore.")
 
-        @tool(name="project_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_delete(project_id: str = "") -> dict[str, Any]:
-            """Delete a non-vault-backed project and its chats."""
-            return await self._invoke("project_delete", lambda cp, p: cp.project_delete(p, project_id), mutating=True)
+        @tool(name="project_action", annotations=_DESTRUCTIVE, structured_output=True)
+        async def project_action(
+            action: str,
+            project_id: str = "",
+        ) -> dict[str, Any]:
+            """Run one lifecycle action on a project.
 
-        @tool(name="project_files_list", annotations=_READ, structured_output=True)
-        async def project_files_list(project_id: str = "") -> dict[str, Any]:
-            """List files inside a project's vault folder. Omit project_id for active project."""
-            return await self._invoke("project_files_list", lambda cp, p: cp.project_files_list(p, project_id))
+            action:
+                "complete" — move a vault-backed project to completed and
+                    archive its active project record.
+                "delete"   — delete a non-vault-backed project and its chats.
+            """
+            if action == "complete":
+                return await self._invoke(
+                    "project_action",
+                    lambda cp, p: cp.project_complete(p, project_id),
+                    mutating=True,
+                )
+            if action == "delete":
+                return await self._invoke(
+                    "project_action",
+                    lambda cp, p: cp.project_delete(p, project_id),
+                    mutating=True,
+                )
+            raise ControlPlaneError("invalid_action", "action must be complete or delete.")
+
+        # project_files_list dropped — the agent has native Glob/Read to list
+        # files in a project's vault folder. The PWA REST route
+        # (GET /api/projects/{id}/files) remains for the UI.
 
         @tool(name="workspaces_list", annotations=_READ, structured_output=True)
         async def workspaces_list() -> dict[str, Any]:
@@ -1030,7 +1084,7 @@ class CiaoMcpService:
             Args:
                 name: Letters, numbers, dashes, or underscores. The vault
                     folder is the standard one under the vault root.
-                default_provider: claude, codex, or opencode.
+                default_provider: claude or opencode.
                 default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
@@ -1051,49 +1105,10 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="workspace_update", annotations=_WRITE, structured_output=True)
-        async def workspace_update(
-            name: str,
-            default_provider: str | None = None,
-            default_model: str | None = None,
-            gws_profile: str | None = None,
-            disallowed_tools: Any = _UNSET,
-            color: str = "",
-        ) -> dict[str, Any]:
-            """Update a configured workspace. Omitted fields keep their values.
-
-            Args:
-                name: The workspace to update.
-                default_provider: claude, codex, or opencode.
-                default_model: Empty inherits the app-wide default.
-                gws_profile: Linked Google Workspace profile, or empty.
-                disallowed_tools: Extra tools to deny in this workspace;
-                    null resets the workspace-specific list to inherited defaults.
-                color: Workspace accent (pink, cyan, amber, emerald, violet).
-            """
-            return await self._invoke(
-                "workspace_update",
-                lambda cp, p: cp.workspace_update(
-                    p,
-                    name=name,
-                    default_provider=default_provider,
-                    default_model=default_model,
-                    gws_profile=gws_profile,
-                    disallowed_tools=disallowed_tools,
-                    color=color,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="workspace_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def workspace_delete(name: str) -> dict[str, Any]:
-            """Delete a configured workspace. The last workspace cannot be
-            deleted; chats keep their history but lose workspace routing."""
-            return await self._invoke(
-                "workspace_delete",
-                lambda cp, p: cp.workspace_delete(p, name=name),
-                mutating=True,
-            )
+        # workspace_update / workspace_delete moved to the PWA Settings UI
+        # (PATCH/DELETE /api/workspaces/{name}). Workspace config (provider
+        # keys, env vars, model defaults) is admin territory, not a
+        # conversational action.
 
         @tool(name="chats_list", annotations=_READ, structured_output=True)
         async def chats_list(project_id: str = "") -> dict[str, Any]:
@@ -1298,7 +1313,7 @@ class CiaoMcpService:
                 title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
                 model: Model for the delegate, e.g. a cheaper or specialized
                     one. Must be in the configured model set for the resolved
-                    provider (Anthropic, OpenAI via Codex, or opencode
+                    provider (Anthropic or opencode
                     tier alias). Unknown ids are rejected with `invalid_model`
                     and a list of valid alternatives. Omit to inherit the
                     workspace default.
@@ -1420,60 +1435,54 @@ class CiaoMcpService:
             """List schedules in the active workspace with their next run."""
             return await self._invoke("schedules_list", lambda cp, p: cp.schedules_list(p))
 
-        @tool(name="schedule_preview", annotations=_READ, structured_output=True)
-        async def schedule_preview(
-            prompt: str,
-            daily_time: str = "09:00",
-            timezone: str = "UTC",
-            frequency: str = "weekly",
+        @tool(name="schedule", annotations=_WRITE, structured_output=True)
+        async def schedule(
+            action: str,
+            prompt: str | None = None,
+            daily_time: str | None = None,
+            timezone: str | None = None,
+            frequency: str | None = None,
             days_of_week: list[str] | None = None,
             day_of_month: int | None = None,
             run_at_date: str | None = None,
             project_id: str | None = None,
             chat_id: str | None = None,
-            title: str = "",
-            provider: str = "",
-            model: str = "",
-            archive_policy: str = "manual",
+            title: str | None = None,
+            description: str | None = None,
+            provider: str | None = None,
+            model: str | None = None,
+            archive_policy: str | None = None,
+            workspace: str | None = None,
+            schedule_id: str = "",
         ) -> dict[str, Any]:
-            """Validate a schedule and compute its next run without saving it.
+            """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
 
-            Call this before schedule_create for a new recurring schedule and
-            show the user the resulting next_run, workspace, and project as
-            part of the draft. A missing or invalid next_run means the fields
-            don't validate as given — don't create it yet. See schedule_create's
-            docstring for field semantics (they're identical here)."""
-            values = {key: value for key, value in locals().items() if key != "self"}
-            return await self._invoke("schedule_preview", lambda cp, p: cp.schedule_preview(p, **values))
+            action:
+                "preview" — validate and compute next_run without saving. Call this
+                    before "create" for a new recurring schedule and show the user
+                    the resulting next_run, workspace, and project as part of the
+                    draft. A missing or invalid next_run means the fields don't
+                    validate as given — don't create it yet.
+                "create"  — create a validated schedule. Show the user a concise
+                    draft and get confirmation before creating it, unless they
+                    already explicitly asked you to apply it — call "preview"
+                    first. The draft must include next_run, the target workspace,
+                    and the target project (or chat). Ask if they want a different
+                    workspace/project when that isn't obvious from the request.
+                "update"  — update an existing schedule through validated fields.
+                    Field semantics match "create". System schedules (scope=system)
+                    only accept enabled/workspace changes — everything else raises
+                    system_schedule_read_only. Pass schedule_id to target the
+                    schedule; all other fields are optional overrides.
 
-        @tool(name="schedule_create", annotations=_WRITE, structured_output=True)
-        async def schedule_create(
-            prompt: str,
-            daily_time: str = "09:00",
-            timezone: str = "UTC",
-            frequency: str = "weekly",
-            days_of_week: list[str] | None = None,
-            day_of_month: int | None = None,
-            run_at_date: str | None = None,
-            project_id: str | None = None,
-            chat_id: str | None = None,
-            title: str = "",
-            description: str = "",
-            provider: str = "",
-            model: str = "",
-            archive_policy: str = "manual",
-        ) -> dict[str, Any]:
-            """Create a validated Ciaobot schedule (recurring, one-off, or manual-only).
+            Every field but action is optional and unset by default:
+            preview/create fall back to the default noted below, update leaves
+            an unset field untouched. Pass a field (including "" to clear a
+            title, provider, or model) only when you mean to change it.
 
-            Show the user a concise draft and get confirmation before creating
-            it, unless they already explicitly asked you to apply it — call
-            schedule_preview first. The draft must include next_run, the
-            target workspace, and the target project (or chat). Ask if they
-            want a different workspace/project when that isn't obvious from
-            the request. Schedules always belong to one logical workspace
-            (Personal, Work, …) and show under Automations for that workspace.
+            Field semantics (identical for preview/create; update treats all but
+            schedule_id as optional overrides):
 
-            Args:
                 prompt: The prompt dispatched each run. Start with the goal in
                     3-7 words (becomes the chat-title hint); keep only
                     schedule-specific logic — a fresh project run already
@@ -1485,11 +1494,12 @@ class CiaoMcpService:
                     {{ISSUE_REPORT}} (server errors + failed background jobs);
                     Ciaobot clears the consumed error log after a clean run
                     that uses one.
-                daily_time: Local HH:MM in `timezone` (persisted as the legacy
-                    field daily_time_utc).
-                timezone: IANA name, e.g. "Europe/Rome". Use the user's local
-                    timezone unless they ask for UTC.
-                frequency: "daily" | "weekly" | "monthly" | "manual" | "once".
+                daily_time: Local HH:MM in `timezone`, default "09:00"
+                    (persisted as the legacy field daily_time_utc).
+                timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
+                    the user's local timezone unless they ask for UTC.
+                frequency: "daily" | "weekly" | "monthly" | "manual" | "once";
+                    default "weekly".
                 days_of_week: weekly only — lowercase "mon".."sun".
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
@@ -1507,47 +1517,69 @@ class CiaoMcpService:
                     dispatch time; override only when necessary.
                 provider: Empty inherits the target workspace's default
                     provider at dispatch time; override only when necessary.
-                archive_policy: "manual" | "auto".
+                archive_policy: "manual" (default) | "auto".
+                workspace: Omit in almost every case — the schedule is created
+                    in this chat's workspace. Any other name is refused unless
+                    it restates this chat's workspace: schedules are
+                    auto-approved model input and their unattended runs execute
+                    in bypass, so planting one in another workspace would run
+                    there with that workspace's guide, integrations, and file
+                    authority and no operator approval. To automate a second
+                    workspace, work from a chat scoped to it or ask the
+                    operator.
+                schedule_id: (update only) The schedule to update.
 
             An enabled schedule with a missed latest occurrence (e.g. the
             server was off) runs once on startup; older missed intervals are
             not replayed.
             """
-            values = {key: value for key, value in locals().items() if key != "self"}
-            return await self._invoke("schedule_create", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
-
-        @tool(name="schedule_update", annotations=_WRITE, structured_output=True)
-        async def schedule_update(
-            schedule_id: str,
-            prompt: str | None = None,
-            daily_time: str | None = None,
-            timezone: str | None = None,
-            frequency: str | None = None,
-            days_of_week: list[str] | None = None,
-            day_of_month: int | None = None,
-            run_at_date: str | None = None,
-            project_id: str | None = None,
-            chat_id: str | None = None,
-            title: str | None = None,
-            description: str | None = None,
-            provider: str | None = None,
-            model: str | None = None,
-            archive_policy: str | None = None,
-        ) -> dict[str, Any]:
-            """Update a Ciaobot schedule through validated fields. Field
-            semantics match schedule_create. System schedules (scope=system)
-            only accept enabled/workspace changes — everything else raises
-            system_schedule_read_only."""
-            values = {
-                key: value
-                for key, value in locals().items()
-                if key not in {"self", "schedule_id"}
+            # Snapshot the caller's arguments before any other local exists.
+            # Doing it first is what keeps helper locals out of the payload: a
+            # leaked `_defaults` dict once reached the control plane as
+            # `Unknown schedule fields: _defaults`.
+            supplied: dict[str, Any] = {
+                key: value for key, value in locals().items()
+                if key not in {"self", "action", "schedule_id"}
             }
-            return await self._invoke(
-                "schedule_update",
-                lambda cp, p: cp.schedule_update(p, schedule_id, **values),
-                mutating=True,
-            )
+            if action in {"preview", "create"}:
+                values = {
+                    key: _SCHEDULE_CREATE_DEFAULTS.get(key, value) if value is None else value
+                    for key, value in supplied.items()
+                }
+                if action == "preview":
+                    return await self._invoke("schedule", lambda cp, p: cp.schedule_preview(p, **values))
+                return await self._invoke("schedule", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
+            if action == "update":
+                if not schedule_id:
+                    raise ControlPlaneError("invalid_action", "schedule_id is required for update.")
+                # update applies exactly the fields the caller passed. None (the
+                # signature default) is the only "not supplied" marker, so a
+                # value that happens to equal a create default still goes
+                # through. Filter here rather than leaning on schedule_update's
+                # own None-skipping: its system-schedule guard inspects every
+                # key it is handed, including ones it would later skip.
+                values = {key: value for key, value in supplied.items() if value is not None}
+                if not values:
+                    raise ControlPlaneError(
+                        "invalid_action",
+                        "update needs at least one field to change besides schedule_id.",
+                    )
+                # "" now reaches the control plane instead of being dropped,
+                # which is the point for title/provider/model. A schedule with
+                # no prompt dispatches nothing though, and neither
+                # schedule_update nor schedule_preview rejects a blank one, so
+                # an accidental prompt="" must fail here rather than quietly
+                # wipe a working routine.
+                if values.get("prompt") == "":
+                    raise ControlPlaneError(
+                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
+                    )
+                return await self._invoke(
+                    "schedule",
+                    lambda cp, p: cp.schedule_update(p, schedule_id, **values),
+                    mutating=True,
+                )
+            raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
 
         @tool(name="schedule_action", annotations=_DESTRUCTIVE, structured_output=True)
         async def schedule_action(schedule_id: str, action: str) -> dict[str, Any]:
@@ -1579,22 +1611,31 @@ class CiaoMcpService:
             """List in-chat loops in the active workspace."""
             return await self._invoke("loops_list", lambda cp, p: cp.loops_list(p))
 
-        @tool(name="loop_create", annotations=_WRITE, structured_output=True)
-        async def loop_create(
-            prompt: str,
-            chat_id: str = "",
-            interval_minutes: int = 10,
-            title: str = "",
-            autostart: bool = False,
-            start: bool = True,
+        @tool(name="loop", annotations=_WRITE, structured_output=True)
+        async def loop(
+            action: str,
+            prompt: str | None = None,
+            chat_id: str | None = None,
+            interval_minutes: int | None = None,
+            title: str | None = None,
+            autostart: bool | None = None,
+            start: bool | None = None,
+            loop_id: str = "",
         ) -> dict[str, Any]:
-            """Create an interval loop: re-sends one prompt into a fixed chat
-            every N minutes, retaining that chat's context. Use a loop rather
-            than a schedule for sub-day recurrence that needs one
-            conversation's continuity; use a schedule instead when each run
-            should get a fresh project chat.
+            """Create or update an in-chat loop.
 
-            Args:
+            A loop re-sends one prompt into a fixed chat every N minutes,
+            retaining that chat's context. Use a loop rather than a schedule
+            for sub-day recurrence that needs one conversation's continuity;
+            use a schedule instead when each run should get a fresh project chat.
+
+            action:
+                "create" — create an interval loop and (by default) start it
+                    immediately.
+                "update" — update an existing loop's fields. Pass loop_id to
+                    target it; all other fields are optional overrides.
+
+            Args (create):
                 chat_id: An existing chat id, or omit / pass empty / "this" for
                     the calling chat. If you must target another chat, resolve
                     its id via chats_list first — chat titles aren't unique.
@@ -1612,36 +1653,74 @@ class CiaoMcpService:
                     running. The returned payload carries the real `running`
                     flag — report that, not your intent.
 
+            Args (update): loop_id is required; every other field is unset by
+                default and only a field you pass is changed. `start` is
+                honoured here too: True starts the cadence, False stops it
+                (same as loop_action), and the returned payload carries the
+                resulting `running` flag.
+
             If the target chat is busy when a tick fires, that iteration is
             skipped and retried on the next tick (not queued). If the target
             chat is missing or archived, the loop stops. Loops do not catch
             up missed ticks after downtime (unlike schedules, which fire once
             for a missed occurrence on startup).
             """
-            return await self._invoke(
-                "loop_create",
-                lambda cp, p: cp.loop_create(
-                    p, chat_id, prompt, interval_minutes, title, autostart, start
-                ),
-                mutating=True,
-            )
-
-        @tool(name="loop_update", annotations=_WRITE, structured_output=True)
-        async def loop_update(
-            loop_id: str,
-            prompt: str | None = None,
-            chat_id: str | None = None,
-            interval_minutes: int | None = None,
-            title: str | None = None,
-            autostart: bool | None = None,
-        ) -> dict[str, Any]:
-            """Update an in-chat loop."""
-            values = {
-                key: value
-                for key, value in locals().items()
-                if key not in {"self", "loop_id"}
+            # Snapshot the arguments before any other local exists, so no helper
+            # local can leak into the control-plane payload.
+            supplied: dict[str, Any] = {
+                key: value for key, value in locals().items()
+                if key not in {"self", "action", "loop_id"}
             }
-            return await self._invoke("loop_update", lambda cp, p: cp.loop_update(p, loop_id, **values), mutating=True)
+            if action == "create":
+                values: dict[str, Any] = {
+                    key: _LOOP_CREATE_DEFAULTS.get(key, value) if value is None else value
+                    for key, value in supplied.items()
+                }
+                return await self._invoke(
+                    "loop",
+                    lambda cp, p: cp.loop_create(p, **values),
+                    mutating=True,
+                )
+            if action == "update":
+                if not loop_id:
+                    raise ControlPlaneError("invalid_action", "loop_id is required for update.")
+                # Only the fields the caller passed, keyed off None rather than
+                # off equality with the create defaults: that comparison dropped
+                # interval_minutes=10 and every ""-clear (reporting ok while
+                # changing nothing) and, because False != True, forwarded
+                # start=False to loop_update, which rejected it as
+                # `invalid_fields: start`.
+                values = {
+                    key: value for key, value in supplied.items()
+                    if key != "start" and value is not None
+                }
+                if not values and start is None:
+                    raise ControlPlaneError(
+                        "invalid_action",
+                        "update needs at least one field to change besides loop_id.",
+                    )
+                # loop_create refuses an empty prompt; loop_update does not, and
+                # a loop with a blank prompt keeps ticking on nothing.
+                if values.get("prompt") == "":
+                    raise ControlPlaneError(
+                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
+                    )
+
+                def _update(cp: CiaoControlPlane, principal: McpPrincipal) -> dict[str, Any]:
+                    result: dict[str, Any] = cp.loop_update(principal, loop_id, **values)
+                    if start is None:
+                        return result
+                    # `start` is a runtime cadence flag, not a stored loop field,
+                    # so it has to go through the lifecycle calls instead of the
+                    # update payload.
+                    if start:
+                        cp.loop_start(principal, loop_id)
+                    else:
+                        cp.loop_stop(principal, loop_id)
+                    return {"ok": True, "data": {**result.get("data", {}), "running": bool(start)}}
+
+                return await self._invoke("loop", _update, mutating=True)
+            raise ControlPlaneError("invalid_action", "action must be create or update.")
 
         @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
         async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
@@ -1687,45 +1766,10 @@ class CiaoMcpService:
             do not claim you already confirmed it failed."""
             return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
-        # File history/snapshot/restore are covered by the workspace git repo.
-        @tool(name="adversarial_review", annotations=_WRITE, structured_output=True)
-        async def adversarial_review(
-            artifact: str,
-            doc_type: str = "document",
-            focus: str = "",
-            context: str = "",
-            models: str = "",
-            format: str = "markdown",
-        ) -> dict[str, Any]:
-            """Send an artifact to several models for a multi-model adversarial review.
-
-            Each configured model reviews the artifact independently (no shared
-            context between them) and the results are synthesized into per-model
-            verdicts plus a combined issue list. Use when the user explicitly asks
-            for a review, critique, red-team, or second opinion, when they're about
-            to ship something high-stakes (a PRD, brief, plan, customer email, exec
-            deck, public post), or when you just produced a substantive artifact
-            yourself and want it pressure-tested before declaring done. Skip for
-            trivial outputs (one-line answers, simple lookups) — the panel costs
-            real tokens and time.
-
-            Args:
-                artifact: The full text to review, inlined directly (not a file path).
-                doc_type: Artifact type, e.g. "prd", "plan", "brief", "email", "code".
-                focus: Optional area to focus the critique on.
-                context: Optional extra context for the reviewers (audience, constraints).
-                models: Comma-separated model ids to override the configured panel
-                    (Settings → Models → Adversarial review panel) for this one call.
-                format: "markdown" (a rendered report) or "json" (raw per-model results).
-            """
-            return await self._invoke(
-                "adversarial_review",
-                lambda cp, p: cp.adversarial_review(
-                    p, artifact, doc_type=doc_type, focus=focus, context=context,
-                    models=models, format=format,
-                ),
-                mutating=True,
-            )
+        # adversarial_review dropped — the `ciao-command-critique` skill and
+        # `/code-review --fix` cover the same surface. The skill is the better
+        # mechanism: model-picked, not a flat tool call. The control-plane
+        # method remains for the CLI skill path.
 
         # agent_context_get / workspace_health_* -> `ciao health get|fix`;
         # skills_list -> `ciao skills list`; skills_sync -> `ciao skills-sync`.

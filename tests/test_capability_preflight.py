@@ -233,10 +233,12 @@ async def test_preflight_switch_redispatches_on_picked_model(tmp_path: Path, mon
 
 
 async def test_preflight_picker_closes_cleanly(tmp_path: Path, monkeypatch) -> None:
-    """Picker answers end the turn with no result and no bubble.
+    """Picker answers end the turn with no result, but with the system bubble.
 
     The PWA opens the model selector and the user re-sends through the
-    normal path, so this turn just stops.
+    normal path. The bubble is deliberate: a silent end left every *other*
+    connected client (flaky mobile socket, second device) with a stuck
+    "thinking" state and no transcript row to settle on.
     """
     _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
@@ -267,8 +269,9 @@ async def test_preflight_picker_closes_cleanly(tmp_path: Path, monkeypatch) -> N
 
     assert drive_calls == []
     assert not any(e.get("type") == "result" for e in events)
-    # No status bubble: the user is mid-flow, not abandoned.
-    assert not any(e.get("type") == "status" for e in events)
+    # The system bubble explains the empty transcript on every client.
+    status = [e for e in events if e.get("type") == "status"]
+    assert any(_CAPABILITY_IMAGE_MSG in (e.get("message") or "") for e in status)
 
 
 async def test_preflight_timeout_closes_turn_with_bubble(tmp_path: Path, monkeypatch) -> None:

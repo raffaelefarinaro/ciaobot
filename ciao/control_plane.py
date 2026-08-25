@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -21,7 +20,13 @@ from typing import Any, Literal
 
 from ciao import vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
-from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
+from ciao.fts_search import (
+    get_db_path,
+    index_vault,
+    init_db,
+    search_vault,
+    vault_key_prefix,
+)
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import resolve_region, update_region
@@ -36,13 +41,6 @@ logger = logging.getLogger(__name__)
 # normal ``= None`` default loses information before the control plane sees
 # it.
 _UNSET = object()
-
-# One grammar for a proposal bullet, shared by the list and dismiss paths. The
-# trailing `_(from: …)_` source tag is optional and captured when present.
-_PROPOSAL_BULLET_RE = re.compile(
-    r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
-)
-
 
 @dataclass(frozen=True, slots=True)
 class McpPrincipal:
@@ -84,6 +82,14 @@ class McpPrincipal:
         )
 
 
+# Permission modes ordered weakest to strongest, so a child chat's requested
+# mode can be compared against its ceiling instead of being overwritten by it.
+# ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
+# defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
+# and the SDK mapping in ciao.providers.claude.
+_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+
+
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
@@ -118,10 +124,8 @@ class CiaoControlPlane:
         project_chat_manager: Any,
         schedule_manager: Any,
         loop_manager: Any,
-        local_session_manager: Any | None = None,
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
-        lifecycle_callback: Callable[[int], Any] | None = None,
         connection_tracker: Any | None = None,
         background_runner: Any | None = None,
     ) -> None:
@@ -129,10 +133,8 @@ class CiaoControlPlane:
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
         self.loops = loop_manager
-        self.local_sessions = local_session_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
-        self._lifecycle_callback = lifecycle_callback
         self._deferred_actions: dict[str, dict[str, Any]] = {}
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
@@ -140,10 +142,6 @@ class CiaoControlPlane:
         # Optional: the BackgroundRunner backing the background_run_* tools.
         # Unset on legacy-only instances and in most tests.
         self.background = background_runner
-
-    def set_lifecycle_callback(self, callback: Callable[[int], Any]) -> None:
-        """Attach the server restart callback after uvicorn is constructed."""
-        self._lifecycle_callback = callback
 
     def _defer_until_chat_idle(
         self,
@@ -260,6 +258,37 @@ class CiaoControlPlane:
             return principal.chat_id
         return value
 
+    def _resolve_project_in_workspace(
+        self, principal: McpPrincipal, ref: str, workspace: str
+    ) -> Any:
+        """Resolve a project reference against one explicit workspace.
+
+        Like ``_resolve_project`` but both the name lookup and the ownership
+        check target ``workspace`` instead of the caller's own (used by
+        ``schedule_update`` to resolve a project inside its settled
+        destination workspace).
+        """
+        exact = self.pcm.get_project(ref)
+        if exact is not None:
+            if exact.workspace != workspace:
+                raise ControlPlaneError(
+                    "workspace_mismatch",
+                    f"Project '{ref}' lives in workspace '{exact.workspace}', not '{workspace}'.",
+                )
+            return exact
+        matches = [
+            p for p in self.pcm.list_projects(workspace)
+            if p.name.casefold() == ref.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ControlPlaneError(
+                "project_ambiguous",
+                f"'{ref}' matches more than one project; use its exact id instead.",
+            )
+        raise ControlPlaneError("project_not_found", f"Project '{ref}' was not found.")
+
     def _chat_scope(self, principal: McpPrincipal, chat_id: str | None = None) -> tuple[Any, Any]:
         """Resolve a chat plus the project that owns it, in one authorization pass.
 
@@ -289,24 +318,38 @@ class CiaoControlPlane:
         return str(getattr(chat, "mode", "auto") or "auto")
 
     def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
-        """Keep an MCP-created child at its caller's permission ceiling.
+        """Hold an MCP-created child at or below its caller's permission ceiling.
 
-        The child starts its first turn immediately, so accepting a stronger
+        The child starts its first turn immediately, so accepting a *stronger*
         mode from model-authored tool arguments would let a normal/auto chat
-        manufacture a bypass session without an operator approval. The
-        provider enforces the returned mode as its session permission rules;
-        keeping the clamp here also covers Codex and Claude child chats.
+        manufacture a bypass session without an operator approval. The provider
+        enforces the returned mode as its session permission rules; keeping the
+        clamp here also covers provider child chats.
+
+        A ceiling, not a pin. This used to return ``parent_mode`` outright and
+        ignore ``requested``, which blocked *de-escalation* as well as
+        escalation: from a ``bypass`` chat, ``chat_update(chat_id=<other>,
+        mode="normal")`` raised the target to ``bypass`` instead of clamping it,
+        and in an ``auto`` chat a ``mode="plan"`` downgrade was written back as
+        ``auto`` while the response still reported success — a requested
+        restriction silently discarded. A weaker request is always honoured;
+        only an upward one is clamped.
         """
         parent_mode = self.chat_mode(principal)
-        if parent_mode not in {"normal", "plan", "auto", "bypass"}:
+        if parent_mode not in _MODE_RANK:
             parent_mode = "normal"
-        if requested and requested != parent_mode:
-            logger.warning(
-                "Clamping child chat mode %r to parent %r for %s",
-                requested,
-                parent_mode,
-                principal.chat_id or "unscoped MCP session",
-            )
+        # An unrecognised request carries no rank to compare, so it cannot be
+        # honoured safely; fall back to the ceiling rather than guessing.
+        if not requested or requested not in _MODE_RANK:
+            return parent_mode
+        if _MODE_RANK[requested] <= _MODE_RANK[parent_mode]:
+            return requested
+        logger.warning(
+            "Clamping child chat mode %r to ceiling %r for %s",
+            requested,
+            parent_mode,
+            principal.chat_id or "unscoped MCP session",
+        )
         return parent_mode
 
     def _vault_root(self, principal: McpPrincipal) -> Path:
@@ -355,8 +398,8 @@ class CiaoControlPlane:
 
     def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
-        self._workspace(principal)
-        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        workspace = self._workspace(principal)
+        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         return _ok(memory_status_payload(
             guide,
             memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
@@ -373,7 +416,7 @@ class CiaoControlPlane:
         match: str = "",
     ) -> dict[str, Any]:
         """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
-        self._workspace(principal)
+        workspace = self._workspace(principal)
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
@@ -382,7 +425,7 @@ class CiaoControlPlane:
             if canonical == "memory"
             else int(getattr(self.config, "user_char_limit", 1375))
         )
-        guide = Path(self.config.workspace_root) / "CLAUDE.md"
+        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         try:
             result = update_region(
                 guide,
@@ -398,71 +441,10 @@ class CiaoControlPlane:
 
     # ---- memory proposals ----------------------------------------------
 
-    def _memory_proposals_path(self, principal: McpPrincipal) -> Path:
-        return self._vault_root(principal) / "Workspace" / "Memory-Proposals.md"
-
-    def memory_proposals_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        """Return structured pending proposal bullets for the active workspace."""
-        path = self._memory_proposals_path(principal)
-        if not path.exists():
-            return _ok([])
-        rows: list[dict[str, str]] = []
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            match = _PROPOSAL_BULLET_RE.match(raw)
-            if match:
-                rows.append({
-                    "target": resolve_region(match.group(1)),
-                    "text": match.group(2).strip(),
-                    "source": (match.group(3) or "").strip(),
-                })
-        return _ok(rows)
-
-    def memory_proposal_resolve(
-        self,
-        principal: McpPrincipal,
-        text: str,
-        *,
-        action: Literal["accept", "reject"],
-    ) -> dict[str, Any]:
-        """Dismiss exactly one proposal from the queue.
-
-        Promotion into a CLAUDE.md region is an explicit ``Edit`` by the
-        agent — this tool never writes memory. Ordering: edit the region
-        first, then dismiss the proposal (the reverse loses the fact if the
-        turn dies between the two steps).
-        """
-        if action not in {"accept", "reject"}:
-            raise ControlPlaneError("invalid_action", "action must be accept or reject.")
-        path = self._memory_proposals_path(principal)
-        if not path.exists():
-            raise ControlPlaneError("proposal_not_found", "The proposal queue is empty.")
-        needle = text.strip()
-        if not needle:
-            raise ControlPlaneError("proposal_required", "A proposal text or unique substring is required.")
-        lines = path.read_text(encoding="utf-8").splitlines()
-        candidates = [
-            (index, line)
-            for index, line in enumerate(lines)
-            if line.lstrip().startswith("- [") and needle.casefold() in line.casefold()
-        ]
-        if not candidates:
-            raise ControlPlaneError("proposal_not_found", "No pending proposal matched that text.")
-        if len(candidates) > 1:
-            raise ControlPlaneError("proposal_ambiguous", "The text matched more than one proposal; use a longer substring.")
-        index, line = candidates[0]
-        match = _PROPOSAL_BULLET_RE.match(line)
-        if match is None:
-            raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_target = resolve_region(match.group(1))
-        proposal_text = match.group(2).strip()
-        del lines[index]
-        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-        return _ok({
-            "action": action,
-            "target": proposal_target,
-            "text": proposal_text,
-            "dismissed": True,
-        })
+    # Memory-proposal list/dismiss moved out of the MCP surface to the CLI
+    # (`ciao memory-proposals`, `ciao memory-proposal-dismiss`) so the nightly
+    # curation agent can review and resolve the queue through one tool instead
+    # of a synchronous MCP round-trip.
 
     # ---- workspaces ----------------------------------------------------
 
@@ -504,65 +486,6 @@ class CiaoControlPlane:
         self._refresh_workspace_registry()
         return _ok(workspace_to_dict(workspace, self.config))
 
-    def workspace_update(
-        self,
-        principal: McpPrincipal,
-        *,
-        name: str,
-        default_provider: str | None = None,
-        default_model: str | None = None,
-        gws_profile: str | None = None,
-        disallowed_tools: Any = _UNSET,
-        color: str = "",
-    ) -> dict[str, Any]:
-        """Update a registered workspace. Omitted fields keep their values."""
-        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
-
-        existing = self.config.workspace(name)
-        if existing is None:
-            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
-        data: dict[str, Any] = {"name": name}
-        if default_provider is not None:
-            data["default_provider"] = default_provider
-        if default_model is not None:
-            data["default_model"] = default_model
-        if gws_profile is not None:
-            data["gws_profile"] = gws_profile
-        if disallowed_tools is not _UNSET:
-            data["disallowed_tools"] = disallowed_tools
-        if color:
-            data["color"] = color
-        workspace = workspace_from_request(data, config=self.config, existing=existing)
-        self.config.workspaces[workspace.name] = workspace
-        persist_workspaces(self.config)
-        self._refresh_workspace_registry()
-        return _ok(workspace_to_dict(workspace, self.config))
-
-    def workspace_delete(self, principal: McpPrincipal, *, name: str) -> dict[str, Any]:
-        """Delete a registered workspace. The last workspace cannot be deleted."""
-        if self.config.workspace(name) is None:
-            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
-        if len(self.config.workspaces) <= 1:
-            raise ControlPlaneError(
-                "last_workspace", "Cannot delete the last workspace."
-            )
-        if name == principal.workspace:
-            # The caller lives inside the workspace being deleted; dropping it
-            # mid-turn would invalidate the calling scope, so wait until idle.
-            return self._defer_until_chat_idle(
-                principal,
-                "workspace_delete",
-                lambda: self._delete_workspace(name),
-            )
-        return _ok(self._delete_workspace(name))
-
-    def _delete_workspace(self, name: str) -> dict[str, Any]:
-        from ciao.workspaces import persist_workspaces
-
-        self.config.workspaces.pop(name, None)
-        persist_workspaces(self.config)
-        self._refresh_workspace_registry()
-        return {"deleted": name}
 
     def _refresh_workspace_registry(self) -> None:
         """Notify the project-chat manager after a registry mutation."""
@@ -572,27 +495,106 @@ class CiaoControlPlane:
 
     # ---- vault ---------------------------------------------------------
 
+    def _entity_index_root(self, principal: McpPrincipal) -> Path:
+        """The vault whose INDEX.md covers this chat. See vault_index_refresh."""
+        workspace = self._workspace(principal)
+        if workspace:
+            try:
+                return Path(self.config.agent_vault_root(workspace))
+            except (AttributeError, ValueError):
+                pass
+        return Path(self.config.vault_root)
+
+    def _index_stamp(self, principal: McpPrincipal) -> str:
+        """Workspace to stamp on scanned entries, or "" to infer from the path.
+
+        Empty before the re-rooting: the shared vault holds every workspace, so
+        the first-path-segment inference is what labels them. The workspace name
+        afterwards, because a root's vault holds exactly one workspace and its
+        first segment is a folder name.
+        """
+        workspace = self._workspace(principal)
+        if not workspace:
+            return ""
+        try:
+            rooted = Path(self.config.agent_vault_root(workspace)) != Path(
+                self.config.vault_root
+            )
+        except (AttributeError, ValueError):
+            return ""
+        return workspace if rooted else ""
+
+    def _search_key_base(self) -> Path:
+        """The install root, which every stored search key is relative to.
+
+        Falls back to the configured vault root's parent, which is the install
+        root in both layouts: before the re-rooting the vault sits directly under
+        it, and after it ``config.vault_root`` still names that same path even
+        though each root now owns its own vault. The fallback exists because
+        several call sites build a minimal config stub.
+        """
+        base = getattr(self.config, "workspace_root", None)
+        if base:
+            return Path(base)
+        return Path(self.config.vault_root).parent
+
     def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
+        """Search this workspace's notes, and only this workspace's notes.
+
+        Keys are stored relative to the install root so two agent roots holding
+        a vault of the same name cannot overwrite each other's rows, and the
+        result set is filtered to this vault's prefix. Both halves are needed:
+        the isolation used to be a side effect of the index prune deleting every
+        other root's rows on each pass, which also meant switching workspace
+        re-indexed the whole vault.
+        """
         root = self._vault_root(principal)
+        base = self._search_key_base()
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
-            index_vault(conn, root)
-            rows = search_vault(conn, query, limit=max(1, min(50, int(limit))))
+            index_vault(conn, root, path_base=base)
+            rows = search_vault(
+                conn,
+                query,
+                limit=max(1, min(50, int(limit))),
+                path_prefix=vault_key_prefix(root, base),
+            )
         finally:
             conn.close()
         return _ok(rows)
 
     def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
-        root = self._vault_root(principal)
-        entries = vault_index.scan_vault(root)
-        vault_index.write_index_file(entries, root / "INDEX.md")
+        """Rebuild the entity index covering this chat, and its search index.
+
+        The index root is ``agent_vault_root(workspace)``, which is correct in
+        both layouts and for the same reason each time: it is the vault whose
+        INDEX.md this chat's entity lookup reads. Before the re-rooting that is
+        the ONE shared index, holding every workspace's prefixed paths and
+        filtered per workspace at read time; after it, this root's own index,
+        which needs no prefix because the root holds one vault.
+
+        Deliberately not ``_workspace_vault_root``: before the migration that is
+        a subtree of the shared vault, and writing an index there produced one
+        whose paths no filter recognised while leaving the real one stale.
+
+        The FTS index stays workspace-scoped: it backs ``vault_search``, whose
+        isolation boundary is ``_vault_root(principal)``.
+        """
+        search_root = self._vault_root(principal)
+        index_root = self._entity_index_root(principal)
+        entries = vault_index.scan_vault(
+            index_root, workspace=self._index_stamp(principal)
+        )
+        vault_index.write_index_file(entries, index_root / "INDEX.md")
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
-            indexed, removed = index_vault(conn, root)
+            indexed, removed = index_vault(
+                conn, search_root, path_base=self._search_key_base()
+            )
         finally:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
@@ -667,10 +669,6 @@ class CiaoControlPlane:
             )
         return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
 
-    def project_files_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
-        project = self._resolve_project(principal, project_id)
-        return _ok(self.pcm.list_project_files(project.project_id))
-
     def chats_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
         if project_id:
             self._project(principal, project_id)
@@ -700,6 +698,7 @@ class CiaoControlPlane:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
+        requested_mode = mode
         mode = self._child_mode(principal, mode)
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
@@ -708,6 +707,9 @@ class CiaoControlPlane:
             chat.control_surface = control_surface
             self.pcm._save()
         result = chat.to_dict(local=True)
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
         text = (prompt or "").strip()
         if text:
             if self.pcm.queue_message(chat.chat_id, text):
@@ -733,6 +735,7 @@ class CiaoControlPlane:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
             self._project(principal, project_id)
+        requested_mode = mode
         if mode is not None:
             # A normal/auto MCP caller must not upgrade its own or another
             # chat to bypass through the auto-approved metadata tool. Keep the
@@ -771,7 +774,11 @@ class CiaoControlPlane:
                     if provider_service is not None:
                         asyncio.create_task(provider_service.disconnect())
             self.pcm._save()
-        return _ok(updated.to_dict(local=self.pcm.is_session_local(updated)))
+        result = updated.to_dict(local=self.pcm.is_session_local(updated))
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
+        return _ok(result)
 
     def chat_send(self, principal: McpPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
@@ -969,6 +976,7 @@ class CiaoControlPlane:
             )
         if not prompt.strip():
             raise ControlPlaneError("empty_prompt", "prompt is required.")
+        requested_mode = mode
         mode = self._child_mode(principal, mode)
         active = self.pcm.active_delegate_count(parent.chat_id)
         if active >= _MAX_ACTIVE_DELEGATES:
@@ -1005,6 +1013,9 @@ class CiaoControlPlane:
         result = chat.to_dict(local=True)
         result["send_status"] = send_status
         result["active_delegates"] = active + 1
+        if requested_mode and requested_mode != mode:
+            result["mode_clamped"] = True
+            result["requested_mode"] = requested_mode
         return _ok(result)
 
     def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
@@ -1158,8 +1169,21 @@ class CiaoControlPlane:
         When ``chat_id`` is omitted, ``project_id`` defaults to the caller's
         active project (same as ``chat_create``) so MCP-created schedules land
         in the chat's workspace+project instead of an unscoped Personal fallback.
+
+        An explicit ``workspace`` may only restate the principal's own. Unlike a
+        chat turn, a schedule is auto-approved model input that persists a
+        prompt and runs unattended — and unattended dispatch forces the target
+        chat into bypass — so honoring a foreign workspace would let an
+        injected or compromised managed chat execute there with that
+        workspace's guide, integrations, and filesystem authority, without
+        operator approval. Giving a second workspace an automation is operator
+        business, done from a chat scoped to it.
         """
-        workspace = self._workspace(principal)
+        # One boundary for explicit and omitted targets alike: ``_workspace``
+        # refuses any name other than the principal's own and still validates
+        # that the scoped workspace exists.
+        workspace = self._workspace(principal, str(values.get("workspace") or ""))
+
         chat_ref = values.get("chat_id")
         project_ref = values.get("project_id")
         web_chat_id: str | None = None
@@ -1168,18 +1192,18 @@ class CiaoControlPlane:
         if chat_ref:
             chat = self._chat(principal, str(chat_ref))
             web_chat_id = chat.chat_id
-            if project_ref:
-                project = self._resolve_project(principal, str(project_ref))
-        else:
+
+        if project_ref:
+            project = self._resolve_project(principal, str(project_ref))
+        elif not web_chat_id:
             # Inherit the active project when omitted — preferred for vault-aware
             # automation and keeps the schedule in the same workspace as this chat.
-            project = self._resolve_project(
-                principal, None if project_ref is None else str(project_ref)
-            )
+            project = self._resolve_project(principal, None)
 
         web_project_id: str | None = None
         if project is not None:
             web_project_id = project.project_id
+            # Re-stamp from the resolved project (same as the HTTP route).
             workspace = self._workspace(principal, project.workspace)
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -1243,14 +1267,94 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" and any(key not in {"enabled", "workspace"} for key in changes):
             raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace changes.")
+        # Where this schedule's run bindings actually live: the bound project's
+        # own workspace when there is one (an entry written before the workspace
+        # field existed carries none of its own), else the stored field.
+        bound = self.pcm.get_project(entry.web_project_id) if entry.web_project_id else None
+        origin = str(getattr(bound, "workspace", "") or entry.workspace or principal.workspace)
+        # Settle the destination workspace *before* resolving the project, and
+        # validate it here: dispatch-time routing and provider/model inheritance
+        # both hang off this field, so silently storing garbage would strand the
+        # schedule. The destination is scoped like every other tool too: an
+        # unattended run executes its prompt in bypass inside the target
+        # workspace, so a move there is operator business, not something a
+        # managed chat can talk a token into.
+        if changes.get("workspace") is not None:
+            target = self._workspace(principal, str(changes["workspace"]).strip().lower())
+            changes["workspace"] = target
+        else:
+            target = origin
+
+        project: Any | None = None
         if changes.get("project_id"):
-            project_id = self._resolve_project_id(principal, str(changes["project_id"]))
-            project = self._project(principal, project_id)
-            changes["project_id"] = project_id
+            # Resolve the reference inside the *destination* workspace, exactly
+            # as ``schedule_preview`` does. Going through
+            # ``_resolve_project_id``/``_project`` searched and authorized
+            # against the caller's own workspace instead, so
+            # ``workspace="work"`` plus a project that lives in `work` failed
+            # with project_not_found/workspace_forbidden before the new
+            # workspace was ever considered — cross-workspace targeting worked
+            # on create but never on update.
+            project = self._resolve_project_in_workspace(
+                principal, str(changes["project_id"]), target
+            )
+            changes["project_id"] = project.project_id
             # Keep workspace aligned with the new target (same as the HTTP API).
             changes.setdefault("workspace", project.workspace)
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        if project is not None:
+            # The recorded name is what survives per-instance project-id
+            # regeneration (dispatch re-homes by it), so leaving the previous
+            # project's name behind would let a moved schedule silently re-home
+            # onto the wrong project.
+            normalized["web_project_name"] = project.name
+        if target != origin:
+            # Reassigning the workspace has to re-point the run target too:
+            # dispatch prioritises web_chat_id/web_project_id and never checks
+            # them against entry.workspace, so a bare ``workspace="work"``
+            # update left the schedule listed under `work` while every
+            # unattended run still created chats in — or posted into — the old
+            # workspace's project/chat: a silent cross-workspace write.
+            if normalized.get("web_chat_id"):
+                # Same boundary ``schedule_create`` draws: a chat binding cannot
+                # cross workspaces, and it resolves against the caller's own.
+                raise ControlPlaneError(
+                    "workspace_mismatch",
+                    "chat_id binds the schedule to a chat in its current workspace; "
+                    "omit it when moving the schedule to another workspace, and pass "
+                    "project_id to choose where its runs land.",
+                )
+            if entry.web_chat_id or entry.web_project_id:
+                normalized["web_chat_id"] = None
+                if "web_project_id" not in normalized:
+                    if entry.scope == "system":
+                        # System rows persist only SYSTEM_STATE_FIELDS and
+                        # resolve their project from the packaged definition
+                        # plus the workspace at dispatch, so clearing suffices.
+                        normalized["web_project_id"] = None
+                        normalized["web_project_name"] = ""
+                    else:
+                        # A user schedule with neither binding is skipped
+                        # outright at dispatch ("Schedule has no web target"),
+                        # so a bare move still has to name a destination: the
+                        # target workspace's General project, which is what an
+                        # unqualified cross-workspace target means.
+                        general = next(
+                            (
+                                item for item in self.pcm.list_projects(target)
+                                if item.name == "General"
+                            ),
+                            None,
+                        )
+                        if general is None:
+                            raise ControlPlaneError(
+                                "project_required",
+                                f"Workspace '{target}' has no General project to move this "
+                                "schedule into; pass project_id naming a project in it.",
+                            )
+                        normalized["web_project_id"] = general.project_id
+                        normalized["web_project_name"] = general.name
         known = set(ScheduleEntry.__dataclass_fields__)
         unknown = sorted(set(normalized) - known)
         if unknown:
@@ -1465,126 +1569,7 @@ class CiaoControlPlane:
                 stream_state = "active"
         return viewers, stream_state
 
-    def file_history_list(
-        self, principal: McpPrincipal, chat_id: str, file_path: str
-    ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        return _ok(self.pcm.snapshots.list_snapshots(chat_id=chat.chat_id, file_path=file_path))
-
-    def file_snapshot_read(
-        self, principal: McpPrincipal, chat_id: str, file_path: str, seq: int
-    ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        result = self.pcm.snapshots.read_snapshot(
-            chat_id=chat.chat_id, file_path=file_path, seq=max(1, int(seq))
-        )
-        if result is None:
-            raise ControlPlaneError("snapshot_not_found", "The requested snapshot was not found.")
-        content, meta = result
-        if meta.get("truncated"):
-            raise ControlPlaneError("snapshot_truncated", "The snapshot was too large to capture.")
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ControlPlaneError("binary_snapshot", "Binary snapshots are not returned through MCP.") from exc
-        return _ok({"content": text, "meta": meta})
-
-    async def file_snapshot_restore(
-        self, principal: McpPrincipal, chat_id: str, file_path: str, seq: int
-    ) -> dict[str, Any]:
-        chat_id = self._chat_id(principal, chat_id)
-        root = Path(self.config.workspace_root).resolve()
-        raw = Path(file_path)
-        target = raw.resolve() if raw.is_absolute() else self._safe_relative(root, file_path)
-        if not target.is_relative_to(root):
-            raise ControlPlaneError("path_forbidden", "Snapshots can only be restored inside the workspace root.")
-        result = self.pcm.snapshots.read_snapshot(
-            chat_id=chat_id, file_path=file_path, seq=max(1, int(seq))
-        )
-        if result is None:
-            raise ControlPlaneError("snapshot_not_found", "The requested snapshot was not found.")
-        content, meta = result
-        if meta.get("truncated"):
-            raise ControlPlaneError("snapshot_truncated", "A truncated snapshot cannot be restored.")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-        new_meta = await self.pcm.snapshots.capture(
-            chat_id=chat_id,
-            file_path=file_path,
-            action="restored",
-            tool="MCPRestore",
-        )
-        return _ok({
-            "restored_seq": int(seq),
-            "new_seq": new_meta.seq if new_meta else 0,
-            "path": target.relative_to(root).as_posix(),
-        })
-
     # ---- adversarial review ---------------------------------------------
-
-    async def adversarial_review(
-        self,
-        principal: McpPrincipal,
-        artifact: str,
-        *,
-        doc_type: str = "document",
-        focus: str = "",
-        context: str = "",
-        models: str = "",
-        format: str = "markdown",
-    ) -> dict[str, Any]:
-        self._workspace(principal)
-        text = artifact.strip()
-        if not text:
-            raise ControlPlaneError("empty_artifact", "Artifact text is required.")
-        from ciao.critique import (
-            USER_PROMPT_TEMPLATE,
-            aggregate,
-            render_markdown,
-            resolve_critique_panel,
-            run_panel,
-        )
-
-        panel = resolve_critique_panel(self.config, override=models)
-        if not panel:
-            raise ControlPlaneError(
-                "no_panel", "No critique models are configured (Settings → Models)."
-            )
-        user_prompt = USER_PROMPT_TEMPLATE.format(
-            doc_type=doc_type or "document",
-            focus_block=f"Focus area: {focus}\n" if focus else "",
-            context_block=f"Author context: {context}\n" if context else "",
-            artifact=text,
-        )
-        results = await run_panel(panel, text, user_prompt, self.config)
-        agg = aggregate(results)
-        if format == "json":
-            from dataclasses import asdict as _asdict
-
-            return _ok({"aggregate": agg, "results": [_asdict(r) for r in results]})
-        return _ok({
-            "markdown": render_markdown("artifact", results, agg),
-            "model_count": agg["model_count"],
-            "ok_count": agg["ok_count"],
-            "verdicts": agg["verdicts"],
-            "total_issues": agg["total_issues"],
-        })
-
-    def agent_context_get(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.web.agent_assets import (
-            list_command_assets,
-            list_prompt_assets,
-            list_subagents,
-            workspace_health,
-        )
-
-        return _ok({
-            "context": [asdict(item) for item in list_prompt_assets(self.config)],
-            "subagents": [asdict(item) for item in list_subagents(self.config)],
-            "commands": [asdict(item) for item in list_command_assets(self.config)],
-            "health": workspace_health(self.config),
-        })
 
     async def skills_sync(self, principal: McpPrincipal, refresh_upstream: bool = False) -> dict[str, Any]:
         self._workspace(principal)
@@ -1596,109 +1581,3 @@ class CiaoControlPlane:
             refresh_upstream=refresh_upstream,
         )
         return _ok(asdict(result))
-
-    # ---- operations ----------------------------------------------------
-
-    async def local_session_status(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(self.local_sessions.status())
-
-    async def local_session_preflight(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(await self.local_sessions.preflight())
-
-    async def local_session_handback(
-        self, principal: McpPrincipal, *, confirm_warnings: bool = False
-    ) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        preflight = await self.local_sessions.preflight()
-        if preflight.get("blockers"):
-            raise ControlPlaneError("secrets_blocked", "The git handback is blocked by the secrets check.")
-        if preflight.get("warnings") and not confirm_warnings:
-            return {
-                "ok": False,
-                "error": {
-                    "code": "confirmation_required",
-                    "message": "Preflight warnings require explicit confirmation.",
-                    "retryable": False,
-                    "details": preflight.get("warnings"),
-                },
-            }
-        return _ok(await self.local_sessions.commit_and_sync())
-
-    async def local_session_resync(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        if self.local_sessions is None:
-            raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
-        return _ok(await self.local_sessions.resync())
-
-    def lifecycle_actions_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        return _ok([
-            dict(item)
-            for item in self._deferred_actions.values()
-            if item.get("token_id") == principal.token_id
-        ])
-
-    def lifecycle_action_request(
-        self,
-        principal: McpPrincipal,
-        *,
-        action: Literal["restart", "package_update"],
-        confirmed: bool = False,
-    ) -> dict[str, Any]:
-        """Queue a self-affecting action after the requesting turn has drained."""
-        self._workspace(principal)
-        if action not in {"restart", "package_update"}:
-            raise ControlPlaneError("invalid_action", "action must be restart or package_update.")
-        if not confirmed:
-            raise ControlPlaneError(
-                "confirmation_required",
-                f"Set confirmed=true only after the user explicitly approved {action}.",
-            )
-        if self._lifecycle_callback is None:
-            raise ControlPlaneError("unavailable", "The server lifecycle callback is not ready.", retryable=True)
-        action_id = f"action-{uuid.uuid4().hex[:8]}"
-        record = {
-            "action_id": action_id,
-            "action": action,
-            "chat_id": principal.chat_id,
-            "token_id": principal.token_id,
-            "status": "queued",
-            "requested_at": datetime.now(UTC).isoformat(),
-            "completed_at": "",
-            "error": "",
-        }
-        self._deferred_actions[action_id] = record
-        asyncio.create_task(self._run_lifecycle_action(record), name=action_id)
-        return _ok({key: value for key, value in record.items() if key != "token_id"})
-
-    async def _run_lifecycle_action(self, record: dict[str, Any]) -> None:
-        """Wait until the MCP caller's chat is idle before mutating its server."""
-        chat_id = str(record.get("chat_id") or "")
-        try:
-            while chat_id and chat_id in self.pcm.active_chat_ids():
-                await asyncio.sleep(0.25)
-            record["status"] = "running"
-            if record["action"] == "package_update":
-                from ciao.package_version import update_package
-
-                result = await asyncio.to_thread(update_package)
-                record["result"] = result
-                if not result.get("ok"):
-                    raise RuntimeError(str(result.get("error") or "package update failed"))
-            record["status"] = "restart_requested"
-            callback = self._lifecycle_callback
-            if callback is None:
-                raise RuntimeError("server lifecycle callback became unavailable")
-            callback(int(self.config.restart_exit_code))
-            record["completed_at"] = datetime.now(UTC).isoformat()
-        except Exception as exc:  # noqa: BLE001 - persist a stable deferred result
-            record["status"] = "failed"
-            record["error"] = str(exc)
-            record["completed_at"] = datetime.now(UTC).isoformat()

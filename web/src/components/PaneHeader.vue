@@ -29,14 +29,12 @@
       <div v-if="$slots.actions" class="header-actions" :key="activeBgAgents">
         <slot name="actions" />
       </div>
-      <NotificationBell class="header-bell" />
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
-import NotificationBell from './NotificationBell.vue'
 import BrandMark from './BrandMark.vue'
 
 const props = withDefaults(defineProps<{
@@ -128,7 +126,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
    dragged near its maximum. The header's action trail is unshrinkable, so
    let the mark shrink to the available column rather than overflow into the
    hamburger or actions. Same trade on mobile: the wordmark stays, sized down
-   so it fits between the hamburger and the bell. Hiding it left the home
+   so it fits between the hamburger and the action trail. Hiding it left the home
    screen with an empty header strip and no click target to reload the app. */
 @container chat-pane (max-width: 460px) {
   .header-center { min-width: 0; }
@@ -200,10 +198,6 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   flex-shrink: 0;
 }
 .header-hamburger:active { transform: scale(0.96); }
-.header-bell {
-  flex-shrink: 0;
-  display: none;
-}
 /* Unify header icon sizes with the sidebar (30px containers, 18px content).
    ::before keeps hover/active fills at the 30px visual footprint. */
 .pane-header :deep(.btn-icon),
@@ -222,8 +216,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 }
 .pane-header :deep(.btn-icon::before),
 .pane-header :deep(.model-picker-btn::before),
-.pane-header :deep(.archive-btn::before),
-.pane-header .header-bell :deep(.bell-btn::before) {
+.pane-header :deep(.archive-btn::before) {
   content: '';
   position: absolute;
   inset: calc((var(--touch) - 30px) / 2);
@@ -235,14 +228,12 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 }
 .pane-header :deep(.btn-icon:hover),
 .pane-header :deep(.model-picker-btn:hover),
-.pane-header :deep(.archive-btn:hover),
-.pane-header .header-bell :deep(.bell-btn:hover) {
+.pane-header :deep(.archive-btn:hover) {
   background: transparent;
 }
 .pane-header :deep(.btn-icon:hover::before),
 .pane-header :deep(.model-picker-btn:hover::before),
-.pane-header :deep(.archive-btn:hover::before),
-.pane-header .header-bell :deep(.bell-btn:hover::before) {
+.pane-header :deep(.archive-btn:hover::before) {
   background: var(--bg3);
 }
 .pane-header :deep(.btn-icon.active::before),
@@ -250,35 +241,6 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   background: var(--bg3);
   border: 1px solid var(--border);
 }
-.pane-header :deep(.bell-btn) {
-  box-sizing: content-box;
-  width: 30px;
-  height: 30px;
-  padding: calc((var(--touch) - 30px) / 2);
-  margin: calc((30px - var(--touch)) / 2);
-}
-.pane-header :deep(.bell-btn) svg {
-  width: 18px;
-  height: 18px;
-}
-.pane-header .header-bell :deep(.bell-btn) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  transition: color 120ms var(--ease), transform 120ms var(--ease);
-}
-.pane-header .header-bell :deep(.bell-btn:hover) {
-  color: var(--fg);
-}
-.pane-header .header-bell :deep(.bell-btn:active) { transform: scale(0.96); }
-.pane-header .header-bell :deep(.bell-btn.has-unread) { color: var(--accent); }
 .pane-header :deep(.btn-icon:active),
 .pane-header :deep(.model-picker-btn:active),
 .pane-header :deep(.archive-btn:active) {
@@ -287,7 +249,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 }
 @media (max-width: 768px) {
   /* Narrow: the hamburger joins the row, so a single row would have to fit
-     hamburger + title + brand + actions + bell across ~360px and the title is
+      hamburger + title + brand + actions across ~360px and the title is
      what would lose. Instead the chrome keeps row 1 - hamburger, brand, actions -
      and the title gets row 2 to itself, full width, where its two-line clamp has
      somewhere to go. Row 2 only exists when there is a title, because
@@ -299,6 +261,14 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   .pane-header {
     height: auto;
     grid-template-columns: auto minmax(0, 1fr) auto;
+    /* Top padding matches the desktop/home 61px header's centring (12px here
+       vs the 30px icon half-height) rather than --space-2: with 8px the
+       touch-hit icons' -7px margin pulled their visual box to ~1px below the
+       safe-area line, which on a standalone iOS PWA put the row inside the
+       status bar's frosted-glass edge — the icons rendered as if something
+       translucent was covering them, while the title row below stayed crisp.
+       The extra 4px drops the icons below the glass like every other view. */
+    padding-top: calc(var(--space-3) + var(--safe-top));
     padding-left: calc(var(--space-3) + var(--safe-left));
     padding-right: calc(var(--space-3) + var(--safe-right));
     row-gap: var(--space-1);
@@ -315,7 +285,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     justify-content: center;
     /* The track shrinks but the wordmark does not, so on the tightest headers -
        an automation detail at 375px, where the trail already holds Run now,
-       overflow and the bell, and worse again at a raised font scale - it
+       and worse again at a raised font scale - it
        overran the hamburger and the actions. Let it disappear instead: it is
        decoration plus a reload shortcut, and a clipped control is a lost
        action. Same trade the split-view rule above makes. */
@@ -332,7 +302,6 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     text-align: left;
     min-width: 0;
   }
-  .header-bell { display: flex; }
   :deep(.header-left) { min-width: 0; }
   :deep(.header-actions) {
     flex-shrink: 0;

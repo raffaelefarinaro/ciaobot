@@ -8,18 +8,9 @@ from typing import Literal
 
 from ciao import provider_registry
 
-ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 ControlSurface = Literal["legacy", "mcp", "auto"]
 MessagePhase = Literal["commentary", "final_answer"]
-
-
-@dataclass(frozen=True, slots=True)
-class ModelOption:
-    """One selectable model."""
-
-    value: str
-    label: str
 
 
 @dataclass(slots=True)
@@ -105,11 +96,11 @@ class AgentRequest:
     prompt: str
     model: str
     mode: BridgeMode
-    # Optional human-visible form when provider-neutral preprocessing (for
-    # example Codex slash-command expansion) changes the model-facing prompt.
+    # Optional human-visible form when provider-neutral preprocessing changes
+    # the model-facing prompt.
     display_prompt: str = ""
-    # Routing key for ProviderService. Public builds currently accept
-    # "claude". Which models are reachable is the provider's own business.
+    # Routing key for ProviderService. Public builds currently accept Claude
+    # and opencode. Which models are reachable is the provider's own business.
     provider: str = "claude"
     resume_session: str | None = None
     # Fork the resumed provider session into a new durable session before the
@@ -168,7 +159,7 @@ class AssistantTextDelta(StreamEvent):
 
     text: str = ""
     parent_tool_use_id: str | None = None
-    # Provider-declared assistant-message phase. Codex uses this to
+    # Provider-declared assistant-message phase. Providers may use this to
     # distinguish mid-turn progress commentary from the terminal answer.
     # ``None`` preserves the legacy inference path for providers/models that
     # do not expose a phase.
@@ -196,7 +187,7 @@ class ToolUseEvent(StreamEvent):
     tool_use_id: str | None = None
     parent_tool_use_id: str | None = None
     # Set for provider-native structured questions that must be answered
-    # inside the active turn (Codex app-server request_user_input).
+    # inside the active turn (provider-native request_user_input).
     request_id: str = ""
     file_touches: list | None = None
 

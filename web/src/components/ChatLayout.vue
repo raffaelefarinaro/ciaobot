@@ -1,6 +1,7 @@
 <template>
   <div class="chat-layout" :class="{ 'sidebar-open': !sidebarCollapsed }">
     <ProjectSidebar
+      ref="projectSidebarRef"
       :collapsed="sidebarCollapsed"
       :mode="viewMode"
       :style="sidebarStyle"
@@ -40,6 +41,33 @@
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <div class="home-boot-body">
+              <!-- Skeleton of the home screen this will become (status line,
+                   housekeeping tile, lane header, chat rows) — a spinner pill
+                   read as "nothing is coming", while the shapes promise the
+                   layout that is about to land. -->
+              <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+                <div class="boot-status">
+                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+                </div>
+                <div class="boot-tile" aria-hidden="true">
+                  <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 62%"></span>
+                </div>
+                <div class="boot-lane" aria-hidden="true">
+                  <div class="boot-lane-header">
+                    <span class="boot-chip boot-shimmer"></span>
+                    <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                    <span class="boot-pill boot-shimmer"></span>
+                  </div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
+                </div>
+              </div>
+            </div>
           </div>
           <!-- On mobile, the sidebar already lists every active chat. Showing the
                homepage behind it after closing a chat would just duplicate the
@@ -75,6 +103,7 @@
                   </button>
                 </div>
               </div>
+              <HousekeepingStrip />
               <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
               <div v-if="showGlobalNewChatActions" class="empty-actions">
                 <button
@@ -117,7 +146,10 @@
           @close="showNewSchedule = false"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <MemoryMapView v-else-if="viewMode === 'memory'" @open-sidebar="sidebarCollapsed = false" />
+        <MemoryMapView
+          v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
+          @open-sidebar="sidebarCollapsed = false"
+        />
         <ProjectView
           v-else-if="projectIdParam"
           :project-id="projectIdParam"
@@ -127,6 +159,31 @@
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <div class="home-boot-body">
+            <!-- Same skeleton as the split-view copy above; only one is ever
+                 mounted, so the two must stay identical. -->
+            <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+              <div class="boot-status">
+                <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+              </div>
+              <div class="boot-tile" aria-hidden="true">
+                <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                <span class="boot-line boot-shimmer" style="width: 62%"></span>
+              </div>
+              <div class="boot-lane" aria-hidden="true">
+                <div class="boot-lane-header">
+                  <span class="boot-chip boot-shimmer"></span>
+                  <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                  <span class="boot-pill boot-shimmer"></span>
+                </div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
+              </div>
+            </div>
+          </div>
         </div>
         <!-- On mobile, the sidebar already lists every active chat. Showing the
              homepage behind it after closing a chat would just duplicate the
@@ -162,6 +219,7 @@
                 </button>
               </div>
             </div>
+            <HousekeepingStrip />
             <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
             <div v-if="showGlobalNewChatActions" class="empty-actions">
               <button
@@ -184,21 +242,32 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
+import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
-import MemoryMapView from './MemoryMapView.vue'
-import ProjectView from './ProjectView.vue'
-import SchedulePanel from './SchedulePanel.vue'
-import SettingsView from './SettingsView.vue'
+// The destinations behind the rail are loaded on first visit, not on boot.
+// Statically imported they landed in the same chunk as the chat itself — a
+// third of a megabyte of Settings, Automations, the memory canvas and the
+// project view that every cold start had to download and parse before the
+// first chat could paint, whether or not the user ever opened them. They are
+// each rendered behind a `viewMode` branch, so a component-level split needs
+// no other change; the chunk is fetched from the local server (and is
+// cache-first in the service worker after that), so the first switch is not
+// perceptibly slower.
+const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
+const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
+const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
+const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
+import HousekeepingStrip from './HousekeepingStrip.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
@@ -221,6 +290,8 @@ const fileViewer = useFileViewerStore()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
+const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
+const schedulePanelRef = ref<any>(null)
 
 // Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
@@ -410,14 +481,16 @@ function onFaceLeave() {
 
 const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
+const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
   if (path.startsWith('/memory')) return 'memory'
+  if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
@@ -440,7 +513,7 @@ const viewShortcutsActive = computed(() =>
   && !fileViewer.isOpen,
 )
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -465,7 +538,7 @@ const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
 // Post-archive work is not part of activeChatsAll, but it is still something
 // the home surface should report before the user starts a new chat.
 const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0 || store.postprocessingChats().length > 0
+  store.activeChatsAll.length > 0 || store.archivingChatsList().length > 0 || store.postprocessingChats().length > 0
 ))
 
 const generalWorkspaceActions = computed(() => {
@@ -500,6 +573,7 @@ const homeStatus = computed(() => {
   // the user, so it reports itself in the same muted register as the lane
   // headers' "N tidying up" fragment.
   const tidying = store.postprocessingChats().length
+  const archiving = store.archivingChatsList().length
   const needVerb = needs === 1 ? 'needs' : 'need'
   const needText = needs
     ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
@@ -510,7 +584,10 @@ const homeStatus = computed(() => {
   const tidyingText = tidying
     ? `${tidying} chat${tidying === 1 ? '' : 's'} tidying up`
     : ''
-  return [needText, workingText, tidyingText].filter(Boolean).join('. ') + '.'
+  const archivingText = archiving
+    ? `${archiving} chat${archiving === 1 ? '' : 's'} archiving`
+    : ''
+  return [needText, workingText, archivingText, tidyingText].filter(Boolean).join('. ') + '.'
 })
 
 function workspaceLabel(name: string): string {
@@ -538,6 +615,7 @@ const pageDocumentTitle = computed(() => {
     return 'automations'
   }
   if (viewMode.value === 'memory') return 'memory'
+  if (viewMode.value === 'proposals') return 'proposals'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -571,7 +649,7 @@ const pinnedFilePath = computed(() => {
   // those views entirely because the v-if="pinnedFilePath" branch only
   // renders ProjectView/ChatPanel. Hide the pin in those modes; the store
   // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') return ''
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
 function unpinCurrent(): void {
@@ -698,6 +776,14 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       return
     }
+    // A pending permission card takes the 1/2 keys over the workspace
+    // switcher while it is up, mirroring the question card's first-refusal:
+    // the model is blocked on the approval and the digits are printed on the
+    // buttons. Only the first card is keyed (1 deny / 2 approve).
+    if (chatPanelRef.value?.handlePermissionShortcut?.(e)) {
+      e.preventDefault()
+      return
+    }
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
@@ -749,7 +835,15 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // Project routes stay chat-first on purpose: Esc closing the chat you opened
     // through a project is long-standing, tested behaviour, and a project page is
     // one press further from home either way.
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory') {
+    // Memory Map's own detail panel is a mode within the page, not a
+    // separate view — the first Esc closes it (matching the panel's own
+    // close button) and only navigates home once nothing is selected.
+    if (viewMode.value === 'memory' && memoryMapStore.selectedId) {
+      e.preventDefault()
+      memoryMapStore.selectNode(null)
+      return
+    }
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
       return
@@ -762,6 +856,23 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     if (projectIdParam.value) {
       e.preventDefault()
       void router.push('/')
+      return
+    }
+    return
+  }
+
+  // Automations: same arrow contract as home, but over the sidebar's
+  // schedule lists and the overview pane. This lives outside the chat-only
+  // gate because shortcutsActive deliberately excludes schedules — the
+  // lists still want keyboard roaming.
+  if (viewMode.value === 'schedules' && e.key.startsWith('Arrow')) {
+    if (isTypingTarget(e.target) || e.defaultPrevented) return
+    if (projectSidebarRef.value?.onArrow?.(e.key)) {
+      e.preventDefault()
+      return
+    }
+    if (schedulePanelRef.value?.onArrow?.(e.key)) {
+      e.preventDefault()
       return
     }
     return
@@ -785,6 +896,13 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 
 function onShortcutKeydown(e: KeyboardEvent) {
   if (!shortcutsActive.value) return
+  // Holding the chord repeats the keydown at OS speed. None of these actions
+  // are meant to fire more than once per press: New Chat created a fresh
+  // "New Chat" on every repeat (each POST racing the server's empty-chat
+  // sweep against the one before it, so the panel kept snapping to a newer
+  // chat instead of opening directly), and dictation/sidebar/model-picker
+  // would otherwise toggle back and forth for as long as the key was held.
+  if (e.repeat) return
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
   // both the PWA and the desktop app. Handling them here too made the desktop
@@ -973,6 +1091,138 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+/* fetchAll() (workspaces/projects/chats) is still in flight here — a bare
+   header over an empty flex area used to read as broken rather than loading. */
+.home-boot-body {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+/* Skeleton of the home screen while workspaces load: the same vertical
+   rhythm as the real thing (status line, tile, lane header, chat rows) so
+   the handover from skeleton to content is a fill-in, not a jump. */
+.home-boot-skeleton {
+  width: 100%;
+  max-width: var(--home-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  animation: home-boot-enter 220ms ease-out both;
+}
+
+.boot-shimmer {
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: home-boot-shimmer 1.4s ease-in-out infinite;
+}
+
+.boot-line {
+  display: block;
+  height: 13px;
+  border-radius: var(--radius-pill);
+}
+
+.boot-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.boot-face {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.boot-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.boot-lane {
+  display: flex;
+  flex-direction: column;
+}
+
+.boot-lane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.boot-chip {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+}
+
+.boot-pill {
+  width: 64px;
+  height: 28px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: none;
+  animation: none;
+}
+
+.boot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.boot-row:last-child {
+  border-bottom: none;
+}
+
+.boot-row .boot-line {
+  flex: 0 1 auto;
+}
+
+.boot-meta {
+  width: 72px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+}
+
+@keyframes home-boot-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@keyframes home-boot-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-boot-skeleton {
+    animation: none;
+  }
+  .boot-shimmer {
+    animation: none;
+  }
 }
 
 .empty-state {

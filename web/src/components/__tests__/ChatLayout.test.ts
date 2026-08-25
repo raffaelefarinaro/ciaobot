@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
 
 const toggleDictation = vi.fn()
@@ -114,6 +115,72 @@ describe('ChatLayout', () => {
     await flushPromises()
 
     expect(wrapper.find('.empty-status-text').text()).toBe('1 chat needs your attention. no agents working.')
+    wrapper.unmount()
+  })
+
+  it('mounts the housekeeping strip on the home screen', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = []
+    store.activeChatId = null
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const housekeeping = useHousekeepingStore()
+    housekeeping.actions = [{
+      id: 'a',
+      kind: 'test',
+      severity: 10,
+      title: 'A condition needs you',
+      detail: 'It can be fixed.',
+      glyph: '▲',
+      workspace: 'personal',
+      run_label: '',
+      chat_label: '',
+      chat_prompt: '',
+      view_label: '',
+      blocking: false,
+      view_route: '',
+    }]
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    // The strip renders once per home branch. Only the no-pinned-file branch
+    // is mounted here (no pinned file), so exactly one strip is on screen.
+    expect(wrapper.findAll('.housekeeping')).toHaveLength(1)
+    expect(wrapper.find('.housekeeping').text()).toContain('A condition needs you')
     wrapper.unmount()
   })
 
@@ -884,9 +951,10 @@ describe('ChatLayout home arrow navigation', () => {
     return wrapper
   }
 
-  it('renders the recent-chat lanes on the home screen', async () => {
+  it('renders the recent-chat lane of the selected workspace on home', async () => {
     const wrapper = await mountHome()
-    expect(wrapper.findAll('.home-lane')).toHaveLength(2)
+    expect(wrapper.findAll('.home-lane')).toHaveLength(1)
+    expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -909,19 +977,19 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('moves focus across lanes from a window keydown', async () => {
+  it('moves focus through the home grid from a window keydown', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[2].element)
+    expect(document.activeElement).toBe(cards[1].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
     wrapper.unmount()
@@ -1108,13 +1176,13 @@ describe('ChatLayout home arrow navigation', () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
     expect(document.activeElement).toBe(cards[0].element)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     await nextTick()
-    expect(document.activeElement).toBe(cards[2].element)
+    expect(document.activeElement).toBe(cards[1].element)
     wrapper.unmount()
   })
 })

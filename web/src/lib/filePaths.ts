@@ -18,7 +18,7 @@ const EXTS = [
   'yaml', 'yml', 'toml',
   'sh', 'rs', 'go', 'java', 'xml', 'sql',
   'cfg', 'ini', 'log', 'csv',
-  'env', 'example', 'excalidraw',
+  'env', 'example',
   // Binary / office types served by /api/workspace-binary (inline PDF preview).
   'pdf', 'pptx', 'mht', 'mhtml',
   // Images served by /api/workspace-image.
@@ -29,7 +29,7 @@ const EXTS = [
 // segment ending with an allow-listed extension, with an optional ":line".
 // The non-capturing outer group rules out word-breaks inside extensions.
 const EXT_ALT = EXTS.join('|')
-export const FILE_PATH_RE = new RegExp(
+const FILE_PATH_RE = new RegExp(
   `(?<![\\w.])((?:\\/)?(?:[\\w.+-]+\\/)+[\\w.+-]+\\.(?:${EXT_ALT}))(?::(\\d+))?(?!\\w)`,
   'g',
 )

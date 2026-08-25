@@ -1,6 +1,6 @@
 """opencode provider over the local HTTP + SSE server.
 
-Unlike Claude (in-process SDK) and Codex (stdio JSON-RPC), opencode ships a
+Unlike Claude (in-process SDK), opencode ships a
 real multi-session HTTP server. Ciaobot runs ``opencode serve`` on an ephemeral
 loopback port and drives it over ``httpx``, consuming the ``/event`` SSE stream.
 
@@ -18,9 +18,9 @@ The wire contract is verified against the server's own OpenAPI document at
 message rather than half-working.
 
 Capability note: opencode has no method that injects a message into a running
-turn, so ``steer`` is False and ``ProviderService`` keeps a mid-turn message in
-its next-turn queue. Everything else Ciaobot needs — fork, abort, permissions,
-structured questions, background subagents as child sessions — is native.
+turn; Ciaobot keeps a mid-turn message in the next-turn queue. Everything else
+Ciaobot needs — fork, abort, permissions, structured questions, background
+subagents as child sessions — is native.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from typing import Any
 
 import httpx
 
-from ciao.memory_injector import system_prompt_payload
+from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -62,15 +62,15 @@ from ciao.providers.base import (
     prepend_stable_context,
 )
 from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
-from ciao.providers.safe_commands import is_read_only_command
+from ciao.providers._sse import SSEDecoder
+from ciao.providers.safe_commands import is_destructive_command
 from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
 
 # Operations Ciaobot cannot work without. Checked against the server's own
 # OpenAPI paths at connect time so an incompatible build fails closed. This is
-# the machine-checkable equivalent of Codex's hand-maintained
-# ``_REQUIRED_PROTOCOL_TOKENS``.
+# the machine-checkable equivalent of the provider's protocol requirements.
 REQUIRED_PATHS: frozenset[str] = frozenset({
     "/global/health",
     "/event",
@@ -87,7 +87,7 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 # The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
-# hit on every model-picker open. Cache it like Codex does rather than paying
+# hit on every model-picker open. Cache it rather than paying
 # a server spawn per request.
 _MODEL_CACHE_TTL = 300.0
 # An empty catalog is cached far more briefly: it usually means "nothing
@@ -101,19 +101,61 @@ _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
-# `opencode serve`, and the PWA polls the routes they back on short intervals
-# (15s status sync plus a post-turn retry ladder for /messages, 4s for
-# /subagents while a turn streams). A TTL shorter than every poll interval
-# collapses the bursts to roughly one spawn per tick without making replays
-# feel stale.
-_READ_CACHE_TTL = 3.0
-_THREAD_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_COLLAB_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+# `opencode serve`. A chat with a live provider attached reuses that server
+# instead (see `has_live_server` / `read_live_collab_tree`), so this classmethod
+# path and its cache now mainly cover reads with nothing attached (an archived
+# chat, or a chat viewed from another device). The PWA still polls the routes
+# they back on short intervals (15s status sync, 4s for /subagents while a
+# turn streams), so the TTL stays above that cadence to collapse bursts to
+# roughly one spawn per tick rather than one per poll.
+_READ_CACHE_TTL = 6.0
+# A spawn that could not start at all (binary missing, process died, health
+# never answered) is cached longer than a read: while opencode is in this
+# state, every uncached read path spawns another doomed `opencode serve` and
+# holds it for up to `_SERVER_START_TIMEOUT`, so an un-negative-cached
+# `/subagents` poll stacks dying servers on every tick. The TTL stays well
+# under a minute so reads recover promptly once opencode starts working.
+_READ_FAILURE_CACHE_TTL = 20.0
+# Cache entries carry their own TTL as ``(stamp, ttl, value)``: a failed
+# spawn lives longer than a successful read (see `_READ_FAILURE_CACHE_TTL`).
+_THREAD_CACHE: dict[tuple[str, str], tuple[float, float, dict[str, Any]]] = {}
+_COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
 _SERVER_START_RETRY_DELAYS = (0.25, 0.75)
 _REQUEST_TIMEOUT = 30.0
+# Mid-turn SSE recovery: re-subscribe attempts after a dropped /event stream,
+# then a bounded message-poll window that replays settled parts idempotently.
+_OPENCODE_SSE_RECONNECTS = 3
+_OPENCODE_RECOVERY_WINDOW_S = 60.0
+_OPENCODE_RECOVERY_POLL_S = 2.5
+
+
+def _opencode_messages_signature(messages: list[Any]) -> str:
+    """Cheap change detector for the reconciliation poll.
+
+    Hashes message count plus each assistant part's id and content length;
+    when two consecutive polls agree, the turn's output has settled.
+    """
+    pieces: list[str] = [str(len(messages))]
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        info = message.get("info")
+        role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+        parts = message.get("parts")
+        if role != "assistant" or not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, Mapping):
+                continue
+            text = part.get("text")
+            pieces.append(
+                f"{part.get('id')}/{part.get('type')}/"
+                f"{len(text) if isinstance(text, str) else 0}"
+            )
+    return "|".join(pieces)
 _SHUTDOWN_TIMEOUT = 5.0
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
@@ -137,11 +179,26 @@ _MODE_AGENTS: dict[str, str] = {
 # with a bare 400, so keep this in rule form.
 #
 # Resolution is last-match-wins, so the wildcard goes first and the specific
-# grants follow. Read-only tools are always allowed; `edit` is what separates
-# auto from normal. Shell stays on the wildcard in every non-bypass mode, so a
-# command reaches `_permission_event` even in auto, where the read-only
-# classifier decides whether the operator has to see it.
+# grants follow. ``auto`` is the permissive default: every tool is allowed
+# outright except ``bash`` and Ciaobot's destructive control-plane tools,
+# which stay on the wildcard so ``_permission_event`` can classify each call
+# (see ``auto_approves_permission``). Every other mode keeps its old
+# narrower ruleset for compatibility.
 _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
+
+# Ciaobot's control-plane mutations that must keep prompting even in the
+# permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
+# tools in ``ciao/mcp_server.py``: deletes, lifecycle teardown, and arbitrary
+# command starts. Everything else on the control plane is allow-listed.
+_DESTRUCTIVE_MCP_TOOLS = (
+    "chat_delete",
+    "project_action",
+    "chat_stop",
+    "schedule_action",
+    "loop_action",
+    "background_run_start",
+    "background_run_cancel",
+)
 
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
@@ -157,14 +214,26 @@ def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
     ]
 
 
+def _permissive_auto_rules() -> list[dict[str, str]]:
+    """The auto-mode ruleset: allow everything except removals.
+
+    A leading wildcard ``allow`` makes opencode run without an approval card
+    for almost every tool. ``bash`` and the destructive control-plane tools
+    are pinned to ``ask`` so their permission events reach
+    ``_permission_event``, where ``auto_approves_permission`` lets safe
+    commands through and surfaces only destructive ones to the operator.
+    """
+    return _rules(
+        ("*", "allow"),
+        ("bash", "ask"),
+        *((f"{MCP_SERVER_NAME}_{tool}", "ask") for tool in _DESTRUCTIVE_MCP_TOOLS),
+    )
+
+
 _MODE_PERMISSIONS: dict[str, list[dict[str, str]]] = {
     "plan": _rules(("*", "ask"), *((tool, "allow") for tool in _READ_ONLY_TOOLS)),
     "normal": _rules(("*", "ask")),
-    "auto": _rules(
-        ("*", "ask"),
-        *((tool, "allow") for tool in _READ_ONLY_TOOLS),
-        ("edit", "allow"),
-    ),
+    "auto": _permissive_auto_rules(),
     "bypass": _rules(("*", "allow")),
 }
 
@@ -175,8 +244,7 @@ class OpencodeSettings:
 
     Empty string means "no override": the default falls through to whatever
     model the session's configured provider resolves. Mirrors
-    ``CodexSettings`` so ``AppSettings.provider_default_models`` can drive
-    both the same way.
+    so ``AppSettings.provider_default_models`` can drive it the same way.
     """
 
     default_model: str = ""
@@ -191,8 +259,18 @@ def opencode_default_model(config: object) -> str:
 
 
 def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
-    """Absolute path to the opencode CLI, or None when it is not installed."""
-    source = env if env is not None else os.environ
+    """Absolute path to the opencode CLI, or None when it is not installed.
+
+    ``env`` is an *overlay* of per-request overrides, not a whole environment:
+    ``_ensure_server`` passes ``AgentRequest.extra_env``, which is built from
+    workspace settings and never carries ``CIAO_OPENCODE_BIN``. Reading the
+    overlay *instead of* the process environment therefore silently ignored an
+    exported ``CIAO_OPENCODE_BIN`` on every chat turn — even though the
+    not-installed error tells the operator to set exactly that variable. Layer
+    the overlay on top of ``os.environ`` so the override works from either
+    side, with the per-request value still winning.
+    """
+    source: Mapping[str, str] = {**os.environ, **env} if env else os.environ
     explicit = str(source.get("CIAO_OPENCODE_BIN", "")).strip()
     if explicit:
         path = Path(explicit).expanduser()
@@ -233,10 +311,36 @@ def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
     return lock
 
 
+def _health_failure_reason(
+    last_status: int | None, last_error: Exception | None
+) -> str:
+    """A human-readable cause for a server that never became healthy.
+
+    A server that stays alive (returncode None) but never answers 200 wedges
+    on startup — most commonly opencode's shared SQLite migration — and the
+    poll loop leaves both the last HTTP status and the last transport error
+    empty. Say which it was rather than trailing a bare ``: ``.
+    """
+    if last_status is not None:
+        return f"health returned HTTP {last_status}"
+    if last_error is not None:
+        return str(last_error)
+    return "server stayed alive but never answered /global/health"
+
+
 def _is_transient_startup_error(exc: BaseException) -> bool:
-    """Whether a failed server launch is likely to recover on retry."""
+    """Whether a failed server launch is likely to recover on retry.
+
+    A server that wedges on startup (exits, or never becomes healthy) can
+    clear once the shared database contention it hit settles, so both the
+    database-lock exit and the never-healthy timeout are treated as
+    retriable. Everything else — a missing binary, a contract mismatch — is
+    terminal.
+    """
     text = str(exc).lower()
-    return "database is locked" in text or "database is busy" in text
+    if "database is locked" in text or "database is busy" in text:
+        return True
+    return "did not become healthy" in text
 
 
 def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
@@ -380,6 +484,37 @@ def _token_count(raw: object) -> int:
     return int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0
 
 
+def _context_window_for(payload: object, provider_id: str, model_id: str) -> int | None:
+    """The model's ``limit.context`` from ``GET /provider``, or ``None``.
+
+    opencode's own UI computes context occupancy the same way: total turn
+    tokens over the model's declared context window. The window is a static
+    model property (``limit.context``), not a live number, so it is looked up
+    once per turn from the provider catalog rather than queried repeatedly.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    for provider in payload.get("all") or []:
+        if not isinstance(provider, Mapping):
+            continue
+        if str(provider.get("id") or "") != provider_id:
+            continue
+        models = provider.get("models")
+        if not isinstance(models, Mapping):
+            continue
+        model = models.get(model_id)
+        if not isinstance(model, Mapping):
+            continue
+        limit = model.get("limit")
+        if not isinstance(limit, Mapping):
+            continue
+        context = limit.get("context")
+        if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
+            return int(context)
+        return None
+    return None
+
+
 def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
     """Normalize opencode token counts into Ciaobot's usage fields."""
     if not isinstance(tokens, Mapping):
@@ -393,6 +528,11 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         ("reasoningTokens", tokens.get("reasoning")),
         ("cacheReadTokens", cache.get("read")),
         ("cacheWriteTokens", cache.get("write")),
+        # The assistant message reports a cumulative total for the turn
+        # (input + output + reasoning + cache), matching opencode's own
+        # context-window denominator. Preserve it so a later context %
+        # computation does not have to re-sum the parts.
+        ("totalTokens", tokens.get("total")),
     ):
         count = _token_count(source)
         if count:
@@ -422,7 +562,7 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
 
     Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
     the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
-    chat_delete, project_delete, chat_stop, background_run_start — which must
+    chat_delete, project_action, chat_stop, background_run_start — which must
     keep prompting. opencode names an MCP tool ``<server>_<tool>``.
     """
     return [
@@ -521,18 +661,32 @@ def auto_approves_permission(mode: BridgeMode, permission: str, command: str) ->
 
     A session's permission ruleset is fixed at creation and `PATCH` does not
     apply (see ``_ensure_session``); mode changes rotate the session before the
-    prompt runs. Even a fresh auto session deliberately keeps shell on the
-    wildcard. Deciding here, on the *current* mode of the turn, is what makes
-    Auto automatic: bypass approves everything, auto approves verifiably
-    read-only work, and every other mode (or anything the classifier cannot
-    verify) still puts a card in front of the operator.
+    prompt runs. In the permissive auto default the ruleset already allows
+    every tool, so the only permission events that surface are ``bash`` and the
+    destructive control-plane tools. Deciding here, on the *current* mode of
+    the turn, is what makes Auto automatic: bypass approves everything, auto
+    approves any non-destructive bash command, and every other mode (or a
+    command the classifier cannot verify) still puts a card in front of the
+    operator.
     """
     if mode == "bypass":
         return True
     if mode != "auto":
         return False
     if permission == "bash":
-        return bool(command) and is_read_only_command(command)
+        # A command we cannot see cannot be verified as non-destructive, so it
+        # keeps the card rather than being waved through blind.
+        #
+        # This is a DENYLIST, and a denylist fails open: a destructive form the
+        # classifier has not been taught is auto-approved, with the operator's
+        # full filesystem and credential access and no card. `is_destructive_command`
+        # covers path-qualified verbs, prefix wrappers, `xargs`, shells carrying
+        # `-c` payloads, opaque shells (`curl … | sh`), command substitution,
+        # subshells and inline interpreter code - every bypass found so far -
+        # but "so far" is the operative phrase. An allowlist would fail closed
+        # instead; keeping auto frictionless was chosen over that, so any new
+        # destructive form belongs in the classifier and its tests.
+        return bool(command) and not is_destructive_command(command)
     return permission in _READ_ONLY_TOOLS
 
 
@@ -595,15 +749,12 @@ class OpencodeProvider(BaseSDKProvider):
         fork=True,
         images=True,
         stop=True,
-        # No upstream method injects into a running turn; a mid-turn message
-        # queues for the next one instead.
-        steer=False,
         permissions=True,
         structured_questions=True,
         dynamic_models=True,
         # Reasoning effort is per model (opencode calls it a model `variant`),
         # so the level list is narrowed per model from the catalog rather than
-        # being a fixed ladder — same arrangement as Codex.
+        # being a fixed ladder.
         thinking_levels=True,
         usage=True,
         # opencode is bring-your-own-provider: there is no unified quota or
@@ -662,7 +813,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._usage: dict[str, str] = {}
         self._cost: float | None = None
         # Visible assistant text, accumulated per part so the terminal
-        # ResultEvent can carry the turn's answer (codex-style). `record_turn`
+        # ResultEvent can carry the turn's answer. `record_turn`
         # persists that as the durable transcript's response, so leaving it
         # empty made replayed opencode chats render blank turns (#295).
         # Dict insertion order doubles as the part order.
@@ -685,12 +836,70 @@ class OpencodeProvider(BaseSDKProvider):
         self._cost = None
         self._answer_parts.clear()
         self._effective_model = ""
+        self._turn_recovered_via_poll = False
 
     # ---------------------------------------------------------------- server
 
     @property
     def current_session_id(self) -> str | None:
         return self._session_id or None
+
+    @property
+    def has_live_server(self) -> bool:
+        """True while this chat's own opencode server is still running.
+
+        Lets read paths (the subagents poll) reuse this connection instead of
+        paying to spawn a throwaway server via ``_EphemeralServer`` every time
+        the 3-second read cache misses.
+        """
+        return (
+            self._client is not None
+            and self._process is not None
+            and self._process.returncode is None
+        )
+
+    async def read_live_collab_tree(self) -> list[dict[str, Any]]:
+        """``read_collab_tree`` read over this chat's already-running server.
+
+        Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
+        while a chat is attached, its own server is already up, so spawning a
+        second one just to poll subagent transcripts every few seconds wastes
+        a process start each time. Callers should check ``has_live_server``
+        first and fall back to the classmethod otherwise (e.g. a chat with no
+        attached provider, viewed from another device or after a restart).
+        """
+        client = self._client
+        if client is None or not self._session_id:
+            return []
+
+        async def _child_messages(child_id: str) -> list[Any]:
+            try:
+                messages = await client.get(f"/session/{child_id}/message")
+                messages.raise_for_status()
+                payload = messages.json()
+            except (httpx.HTTPError, ValueError):
+                return []
+            return payload if isinstance(payload, list) else []
+
+        try:
+            response = await client.get(f"/session/{self._session_id}/children")
+            response.raise_for_status()
+            children = response.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+        if not isinstance(children, list):
+            return []
+        children = [
+            child for child in children
+            if isinstance(child, dict) and child.get("id")
+        ]
+        histories = await asyncio.gather(
+            *(_child_messages(str(child["id"])) for child in children)
+        )
+        return [
+            {"info": child, "messages": messages}
+            for child, messages in zip(children, histories)
+        ]
 
     @property
     def can_drain(self) -> bool:
@@ -850,6 +1059,11 @@ class OpencodeProvider(BaseSDKProvider):
         assert self._client is not None
         deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
         last_error: Exception | None = None
+        # A server that never reaches 200 but stays alive (wedged on shared
+        # SQLite migration) leaves an empty last_error today, which hides the
+        # cause. Track the last HTTP status so the timeout message says what
+        # the poll actually saw instead of trailing an empty ``: ``.
+        last_status: int | None = None
         while asyncio.get_running_loop().time() < deadline:
             if self._process is not None and self._process.returncode is not None:
                 detail = await self._stderr_detail()
@@ -859,12 +1073,15 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             try:
                 response = await self._client.get("/global/health", timeout=2.0)
+                last_status = response.status_code
                 if response.status_code == 200:
                     return
             except httpx.HTTPError as exc:  # not up yet
                 last_error = exc
+                last_status = None
             await asyncio.sleep(0.2)
-        raise TimeoutError(f"opencode serve did not become healthy: {last_error}")
+        reason = _health_failure_reason(last_status, last_error)
+        raise TimeoutError(f"opencode serve did not become healthy: {reason}")
 
     async def _verify_contract(self) -> None:
         """Fail closed when the installed build is missing required operations."""
@@ -885,8 +1102,8 @@ class OpencodeProvider(BaseSDKProvider):
     async def _register_control_plane(self, request: AgentRequest) -> None:
         """Attach Ciaobot's own MCP server to this chat's opencode process.
 
-        Claude gets this through ``options.mcp_servers`` and Codex through
-        ``-c mcp_servers.ciaobot.*``. opencode takes it over the running
+        Claude gets this through ``options.mcp_servers``. opencode takes it over
+        the running
         server's API, which is what makes the per-chat process worth having:
         the token is scoped to this chat and never written to
         ``opencode.json``, where it would be workspace-wide and on disk.
@@ -953,8 +1170,14 @@ class OpencodeProvider(BaseSDKProvider):
             try:
                 await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
             except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except (ProcessLookupError, FileNotFoundError):
+                    # The process already exited between the timeout and the
+                    # kill; treat it as cleanly gone rather than surfacing a
+                    # spurious task exception.
+                    pass
         # After the process is gone, so the tail still explains a crash above.
         reader = self._stderr_task
         self._stderr_task = None
@@ -1100,8 +1323,8 @@ class OpencodeProvider(BaseSDKProvider):
 
         Returning False (rather than sending a second prompt) is deliberate —
         a second prompt would be queued or would abort the active turn, and
-        neither is what steering means. ``ProviderService`` keeps the message
-        for the next turn instead.
+        neither is what steering means. The caller keeps the message for the
+        next turn instead.
         """
         return False
 
@@ -1239,8 +1462,92 @@ class OpencodeProvider(BaseSDKProvider):
         """Accumulate one emitted fragment of the visible reply."""
         self._answer_parts.setdefault(part_id, []).append(text)
 
+    def _turn_assistant_parts(
+        self, messages: list[Any]
+    ) -> list[Mapping[str, Any]]:
+        """Settled parts of *this* turn's assistant messages, in order.
+
+        ``GET /session/{id}/message`` returns the session's whole history, not
+        the current turn, and ``_reset_turn_state`` has just cleared
+        ``_emitted`` — so replaying every assistant message re-emitted turns
+        1..10 as turn 11's text when the SSE dropped on turn 11, and
+        ``record_turn`` then persisted that mash-up as the turn's response.
+
+        The turn begins at its own user message — the same anchor
+        ``_part_updated`` filters on — so everything after it is this turn's
+        output. When that id was never seen live (the stream died before the
+        user ``message.updated`` arrived) the *last* user message in the list
+        is ours, because our prompt is what created it.
+        """
+        anchor = -1
+        for index, message in enumerate(messages):
+            if not isinstance(message, Mapping):
+                continue
+            info = message.get("info")
+            if not isinstance(info, Mapping) or info.get("role") != "user":
+                continue
+            anchor = index
+            if self._user_message_id and str(info.get("id") or "") == self._user_message_id:
+                break
+
+        parts: list[Mapping[str, Any]] = []
+        for message in messages[anchor + 1:]:
+            if not isinstance(message, Mapping):
+                continue
+            info = message.get("info")
+            role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+            message_parts = message.get("parts")
+            if role != "assistant" or not isinstance(message_parts, list):
+                continue
+            parts.extend(part for part in message_parts if isinstance(part, Mapping))
+        return parts
+
+    async def _reconcile_interrupted_turn(
+        self, client: httpx.AsyncClient, session_id: str
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Recover a turn whose SSE died after the prompt was accepted.
+
+        Polls ``GET /session/{id}/message`` until the message list stops
+        changing (or the recovery window expires), then replays this turn's
+        settled assistant parts through ``message.part.updated``. The
+        accumulator's per-part emitted counts make the replay emit only what
+        the live stream actually missed, so this backfills gaps and repairs a
+        truncated tail without duplicating anything already shown.
+        """
+        deadline = time.monotonic() + _OPENCODE_RECOVERY_WINDOW_S
+        signature = ""
+        while True:
+            messages: list[Any] | None = None
+            try:
+                response = await client.get(f"/session/{session_id}/message")
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    messages = payload
+            except (httpx.HTTPError, ValueError, AttributeError):
+                # Best-effort by design: an unresponsive read endpoint just
+                # means the window expires and the turn finishes degraded.
+                messages = None
+
+            if messages is not None:
+                current = _opencode_messages_signature(messages)
+                quiesced = bool(current) and current == signature
+                signature = current or signature
+                for part in self._turn_assistant_parts(messages):
+                    for converted in self._event_to_stream({
+                        "type": "message.part.updated",
+                        "properties": {"part": dict(part)},
+                    }):
+                        yield converted
+                if quiesced:
+                    self._turn_recovered_via_poll = True
+                    return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(_OPENCODE_RECOVERY_POLL_S)
+
     def _answer_text(self) -> str:
-        """The turn's visible reply, joined across text parts codex-style."""
+        """The turn's visible reply, joined across text parts."""
         parts = (
             "".join(chunks).strip() for chunks in self._answer_parts.values()
         )
@@ -1505,7 +1812,7 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         self._permission_requests[request_id] = pending
         return [PermissionRequestEvent(
-            # `system`, and "Approve use of X?", to match the Claude and Codex
+            # `system`, and "Approve use of X?", to match the Claude
             # providers. A different type and a restated "opencode wants to
             # use bash" rendered as an extra transcript line beside the card.
             type="system",
@@ -1614,34 +1921,49 @@ class OpencodeProvider(BaseSDKProvider):
         error: str = ""
         saw_output = False
 
-        try:
+        # The SSE subscription can drop mid-turn (network blip, server hiccup)
+        # before `session.idle` arrives. Rather than failing the whole turn,
+        # re-subscribe a bounded number of times; if the stream still will not
+        # hold, poll the message list until output quiesces and replay settled
+        # parts through the same accumulator (its `_emitted` bookkeeping makes
+        # the replay idempotent). Mirrors conduit's poll-backstop design.
+        prompt_accepted = False
+        prompt_rejected = False
+        idle_seen = False
+
+        async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
+            """One SSE subscription, pumped until idle or premature close."""
+            nonlocal prompt_accepted, prompt_rejected, error, saw_output, idle_seen
             async with client.stream("GET", "/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
-                response = await client.post(
-                    f"/session/{session_id}/prompt_async", json=body
-                )
-                if response.status_code >= 400:
-                    detail = _sanitize_error(response.text)
-                    yield ResultEvent(
-                        type="result",
-                        result=f"opencode rejected the prompt: {detail}",
-                        session_id=session_id,
-                        is_error=True,
+                if not prompt_accepted:
+                    response = await client.post(
+                        f"/session/{session_id}/prompt_async", json=body
                     )
-                    return
-                # Once accepted, the replacement session owns the handover
-                # context. Retain it only across a rejected prompt so a retry
-                # can still recover the old conversation.
-                self._session_handover_context = ""
-
-                async for raw in stream.aiter_lines():
-                    if not raw.startswith("data: "):
-                        continue
+                    if response.status_code >= 400:
+                        detail = _sanitize_error(response.text)
+                        prompt_rejected = True
+                        # Record the failure and let the single closing
+                        # ResultEvent below carry it. Yielding a terminal
+                        # result here emitted *two*: this one, then the
+                        # unconditional one at the end of the turn with an
+                        # empty `result` and `is_error=False`, which the PWA
+                        # applied last — so a rejected prompt rendered as a
+                        # successful, blank turn instead of the error.
+                        error = error or f"opencode rejected the prompt: {detail}"
+                        return
+                    # Once accepted, the replacement session owns the handover
+                    # context. Retain it only across a rejected prompt so a
+                    # retry can still recover the old conversation.
+                    self._session_handover_context = ""
+                    prompt_accepted = True
+                decoder = SSEDecoder()
+                async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
                     try:
-                        event = json.loads(raw[6:])
+                        event = sse.json()
                     except ValueError:
                         continue
                     if not isinstance(event, Mapping):
@@ -1664,25 +1986,59 @@ class OpencodeProvider(BaseSDKProvider):
                         error = error or error_text(props.get("error"))
                         continue
                     if kind == "session.idle":
+                        idle_seen = True
                         break
 
                     for converted in self._event_to_stream(event):
                         saw_output = saw_output or converted.type in {"text", "tool_use"}
                         yield converted
-        except httpx.HTTPError as exc:
-            yield ResultEvent(
-                type="result",
-                result=f"opencode connection failed: {exc}",
-                session_id=session_id,
-                is_error=True,
-            )
-            return
+
+        # The SSE subscription can drop mid-turn (network blip, server hiccup)
+        # before `session.idle` arrives. Rather than failing the whole turn,
+        # re-subscribe a bounded number of times; if the stream still will not
+        # hold, poll the message list until output quiesces and replay settled
+        # parts through the same accumulator — its `_emitted` bookkeeping makes
+        # the replay idempotent. Poll-backstop design borrowed from conduit.
+        reconnects = 0
+        try:
+            while True:
+                try:
+                    async for converted in _pump_once():
+                        yield converted
+                except httpx.HTTPError as exc:
+                    if not prompt_accepted:
+                        # The turn never started; nothing to recover.
+                        yield ResultEvent(
+                            type="result",
+                            result=f"opencode connection failed: {exc}",
+                            session_id=session_id,
+                            is_error=True,
+                        )
+                        return
+                if prompt_rejected or idle_seen:
+                    break
+                if reconnects >= _OPENCODE_SSE_RECONNECTS - 1:
+                    break
+                reconnects += 1
+                await asyncio.sleep(0.5 * reconnects)
+
+            degraded_final = False
+            if not idle_seen and prompt_accepted and not prompt_rejected:
+                self._turn_recovered_via_poll = False
+                async for converted in self._reconcile_interrupted_turn(
+                    client, session_id
+                ):
+                    saw_output = saw_output or converted.type in {"text", "tool_use"}
+                    yield converted
+                degraded_final = not self._turn_recovered_via_poll
         finally:
             register_handle(None)
 
+        await self._augment_context_pct(client, self._turn_model)
+
         yield ResultEvent(
             type="result",
-            # A successful turn carries the accumulated answer (codex-style):
+            # A successful turn carries the accumulated answer:
             # `record_turn` persists it as the durable transcript's response,
             # which is what the PWA replays when the session is unreadable.
             result=error or self._answer_text(),
@@ -1693,8 +2049,53 @@ class OpencodeProvider(BaseSDKProvider):
             # summed per step, so a retried step cannot double-count.
             usage=self._usage,
             cost_usd=self._cost,
-            fallback_final=bool(error) and saw_output,
+            fallback_final=(bool(error) and saw_output) or degraded_final,
         )
+
+    async def _augment_context_pct(
+        self, client: httpx.AsyncClient, model: tuple[str, str]
+    ) -> None:
+        """Attach the turn's context-window occupancy to ``self._usage``.
+
+        Mirrors opencode's own UI: total turn tokens over the model's declared
+        ``limit.context`` from ``GET /provider``. Silent on failure — the field
+        is simply left off the usage payload when the CLI cannot answer.
+        """
+        if not self._usage:
+            return
+        total = self._usage.get("totalTokens")
+        if not total:
+            return
+        provider_id, model_id = model
+        if not provider_id or not model_id:
+            # A chat may let opencode choose the model; `_effective_model` then
+            # carries the resolved `providerID/modelID` from the assistant
+            # message.
+            provider_id, model_id = split_model(self._effective_model)
+        if not provider_id or not model_id:
+            return
+        context_window: int | None = None
+        try:
+            response = await client.get("/provider")
+            if response.status_code < 400:
+                context_window = _context_window_for(
+                    response.json(), provider_id, model_id
+                )
+        except (httpx.HTTPError, ValueError):
+            context_window = None
+        if not context_window:
+            return
+        try:
+            total_tokens = int(total)
+        except (TypeError, ValueError):
+            return
+        if total_tokens <= 0:
+            return
+        self._usage = {
+            **self._usage,
+            "context_window": str(context_window),
+            "context_pct": f"{min(100.0, total_tokens / context_window * 100):.1f}%",
+        }
 
     # ----------------------------------------------------------- provider API
 
@@ -1741,21 +2142,26 @@ class OpencodeProvider(BaseSDKProvider):
             return {}
         key = (str(workspace_root), session_id)
         cached = _THREAD_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
-            return cached[1]
+        if cached and time.monotonic() - cached[0] < cached[1]:
+            return cached[2]
         thread: dict[str, Any] = {}
+        ttl = _READ_CACHE_TTL
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
-                return {}
-            try:
-                info = await client.get(f"/session/{session_id}")
-                info.raise_for_status()
-                messages = await client.get(f"/session/{session_id}/message")
-                messages.raise_for_status()
-                thread = {"info": info.json(), "messages": messages.json()}
-            except (httpx.HTTPError, ValueError):
-                thread = {}
-        _THREAD_CACHE[key] = (time.monotonic(), thread)
+                # Cache the failure too, briefly longer than a read: an
+                # uncached miss here means another doomed server spawn on
+                # the next poll.
+                ttl = _READ_FAILURE_CACHE_TTL
+            else:
+                try:
+                    info = await client.get(f"/session/{session_id}")
+                    info.raise_for_status()
+                    messages = await client.get(f"/session/{session_id}/message")
+                    messages.raise_for_status()
+                    thread = {"info": info.json(), "messages": messages.json()}
+                except (httpx.HTTPError, ValueError):
+                    thread = {}
+        _THREAD_CACHE[key] = (time.monotonic(), ttl, thread)
         return thread
 
     @classmethod
@@ -1772,8 +2178,8 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         key = (str(workspace_root), session_id)
         cached = _COLLAB_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < _READ_CACHE_TTL:
-            return cached[1]
+        if cached and time.monotonic() - cached[0] < cached[1]:
+            return cached[2]
 
         async def _child_messages(client: Any, child_id: str) -> list[Any]:
             try:
@@ -1785,29 +2191,33 @@ class OpencodeProvider(BaseSDKProvider):
             return payload if isinstance(payload, list) else []
 
         result: list[dict[str, Any]] = []
+        ttl = _READ_CACHE_TTL
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
-                return []
-            try:
-                response = await client.get(f"/session/{session_id}/children")
-                response.raise_for_status()
-                children = response.json()
-            except (httpx.HTTPError, ValueError):
-                return []
-            if not isinstance(children, list):
-                return []
-            children = [
-                child for child in children
-                if isinstance(child, dict) and child.get("id")
-            ]
-            histories = await asyncio.gather(
-                *(_child_messages(client, str(child["id"])) for child in children)
-            )
-            result = [
-                {"info": child, "messages": messages}
-                for child, messages in zip(children, histories)
-            ]
-        _COLLAB_CACHE[key] = (time.monotonic(), result)
+                # Negative-cache the failed spawn (see read_thread).
+                ttl = _READ_FAILURE_CACHE_TTL
+            else:
+                try:
+                    response = await client.get(f"/session/{session_id}/children")
+                    response.raise_for_status()
+                    children = response.json()
+                except (httpx.HTTPError, ValueError):
+                    children = None
+                else:
+                    if not isinstance(children, list):
+                        children = []
+                    children = [
+                        child for child in children
+                        if isinstance(child, dict) and child.get("id")
+                    ]
+                    histories = await asyncio.gather(
+                        *(_child_messages(client, str(child["id"])) for child in children)
+                    )
+                    result = [
+                        {"info": child, "messages": messages}
+                        for child, messages in zip(children, histories)
+                    ]
+        _COLLAB_CACHE[key] = (time.monotonic(), ttl, result)
         return result
 
     @classmethod
@@ -2041,8 +2451,14 @@ class _EphemeralServer:
             try:
                 await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
             except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except (ProcessLookupError, FileNotFoundError):
+                    # The process already exited between the timeout and the
+                    # kill; treat it as cleanly gone rather than surfacing a
+                    # spurious task exception.
+                    pass
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

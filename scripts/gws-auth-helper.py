@@ -29,6 +29,7 @@ if sys.version_info < (3, 12):
     )
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -76,6 +77,11 @@ FULL_SCOPES = (
     "https://www.googleapis.com/auth/userinfo.email "
     "https://www.googleapis.com/auth/userinfo.profile"
 )
+
+
+def fingerprint(value: str) -> str:
+    """Short irreversible digest so client_secret.json contents never hit stdout."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 def read_client_secret(config_dir: Path) -> dict:
@@ -241,8 +247,10 @@ def main() -> None:
 
     print(f"\nProfile: {args.profile}")
     print(f"Config dir: {config_dir}")
-    print(f"Client ID: {client_id}")
-    print(f"Redirect URI: {redirect_uri}")
+    # Both values come from client_secret.json, so only their fingerprints are
+    # printed; the full values remain visible in the auth URL below.
+    print(f"Client ID: sha256:{fingerprint(client_id)}")
+    print(f"Redirect URI: sha256:{fingerprint(redirect_uri)}")
     print()
 
     auth_url = build_auth_url(client_id, redirect_uri, scopes)

@@ -59,12 +59,12 @@ def test_audit_skills_deduplicates_provider_projections(tmp_path: Path) -> None:
     claude_demo.mkdir()
     (claude_demo / "SKILL.md").write_text("# Stale projection\n", encoding="utf-8")
 
-    codex = tmp_path / ".agents" / "skills"
-    codex.mkdir(parents=True)
-    (codex / "demo").symlink_to(canonical, target_is_directory=True)
-    codex_only = codex / "codex-only"
-    codex_only.mkdir()
-    (codex_only / "SKILL.md").write_text("# Codex only\n", encoding="utf-8")
+    agents = tmp_path / ".agents" / "skills"
+    agents.mkdir(parents=True)
+    (agents / "demo").symlink_to(canonical, target_is_directory=True)
+    agents_only = agents / "agents-only"
+    agents_only.mkdir()
+    (agents_only / "SKILL.md").write_text("# Shared agents skill\n", encoding="utf-8")
 
     res = audit_skills(tmp_path)
     assert res["total_skills"] == 2
@@ -196,6 +196,45 @@ def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) 
     assert memory_actionable_count(memory) >= 1
     # The whole-audit status agrees, which is the contract the CLI relies on.
     assert report["total_issues"] >= 1
+
+
+def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> None:
+    """Aging notes are evidence for the curation routine, not audit defects.
+
+    They render in memory_hygiene so the weekly report can name them, but they
+    must not gate the status or the actionable count — a vault nobody has
+    touched in months is not an install that needs emergency attention, it is
+    a queue for the next curation pass.
+    """
+    import os as _os
+    import time as _time
+
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: person\n---\n# Mo\n", encoding="utf-8"
+    )
+    old = _time.time() - 200 * 86400
+    _os.utime(vault / "People" / "Mo.md", (old, old))
+    _seed_guide(tmp_path / "CLAUDE.md", memory=["durable lesson"], profile=[])
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=vault)
+    memory = report["memory_hygiene"]
+
+    stale = memory["stale_notes"]
+    assert len(stale) == 1
+    assert stale[0]["path"] == "memory-vault/People/Mo.md"
+    assert stale[0]["threshold_days"] == 90
+    assert memory["notes_checked"] >= 1
+
+    from ciao.os_audit import format_audit_markdown, memory_actionable_count
+
+    # Informational by contract: nothing here is actionable on its own.
+    findings = memory_actionable_count(memory)
+    assert findings == 0
+    assert "Notes not verified within their type's horizon" in (
+        format_audit_markdown(report)
+    )
 
 
 def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
@@ -539,7 +578,7 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     ideas.mkdir(parents=True)
     resources.mkdir(parents=True)
     (ideas / "same.md").write_text(
-        "---\ntype: idea\n---\n# One\n\n[[missing-target]]\n",
+        "---\ntype: idea\n---\n# One\n\n[gone](./missing-target.md)\n",
         encoding="utf-8",
     )
     (resources / "same.md").write_text(
@@ -578,7 +617,7 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
         today=datetime.date(2026, 7, 26),
     )
     assert report["status"] == "needs_attention"
-    # Vault: 1 broken link + 2 orphans + 1 duplicate.
+    # Vault: 1 broken markdown link + 2 orphans + 1 duplicate.
     # Skills: 1 missing SKILL.md + 1 over budget.
     # Rules: 1 conflict. Memory: 1 expired + 1 invalid tag + 1 proposal.
     # Jobs: 1 unresolved latest failure.
@@ -737,3 +776,372 @@ def test_run_os_audit_preserves_distinct_errors_for_the_same_file(
     assert report["status"] == "error"
     assert report["total_errors"] == 2
     assert len(report["scan_errors"]) == 2
+
+
+def _upgrade_config(workspace: Path):
+    """Config whose vault registry pins a legacy sibling vault.
+
+    The pinned vault is left outside the standard folder so
+    `audit_upgrade_notices` reports it as an optional migration.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    legacy = workspace / "research"
+    (legacy / "Workspace").mkdir(parents=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=workspace,
+        vault_root=workspace / "memory-vault",
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        workspaces={
+            "research": WorkspaceConfig(name="research", vault_root="research"),
+        },
+    )
+
+
+def test_run_os_audit_pending_only_is_healthy(tmp_path: Path) -> None:
+    """One upgrade notice and zero defects must not raise the status.
+
+    A migration a user may decline must not pin the audit at needs_attention,
+    mirroring how `memory_actionable_count` treats superseded-state candidates.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_upgrade_config(workspace),
+    )
+
+    assert report["status"] == "healthy"
+    assert report["total_issues"] == 0
+    assert report["defect_count"] == 0
+    # One pending action: the vault-location notice. The re-home notice needs
+    # more than one registered workspace, and this config registers one.
+    assert report["pending_action_count"] == 1
+    assert report["has_pending_actions"] is True
+    markdown = format_audit_markdown(report)
+    assert "Upgrade Actions (optional)" in markdown
+    assert "Pending actions" in markdown
+
+
+def test_run_os_audit_split_counts_keep_pending_actions_out_of_defects(
+    tmp_path: Path,
+) -> None:
+    """A pending action is reported separately and never raises defect_count."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    (workspace / "skills" / "missing-md").mkdir(parents=True)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_upgrade_config(workspace),
+    )
+
+    assert report["defect_count"] == 1
+    # One pending action: the vault-location notice. The re-home notice needs
+    # more than one registered workspace, and this config registers one.
+    assert report["pending_action_count"] == 1
+    assert report["has_pending_actions"] is True
+    assert report["status"] == "needs_attention"
+
+
+def test_run_os_audit_clean_has_no_pending_actions(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+    )
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] == 0
+    assert report["has_pending_actions"] is False
+
+
+def _rehome_config(workspace: Path):
+    """Config with TWO registered workspaces, the shape the damage needs.
+
+    With a single workspace `detect_misfiled_people` still buckets an untagged
+    note as needs_judgement, but its target and destination come back empty:
+    there is nowhere to move it, so the migration has nothing to offer. The
+    notice is gated on more than one workspace, so its tests must register two.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    for name in ("personal", "work"):
+        (workspace / "memory-vault" / name / "People").mkdir(parents=True, exist_ok=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=workspace,
+        vault_root=workspace / "memory-vault",
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+
+
+def _rehome_notice(report: dict) -> list[dict]:
+    return [
+        notice
+        for notice in report["upgrade_notices"]["notices"]
+        if notice["type"] == "unrehomed_people"
+    ]
+
+
+def _write_legacy_receipt(runtime: Path) -> None:
+    """A receipt from before `vault_rehome` wrote a `status` field at all."""
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "rehomed_at": "2026-08-19T00:00:00Z",
+        "vault_root": str(runtime),
+        "moves": [{"from": "personal/People/A.md", "to": "work/People/A.md"}],
+        "rewrites": [],
+        "needs_judgement": [],
+        "proposals": [],
+    }
+    (runtime / "migration" / "vault-rehome.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _write_migrated_receipt(runtime: Path) -> None:
+    """Write a completed re-home receipt, which must silence the notice."""
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "status": "migrated",
+        "rehomed_at": "2026-08-19T00:00:00Z",
+        "vault_root": str(runtime),
+        "moves": [],
+        "rewrites": [],
+        "needs_judgement": [],
+        "proposals": [],
+    }
+    (runtime / "migration" / "vault-rehome.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_rehome_notice_fires_when_receipt_is_absent(tmp_path: Path) -> None:
+    """No receipt means no re-home has ever been applied, so the offer stands."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report)
+    detail = _rehome_notice(report)[0]["detail"]
+    # Nothing writes a survey receipt any more, so the notice must not claim a
+    # survey either ran or is the next step.
+    assert "survey" not in detail.lower()
+    assert "none have been re-homed yet" in detail
+
+
+def test_rehome_notice_is_silent_once_migrated(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_migrated_receipt(runtime)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report) == []
+
+
+def test_rehome_notice_is_silent_on_a_legacy_receipt_with_no_status(
+    tmp_path: Path,
+) -> None:
+    """A receipt written before the `status` field records a COMPLETED re-home.
+
+    Gating on `status == "migrated"` made this notice fire forever on exactly
+    the installs that had done the work — the same false positive the home-screen
+    tile was fixed for. Presence of the receipt is the signal.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_legacy_receipt(runtime)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report) == []
+
+
+def test_rehome_notice_keeps_asking_after_a_partial_run(tmp_path: Path) -> None:
+    """A half-finished re-home must not silence this as well as a finished one.
+
+    A run that left failures used to write a `migrated` receipt, so the notice
+    went quiet while references were still inconsistent. Now the receipt says
+    `partial`, and the check reports only COMPLETED work as done.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    _write_legacy_receipt(runtime)
+    receipt = runtime / "migration" / "vault-rehome.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["status"] = "partial"
+    payload["failed"] = [{"path": "personal/People/A.md", "error": "Permission denied"}]
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert _rehome_notice(report) != [], "a partial re-home reported as done"
+
+
+def test_rehome_notice_never_walks_the_vault_for_counts(tmp_path: Path) -> None:
+    """The notice is a receipt check, not a vault scan.
+
+    The vault below holds nine re-homable person notes. This routine runs on
+    every app open, and `plan_rehome` walks every person note, so quoting a
+    number here would put that walk on the hot path. If a future edit
+    "helpfully" scanned the vault to fill in counts, this test fails.
+    """
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    for i in range(9):
+        note = vault / "personal" / "People" / f"Note{i}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: person\ntags: [person, colleague]\n---\n# X\n",
+            encoding="utf-8",
+        )
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    detail = _rehome_notice(report)[0]["detail"]
+    assert not any(char.isdigit() for char in detail), detail
+
+
+def test_rehome_notice_remedy_names_the_inverse_command(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    remedy = _rehome_notice(report)[0]["remedy"]
+    assert "ciao vault-rehome" in remedy
+    assert "ciao vault-rehome --apply" in remedy
+    assert "ciao vault-unrehome --apply" in remedy
+
+
+def test_rehome_notice_keeps_status_healthy_and_raises_pending(tmp_path: Path) -> None:
+    """A re-home offer is an optional pending action, never a defect: it must not
+    turn the audit red, and it must not raise defect_count."""
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        config=_rehome_config(workspace),
+    )
+
+    assert report["status"] == "healthy"
+    assert report["defect_count"] == 0
+    assert report["pending_action_count"] >= 1
+    assert report["has_pending_actions"] is True
+
+
+def test_unrehomed_people_notice_is_silent_on_a_single_workspace_install(
+    tmp_path: Path,
+) -> None:
+    """One workspace has nowhere to misfile a note to, so there is nothing to offer.
+
+    detect_misfiled_people only makes a note a candidate when another registered
+    workspace could hold it. Without the workspace-count gate a fresh install
+    with one workspace and an empty vault was told its person notes may be in
+    the wrong place, which is an action the operator cannot take.
+    """
+    import json as _json
+
+    from ciao.config import CiaoConfig
+    from ciao.os_audit import audit_upgrade_notices
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        _json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]),
+        encoding="utf-8",
+    )
+    (tmp_path / "memory-vault" / "personal").mkdir(parents=True)
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+
+    result = audit_upgrade_notices(config, runtime)
+
+    kinds = [notice["type"] for notice in result["notices"]]
+    assert "unrehomed_people" not in kinds
+
+
+def test_a_search_index_defect_is_rendered_not_just_counted(tmp_path: Path) -> None:
+    """A defect that changes `status` has to be legible in the report.
+
+    `search_index` findings were added to `defect_count` when they landed but
+    never rendered, so an install whose only defect was the search index printed
+    "Total Issues: 1" above a report with every section empty — and `--repair`,
+    which is the fix, went unmentioned. The inline comment beside the count
+    asserted the opposite.
+    """
+    report = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+    report["search_index"] = {
+        "missing": True,
+        "stale_rows": ["personal/memory-vault/People/Mo.md"],
+        "transcripts_unindexed": 3,
+        "errors": [],
+    }
+
+    text = format_audit_markdown(report)
+
+    assert "## 7. Search Index" in text
+    assert "--repair" in text
+    assert "personal/memory-vault/People/Mo.md" in text
+    assert "3 transcript archive(s) unindexed" in text
+
+
+def test_a_clean_search_index_renders_no_section(tmp_path: Path) -> None:
+    """Silence is the healthy answer; an empty section reads as a finding."""
+    report = run_os_audit(
+        workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
+    )
+    report["search_index"] = {
+        "missing": False,
+        "stale_rows": [],
+        "transcripts_unindexed": 0,
+        "errors": [],
+    }
+
+    assert "## 7. Search Index" not in format_audit_markdown(report)

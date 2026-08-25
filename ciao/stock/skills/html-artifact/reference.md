@@ -151,3 +151,68 @@ render();
 ```
 
 Building HTML with a template string is fine here because the data is yours, baked into the page at author time. If any string could come from somewhere else, set `textContent` instead.
+
+## Static SVG diagram
+
+For an architecture, a flow, or a sequence. Builds on the base shell's tokens (light/dark handled, one accent).
+
+Conventions that keep the diagram readable and not machine-made:
+
+- **Shape carries type.** Oval = start/end, rectangle = step, diamond = decision, thin-bordered zone = grouping container.
+- **One accent, two focal points max.** Reserve it for the primary path or the single thing under review; everything else is muted ink/muted outline.
+- **Arrows behind the nodes.** Draw the edges first so node fills cover the line ends, then the boxes, then labels.
+- **Orthogonal arrows.** Run lines only horizontally and vertically; route around nodes with `H`/`V` path segments, not diagonals.
+- **Legend.** A short strip at the bottom decoding the shape/line/colour grammar, so the diagram argues on its own.
+- **Accessible name.** `role="img"` plus a `<title>` and a one-line `<desc>` describing what the diagram shows, with IDs that stay unique if several SVG sit on one page.
+
+One panel trap this shell fixes that bare SVG falls into: the panel is ~420px, so no `min-width` on the SVG and no fixed 900px design. Use a `viewBox` and let it scale down, or stack vertically. The `<defs>` for the arrow markers are inlined; nothing is fetched.
+
+```html
+<style>
+  .dg { margin: 14px 0; }
+  .dg svg { width: 100%; display: block; }
+  .dg .eyebrow { color: var(--muted); font-size: 11px; text-transform: uppercase;
+                 letter-spacing: .08em; margin-bottom: 4px; }
+</style>
+
+<div class="dg">
+  <p class="eyebrow">Architecture</p>
+  <svg viewBox="0 0 640 360" role="img" aria-labelledby="dg-title dg-desc">
+    <title id="dg-title">Reader request path</title>
+    <desc id="dg-desc">A request moves from the reader through the edge cache to the origin, then to the CMS.</desc>
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="var(--muted)"/>
+      </marker>
+      <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- arrows first, then boxes, then labels -->
+    <line x1="180" y1="180" x2="252" y2="180" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arrow)"/>
+    <line x1="388" y1="180" x2="460" y2="180" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+
+    <rect x="60" y="140" width="120" height="80" rx="40" fill="var(--card)" stroke="var(--muted)" stroke-width="1"/>
+    <text x="120" y="184" fill="var(--fg)" font-size="14" font-weight="600" text-anchor="middle">Reader</text>
+
+    <rect x="252" y="148" width="136" height="64" rx="6" fill="var(--card)" stroke="var(--muted)" stroke-width="1"/>
+    <text x="320" y="176" fill="var(--fg)" font-size="13" font-weight="600" text-anchor="middle">Edge cache</text>
+    <text x="320" y="192" fill="var(--muted)" font-size="11" text-anchor="middle">CDN</text>
+
+    <rect x="460" y="148" width="136" height="64" rx="6" fill="var(--card)" stroke="var(--accent)" stroke-width="1"/>
+    <text x="528" y="176" fill="var(--fg)" font-size="13" font-weight="600" text-anchor="middle">Origin</text>
+    <text x="528" y="192" fill="var(--muted)" font-size="11" text-anchor="middle">SSR + MDX</text>
+
+    <!-- zone container -->
+    <rect x="460" y="300" width="136" height="52" rx="6" fill="var(--card)" stroke="var(--muted)" stroke-width="1"/>
+    <text x="528" y="330" fill="var(--fg)" font-size="13" font-weight="600" text-anchor="middle">CMS</text>
+
+    <line x1="40" y1="360" x2="600" y2="360" stroke="var(--line)" stroke-width="1"/>
+    <rect x="40" y="372" width="14" height="10" rx="2" fill="var(--card)" stroke="var(--accent)" stroke-width="1"/>
+    <text x="62" y="382" fill="var(--muted)" font-size="11">Focal path</text>
+  </svg>
+</div>
+```
+
+Colour the SVG with `var()` tokens so the dark-mode media query keeps working. If the diagram is dense enough that 420px gets cramped, keep the SVG full-width and let it scroll vertically inside the panel rather than shrinking the type below 11px. Build a flow chart the same way: an oval start, rectangle steps, a diamond for the decision, and a labelled legend at the bottom that says what each shape and line means.

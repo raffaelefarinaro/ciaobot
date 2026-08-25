@@ -78,10 +78,7 @@ def test_review_one_routes_via_oneshot(monkeypatch) -> None:
     assert captured["cwd"] is None
 
 
-@pytest.mark.parametrize(
-    ("entry", "provider"),
-    [("codex:fable", "codex"), ("opencode:fable", "opencode")],
-)
+@pytest.mark.parametrize(("entry", "provider"), [("opencode:fable", "opencode")])
 def test_review_one_routes_prefixed_entry_to_its_provider(
     monkeypatch, entry, provider
 ) -> None:
@@ -141,20 +138,16 @@ def test_resolve_critique_panel_cli_override_wins() -> None:
 def _panel(
     monkeypatch,
     *,
-    codex: bool,
     opencode: bool,
     anthropic: bool = True,
-    codex_model: str = "",
     opencode_model: str = "",
 ) -> list[str]:
     """Resolve the default panel with each vendor probe pinned."""
     from ciao.config import CiaoConfig
 
     monkeypatch.setattr(crt, "is_anthropic_available", lambda: anthropic)
-    monkeypatch.setattr(crt, "is_codex_available", lambda: codex)
     monkeypatch.setattr(crt, "is_opencode_available", lambda: opencode)
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
-    config.codex = SimpleNamespace(default_model=codex_model)
     config.opencode = SimpleNamespace(default_model=opencode_model)
     return crt.default_critique_panel(config)
 
@@ -162,20 +155,20 @@ def _panel(
 def test_default_critique_panel_is_anthropic_only_when_nothing_else_signed_in(
     monkeypatch,
 ) -> None:
-    assert _panel(monkeypatch, codex=False, opencode=False) == ["opus", "fable"]
+    assert _panel(monkeypatch, opencode=False) == ["opus", "fable"]
 
 
 def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
     monkeypatch,
 ) -> None:
     """Every entry is gated, Anthropic included."""
-    panel = _panel(monkeypatch, codex=True, opencode=True, anthropic=False)
-    assert panel == ["codex:", "opencode:"]
+    panel = _panel(monkeypatch, opencode=True, anthropic=False)
+    assert panel == ["opencode:"]
 
 
 def test_default_critique_panel_never_resolves_empty(monkeypatch) -> None:
     """With nothing signed in, report a real auth error rather than review nothing."""
-    panel = _panel(monkeypatch, codex=False, opencode=False, anthropic=False)
+    panel = _panel(monkeypatch, opencode=False, anthropic=False)
     assert panel == ["opus", "fable"]
 
 
@@ -184,13 +177,12 @@ def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
 ) -> None:
     """The point of the panel is disagreement, so prefer vendor diversity.
 
-    Three Anthropic models would largely agree with each other; Codex and
-    opencode each contribute a genuinely different model.
+    Multiple Anthropic models would largely agree with each other; opencode
+    contributes a genuinely different model.
     """
-    assert _panel(monkeypatch, codex=True, opencode=True) == [
+    assert _panel(monkeypatch, opencode=True) == [
         "opus",
         "fable",
-        "codex:",
         "opencode:",
     ]
 
@@ -198,29 +190,23 @@ def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
 def test_default_critique_panel_uses_per_provider_default_models(
     monkeypatch,
 ) -> None:
-    """Codex/opencode entries carry the operator's per-provider default model.
+    """opencode entries carry the operator's per-provider default model.
 
     A tier alias like ``fable`` is only meaningful to Claude Code; the other
     providers must get a concrete model id (or none, to use their own default).
     """
     assert _panel(
         monkeypatch,
-        codex=True,
         opencode=True,
-        codex_model="gpt-5.6-sol",
         opencode_model="ollama-cloud/deepseek-v4-flash",
     ) == [
         "opus",
         "fable",
-        "codex:gpt-5.6-sol",
         "opencode:ollama-cloud/deepseek-v4-flash",
     ]
 
 
 def test_default_critique_panel_omits_vendors_that_are_signed_out(monkeypatch) -> None:
     """An unavailable provider would put a guaranteed failure in the panel."""
-    codex_only = _panel(monkeypatch, codex=True, opencode=False)
-    assert codex_only == ["opus", "fable", "codex:"]
-
-    opencode_only = _panel(monkeypatch, codex=False, opencode=True)
+    opencode_only = _panel(monkeypatch, opencode=True)
     assert opencode_only == ["opus", "fable", "opencode:"]

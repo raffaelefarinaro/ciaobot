@@ -86,7 +86,7 @@ def test_setup_status_reports_linked_workspace_guides(tmp_path) -> None:
     assert checks["workspace_guides"]["required"] is False
 
     (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom runtime guide\n", encoding="utf-8")
     checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
     assert checks["workspace_guides"]["ok"] is False
 
@@ -264,25 +264,6 @@ def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
     assert claude["cli_path"] == "/usr/local/bin/claude"
 
 
-def test_setup_status_includes_codex_subscription_login(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ciao.setup_status.codex_login_status",
-        lambda env: {
-            "name": "codex",
-            "ok": True,
-            "auth": "chatgpt",
-            "command": "ciao auth codex",
-            "detail": "Logged in using ChatGPT",
-        },
-    )
-    config = _config(tmp_path)
-
-    data = setup_status(config, env={})
-
-    assert data["providers"]["codex"]["ok"] is True
-    assert data["providers"]["codex"]["auth"] == "chatgpt"
-
-
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
@@ -395,14 +376,17 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_MODE=scratch" in env_text
-    assert (ws / "memory-vault" / "life" / "MEMORY.md").is_file()
+    # `<workspace>/memory-vault`: the wizard creates the per-workspace layout
+    # directly, so a new install never has a shared vault to migrate.
+    assert (ws / "life" / "memory-vault" / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault").exists()
     # The wizard's first workspace replaces the legacy personal+work
     # fallback: a one-entry registry with the chosen name.
     import json as _json
 
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
-    assert registry[0]["vault_root"] == "memory-vault/life"
+    assert registry[0]["vault_root"] == "life/memory-vault"
     # Setup links no Google account: which accounts exist is the user's choice,
     # made in Settings → Workspaces after onboarding.
     assert registry[0]["gws_profile"] == ""
@@ -426,31 +410,6 @@ def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:
     assert "workspace name" in response.json()["error"]
     assert not workspace.exists()
     assert not (tmp_path / "outside").exists()
-
-
-def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> None:
-    ws = tmp_path / "codex-workspace"
-    ws.mkdir()
-
-    resp = _finish_client(tmp_path).post(
-        "/api/setup/finish",
-        json={
-            "password": "wizard-pass",
-            "workspace": str(ws),
-            "workspace_name": "personal",
-            "provider": "codex",
-            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
-            "app_dir": str(tmp_path / "Applications"),
-        },
-    )
-
-    assert resp.status_code == 200
-    registry = json.loads(
-        (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
-    )
-    assert registry[0]["default_provider"] == "codex"
-    assert (ws / "AGENTS.md").is_symlink()
-    assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
 
 
 def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
@@ -501,7 +460,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     the login view, where the first-run wizard renders — even for a caller that
     already carries a valid session cookie for the throwaway workspace."""
     from ciao.web.auth import SESSION_COOKIE
-    from ciao.web.routes_api import auth_check
+    from ciao.web.routes_auth import auth_check
 
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -530,7 +489,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
     """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
     from ciao.web.auth import SESSION_COOKIE
-    from ciao.web.routes_api import auth_check
+    from ciao.web.routes_auth import auth_check
 
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -563,6 +522,12 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # `_isolate_launch_agents` redirects the default away from the real
+    # ~/Library/LaunchAgents; re-point it at this test's faked home so the
+    # assertion still exercises per-user default resolution.
+    monkeypatch.setenv(
+        "CIAO_LAUNCH_AGENTS_DIR", str(home / "Library" / "LaunchAgents")
+    )
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
     monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
@@ -739,10 +704,10 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     assert resp.json()["workspace"] == str(workspace.resolve())
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_ROOT=memory-vault" in env_text
-    assert (workspace / "memory-vault" / "personal" / "MEMORY.md").is_file()
-    # One repo at the workspace root; the nested vault is never double-inited.
+    assert (workspace / "personal" / "memory-vault" / "MEMORY.md").is_file()
+    # One repo at the install root; the nested vault is never double-inited.
     assert (workspace / ".git").is_dir()
-    assert not (workspace / "memory-vault" / ".git").exists()
+    assert not (workspace / "personal" / "memory-vault" / ".git").exists()
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:
@@ -1018,7 +983,7 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
 
     def fake_payload(_config):
         calls["payload"] += 1
-        return {"connections": {"claude": {"mcps": ["Airtable"]}, "codex": {}}}
+        return {"connections": {"claude": {"mcps": ["Airtable"]}, "opencode": {}}}
 
     monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", fake_clear)
     monkeypatch.setattr(routes_api, "_provider_config_payload", fake_payload)
@@ -1033,7 +998,7 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     assert json.loads(response.body) == {"mcps": ["Airtable"]}
     assert calls == {"clear": 1, "payload": 1}
 
-    request.path_params["provider"] = "codex"
+    request.path_params["provider"] = "opencode"
     await provider_connection_action(request)
     assert calls == {"clear": 1, "payload": 2}
 

@@ -6,25 +6,188 @@ import json
 import logging
 import re
 import shutil
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from claude_agent_sdk import (
-    SDKSessionInfo,
     SessionMessage,
     delete_session,
     get_session_messages,
     get_session_messages as _sdk_get_session_messages,
-    get_subagent_messages,
-    list_sessions,
-    list_subagents,
 )
 
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
 logger = logging.getLogger(__name__)
+
+# Turn-journal flush cadence: buffered event records spill to disk when this
+# many seconds have elapsed since the last write or the buffer grows past the
+# entry cap, whichever comes first. A crash loses at most this much tail.
+_JOURNAL_FLUSH_SECONDS = 0.25
+_JOURNAL_FLUSH_ENTRIES = 32
+
+
+class TurnJournal:
+    """Append-only crash journal for one in-flight turn.
+
+    The normalized transcript (``record_turn``) is written only at end of
+    turn, so a server crash or provider abort mid-turn previously lost the
+    whole exchange. The journal mirrors the stream's user-visible events as
+    JSON lines while the turn runs; on normal completion ``finish()`` deletes
+    the file. A file left behind by a crash is folded back into the transcript
+    as an ``is_partial`` turn by :meth:`TranscriptStore.recover_journals`.
+
+    Writes are synchronous on purpose: cancellation cannot interrupt them
+    mid-line, so no shield wrapper is needed around finalization.
+    """
+
+    def __init__(self, journal_dir: Path, provider: str) -> None:
+        self._dir = journal_dir
+        self._provider = provider
+        self._path: Path | None = None
+        self._handle: Any = None
+        self._buffer: list[str] = []
+        self._last_flush = 0.0
+        # The elapsed deadline used to be checked only from `append()`, so a
+        # turn that emitted a short burst and then went quiet held those records
+        # until the next one arrived - a crash in the quiet stretch lost an
+        # arbitrarily old reply rather than the documented 250ms tail. A timer
+        # makes the deadline real; it fires on its own thread, so the buffer and
+        # the handle are guarded.
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+
+    @property
+    def active(self) -> bool:
+        return self._handle is not None
+
+    def begin(self, header: dict[str, Any]) -> None:
+        """Create the journal file and write the header record.
+
+        Failures are log-only: a broken journal must never break the turn.
+        """
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+            name = f"{_safe_slug(self._provider)}-{stamp}-{id(self):x}.jsonl"
+            self._path = self._dir / name
+            self._handle = self._path.open("a", encoding="utf-8")
+            self._last_flush = time.monotonic()
+            # Header goes straight to disk so a crash before any event still
+            # leaves a recoverable prompt + provider record.
+            self._handle.write(
+                json.dumps({"type": "begin", **header}, ensure_ascii=False) + "\n"
+            )
+            self._handle.flush()
+        except OSError:
+            logger.exception("Failed opening turn journal under %s", self._dir)
+            self._handle = None
+
+    def append(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            if self._handle is None:
+                return
+            self._buffer.append(json.dumps(record, ensure_ascii=False))
+            now = time.monotonic()
+            if (
+                len(self._buffer) >= _JOURNAL_FLUSH_ENTRIES
+                or now - self._last_flush >= _JOURNAL_FLUSH_SECONDS
+            ):
+                self._flush_locked()
+            else:
+                self._arm_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _arm_locked(self) -> None:
+        """Make sure the buffered tail lands even if nothing else arrives."""
+        if self._timer is not None:
+            return
+        delay = max(0.0, _JOURNAL_FLUSH_SECONDS - (time.monotonic() - self._last_flush))
+        timer = threading.Timer(delay, self._flush_from_timer)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _cancel_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _flush_from_timer(self) -> None:
+        with self._lock:
+            self._timer = None
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        self._cancel_locked()
+        if self._handle is None or not self._buffer:
+            return
+        try:
+            self._handle.write("\n".join(self._buffer) + "\n")
+            self._handle.flush()
+        except OSError:
+            logger.exception("Failed writing turn journal %s", self._path)
+        finally:
+            self._buffer.clear()
+            self._last_flush = time.monotonic()
+
+    def mark_committed(self) -> None:
+        """Record that the normalized turn is durably written.
+
+        ``record_turn`` and ``finish`` are two steps, and a process death
+        between them left behind a journal whose turn was ALREADY in the
+        transcript - recovery then folded it in a second time, duplicating the
+        prompt and the reply into history, the archive and the insights input,
+        after exactly the crash the journal exists to survive. A journal
+        carrying this marker is dropped by recovery instead of replayed.
+        """
+        with self._lock:
+            if self._handle is None:
+                return
+            self._buffer.append(json.dumps({"type": "committed"}, ensure_ascii=False))
+            self._flush_locked()
+
+    def finish(self) -> None:
+        """Close and delete the journal — the turn completed normally."""
+        with self._lock:
+            self._flush_locked()
+            self._finish_locked()
+
+    def _finish_locked(self) -> None:
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
+        if self._path is not None:
+            try:
+                self._path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed removing turn journal %s", self._path)
+            self._path = None
+
+
+def _journal_event_record(event: Any) -> dict[str, Any] | None:
+    """Map a stream event to its compact journal record (None = skip)."""
+    type_name = type(event).__name__
+    if type_name == "AssistantTextDelta":
+        text = getattr(event, "text", "")
+        return {"type": "text", "text": text} if text else None
+    if type_name == "ToolUseEvent":
+        name = getattr(event, "tool_name", "")
+        return {"type": "tool", "name": name} if name else None
+    if type_name == "ResultEvent":
+        return {"type": "result", "is_error": bool(getattr(event, "is_error", False))}
+    # Thinking/system/permission events carry no recoverable reply content.
+    return None
 
 
 def _now_iso() -> str:
@@ -110,6 +273,159 @@ class TranscriptStore:
         )
         self._save_current(ctx, transcript, provider)
 
+    def open_turn_journal(self, ctx: ChatContext, provider: str = "claude") -> TurnJournal:
+        """Create a crash journal for one in-flight turn of this chat."""
+        return TurnJournal(
+            self._runtime_root / "transcripts" / ctx.key / "journal", provider
+        )
+
+    def record_partial_turn(
+        self,
+        ctx: ChatContext,
+        *,
+        provider: str,
+        prompt: str,
+        response_text: str,
+        tool_events: list[dict[str, Any]] | None = None,
+        started_at: str = "",
+        journal_path: Path | None = None,
+    ) -> bool:
+        """Append an ``is_partial`` turn recovered from a crash journal.
+
+        Returns whether a turn was actually appended, so the caller's count
+        reports recoveries rather than journals seen.
+
+        Idempotent on the journal's own name. `_save_current` and the unlink
+        below are two steps: a death between them - or an unlink that simply
+        raises - leaves a journal whose turn is ALREADY durable, and the next
+        startup folded it in again, duplicating the prompt and the reply after
+        exactly the crash recovery exists to survive.
+
+        A `committed` marker (as the normal turn path uses) would only narrow
+        that window, because a death before the marker still replays a durable
+        turn. Stamping the turn with the journal filename - which is unique per
+        turn - and checking for it first closes the window wherever the crash
+        lands.
+        """
+        source = journal_path.name if journal_path is not None else ""
+        transcript = self._load_current(ctx, provider)
+        if source and transcript:
+            for turn in transcript.get("turns") or []:
+                if turn.get("recovered_from") == source:
+                    # Already folded in by an earlier startup; this journal only
+                    # outlived its own unlink.
+                    self._drop_journal(journal_path)
+                    return False
+        if not transcript:
+            transcript = {
+                "provider": provider,
+                "started_at": started_at or _now_iso(),
+                "selected_model": "",
+                "session_id": "",
+                "context_key": ctx.key,
+                "turns": [],
+            }
+        transcript["updated_at"] = _now_iso()
+        transcript.setdefault("turns", []).append(
+            {
+                "timestamp": started_at or _now_iso(),
+                "input_kind": "recovered",
+                "prompt": prompt,
+                "mode": "",
+                "resume_session": "",
+                "image_count": 0,
+                "response": response_text,
+                "is_error": False,
+                "is_partial": True,
+                "effective_model": "",
+                "usage": {},
+                "quota": {},
+                "tool_events": list(tool_events or []),
+                # The journal this turn came from, so a replay can recognise it.
+                "recovered_from": source,
+            }
+        )
+        self._save_current(ctx, transcript, provider)
+        self._drop_journal(journal_path)
+        return True
+
+    def _drop_journal(self, journal_path: Path | None) -> None:
+        if journal_path is None:
+            return
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed removing recovered journal %s", journal_path)
+
+    def recover_journals(self) -> int:
+        """Fold journals left behind by crashed turns into their transcripts.
+
+        Runs once at startup. Each leftover journal becomes one ``is_partial``
+        turn (recovered prompt + streamed text + tool names); the journal file
+        is deleted after a successful fold. Returns the number recovered.
+        """
+        journals_root = self._runtime_root / "transcripts"
+        if not journals_root.exists():
+            return 0
+        recovered = 0
+        for journal_file in sorted(journals_root.glob("*/journal/*.jsonl")):
+            try:
+                provider = "claude"
+                prompt = ""
+                started_at = ""
+                committed = False
+                texts: list[str] = []
+                tool_events: list[dict[str, Any]] = []
+                with journal_file.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        kind = record.get("type")
+                        if kind == "begin":
+                            provider = str(record.get("provider") or "claude")
+                            prompt = str(record.get("prompt") or "")
+                            started_at = str(record.get("started_at") or "")
+                        elif kind == "text":
+                            texts.append(str(record.get("text") or ""))
+                        elif kind == "tool":
+                            tool_events.append({
+                                "id": "",
+                                "name": str(record.get("name") or "tool"),
+                                "input": {"summary": ""},
+                            })
+                        elif kind == "committed":
+                            committed = True
+                if committed:
+                    # The turn is already in the transcript; this journal only
+                    # outlived the unlink. Replaying it would duplicate the
+                    # exchange, so drop it and move on.
+                    journal_file.unlink(missing_ok=True)
+                    continue
+                ctx = ChatContext(chat_id=0, key_override=journal_file.parent.parent.name)
+                appended = self.record_partial_turn(
+                    ctx,
+                    provider=provider,
+                    prompt=prompt,
+                    response_text="".join(texts).strip(),
+                    tool_events=tool_events,
+                    started_at=started_at,
+                    journal_path=journal_file,
+                )
+                # Only a real append counts: a journal that outlived its own
+                # unlink is dropped, not recovered, and reporting it would
+                # claim a turn was restored twice.
+                recovered += 1 if appended else 0
+            except (OSError, json.JSONDecodeError):
+                logger.exception("Failed recovering turn journal %s", journal_file)
+        if recovered:
+            logger.info("Recovered %d partial turn(s) from crash journals", recovered)
+        return recovered
+
     def archive_session(
         self,
         *,
@@ -188,6 +504,8 @@ class TranscriptStore:
                 }
                 if turn.get("is_error"):
                     row["is_error"] = True
+                if turn.get("is_partial"):
+                    row["partial"] = True
                 usage = turn.get("usage")
                 if isinstance(usage, dict) and usage:
                     row["usage"] = usage
@@ -283,18 +601,6 @@ class TranscriptStore:
                     continue
         return results
 
-    def all_archive_dirs(self) -> list[Path]:
-        """All archive directories across all contexts."""
-        results: list[Path] = []
-        if not self._archive_root.exists():
-            return results
-        for ctx_dir in self._archive_root.iterdir():
-            if not ctx_dir.is_dir():
-                continue
-            for provider_dir in ctx_dir.iterdir():
-                if provider_dir.is_dir():
-                    results.append(provider_dir)
-        return results
 
     # ── Internal paths ────────────────────────────────────────────────────
 
@@ -470,404 +776,6 @@ def _claude_projects_dir(workspace_root: Path) -> Path:
     # Claude Code encodes workspace path: /Users/me/ciao → -Users-me-ciao
     slug = str(workspace_root).replace("/", "-").lstrip("-")
     return Path.home() / ".claude" / "projects" / f"-{slug}"
-
-
-def _peek_cli_entrypoint(path: Path) -> bool:
-    """Return True if the session's first user entry has entrypoint == 'cli'.
-
-    The SDK's ``get_session_messages()`` strips the JSONL envelope (timestamps,
-    entrypoint, etc.) and returns only the inner Anthropic API message dicts.
-    We still need the entrypoint to filter out bridge/SDK sessions that the
-    web server already archives separately.
-    """
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") == "user":
-                    return bool(obj.get("entrypoint") == "cli")
-    except OSError:
-        return False
-    return False
-
-
-def _ms_to_iso(ms: int | None) -> str:
-    if ms is None:
-        return ""
-    return (
-        datetime.fromtimestamp(ms / 1000, tz=UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-
-
-def _build_cli_turns(
-    messages: list[SessionMessage],
-) -> tuple[list[dict[str, Any]], str, dict[str, int]]:
-    """Convert SDK session messages into our turn list.
-
-    Extracts text blocks only (skips thinking, tool_use, tool_result), tallies
-    assistant usage, and merges consecutive same-role turns so that tool-use
-    chains collapse into a single assistant entry.
-    """
-    turns: list[dict[str, Any]] = []
-    model = ""
-    usage_totals: dict[str, int] = {}
-
-    for sm in messages:
-        msg = sm.message
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content", "")
-
-        if sm.type == "user":
-            if isinstance(content, list):
-                text_parts = [
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                text = "\n".join(text_parts)
-                image_count = sum(
-                    1
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "image"
-                )
-            else:
-                text = str(content)
-                image_count = 0
-            if text.strip():
-                turns.append({"role": "user", "text": text, "image_count": image_count})
-
-        elif sm.type == "assistant":
-            if not model:
-                model = msg.get("model", "")
-
-            text_parts = []
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-            elif isinstance(content, str):
-                text_parts.append(content)
-            response_text = "\n".join(text_parts).strip()
-            if response_text:
-                turns.append({"role": "assistant", "text": response_text})
-
-            usage = msg.get("usage", {}) or {}
-            for key in (
-                "input_tokens",
-                "output_tokens",
-                "cache_creation_input_tokens",
-                "cache_read_input_tokens",
-            ):
-                val = usage.get(key)
-                if val is None:
-                    continue
-                try:
-                    usage_totals[key] = usage_totals.get(key, 0) + int(val)
-                except (TypeError, ValueError):
-                    pass
-
-    # Merge consecutive same-role turns (tool-use chains produce multiple
-    # assistant entries between text replies).
-    merged: list[dict[str, Any]] = []
-    for turn in turns:
-        if merged and merged[-1]["role"] == turn["role"]:
-            merged[-1]["text"] += "\n\n" + turn["text"]
-        else:
-            merged.append(dict(turn))
-
-    return merged, model, usage_totals
-
-
-def _fetch_subagent_transcripts(
-    session_id: str,
-    directory: str,
-) -> list[dict[str, Any]]:
-    """Fetch transcripts for subagents spawned inside a parent CLI session.
-
-    Uses ``list_subagents`` (v0.1.60+) to discover subagent ids, then pulls
-    each one's messages with ``get_subagent_messages``. The return value is a
-    list of dicts shaped like the parent session's structured form, minus
-    session-level metadata. Empty on SDK error, no subagents, or subagents
-    with no text content.
-    """
-    try:
-        agent_ids = list_subagents(session_id, directory=directory)
-    except Exception:  # noqa: BLE001 — SDK I/O errors
-        logger.exception("list_subagents failed for %s", session_id)
-        return []
-
-    subagents: list[dict[str, Any]] = []
-    for agent_id in agent_ids:
-        try:
-            messages = get_subagent_messages(
-                session_id,
-                agent_id,
-                directory=directory,
-            )
-        except Exception:  # noqa: BLE001 — SDK I/O errors
-            logger.exception(
-                "get_subagent_messages failed for %s/%s", session_id, agent_id
-            )
-            continue
-        if not messages:
-            continue
-        turns, model, usage_totals = _build_cli_turns(messages)
-        if not turns:
-            continue
-        subagents.append(
-            {
-                "agent_id": agent_id,
-                "turns": turns,
-                "model": model,
-                "usage_totals": usage_totals,
-            }
-        )
-    return subagents
-
-
-def _parse_jsonl_session(
-    path: Path,
-    session_info: SDKSessionInfo,
-) -> dict[str, Any] | None:
-    """Build a structured session dict via the SDK for a CLI-entrypoint session.
-
-    Returns None if the session is not a CLI session, the SDK fails to parse
-    it, or it contains no text turns.
-    """
-    if not _peek_cli_entrypoint(path):
-        return None
-
-    session_id = session_info.session_id
-    directory = session_info.cwd or str(path.parent)
-
-    try:
-        messages = get_session_messages_full(session_id, directory=directory)
-    except Exception:  # noqa: BLE001 — SDK can raise a variety of I/O errors
-        logger.exception("get_session_messages_full failed for %s", session_id)
-        return None
-
-    if not messages:
-        return None
-
-    turns, model, usage_totals = _build_cli_turns(messages)
-    if not turns:
-        return None
-
-    return {
-        "session_id": session_id,
-        "entrypoint": "cli",
-        "model": model,
-        "started": _ms_to_iso(session_info.created_at),
-        "ended": _ms_to_iso(session_info.last_modified),
-        "turns": turns,
-        "usage_totals": usage_totals,
-        "git_branch": session_info.git_branch or "",
-        "cwd": session_info.cwd or "",
-        "subagents": _fetch_subagent_transcripts(session_id, directory),
-    }
-
-
-def _render_cli_transcript(session: dict[str, Any]) -> str:
-    """Render a parsed CLI session as markdown matching the Telegram transcript format."""
-    turns = session.get("turns", [])
-    usage = session.get("usage_totals", {})
-    subagents = session.get("subagents", []) or []
-
-    # Count user turns (a "turn" in transcript convention = one user+assistant exchange)
-    user_turns = [t for t in turns if t["role"] == "user"]
-
-    frontmatter = {
-        "type": "cli-transcript",
-        "provider": "claude",
-        "model": session.get("model", ""),
-        "session_id": session.get("session_id", ""),
-        "started": session.get("started", ""),
-        "ended": session.get("ended", ""),
-        "turn_count": len(user_turns),
-        "subagent_count": len(subagents),
-        "git_branch": session.get("git_branch", ""),
-        "tags": ["cli", "transcript", "claude"],
-        "usage_totals": usage,
-    }
-
-    lines = ["---"]
-    for key, value in frontmatter.items():
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            for item in value:
-                lines.append(f"  - {item}")
-        elif isinstance(value, dict):
-            lines.append(f"{key}:")
-            for sk, sv in value.items():
-                lines.append(f"  {sk}: {sv}")
-        else:
-            lines.append(f"{key}: {value}")
-    lines.extend(["---", "", f"# CLI Transcript", ""])
-    lines.extend([
-        f"- Started: {session.get('started', '-')}",
-        f"- Ended: {session.get('ended', '-')}",
-        f"- Model: {session.get('model', '-')}",
-        f"- Session id: {session.get('session_id', '-')}",
-        f"- Git branch: {session.get('git_branch', '-')}",
-        "",
-    ])
-
-    if usage:
-        lines.append("## Usage Totals")
-        lines.append("")
-        for key, value in sorted(usage.items()):
-            lines.append(f"- {key}: {value}")
-        lines.append("")
-
-    turn_num = 0
-    for turn in turns:
-        if turn["role"] == "user":
-            turn_num += 1
-            lines.extend([
-                f"## Turn {turn_num}",
-                "",
-                "### User",
-                "",
-                "```text",
-                turn["text"],
-                "```",
-                "",
-            ])
-        elif turn["role"] == "assistant":
-            lines.extend([
-                "### Assistant",
-                "",
-                "```text",
-                turn["text"],
-                "```",
-                "",
-            ])
-
-    if subagents:
-        lines.extend(["## Subagents", ""])
-        for sub in subagents:
-            agent_id = sub.get("agent_id", "?")
-            sub_model = sub.get("model", "")
-            sub_usage = sub.get("usage_totals", {}) or {}
-            lines.append(f"### Subagent `{agent_id}`")
-            lines.append("")
-            if sub_model:
-                lines.append(f"- Model: {sub_model}")
-            if sub_usage:
-                usage_str = ", ".join(
-                    f"{k}: {v}" for k, v in sorted(sub_usage.items())
-                )
-                lines.append(f"- Usage: {usage_str}")
-            lines.append("")
-
-            sub_turn_num = 0
-            for turn in sub.get("turns", []):
-                if turn["role"] == "user":
-                    sub_turn_num += 1
-                    lines.extend([
-                        f"#### Turn {sub_turn_num}",
-                        "",
-                        "##### User",
-                        "",
-                        "```text",
-                        turn["text"],
-                        "```",
-                        "",
-                    ])
-                elif turn["role"] == "assistant":
-                    lines.extend([
-                        "##### Assistant",
-                        "",
-                        "```text",
-                        turn["text"],
-                        "```",
-                        "",
-                    ])
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def extract_cli_transcripts(
-    workspace_root: Path,
-    archive_root: Path,
-    tracking_path: Path,
-) -> list[Path]:
-    """Extract new CLI JSONL sessions to readable .md transcripts.
-
-    Uses the Claude Agent SDK's session APIs (``list_sessions`` and
-    ``get_session_messages``) to walk sessions in chronological order. The
-    SDK rebuilds the conversation via ``parentUuid`` links, which is more
-    correct than file-order parsing for branched/forked sessions.
-
-    Args:
-        workspace_root: Project workspace root (e.g. /Users/me/ciao).
-        archive_root: Where to write transcripts (e.g. memory-vault/Logs/CLI/).
-        tracking_path: JSON file tracking already-extracted session IDs.
-
-    Returns:
-        List of paths to newly created transcript files.
-    """
-    projects_dir = _claude_projects_dir(workspace_root)
-    if not projects_dir.is_dir():
-        return []
-
-    # Load tracking state
-    extracted: set[str] = set()
-    if tracking_path.exists():
-        try:
-            extracted = set(json.loads(tracking_path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    try:
-        sessions = list_sessions(
-            directory=str(workspace_root),
-            include_worktrees=False,
-        )
-    except Exception:  # noqa: BLE001 — SDK can raise a variety of I/O errors
-        logger.exception("list_sessions failed for %s", workspace_root)
-        return []
-
-    created: list[Path] = []
-    for sess in sessions:
-        session_id = sess.session_id
-        if session_id in extracted:
-            continue
-
-        jsonl_path = projects_dir / f"{session_id}.jsonl"
-        session = _parse_jsonl_session(jsonl_path, sess)
-        if session is None:
-            # Not a CLI session or empty: mark as seen so we don't re-check
-            extracted.add(session_id)
-            continue
-
-        body = _render_cli_transcript(session)
-        archive_root.mkdir(parents=True, exist_ok=True)
-        started = str(session.get("started", "")).replace(":", "-")
-        out_path = archive_root / f"{started}-{session_id}.md"
-        out_path.write_text(body, encoding="utf-8")
-        extracted.add(session_id)
-        created.append(out_path)
-        logger.info("Extracted CLI transcript: %s", out_path.name)
-
-    # Save tracking state
-    tracking_path.parent.mkdir(parents=True, exist_ok=True)
-    tracking_path.write_text(
-        json.dumps(sorted(extracted), indent=2),
-        encoding="utf-8",
-    )
-
-    return created
 
 
 def get_session_messages_full(

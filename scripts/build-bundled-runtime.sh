@@ -34,6 +34,16 @@ uv export \
     --format requirements.txt \
     --output-file "$requirements"
 
+# setuptools reuses `build/lib` between wheel builds and never removes files
+# that have since been deleted from the source tree, so every wheel built on a
+# long-lived checkout carries the ghosts of every module ever deleted. A dev
+# machine shipped nine of them, four import-broken, because `build/lib` had 119
+# modules against the 110 that still existed. Nothing catches it: the ghosts are
+# imported by nothing, so mypy and pytest stay green, and the failure only shows
+# when something walks the package. Clearing it costs one rebuild of a directory
+# that is pure derived output.
+rm -rf "$repo_root/build"
+
 rm -rf "$output"
 mkdir -p "$output/python" "$output/site-packages" "$output/bin"
 # The bundled-site hook is written from a path computed with os.path.relpath,

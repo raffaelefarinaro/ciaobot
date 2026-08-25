@@ -156,7 +156,7 @@ _SHELL_COPY_RE = re.compile(r"(?:^|[\s;|&])(?:cp|mv|install)\s+([^\n;&|]+)")
 _SHELL_PATH_EXT_RE = re.compile(
     r"\.(?:md|markdown|txt|py|ts|tsx|js|jsx|vue|css|html|json|yaml|yml|toml|"
     r"sh|bash|zsh|rs|go|java|xml|sql|cfg|ini|log|csv|tsv|env|example|"
-    r"excalidraw|pdf|pptx|png|jpe?g|gif|webp|svg|avif|bmp|ico|lock|sum)$",
+    r"pdf|pptx|png|jpe?g|gif|webp|svg|avif|bmp|ico|lock|sum)$",
     re.IGNORECASE,
 )
 _EXTENSIONLESS_SHELL_NAMES = frozenset({
@@ -287,12 +287,6 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
             return []
         return [{"file_path": path, "action": action}]
     return []
-
-
-def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
-    """If this tool mutates a file, return `{file_path, action}`, else None."""
-    touches = extract_file_touches(tool_name, tool_input)
-    return touches[0] if touches else None
 
 
 def normalize_file_touch_paths(
@@ -537,7 +531,7 @@ class ChatStream:
         self.user_stopped: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
-        # queued/steered user messages — a user send while one is active
+        # queued user messages — a user send while one is active
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
         self.pending_capability: dict[str, dict] | None = None
@@ -607,10 +601,6 @@ class ChatStream:
     @property
     def done(self) -> bool:
         return self._done
-
-    @property
-    def event_count(self) -> int:
-        return len(self._events)
 
     def buffered_events(self) -> list[dict]:
         """Return a shallow copy of currently buffered events."""

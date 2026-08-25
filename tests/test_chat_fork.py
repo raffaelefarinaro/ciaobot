@@ -43,8 +43,8 @@ def test_fork_chat_creates_fresh_independent_chat_with_copied_history(
     source = manager.create_chat(
         project.project_id,
         title="Original",
-        model="gpt-5.2-codex",
-        provider="codex",
+        model="anthropic/claude-sonnet-4-6",
+        provider="opencode",
     )
     source.mode = "plan"
     source.thinking_level = "high"
@@ -57,8 +57,8 @@ def test_fork_chat_creates_fresh_independent_chat_with_copied_history(
     assert fork.chat_id != source.chat_id
     assert fork.project_id == source.project_id
     assert fork.title == "Original · Fork 1"
-    assert fork.provider == "codex"
-    assert fork.model == "gpt-5.2-codex"
+    assert fork.provider == "opencode"
+    assert fork.model == "anthropic/claude-sonnet-4-6"
     assert fork.mode == "plan"
     assert fork.thinking_level == "high"
     assert fork.session_id == ""

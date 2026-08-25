@@ -88,7 +88,7 @@ export function isRunningNow(item: AutomationProcess): boolean {
  * A one-time migration that already ran is history, not a live automation:
  * it keeps a green badge forever and nothing will ever change it.
  */
-export function isSettledOneTime(item: AutomationProcess): boolean {
+function isSettledOneTime(item: AutomationProcess): boolean {
   return !!item.one_time && overallHealth(item) !== 'error'
 }
 

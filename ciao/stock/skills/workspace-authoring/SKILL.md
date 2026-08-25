@@ -10,7 +10,7 @@ Use this skill for draft/plan/analysis documents in `memory-vault/Workspace`.
 ## Document rules
 
 - Prefer updating an existing related document over creating a duplicate.
-- Use Obsidian-friendly markdown and wikilinks.
+- Use plain markdown. Cross-link notes with relative markdown links, not wikilinks.
 - Use concise frontmatter:
   - `type: draft | plan | analysis | notes | reference`
   - `tags: []`
@@ -27,7 +27,7 @@ Use this skill for draft/plan/analysis documents in `memory-vault/Workspace`.
 - If one exists, edit in place and keep history in sections.
 
 3. Connect context
-- Link to existing vault entities where useful (`[[People/...]]`, `[[Projects/...]]`).
+- Link to existing vault entities where useful, as relative markdown links: `[Mo](../People/Mo.md)`, `[Apollo](../Projects/Apollo.md)`. The path is relative to the note you are writing, and the label is what the reader sees. Wikilinks (`[[People/Mo]]`) are no longer read by the index, backlinks, or the viewer.
 
 4. Finalize
 - Keep structure clear with headings and short sections.

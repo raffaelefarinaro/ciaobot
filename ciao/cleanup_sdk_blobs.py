@@ -53,7 +53,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     workspace = args.workspace.resolve()
-    vault_chats = workspace / "memory-vault" / "Logs" / "Chats"
+    # Not `workspace / "memory-vault" / "Logs"`: the re-rooting promotes the
+    # archive to `<install>/Logs`, and a hardcoded pre-migration path makes this
+    # report every archived chat as missing and every SDK blob as orphaned.
+    from ciao.config import logs_root_for
+
+    vault_chats = logs_root_for(
+        workspace, workspace / "memory-vault", workspace / ".runtime"
+    ) / "Chats"
     projects_dir = claude_projects_dir(workspace)
 
     print(f"Workspace:       {workspace}")

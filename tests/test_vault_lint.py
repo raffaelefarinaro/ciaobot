@@ -21,7 +21,7 @@ def temp_vault(tmp_path):
     vault.mkdir()
     people = vault / "People"
     people.mkdir()
-    (people / "Alice.md").write_text("Hello [[Bob]]", encoding="utf-8")
+    (people / "Alice.md").write_text("Hello [Bob](./Bob.md)", encoding="utf-8")
     return vault
 
 
@@ -371,7 +371,9 @@ def test_memory_links_survive_post_walk_root_iterdir_failure(
     vault.mkdir()
     workspace = vault / "alternate"
     workspace.mkdir()
-    (workspace / "MEMORY.md").write_text("[[Alice]]\n", encoding="utf-8")
+    (workspace / "MEMORY.md").write_text(
+        "[Alice](../People/Alice.md)\n", encoding="utf-8"
+    )
     people = vault / "People"
     people.mkdir()
     (people / "Alice.md").write_text(_page(), encoding="utf-8")
@@ -616,11 +618,19 @@ def test_vault_lint_cli_clean_exit(
     assert result == 0
     assert capsys.readouterr().out.strip() == "Vault is clean!"
 
-def test_broken_wikilinks(temp_vault):
+def test_dead_link_lands_in_broken_markdown_links(temp_vault):
+    """A dead link is reported once, in `broken_markdown_links`.
+
+    The separate `broken_links` bucket existed only for wikilinks; with one
+    dialect, two buckets for one condition could only disagree.
+    """
     issues = vault_lint.run_validation(temp_vault)
-    assert len(issues["broken_links"]) == 1
-    assert "Bob" in issues["broken_links"][0]["target"]
-    assert "People/Alice.md" in issues["broken_links"][0]["source"]
+    assert "broken_links" not in issues
+    assert len(issues["broken_markdown_links"]) == 1
+    finding = issues["broken_markdown_links"][0]
+    assert finding["source"] == "People/Alice.md"
+    assert finding["resolved"] == "People/Bob.md"
+    assert finding["kind"] == "missing_target"
 
 def test_orphan_detection(temp_vault):
     people = temp_vault / "People"
@@ -642,22 +652,23 @@ def test_duplicate_detection(temp_vault):
     assert "People/AliceSmith.md" in issues["duplicates"][0]
 
 
-def test_ignores_wikilinks_in_code_and_escaped(temp_vault):
-    """Wikilink syntax inside code spans/fences or backslash-escaped is
-    documentation, not a real link, and must not be flagged (issue #129)."""
+def test_ignores_links_in_code_and_escaped(temp_vault):
+    """Link syntax inside code spans/fences, backslash-escaped, or holding a
+    `<placeholder>` is documentation, not a real link (issue #129)."""
     (temp_vault / "People" / "Guide.md").write_text(
-        "Use `[[Nonexistent]]` in prose.\n\n"
-        "```\n[[AlsoNonexistent]]\n```\n\n"
-        "Escaped: \\[[EscapedTarget]]\n"
-        "Placeholder: [[projects/active/<folder>/<folder>]]\n",
+        "Use `[x](./Nonexistent.md)` in prose.\n\n"
+        "```\n[x](./AlsoNonexistent.md)\n```\n\n"
+        "Escaped: \\[x](./EscapedTarget.md)\n"
+        "Placeholder: [x](./projects/active/<folder>/<folder>.md)\n",
         encoding="utf-8",
     )
     issues = vault_lint.run_validation(temp_vault)
-    bad = {b["target"] for b in issues["broken_links"]}
-    assert "Nonexistent" not in bad
-    assert "AlsoNonexistent" not in bad
-    assert "EscapedTarget" not in bad
-    assert not any("<folder>" in t for t in bad)
+    bad = {b["target"] for b in issues["broken_markdown_links"]}
+    assert not any(
+        name in target
+        for target in bad
+        for name in ("Nonexistent", "EscapedTarget", "<folder>")
+    ), bad
 
 
 def test_common_stems_not_flagged_as_duplicates(temp_vault):
@@ -675,6 +686,146 @@ def test_excludes_venv_and_tool_dirs(temp_vault):
     """A venv/node_modules checked out in the vault must not be scanned (#129)."""
     venv = temp_vault / "work" / "automations" / ".venv" / "lib"
     venv.mkdir(parents=True)
-    (venv / "doc.md").write_text("[[NopeTarget]]", encoding="utf-8")
+    (venv / "doc.md").write_text("[x](./NopeTarget.md)", encoding="utf-8")
     issues = vault_lint.run_validation(temp_vault)
-    assert not any(b["target"] == "NopeTarget" for b in issues["broken_links"])
+    assert not any(
+        "NopeTarget" in b["target"] for b in issues["broken_markdown_links"]
+    )
+
+
+def test_incoming_links_resolve_against_the_linking_note(tmp_path: Path) -> None:
+    """An incoming link is credited by *location*, not by filename stem.
+
+    `../People/Bob.md` from `Projects/` is a link to `People/Bob`; the identical
+    `./Bob.md` from `Projects/` is not. Resolving a markdown destination without
+    the linking note's directory would credit both, hiding a real orphan.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "Projects").mkdir(parents=True)
+    (vault / "People" / "Bob.md").write_text(_page(), encoding="utf-8")
+    (vault / "People" / "Carol.md").write_text(_page(), encoding="utf-8")
+    (vault / "Projects" / "Apollo.md").write_text(
+        _page("Worked with [Bob](../People/Bob.md); also [Carol](./Carol.md).\n"),
+        encoding="utf-8",
+    )
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "People/Bob.md" not in issues["orphans"]
+    assert "People/Carol.md" in issues["orphans"]
+    # The miss is still reported as a link fault, in the one bucket there is.
+    assert [item["resolved"] for item in issues["broken_markdown_links"]] == [
+        "Projects/Carol.md"
+    ]
+
+
+def test_leftover_wikilink_is_neither_a_link_nor_a_finding(tmp_path: Path) -> None:
+    """A pre-migration vault must lint cleanly rather than crash or flag.
+
+    Markdown links are the only dialect, so `[[Bob]]` is body text: it grants no
+    incoming link and produces no broken-link finding of its own.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Bob.md").write_text(_page(), encoding="utf-8")
+    (vault / "People" / "Alice.md").write_text(
+        _page("Hello [[Bob]] and [[Nowhere]].\n"), encoding="utf-8"
+    )
+
+    issues = vault_lint.run_validation(vault)
+
+    assert issues["broken_markdown_links"] == []
+    assert "People/Bob.md" in issues["orphans"]
+
+
+def test_a_resolving_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> None:
+    """After the re-rooting, linking another workspace MUST leave the vault.
+
+    Judged lexically against one vault, every cross-root link came back
+    `outside_vault`, so a correctly migrated install carried a standing count of
+    "broken" links that all resolved — 20 of them on the first real migration.
+    """
+    for name in ("personal", "work"):
+        (tmp_path / name / "memory-vault" / "People").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "People" / "Colleague.md").write_text(
+        "---\ntype: person\n---\n# Colleague\n", encoding="utf-8"
+    )
+    source = tmp_path / "personal" / "memory-vault" / "People" / "User.md"
+    source.write_text(
+        "---\ntype: person\n---\n"
+        "# User\n"
+        "- [Colleague](../../../work/memory-vault/People/Colleague.md)\n"
+        "- [Ghost](../../../work/memory-vault/People/Ghost.md)\n"
+        "- [Escapee](../../../../outside-install/Secret.md)\n",
+        encoding="utf-8",
+    )
+    # A real file OUTSIDE the install. Existence must not rescue it: leaving the
+    # install is the thing being rejected, and a lexical-containment check that
+    # answered "yes" to everything would otherwise pass this test unnoticed.
+    outside = tmp_path.parent / "outside-install"
+    outside.mkdir(exist_ok=True)
+    (outside / "Secret.md").write_text("private\n", encoding="utf-8")
+    vault = tmp_path / "personal" / "memory-vault"
+
+    without = vault_lint.run_validation(vault)["broken_markdown_links"]
+    with_install = vault_lint.run_validation(vault, install_root=tmp_path)[
+        "broken_markdown_links"
+    ]
+
+    # Without the install root nothing can be judged, so all three are flagged.
+    assert len(without) == 3
+    flagged = {item["target"] for item in with_install}
+    assert "../../../work/memory-vault/People/Colleague.md" not in flagged
+    assert "../../../work/memory-vault/People/Ghost.md" in flagged
+    assert "../../../../outside-install/Secret.md" in flagged
+
+
+def test_a_symlinked_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> None:
+    """A link that only leaves the vault once resolved is still the layout.
+
+    The sibling of ``test_a_resolving_cross_root_link_is_not_a_broken_link``, for
+    the other branch: this target does not escape the vault lexically, so
+    containment cannot be decided on paths alone, and the check happens after
+    ``resolve()`` instead. That branch called ``_resolves_inside_install``, which
+    was never written - so reaching it raised ``NameError`` rather than
+    reporting anything, and no test went down it.
+    """
+    for name in ("personal", "work"):
+        (tmp_path / name / "memory-vault" / "People").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "People" / "Colleague.md").write_text(
+        "---\ntype: person\n---\n# Colleague\n", encoding="utf-8"
+    )
+    vault = tmp_path / "personal" / "memory-vault"
+    # Lexically `People/shared/Colleague.md` never leaves the vault; it lands in
+    # the sibling root only once the symlink is followed.
+    (vault / "People" / "shared").symlink_to(
+        tmp_path / "work" / "memory-vault" / "People", target_is_directory=True
+    )
+    outside = tmp_path.parent / "outside-install-symlinked"
+    outside.mkdir(exist_ok=True)
+    (outside / "Secret.md").write_text("private\n", encoding="utf-8")
+    (vault / "People" / "elsewhere").symlink_to(outside, target_is_directory=True)
+    (vault / "People" / "User.md").write_text(
+        "---\ntype: person\n---\n"
+        "# User\n"
+        "- [Colleague](shared/Colleague.md)\n"
+        "- [Ghost](shared/Ghost.md)\n"
+        "- [Escapee](elsewhere/Secret.md)\n",
+        encoding="utf-8",
+    )
+
+    flagged = {
+        item["target"]
+        for item in vault_lint.run_validation(vault, install_root=tmp_path)[
+            "broken_markdown_links"
+        ]
+    }
+
+    # Inside the install: the layout, not a defect. Outside it: still an error,
+    # even though the file is real.
+    assert "shared/Colleague.md" not in flagged
+    assert "elsewhere/Secret.md" in flagged
+    # Landing inside the install does not make a dead link live: the lexical
+    # branch probes before clearing, and this branch has to agree with it.
+    assert "shared/Ghost.md" in flagged

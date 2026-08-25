@@ -13,14 +13,14 @@ def client(tmp_path):
     (vault / "work").mkdir(parents=True)
 
     # A relates to B via frontmatter `related:` and to C (a different
-    # workspace) via an inline wikilink.
+    # workspace) via an inline relative markdown link.
     (vault / "personal" / "A.md").write_text(
         "---\n"
         "type: note\n"
         "related: [B]\n"
         "description: Note A.\n"
         "---\n"
-        "# A\n\nSee [[C]] too.\n",
+        "# A\n\nSee [C](../work/C.md) too.\n",
         encoding="utf-8",
     )
     (vault / "personal" / "B.md").write_text(
@@ -95,3 +95,78 @@ def test_vault_graph_surfaces_description_and_degree(client):
     a = _node(data, "A")
     assert a["description"] == "Note A."
     assert a["degree"] == 2
+
+
+def test_vault_graph_reports_note_mtimes(client):
+    """The Memory Map seeds its local view from the most recently written note,
+    so every node has to carry a usable timestamp."""
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+    assert nodes, "expected the fixture vault to produce nodes"
+    for node in nodes:
+        assert isinstance(node["mtime"], (int, float))
+        assert node["mtime"] > 0, f"{node['title']} has no mtime"
+
+
+def test_vault_graph_survives_a_note_that_cannot_be_stat_ed(client, tmp_path):
+    """A note indexed but unreadable (deleted between scan and stat, broken
+    symlink) must degrade to mtime 0 rather than failing the whole request."""
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "Ghost.md").write_text(
+        "---\ntype: note\ndescription: Vanishes.\n---\n# Ghost\n", encoding="utf-8"
+    )
+    # Replace the file with a dangling symlink: still indexed by name, but
+    # stat() on it raises.
+    (vault / "personal" / "Ghost.md").unlink()
+    (vault / "personal" / "Ghost.md").symlink_to(vault / "personal" / "nope.md")
+
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    titles = {n["title"] for n in resp.json()["nodes"]}
+    assert "Ghost" not in titles or _node(resp.json(), "Ghost")["mtime"] == 0.0
+
+
+def test_vault_graph_reports_staleness_from_mtime(client, tmp_path):
+    """The map's needs-review list is computed by the same detector the audit
+    and daily curation consume, so all three surfaces agree."""
+    import os
+    import time
+
+    vault = tmp_path / "memory-vault"
+    # Fixture notes are type `note` (default 180-day horizon): push one well
+    # past it while its sibling stays fresh.
+    old = time.time() - 400 * 86400
+    os.utime(vault / "personal" / "B.md", (old, old))
+
+    resp = client.get("/api/vault/graph")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    aged = _node(data, "B")
+    assert aged["stale"] is True
+    assert aged["age_days"] >= 400
+
+    fresh = _node(data, "A")
+    assert fresh["stale"] is False
+
+
+def test_vault_graph_frontmatter_updated_beats_old_mtime(client, tmp_path):
+    """`updated:` is a deliberate re-verification claim, so it wins over an
+    older file mtime (a future date also proves negative ages stay sane)."""
+    import os
+    import time
+
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "Verified.md").write_text(
+        "---\ntype: person\nupdated: 2099-01-01\n---\n# Verified\n",
+        encoding="utf-8",
+    )
+    old = time.time() - 400 * 86400
+    os.utime(vault / "personal" / "Verified.md", (old, old))
+
+    resp = client.get("/api/vault/graph")
+    node = _node(resp.json(), "Verified")
+    assert node["stale"] is False
+    assert node["age_days"] <= 0
+    assert node["updated"] == "2099-01-01"

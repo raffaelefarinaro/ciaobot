@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from ciao.subagent_loader import (
-    discover_subagents,
     parse_subagent_file,
     parse_subagent_folder,
     scaffold_subagent,
@@ -54,27 +53,6 @@ def test_parse_subagent_folder(tmp_path: Path):
     assert manifest.is_folder
     assert "query.py" in manifest.tools
     assert any(r.name == "schema.json" for r in manifest.resources)
-
-
-def test_discover_subagents_priority(tmp_path: Path):
-    sub_dir = tmp_path / "subagents"
-    sub_dir.mkdir()
-
-    # 1. Create single-file subagent
-    (sub_dir / "writer.md").write_text("# Writer file\nDraft text.", encoding="utf-8")
-
-    # 2. Create folder-based subagent with same name stem
-    writer_folder = sub_dir / "writer"
-    writer_folder.mkdir()
-    (writer_folder / "SKILL.md").write_text(
-        "---\ndescription: Writer package\n---\n# Writer Package\nDraft rich text.",
-        encoding="utf-8",
-    )
-
-    manifests = discover_subagents(tmp_path)
-    assert "writer" in manifests
-    assert manifests["writer"].is_folder
-    assert manifests["writer"].description == "Writer package"
 
 
 def test_scaffold_subagent(tmp_path: Path):

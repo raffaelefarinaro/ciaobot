@@ -17,7 +17,6 @@ from ciao.web.chat_broker import (
     ChatStream,
     ChatStreamBroker,
     event_to_json,
-    extract_file_touch,
 )
 
 
@@ -82,29 +81,6 @@ def test_event_to_json_tool_use_tags_file_writes() -> None:
         ToolUseEvent(type="assistant", tool_name="Read", tool_input="/tmp/x.py")
     )
     assert "file_touch" not in read_payload
-
-
-def test_extract_file_touch_dict_input() -> None:
-    """Reload-side: ``_extract_assistant_blocks`` passes the raw SDK input dict.
-    Picks ``file_path`` or ``path``, and ``notebook_path`` for NotebookEdit."""
-    assert extract_file_touch("Write", {"file_path": "a.md", "content": "..."}) == {
-        "file_path": "a.md",
-        "action": "written",
-    }
-    assert extract_file_touch("MultiEdit", {"file_path": "b.py", "edits": []}) == {
-        "file_path": "b.py",
-        "action": "edited",
-    }
-    assert extract_file_touch("edit", {"path": "web/src/App.vue", "edits": []}) == {
-        "file_path": "web/src/App.vue",
-        "action": "edited",
-    }
-    assert extract_file_touch(
-        "NotebookEdit", {"notebook_path": "n.ipynb", "cell_id": "c1"}
-    ) == {"file_path": "n.ipynb", "action": "edited"}
-    assert extract_file_touch("Bash", {"command": "ls"}) is None
-    assert extract_file_touch("Write", {}) is None
-    assert extract_file_touch("Write", None) is None
 
 
 def test_extract_file_touches_from_bash_creates() -> None:

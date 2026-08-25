@@ -7,6 +7,7 @@ import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
+  setListIndex,
   useProjectStore,
 } from './projects'
 
@@ -105,6 +106,86 @@ beforeEach(() => {
     configurable: true,
   })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+describe('chat websocket URL containment', () => {
+  test('keeps a plain chat id verbatim', () => {
+    const store = useProjectStore()
+    store.activeChatId = 'c-plain'
+    store.connectWs('c-plain')
+    expect(fakeSockets[0].url).toBe('ws://localhost:3000/ws/chat/c-plain')
+  })
+
+  test('pins a hostile chat id into one encoded path segment', () => {
+    // The id flows from server state; encoding it keeps `../`, `?` or `#`
+    // inside it from rewriting the WebSocket path or authority.
+    const store = useProjectStore()
+    store.activeChatId = 'c-hostile'
+    store.connectWs('../../evil?x=1#y')
+    expect(fakeSockets[0].url).toBe('ws://localhost:3000/ws/chat/..%2F..%2Fevil%3Fx%3D1%23y')
+  })
+})
+
+describe('setListIndex guard', () => {
+  test('writes an in-range index', () => {
+    const list = [{ n: 1 }, { n: 2 }]
+    setListIndex(list, 1, { n: 9 })
+    expect(list.map(x => x.n)).toEqual([1, 9])
+    setListIndex(list, '0', { n: 8 }) // string index from stored data still lands
+    expect(list.map(x => x.n)).toEqual([8, 9])
+  })
+
+  test('skips out-of-range and negative indices instead of extending the list', () => {
+    const list = [{ n: 1 }]
+    setListIndex(list, -1, { n: -1 })
+    setListIndex(list, 1.5, { n: 2 })
+    setListIndex(list, 5, { n: 3 })
+    expect(list).toEqual([{ n: 1 }])
+    expect(Object.keys(list)).toEqual(['0'])
+  })
+
+  test('never assigns prototype-hazardous keys onto the array', () => {
+    const list: Array<{ n?: number; polluted?: boolean }> = [{ n: 1 }]
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      setListIndex(list, key as unknown as number, { polluted: true })
+    }
+    expect(list).toEqual([{ n: 1 }])
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    expect((list as unknown as Record<string, unknown>).polluted).toBeUndefined()
+  })
+})
+
+describe('pending comment updates through the guarded write', () => {
+  test('updates text and images on a chat comment', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-guarded-chat-comments'
+    store.activeChatId = chatId
+    const id = store.addPendingChatComment({ messageId: 'msg-123', selection: 'quote', comment: 'note' })
+
+    store.updatePendingChatComment(id, 'edited')
+    expect(store.pendingChatComments[0].comment).toBe('edited')
+
+    store.addPendingChatCommentImage(id, 'a.png')
+    expect(store.pendingChatComments[0].images).toEqual(['a.png'])
+
+    store.removePendingChatCommentImage(id, 'a.png')
+    expect(store.pendingChatComments[0].images).toBeUndefined()
+  })
+
+  test('syncs file comment image changes into pending comments', () => {
+    const store = useProjectStore()
+    store.activeChatId = 'chat-guarded-file-comments'
+    const id = store.addPendingComment({ path: 'notes/a.md', selection: 'sel', comment: 'note' })
+    expect(store.fileComments['notes/a.md']?.map(c => c.id)).toContain(id)
+
+    store.addFileCommentImage('notes/a.md', id, 'a.png')
+    expect(store.pendingComments.find(c => c.id === id)?.images).toEqual(['a.png'])
+    expect(store.fileComments['notes/a.md']?.find(c => c.id === id)?.images).toEqual(['a.png'])
+
+    store.removeFileCommentImage('notes/a.md', id, 'a.png')
+    expect(store.pendingComments.find(c => c.id === id)?.images).toBeUndefined()
+    expect(store.fileComments['notes/a.md']?.find(c => c.id === id)?.images).toBeUndefined()
+  })
 })
 
 describe('native window focus reporting', () => {
@@ -322,6 +403,201 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('unacknowledged send recovery', () => {
+  // Regression harness for the "page refreshed and removed my message"
+  // bug: a send handed to a WS that dies before the server reads it used
+  // to be lost silently, and the reconnect's history reload wiped the
+  // optimistic bubble.
+
+  function sentMessageFrames(): string[] {
+    return fakeSockets
+      .flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
+      .filter(raw => JSON.parse(raw).type === 'message')
+  }
+
+  test('tracks a send until the server echoes it', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'hold my place')
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.text).toBe('hold my place')
+
+    // Server proof of receipt: the broker-replayed user_echo.
+    const ws = fakeSockets[fakeSockets.length - 1]
+    ws.onmessage?.({ data: JSON.stringify({ type: 'user_echo', text: 'hold my place' }) })
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('resends a provably-lost message once after reconnect with empty history', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-resend'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        // Current servers answer with the paginated envelope; an empty one
+        // adopts-wholesale over the optimistic timeline, wiping the bubble
+        // exactly like the production reload does.
+        return Promise.resolve({
+          items: [],
+          total: 0,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([]) // loadSubagents etc.
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'lost in suspension')
+    expect(sentMessageFrames()).toHaveLength(1)
+    expect(store.messages[chatId]?.some(m => m.role === 'user')).toBe(true)
+
+    // The socket dies like a suspended WKWebView: close fires on an opened
+    // socket for the active chat → auto-reconnect → history reload.
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100) // reconnect delay (50ms) + loadMessages
+      await vi.advanceTimersByTimeAsync(1600) // recovery grace window
+
+      // The lost message was re-sent over the reconnected socket exactly once.
+      const frames = sentMessageFrames()
+      expect(frames).toHaveLength(2)
+      expect(JSON.parse(frames[1]).text).toBe('lost in suspension')
+      // The retry is itself still tracked (attempt 1), not reset.
+      expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
+      // And the user bubble is back.
+      expect(store.messages[chatId]?.some(m => m.role === 'user' && m.content === 'lost in suspension')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('does not resend when the turn already landed server-side', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-landed'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        // Envelope history that already contains the user turn, stamped with
+        // the server-assigned turn_index like every hydrated row: the server
+        // received the frame even though no echo reached the client.
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'delivered really', timestamp: '2026-08-22T10:00:00Z', turn_index: 3 },
+          ],
+          total: 1,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'delivered really')
+    expect(sentMessageFrames()).toHaveLength(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // No duplicate turn: only the original frame was ever sent, and the
+    // tracking was cleared by the history row.
+    expect(sentMessageFrames()).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('surfaces an error bubble when the one automatic retry also fails', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-twice'
+    store.activeChatId = chatId
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'twice unlucky')
+
+    const emptyEnvelope = () => Promise.resolve({
+      items: [],
+      total: 0,
+      offset: 0,
+      limit: 50,
+      hasMore: false,
+      nextOffset: null,
+    })
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) return emptyEnvelope()
+      return Promise.resolve([])
+    })
+
+    vi.useFakeTimers()
+    try {
+      // First drop and recovery.
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(1700)
+      // The resent frame rides the second socket; kill it too. History is
+      // still empty, so the recovery runs again — but must not loop.
+      const sockets = [...fakeSockets]
+      sockets[sockets.length - 1].close()
+      await vi.advanceTimersByTimeAsync(1700)
+      await vi.advanceTimersByTimeAsync(1700)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentMessageFrames()
+    expect(frames).toHaveLength(2) // original + one retry, nothing more
+    const sys = (store.messages[chatId] || []).filter(
+      m => m.role === 'system' && m.content.includes("didn't reach the engine"),
+    )
+    expect(sys).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('a full page reload restores the pending send from localStorage', async () => {
+    // Simulate the crash the user sees: the send was tracked, then the whole
+    // page reloaded before any ack. restoreState() must resurrect the entry
+    // so the next reconnect of that chat recovers it.
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-after-reload': { text: 'survived the refresh', at: Date.now(), attempts: 0 },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+
+    const chatId = 'chat-after-reload'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentMessageFrames()
+    expect(frames).toHaveLength(1)
+    expect(JSON.parse(frames[0]).text).toBe('survived the refresh')
+  })
+})
+
 describe('deferred message sends', () => {
   test('does not attach a deferred message image to a later send', () => {
     const store = useProjectStore()
@@ -339,6 +615,301 @@ describe('deferred message sends', () => {
 
     expect(sent).toMatchObject({ type: 'message', text: 'continue' })
     expect(sent.images).toBeUndefined()
+  })
+
+  // Previously this asserted the opposite (false, no bubble). That contract was
+  // the bug: for the whole retry window the user had no evidence the message
+  // was accepted, so they pressed send again and again.
+  test('accepts the send and renders it immediately when the WS is down', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-no-socket'
+    store.activeChatId = chatId
+    // No connectWs — socket is absent.
+
+    const result = store.sendMessage(chatId, 'lost prompt')
+
+    expect(result).toBe(true)
+    const msgs = store.messages[chatId] || []
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]).toMatchObject({ role: 'user', content: 'lost prompt' })
+    // No turn_index: the user_echo handler treats a user bubble without one as
+    // an un-reconciled optimistic bubble and upgrades it in place.
+    expect(msgs[0].turn_index).toBeUndefined()
+  })
+
+  test('fires onSent only when the message actually goes out', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-onsent'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    let onSentFired = false
+    const result = store.sendMessage(chatId, 'hello', undefined, () => { onSentFired = true })
+
+    expect(result).toBe(true)
+    expect(onSentFired).toBe(true)
+  })
+
+  // Also inverted deliberately. A deferred send now renders a bubble, so the
+  // composer must clear: leaving the text sitting there next to its own bubble
+  // is what made users press send again.
+  test('fires onSent when the send is deferred so the composer clears', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-onsent-deferred'
+    store.activeChatId = chatId
+    // No connectWs — socket is absent.
+
+    let onSentFired = false
+    store.sendMessage(chatId, 'deferred prompt', undefined, () => { onSentFired = true })
+
+    expect(onSentFired).toBe(true)
+  })
+
+  test('surfaces a system error bubble after exhausting deferred retries', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-deferred-exhausted'
+    store.activeChatId = chatId
+    // A WebSocket that never leaves CONNECTING: connectWs creates it, but the
+    // readyState check in sendMessage always defers since onopen never fires.
+    class StuckWebSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = StuckWebSocket.CONNECTING
+      onopen: (() => void) | null = null
+      onmessage: ((e: { data: string }) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      send = vi.fn()
+      close() { this.readyState = StuckWebSocket.CLOSED; this.onclose?.() }
+      constructor(public url: string) {}
+    }
+    vi.stubGlobal('WebSocket', StuckWebSocket)
+
+    vi.useFakeTimers()
+    try {
+      // Accepted immediately (the bubble is on screen), then abandoned.
+      const result = store.sendMessage(chatId, 'doomed prompt')
+      expect(result).toBe(true)
+      // Advance past all 20 retry attempts (20 * 500ms = 10s).
+      await vi.advanceTimersByTimeAsync(11000)
+
+      const msgs = store.messages[chatId] || []
+      expect(msgs.some(m => m.role === 'system' && m.content.includes('Could not send'))).toBe(true)
+      expect(store.streaming[chatId]).toBe(false)
+      // The user's own message survives next to the error so ChatPanel's retry
+      // has a user turn to resend, and it is no longer marked pending — the
+      // pending state must not outlive the retry chain.
+      const bubble = msgs.find(m => m.role === 'user' && m.content === 'doomed prompt')
+      expect(bubble).toBeDefined()
+      expect((bubble as { pendingSend?: true }).pendingSend).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+})
+
+// ── The reported bug ──────────────────────────────────────────────────
+// "I sent the message, nothing happens so I try to send again, and after a
+// while I see many times the same message queued."
+//
+// A send made while the chat socket is down waits on a 500ms retry chain.
+// It used to render nothing at all for that whole window, so the user had no
+// evidence the message was accepted, pressed send again, and each press
+// started an independent chain. When the socket opened they all fired; a turn
+// was running by then, so every one took the queue branch.
+describe('deferred send visibility and re-send de-duplication', () => {
+  // A socket that stays CONNECTING until the test opens it, so the deferred
+  // window can be driven deterministically.
+  let lateSockets: LateWebSocket[] = []
+  class LateWebSocket {
+    static CONNECTING = 0
+    static OPEN = 1
+    static CLOSING = 2
+    static CLOSED = 3
+    readyState = LateWebSocket.CONNECTING
+    onopen: (() => void) | null = null
+    onmessage: ((e: { data: string }) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    send = vi.fn()
+    close() { this.readyState = LateWebSocket.CLOSED; this.onclose?.() }
+    constructor(public url: string) { lateSockets.push(this) }
+    open() { this.readyState = LateWebSocket.OPEN; this.onopen?.() }
+  }
+
+  beforeEach(() => {
+    lateSockets = []
+    vi.stubGlobal('WebSocket', LateWebSocket)
+    vi.useFakeTimers()
+  })
+
+  function messageFrames(socket: LateWebSocket) {
+    return (socket.send as Mock).mock.calls
+      .map(([raw]) => JSON.parse(String(raw)) as Record<string, unknown>)
+      .filter(p => p.type === 'message')
+  }
+
+  function userBubbles(store: ReturnType<typeof useProjectStore>, chatId: string, text: string) {
+    return (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === text)
+  }
+
+  test('three presses while the socket is down send the message exactly once', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-resend-storm'
+      store.activeChatId = chatId
+
+      // Press 1: socket is absent, so the send defers — but it is accepted and
+      // visible immediately, which is the whole point.
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+
+      // "nothing happens so I try to send again" — twice more.
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      expect(store.sendMessage(chatId, 'ship it')).toBe(true)
+      // Collapsed into the send already waiting: still one copy on screen and
+      // one retry chain, not three.
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+
+      // The socket finally opens and every pending chain gets its chance.
+      expect(lateSockets).toHaveLength(1)
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ type: 'message', text: 'ship it' })
+      // Nothing stacked up in the queue, and the optimistic bubble was promoted
+      // in place rather than duplicated.
+      expect(store.queuedMessages[chatId] || []).toHaveLength(0)
+      expect(userBubbles(store, chatId, 'ship it')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a genuinely different message deferred alongside one is not dropped', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-two-deferred'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'first thought')
+      store.sendMessage(chatId, 'second thought')
+      expect(userBubbles(store, chatId, 'first thought')).toHaveLength(1)
+      expect(userBubbles(store, chatId, 'second thought')).toHaveLength(1)
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // De-duplication keys on the payload, so both distinct messages go out:
+      // the first starts the turn, the second queues behind it.
+      const texts = messageFrames(socket).map(p => p.text)
+      expect(texts).toContain('first thought')
+      expect(texts).toContain('second thought')
+      expect(texts).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('the server echo reconciles the pending bubble instead of duplicating it', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-echo'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'echo me')
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(messageFrames(socket)).toHaveLength(1)
+
+      // The broker echoes the turn back with its server-assigned index.
+      socket.onmessage?.({
+        data: JSON.stringify({ type: 'user_echo', text: 'echo me', turn_index: 0 }),
+      })
+
+      const bubbles = userBubbles(store, chatId, 'echo me')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].turn_index).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-queues'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'follow up')
+      expect(userBubbles(store, chatId, 'follow up')).toHaveLength(1)
+
+      // A turn is running by the time the socket comes back.
+      store.streaming[chatId] = true
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ mode: 'queue', text: 'follow up' })
+      // Exactly one representation of the message: the queue entry. The
+      // optimistic bubble is handed over, not left behind alongside it.
+      expect(store.queuedMessages[chatId] || []).toHaveLength(1)
+      expect(store.queuedMessages[chatId][0].text).toBe('follow up')
+      expect(userBubbles(store, chatId, 'follow up')).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a re-send carrying a new image is not collapsed into the pending one', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-images'
+      store.activeChatId = chatId
+
+      store.pendingImages = ['shot-a.png']
+      store.sendMessage(chatId, 'look at this')
+      store.pendingImages = ['shot-b.png']
+      store.sendMessage(chatId, 'look at this')
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // Same text but a different attachment is a different message; collapsing
+      // it would silently lose the second image.
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(2)
+      expect(frames.map(p => p.images)).toEqual(
+        expect.arrayContaining([['shot-a.png'], ['shot-b.png']]),
+      )
+      // The first send starts the turn and keeps its own bubble; the second
+      // queues behind it. Pending bubbles are matched on the whole payload, so
+      // two same-text sends cannot promote each other's bubble and leave the
+      // surviving one showing the wrong attachment.
+      const bubbles = userBubbles(store, chatId, 'look at this')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].images).toEqual(['shot-a.png'])
+      expect(store.queuedMessages[chatId] || []).toHaveLength(1)
+      expect(store.queuedMessages[chatId][0].images).toEqual(['shot-b.png'])
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
   })
 })
 
@@ -731,6 +1302,40 @@ describe('chat closing and re-entry orientation', () => {
     localStorage.removeItem('ciao-chat-drafts')
   })
 
+  test('keeps a chat whose staged image is in the legacy array shape', async () => {
+    // Same coupling as the draft above, one storage key over. `normalizePendingBuckets`
+    // still accepts the pre-per-chat array shape; if it stopped, this chat would
+    // read as empty and be deleted with the screenshot in it.
+    // Both keys must be set BEFORE the store exists: `restoreState` runs once at
+    // creation, and it restores the active chat id before the buckets — which is
+    // what lets the legacy array be attributed to a chat at all.
+    const chatId = 'chat-legacy-image'
+    localStorage.setItem('ciao-active-chat', chatId)
+    localStorage.setItem('ciao-pending-images', JSON.stringify(['img-1']))
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[chatId] = []
+    expect(store.activeChatId).toBe(chatId)
+    expect(store.pendingImages).toEqual(['img-1'])
+
+    await store.closeChat()
+
+    expect(apiDel).not.toHaveBeenCalled()
+    expect(store.chats).toHaveLength(1)
+    localStorage.removeItem('ciao-pending-images')
+    localStorage.removeItem('ciao-active-chat')
+  })
+
   test('keeps a chat holding only a staged image', async () => {
     // The server cannot see a staged attachment either, so if the client calls
     // the chat empty the delete goes through and the screenshot goes with it.
@@ -814,7 +1419,18 @@ describe('chat closing and re-entry orientation', () => {
     expect(apiDel).not.toHaveBeenCalled()
     await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
     const summaryCalls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length
-    await store.switchChat(chatId)
+    // The mock chat's last message is an unanswered user turn and apiGet
+    // always resolves empty, so it never looks settled -- switchChat's
+    // waitForSettledReply retries run their full real-time budget. Fake
+    // timers stand in for that wait so the test doesn't.
+    vi.useFakeTimers()
+    try {
+      const switching = store.switchChat(chatId)
+      await vi.advanceTimersByTimeAsync(6000)
+      await switching
+    } finally {
+      vi.useRealTimers()
+    }
     await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
     expect(apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length).toBe(summaryCalls)
   })
@@ -1322,190 +1938,100 @@ describe('optimistic user bubble reconciliation', () => {
   })
 })
 
-describe('Codex structured questions', () => {
-  test('answers a native request inside the active websocket turn', () => {
+describe('provider-neutral input state', () => {
+  test('chatNeedsInput reflects live and persisted permission-approval state', () => {
     const store = useProjectStore()
-    const chatId = 'codex-chat'
+    const chatId = 'approval-chat'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
-      title: 'Codex',
+      title: 'Approval',
       model: 'gpt-test',
-      provider: 'codex',
+      provider: 'opencode',
       mode: 'auto',
       session_id: 'thread-1',
       created_at: '',
       archived: false,
-    }]
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: JSON.stringify({
-          questions: [{
-            id: 'choice',
-            header: 'Choice',
-            question: 'Pick one',
-            isOther: false,
-            isSecret: false,
-            options: [{ label: 'A', description: 'first' }],
-          }],
-        }),
-      }),
-    })
-
-    expect(store.activeQuestions[chatId][0]).toMatchObject({
-      id: 'choice',
-      requestId: 'codex-1',
-      allowOther: false,
-      question: 'Pick one',
-    })
-
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
-      type: 'question_response',
-      request_id: 'codex-1',
-      answers: { choice: ['A'] },
-    }))
-  })
-
-  test('does not resurrect an answered picker from a stale server snapshot', async () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-stale'
-    // The persisted payload carries the request id, exactly as the backend
-    // embeds it into pending_question for native providers.
-    const pending = JSON.stringify({
-      request_id: 'codex-1',
-      questions: [{
-        id: 'choice',
-        header: 'Choice',
-        question: 'Pick one',
-        isOther: false,
-        options: [{ label: 'A', description: 'first' }],
-      }],
-    })
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-      pending_question: pending,
-    }]
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: JSON.stringify({
-          questions: [{
-            id: 'choice',
-            header: 'Choice',
-            question: 'Pick one',
-            isOther: false,
-            options: [{ label: 'A', description: 'first' }],
-          }],
-        }),
-      }),
-    })
-    expect(store.activeQuestions[chatId]).toHaveLength(1)
-
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-
-    // A poll/reconnect races the server clear: the snapshot still carries the
-    // now-answered pending_question. loadMessages runs rebuildPendingQuestion,
-    // which must refuse to bring the picker back.
-    store.chats[0].pending_question = pending
-    await store.loadMessages(chatId)
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-  })
-
-  test('rebuilds a genuinely new question after an earlier one was answered', async () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-next'
-    const mkPayload = (rid: string) => JSON.stringify({
-      request_id: rid,
-      questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [{ label: 'A' }] }],
-    })
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'codex-1',
-        tool_input: mkPayload('codex-1'),
-      }),
-    })
-    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
-    expect(store.activeQuestions[chatId]).toBeUndefined()
-
-    // A distinct later question (new request id) must still surface on rebuild.
-    store.chats[0].pending_question = mkPayload('codex-2')
-    await store.loadMessages(chatId)
-    expect(store.activeQuestions[chatId]?.[0]).toMatchObject({ requestId: 'codex-2' })
-  })
-
-  test('chatNeedsInput reflects live and persisted AskUserQuestion state', () => {
-    const store = useProjectStore()
-    const chatId = 'question-chat'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Question',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-      pending_question: JSON.stringify({
-        questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'A' }] }],
+      pending_permission: JSON.stringify({
+        request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
       }),
     }]
 
+    // Persisted-only (e.g. a chat reopened before the live WS event arrives).
     expect(store.chatNeedsInput(chatId)).toBe(true)
 
-    store.activeQuestions[chatId] = [{
-      id: 'q1',
-      question: 'Pick one',
-      header: '',
-      multiSelect: false,
-      allowOther: false,
-      isSecret: false,
-      requestId: 'req-1',
-      options: [{ label: 'A', description: '' }],
+    store.pendingPermissions[chatId] = [{
+      request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x', received_at: Date.now(),
     }]
     expect(store.chatNeedsInput(chatId)).toBe(true)
 
-    delete store.activeQuestions[chatId]
-    store.chats[0].pending_question = ''
+    delete store.pendingPermissions[chatId]
+    store.chats[0].pending_permission = ''
     expect(store.chatNeedsInput(chatId)).toBe(false)
+  })
+
+  test('chatNeedsInput rolls up a nested delegate blocked on an approval', () => {
+    const store = useProjectStore()
+    const supervisorId = 'supervisor-chat'
+    const delegateId = 'delegate-chat'
+    store.chats = [{
+      chat_id: supervisorId,
+      project_id: 'p1',
+      title: 'Supervisor',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }, {
+      chat_id: delegateId,
+      project_id: 'p1',
+      title: 'Delegate',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-2',
+      created_at: '',
+      archived: false,
+      spawned_from_chat_id: supervisorId,
+      pending_permission: JSON.stringify({
+        request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+      }),
+    }]
+
+    expect(store.chatNeedsInput(delegateId)).toBe(true)
+    expect(store.chatNeedsInput(supervisorId)).toBe(true)
+
+    store.chats[1].pending_permission = ''
+    expect(store.chatNeedsInput(supervisorId)).toBe(false)
+  })
+
+  test('rebuilds the Approve/Deny card from a persisted pending_permission on chat open', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'approval-reload'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'req-42', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+      }),
+    }]
+
+    await store.loadMessages(chatId)
+
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+    expect(store.pendingPermissions[chatId][0]).toMatchObject({
+      request_id: 'req-42', tool_name: 'Bash',
+    })
   })
 
   test('parses alternate text/type AskUserQuestion payloads', () => {
@@ -1573,7 +2099,7 @@ describe('Codex structured questions', () => {
       project_id: 'p1',
       title: 'Empty question',
       model: 'gpt-test',
-      provider: 'codex',
+       provider: 'opencode',
       mode: 'auto',
       session_id: 'thread-1',
       created_at: '',
@@ -1585,7 +2111,7 @@ describe('Codex structured questions', () => {
       data: JSON.stringify({
         type: 'tool_use',
         tool_name: 'AskUserQuestion',
-        request_id: 'codex-empty-1',
+         request_id: 'question-empty-1',
         tool_input: JSON.stringify({ questions: [] }),
       }),
     })
@@ -1594,20 +2120,20 @@ describe('Codex structured questions', () => {
     expect(store.activeQuestions[chatId][0]).toMatchObject({
       id: '__freeform__',
       allowOther: true,
-      requestId: 'codex-empty-1',
+       requestId: 'question-empty-1',
     })
     expect(store.activeQuestions[chatId][0].question).toContain('needs your input')
   })
 
-  test('surfaces approval requests and preserves Codex quota metadata', () => {
+  test('surfaces approval requests and preserves quota metadata', () => {
     const store = useProjectStore()
-    const chatId = 'codex-gates'
+    const chatId = 'provider-gates'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
-      title: 'Codex',
+      title: 'Provider',
       model: 'gpt-test',
-      provider: 'codex',
+      provider: 'opencode',
       mode: 'normal',
       session_id: 'thread-1',
       created_at: '',
@@ -1787,86 +2313,6 @@ describe('image-capability questions', () => {
   })
 })
 
-describe('Codex assistant message phases', () => {
-  test('keeps commentary in the trace and the final answer separate', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-phases'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Codex phases',
-      model: 'gpt-test',
-      provider: 'codex',
-      mode: 'normal',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: "I'll check that now.",
-      phase: 'commentary',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: 'Done.',
-      phase: 'final_answer',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'result',
-      text: 'Done.',
-      is_error: false,
-      effective_model: 'gpt-test',
-      usage: {},
-      session_id: 'thread-1',
-    }) })
-
-    expect(store.messages[chatId].map(message => ({
-      content: message.content,
-      phase: message.phase,
-    }))).toEqual([
-      { content: "I'll check that now.", phase: 'commentary' },
-      { content: 'Done.', phase: 'final_answer' },
-    ])
-  })
-
-  test('renders a commentary-only completed turn as its fallback final', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'codex-commentary-fallback'
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'text_delta',
-      text: 'The checks completed successfully.',
-      phase: 'commentary',
-    }) })
-    socket.onmessage?.({ data: JSON.stringify({
-      type: 'result',
-      text: 'The checks completed successfully.',
-      fallback_final: true,
-      is_error: false,
-      effective_model: 'gpt-test',
-      usage: {},
-      session_id: 'thread-fallback',
-    }) })
-
-    expect(store.messages[chatId].map(message => ({
-      content: message.content,
-      phase: message.phase,
-    }))).toEqual([{
-      content: 'The checks completed successfully.',
-      phase: 'final_answer',
-    }])
-    expect(store.streaming[chatId]).toBe(false)
-  })
-})
-
 describe('latest status sync', () => {
   test('hydrates settled active chat history and clears stale streaming state', async () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
@@ -1883,12 +2329,14 @@ describe('latest status sync', () => {
     store.streamingText[chatId] = 'partial'
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: chatId, project_id: 'p1', title: 'Fresh title', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, last_activity_at: '2026-07-06T10:00:00Z' },
         ])
       }
-      if (path === `/api/chats/${chatId}/messages`) {
+      // Prefix match: loadMessages now requests the paginated envelope
+      // (?limit=50), so exact equality silently misses and falls through.
+      if (path.startsWith(`/api/chats/${chatId}/messages`)) {
         return Promise.resolve([
           { role: 'user', content: 'status?', sent_at: '2026-07-06T09:59:00Z', turn_index: 0 },
           { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
@@ -1928,7 +2376,7 @@ describe('latest status sync', () => {
           { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
       }
-      if (path === `/api/chats/${chatId}/messages`) {
+      if (path.startsWith(`/api/chats/${chatId}/messages`)) {
         // Claude session files already contain progress notes mid-turn.
         return Promise.resolve([
           { role: 'user', content: 'yes make it more robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
@@ -2021,6 +2469,33 @@ describe('background agents indicator', () => {
     expect(store.backgroundAgents[chatId]).toBe(4)
   })
 
+  test('active-only syncLatest preserves locally-held archived chats', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const activeId = 'c-act'
+    const archivedId = 'c-arch'
+    store.chats = [
+      { chat_id: activeId, project_id: 'p1', title: 'Old', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: archivedId, project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: true },
+    ]
+    store.activeChatId = activeId
+
+    // The server's active-only poll omits archived chats entirely.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return Promise.resolve([
+          { chat_id: activeId, project_id: 'p1', title: 'Fresh', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    // Active row refreshed; archived row survived the active-only poll.
+    expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
+    expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
+  })
+
   test('the events snapshot replaces background-agent counts wholesale', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -2107,6 +2582,35 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.projectStreaming[otherId]).toBeUndefined()
     expect(store.streaming[otherId]).toBe(false)
     expect(store.isChatStreaming(otherId)).toBe(false)
+  })
+
+  test('an active chat ending with an empty transcript clears the stuck spinner', async () => {
+    // The image-capability pre-flight aborts before dispatch: no provider
+    // session, no transcript row, so /messages returns nothing. This used to
+    // leave "Thinking…" on screen forever, because every settle path required
+    // a trailing assistant/system row to exist.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockImplementation((path: string) =>
+      path.endsWith('/messages') ? Promise.resolve([]) : Promise.resolve([]),
+    )
+    const store = useProjectStore()
+    const chatId = 'c-empty-turn'
+    store.activeChatId = chatId
+    store.streaming[chatId] = true
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: chatId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+    // reconcileAfterResult is async; let its first (delay-0) pass run.
+    await new Promise(r => setTimeout(r, 0))
+    expect(store.streaming[chatId]).toBe(false)
+    expect(store.isChatStreaming(chatId)).toBe(false)
   })
 })
 
@@ -2207,6 +2711,43 @@ describe('deep-link chat navigation', () => {
     expect(routerPush).toHaveBeenCalledWith('/chat/c-work')
   })
 
+  // Reproduces the notification-tap bug: the chat was already active when the
+  // reply finished server-side, but the per-chat socket went half-open while
+  // backgrounded, so `streaming` never got cleared and the finished reply
+  // never made it into local history. Tapping the notification re-opens the
+  // same already-active chat, and must reconcile instead of no-opping.
+  test('openChatFromDeepLink reconciles an already-active chat with stuck streaming state', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c1'
+    store.connectWs('c1')
+    const staleSocket = fakeSockets[0]
+    store.streaming['c1'] = true
+
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/chats/c1/messages')) {
+        return Promise.resolve([
+          { role: 'user', content: 'hi', sent_at: '2026-01-01T00:00:00Z' },
+          { role: 'assistant', content: 'the answer', sent_at: '2026-01-01T00:00:05Z' },
+        ])
+      }
+      return Promise.resolve([])
+    })
+
+    await store.openChatFromDeepLink('c1')
+
+    expect(store.messages['c1']?.map(m => m.content)).toEqual(['hi', 'the answer'])
+    expect(store.streaming['c1']).toBe(false)
+    expect(staleSocket.close).toBeDefined()
+    expect(fakeSockets.length).toBeGreaterThan(1)
+  })
+
   test('open_chat event over /ws/events navigates to the target chat', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -2289,8 +2830,10 @@ describe('deep-link chat navigation', () => {
     await store.archiveChat('parent')
 
     expect(store.chatPostprocess('parent')?.state).toBe('running')
-    const toast = store.toasts.find(t => t.title === 'Chat archived')
-    expect(toast?.body).toContain('Processing insights in the background')
+    // The "Chat archived — processing insights in the background" toast was
+    // removed: archiving is immediate and the pipeline is visible via
+    // postprocess state, so no toast is needed.
+    expect(store.toasts.find(t => t.title === 'Chat archived')).toBeUndefined()
   })
 
   test('a subchat the server did not archive stays active and keeps its socket', async () => {
@@ -2335,6 +2878,62 @@ describe('deep-link chat navigation', () => {
     const toast = store.toasts.find(t => t.title.includes('mid-turn'))
     expect(toast?.title).toBe('Stopped 1 subchat mid-turn')
     expect(toast?.body).toContain('is not in the archive')
+  })
+
+  test('a stale /api/chats payload does not resurrect a chat being archived', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockResolvedValue({ ok: true, archived_chat_ids: ['parent', 'child-a', 'child-b'] })
+
+    await store.archiveChat('parent')
+
+    // A GET that left before the archive committed (the 15s poll, or the
+    // refresh chat_result_ready fires) still reports the chat as active.
+    // Taking it at face value put the row back in the sidebar until the next
+    // poll corrected it — the archive flicker.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+    expect(store.projectChats('p1')).toHaveLength(0)
+
+    // Once the server agrees, its payload is authoritative again.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return Promise.resolve(supervisorWithTwoSubchats().map(c => ({ ...c, archived: true })))
+      }
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+    expect(store.chats.every(chat => chat.archived)).toBe(true)
+  })
+
+  test('a rolled-back archive lets the server payload show the chat as active', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = supervisorWithTwoSubchats()
+    apiPost.mockRejectedValue(new Error('archive exploded'))
+
+    await expect(store.archiveChat('parent')).rejects.toThrow('archive exploded')
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    expect(store.chats.some(chat => chat.archived)).toBe(false)
+    expect(store.projectChats('p1')).toHaveLength(3)
   })
 
   test('a failed archive POST reconnects the sockets and raises an error toast', async () => {
@@ -2429,7 +3028,7 @@ describe('workspace and chat transitions', () => {
           { chat_id: 'c-client', project_id: 'p-client', title: 'Client chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
       }
-      if (path === '/api/chats/c-client/messages') return Promise.resolve([])
+      if (path.startsWith('/api/chats/c-client/messages')) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -2491,7 +3090,7 @@ describe('workspace and chat transitions', () => {
             { chat_id: 'c1', project_id: 'p1', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
           ])
         }
-        if (path === '/api/chats/c1/messages') {
+        if (path.startsWith('/api/chats/c1/messages')) {
           seen()
           // Never resolves until we say so: stands in for a slow transcript.
           return new Promise(resolve => { releaseMessages = resolve })
@@ -2570,7 +3169,7 @@ describe('workspace and chat transitions', () => {
     store.activeChatId = 'c-work'
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats/c-personal/messages') {
+      if (path.startsWith('/api/chats/c-personal/messages')) {
         return new Promise(() => {}) // a transcript that would block forever
       }
       return Promise.resolve([])
@@ -2598,7 +3197,7 @@ describe('workspace and chat transitions', () => {
     store.activeWorkspace = 'work'
     store.activeChatId = 'c-work'
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats/c-personal-old/messages') {
+      if (path.startsWith('/api/chats/c-personal-old/messages')) {
         return new Promise(() => {})
       }
       return Promise.resolve([])
@@ -2906,6 +3505,49 @@ describe('orphaned draft recovery on load', () => {
   })
 })
 
+describe('update-available notification', () => {
+  test('checkPackageStatus sets packageStatus and toasts once per new version', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/package/status') {
+        return Promise.resolve({
+          current_version: '0.9.1', latest_version: '9.9.9', update_available: true, mode: 'bundled_app',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.checkPackageStatus()
+
+    expect(store.packageStatus?.update_available).toBe(true)
+    const toast = store.toasts.find(t => t.title === 'Update available')
+    expect(toast).toBeTruthy()
+    expect(toast?.body).toContain('9.9.9')
+
+    // A second check for the same version must not toast again.
+    store.toasts.length = 0
+    await store.checkPackageStatus()
+    expect(store.toasts.some(t => t.title === 'Update available')).toBe(false)
+  })
+
+  test('checkPackageStatus does not toast when already up to date', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/package/status') {
+        return Promise.resolve({
+          current_version: '0.9.1', latest_version: '0.9.1', update_available: false, mode: 'bundled_app',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.checkPackageStatus()
+
+    expect(store.packageStatus?.update_available).toBe(false)
+    expect(store.toasts.some(t => t.title === 'Update available')).toBe(false)
+  })
+})
+
 describe('gws health toast', () => {
   test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
     const store = useProjectStore()
@@ -3186,5 +3828,306 @@ describe('workspaceNeedsInput', () => {
     expect(store.workspaceNeedsInput('personal')).toBe(1)
     expect(store.workspaceNeedsInput('work')).toBe(0)
     expect(store.workspaceNeedsInput('missing')).toBe(0)
+  })
+})
+
+describe('attentionChatCount', () => {
+  test('counts each non-archived unread or needs-input chat globally', () => {
+    const store = useProjectStore()
+    store.chats = [
+      {
+        chat_id: 'unread', project_id: 'p1', title: 'Unread', archived: false, local: true,
+        last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z',
+      },
+      {
+        chat_id: 'needs-input', project_id: 'p2', title: 'Question', archived: false, local: true,
+        pending_question: JSON.stringify({ questions: [{ question: 'Answer?' }] }),
+      },
+      {
+        chat_id: 'archived-unread', project_id: 'p3', title: 'Archived', archived: true, local: true,
+        last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z',
+      },
+    ] as unknown as ChatInfo[]
+
+    expect(store.attentionChatCount).toBe(2)
+  })
+})
+
+describe('envelope history window', () => {
+  test('adopts the server window when the assembled history shrinks', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-history-shrank'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+    )
+    await store.loadMessages(chatId)
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', 'three', 'four',
+    ])
+
+    // An older provider session segment is pruned or becomes unreadable, so the
+    // backend skips it and assembles a SHORTER history. firstIndex is still 0,
+    // so the old `total <= firstIndex` guard let this through to the
+    // index-addressed merge, which refreshed rows 0-1 and left 2-3 in place -
+    // showing two messages that are no longer part of the chat.
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual(['one', 'two'])
+  })
+
+  test('still merges by index when the history only grows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-history-grew'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three')]),
+    )
+    await store.loadMessages(chatId)
+
+    // The shrink check must not cost us the ordinary append path.
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', 'three',
+    ])
+  })
+
+  test('merges by absolute index across un-indexed local rows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unindexed-local-row'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    // recoverUnackedSend pushes this notice straight into the cache, so it
+    // carries NO server index — same shape as an optimistic user bubble or a
+    // flushed streaming row.
+    const notice = "Error: a message didn't reach the engine and its automatic retry failed. Please send it again."
+    store.messages[chatId] = [
+      ...store.messages[chatId],
+      { role: 'system', content: notice, timestamp: '2026-08-24T10:01:00Z' },
+    ]
+
+    // The next turn lands two more server rows. Position arithmetic
+    // (`abs - firstIndex`) counted the un-indexed notice as index 2, so row 2
+    // overwrote the warning and every later row was off by one.
+    apiGet.mockImplementation(
+      envelope([row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+    )
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'two', notice, 'three', 'four',
+    ])
+  })
+
+  test('does not duplicate a row when an un-indexed row sits above indexed rows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unindexed-row-above'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: items.length,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([row(0, 'one'), row(1, 'two')]))
+    await store.loadMessages(chatId)
+
+    // Splice an un-indexed row BETWEEN two indexed rows (a flushed streaming
+    // row that the server never indexed). One shift is enough: the refresh
+    // wrote the assistant reply over that row while its own slot kept the
+    // stale copy, so the same reply rendered twice.
+    store.messages[chatId] = [
+      store.messages[chatId][0],
+      { role: 'system', content: 'local activity', timestamp: '2026-08-24T10:00:30Z' },
+      store.messages[chatId][1],
+    ]
+
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'one', 'local activity', 'two',
+    ])
+  })
+})
+
+describe('older history pages', () => {
+  // Emulates the server's backward-counting pagination: `offset` is measured
+  // from the CURRENT total, so a page covers
+  // [total - offset - limit, total - offset - 1].
+  function pagedHistory(total: () => number) {
+    const row = (i: number) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `m${i}`,
+      i,
+      sent_at: '2026-08-24T10:00:00Z',
+    })
+    return (path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      const params = new URLSearchParams(path.split('?')[1] || '')
+      const limit = Number(params.get('limit') || 50)
+      const offset = Number(params.get('offset') || 0)
+      const now = total()
+      const start = Math.max(0, now - offset - limit)
+      const end = now - offset - 1
+      const items = []
+      for (let i = start; i <= end; i++) items.push(row(i))
+      return Promise.resolve({
+        items,
+        total: now,
+        offset,
+        limit,
+        hasMore: start > 0,
+        nextOffset: start > 0 ? offset + limit : null,
+      })
+    }
+  }
+
+  test('prepends the previous page when the history is unchanged', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-stable'
+    store.activeChatId = chatId
+
+    // Tail window of an 8-row history, page size 5: indices 3-7.
+    apiGet.mockImplementation((path: string) =>
+      path.includes('offset=')
+        ? pagedHistory(() => 8)(path)
+        : Promise.resolve({
+            items: [3, 4, 5, 6, 7].map(i => ({
+              role: i % 2 === 0 ? 'user' : 'assistant',
+              content: `m${i}`,
+              i,
+              sent_at: '2026-08-24T10:00:00Z',
+            })),
+            total: 8,
+            offset: 3,
+            limit: 5,
+            hasMore: true,
+            nextOffset: 5,
+          }),
+    )
+    await store.loadMessages(chatId)
+    expect(store.canLoadOlder(chatId)).toBe(true)
+
+    await store.loadOlderMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
+    ])
+    expect(store.canLoadOlder(chatId)).toBe(false)
+  })
+
+  test('still reaches the oldest page after the history grows', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-grew'
+    store.activeChatId = chatId
+
+    let serverTotal = 8
+    apiGet.mockImplementation((path: string) =>
+      path.includes('offset=')
+        ? pagedHistory(() => serverTotal)(path)
+        : Promise.resolve({
+            items: [3, 4, 5, 6, 7].map(i => ({
+              role: i % 2 === 0 ? 'user' : 'assistant',
+              content: `m${i}`,
+              i,
+              sent_at: '2026-08-24T10:00:00Z',
+            })),
+            total: 8,
+            offset: 3,
+            limit: 5,
+            hasMore: true,
+            nextOffset: 5,
+          }),
+    )
+    await store.loadMessages(chatId)
+
+    // Two rows arrive after the tail was loaded. `meta.nextOffset` (5) still
+    // counts back from the OLD total of 8, so against 10 rows it answers with
+    // indices 0-4 instead of 0-2: the continuity check rejects the overlap and
+    // the rejected page's `hasMore: false` used to stop every further attempt,
+    // stranding m0-m2 forever.
+    serverTotal = 10
+
+    await store.loadOlderMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
+    ])
+    expect(store.canLoadOlder(chatId)).toBe(false)
   })
 })

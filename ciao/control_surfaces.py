@@ -35,12 +35,3 @@ def resolve_auto_surface(config: Any, provider: str) -> str:
     record = providers.get(provider) if isinstance(providers, dict) else None
     winner = record.get("winner") if isinstance(record, dict) else None
     return winner if winner in {"legacy", "mcp"} else "legacy"
-
-
-def write_decision(workspace: Path, payload: dict[str, Any]) -> Path:
-    path = decision_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
-    return path

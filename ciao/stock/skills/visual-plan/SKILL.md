@@ -1,13 +1,13 @@
 ---
 name: visual-plan
-description: Turn important work into a local, reviewable Markdown plan with optional HTML and Excalidraw companions. Use when the user asks for a plan, design direction, architecture review, UI flow, implementation proposal, migration plan, or approval artifact and the work spans more than one file or subsystem, has meaningful product or UX ambiguity, benefits from seeing a UI state or workflow, involves a data/API/security/ownership decision that is expensive to undo, or must be reviewed by another person or model before implementation. Skip it for a typo, a one-line fix, a single obvious function, or a task explainable in one sentence. Also skip it for a routine working doc (notes, an analysis, a draft with no approval gate and no cross-session handoff) — that is the stock workspace-authoring skill's territory.
+description: Turn important work into a local, reviewable Markdown plan with an optional self-contained HTML companion. Use when the user asks for a plan, design direction, architecture review, UI flow, implementation proposal, migration plan, or approval artifact and the work spans more than one file or subsystem, has meaningful product or UX ambiguity, benefits from seeing a UI state or workflow, involves a data/API/security/ownership decision that is expensive to undo, or must be reviewed by another person or model before implementation. Skip it for a typo, a one-line fix, a single obvious function, or a task explainable in one sentence. Also skip it for a routine working doc (notes, an analysis, a draft with no approval gate and no cross-session handoff) — that is the stock workspace-authoring skill's territory.
 ---
 
 # Visual plan
 
-Produce a disciplined, local, reviewable plan before implementation begins. Markdown is the canonical plan because it supports comments, editing, history, backlinks, and durable storage. HTML and Excalidraw are optional visual companions that answer a specific review question. The plan is the approval gate: research and write it, then stop before source edits until the user approves.
+Produce a disciplined, local, reviewable plan before implementation begins. Markdown is the canonical plan because it supports comments, editing, history, backlinks, and durable storage. A self-contained HTML companion is optional and answers a specific review question, including a diagram drawn as inline SVG. The plan is the approval gate: research and write it, then stop before source edits until the user approves.
 
-This skill is provider-neutral. It works the same on Claude, Codex, and later providers. It does not depend on any hosted plan application, MDX, or a second review service.
+This skill is provider-neutral. It works the same on Claude and OpenCode. It does not depend on any hosted plan application, MDX, or a second review service.
 
 ## When to use this skill
 
@@ -25,17 +25,17 @@ Also skip it for a routine working doc: notes, an analysis, a draft with no appr
 
 ## Required workflow
 
-1. **Check the chat's execution mode.** If the chat is in Plan mode, say plainly that Plan mode cannot write the plan file, offer either an in-chat proposal with no files or a switch out of Plan mode with the `plan` chip, and wait. Do not attempt the write first and report a failure afterwards.
+1. **Proceed to write the plan file.** Execution mode is fixed at auto: file writes run silently, and a destructive or system-level step asks for approval. Do not gate the plan on a mode that no longer exists — just create the file.
 2. Read the project canonical document, relevant files, current implementation patterns, and recent changes.
 3. State the outcome, scope, non-goals, and the files or areas that may change.
 4. Record hard-to-reverse decisions and their recommended defaults.
 5. Choose one output mode:
    - document only: Markdown;
-   - document plus diagram: Markdown and Excalidraw;
+   - document plus diagram: Markdown with a diagram as inline SVG inside a companion HTML file;
    - document plus interactive review: Markdown and HTML;
-   - document plus both companions when the task needs architecture and UI review.
+   - document plus both when the task needs architecture and UI review.
 6. Write the Markdown plan with the resume block, checkpoint ledger, decisions, open questions, feedback log, implementation tasks, and verification gates. Copy `plan-template.md` into the user's project folder or `<vault>/Workspace/`, then tailor it to the task.
-7. Create only the visual companions that help answer the review question. Keep them grounded in real product labels, current app chrome, actual file paths, and stated assumptions. Follow `visual-output.md` for the decision rules, and delegate HTML authoring to the stock `html-artifact` skill.
+7. Create only the visual companions that help answer the review question. Keep them grounded in real product labels, current app chrome, actual file paths, and stated assumptions. Follow `visual-output.md` for the decision rules, and delegate all HTML authoring (interactive surfaces and inline-SVG diagrams alike) to the stock `html-artifact` skill.
 8. Surface the Markdown plan with `file_surface`. Surface a companion separately when the user needs to inspect it.
 9. Ask for approval in the same handoff. Name the files and areas that implementation will touch.
 10. Stop before source edits until the user approves the plan.
@@ -82,7 +82,7 @@ Use stable IDs for decisions and questions, such as `D-01`, `Q-01`, and `F-01`. 
 
 ## Visual companions
 
-Read `visual-output.md` for the decision rules on when to reach for HTML and Excalidraw, how to keep them aligned with the Markdown, and when to skip them. Author interactive HTML companions by loading and following the stock `html-artifact` skill; do not re-inline its sandbox rules. Excalidraw has no stock skill, so `visual-output.md` carries its own minimum Excalidraw contract.
+Read `visual-output.md` for the decision rules on when to reach for HTML, how to keep it aligned with the Markdown, and when to skip it. Author interactive HTML companions and inline-SVG diagrams by loading and following the stock `html-artifact` skill; do not re-inline its sandbox rules.
 
 Only one file can be the active pinned surface at a time. Surface the canonical Markdown plan first, surface a companion when needed, then re-surface Markdown before asking for approval. The output cards and links remain the durable way to move between them.
 

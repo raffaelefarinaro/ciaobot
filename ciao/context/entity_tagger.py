@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ciao.vault_index import markdown_destination
+
 logger = logging.getLogger(__name__)
 
 # Cap scan cost: we truncate prompts before matching and cap the number
@@ -35,9 +37,13 @@ _FOLDER_FILENAMES = {"readme"}
 _SKIP_FILENAMES = {"log", "index"}
 
 # Bullet lines look like:
-#   - `People/Alba` (tags: person, friend; aliases: Alba)
-#   - `Projects/Ciaobot-Improvements` (tags: ...)
-_BULLET_RE = re.compile(r"^- `(?P<path>[^`]+)`(?P<rest>.*)$")
+#   - [People/Alba](./People/Alba.md) (tags: person, friend; aliases: Alba)
+#   - [Projects/Ciaobot-Improvements](./Projects/Ciaobot-Improvements.md) (tags: ...)
+# The label carries the vault-relative path, which is what disambiguates two
+# notes with the same stem; the destination is the same path made navigable.
+# Read the label, not the destination: it needs no unescaping and no `<...>`
+# unwrapping (see `vault_index.markdown_destination`).
+_BULLET_RE = re.compile(r"^- \[(?P<path>[^\]\n]+)\]\([^)\n]*\)(?P<rest>.*)$")
 _ALIASES_RE = re.compile(r"aliases:\s*([^)]+)")
 _CATEGORY_PARTS = {
     "People": "People",
@@ -102,6 +108,7 @@ class _Index:
         *,
         workspace: str | None = None,
         legacy_workspace: str = "",
+        index_owns_workspace: bool = False,
     ) -> list[VaultEntity]:
         """Return entities whose name/alias appears as a whole word in ``prompt``."""
         self._refresh_if_stale()
@@ -114,7 +121,10 @@ class _Index:
             if entity.path in seen:
                 continue
             if not _entity_visible_in_workspace(
-                entity, workspace, legacy_workspace=legacy_workspace
+                entity,
+                workspace,
+                legacy_workspace=legacy_workspace,
+                index_owns_workspace=index_owns_workspace,
             ):
                 continue
             if pattern.search(snippet):
@@ -197,22 +207,44 @@ def _entity_visible_in_workspace(
     workspace: str | None,
     *,
     legacy_workspace: str = "",
+    index_owns_workspace: bool = False,
 ) -> bool:
     """Return whether an indexed entity is visible to ``workspace``.
 
-    Workspace-scoped vaults index paths as ``<workspace>/...``. Shared roots
-    use ``shared/...`` and are visible everywhere. Older single-workspace
-    indexes used unprefixed paths like ``People/Alba``; those belong to
-    ``legacy_workspace``, which the caller reads off the workspace registry.
+    Workspace-scoped vaults index paths as ``<workspace>/...``. Older
+    single-workspace indexes used unprefixed paths like ``People/Alba``; those
+    belong to ``legacy_workspace``, which the caller reads off the workspace
+    registry.
+
+    ``index_owns_workspace`` says the index being read covers exactly this one
+    workspace, which is true of every per-root ``INDEX.md`` after the
+    re-rooting. Then every entry belongs here by construction and there is
+    nothing to filter — the prefix rules below describe a shared index and
+    become actively wrong. Applying them anyway is what happened on the migrated
+    install: per-root indexes are unprefixed, so `People/...`, `Projects/...`
+    and the rest fell to the legacy rule, which only admits the ONE workspace
+    that owns unprefixed entries. Measured live: every one of the 423 entities in
+    the work root was invisible to work chats, while personal worked purely
+    because it happened to be the legacy owner. Silently, because entity
+    enrichment is fail-open.
 
     An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
     in every workspace is a cross-workspace disclosure; the provider request
     carries the registry-selected owner explicitly for normal PWA chats.
+
+    There is deliberately no cross-workspace visibility escape hatch. A
+    ``shared/`` prefix used to be treated as visible everywhere, but nothing
+    could reach such a note: every workspace-scoped tool resolves
+    ``<vault>/<workspace>`` as its root and ``_safe_relative`` rejects anything
+    outside it, so a promoted note became visible to the index and unreadable by
+    ``vault_search`` and ``file_read``. Measured on a real two-workspace vault it
+    had no users either — zero notes existed in both trees, and every
+    cross-workspace reference came from a note filed in the wrong workspace.
+    Workspaces are separate; a person belongs to whichever one you deal with them
+    in.
     """
     workspace = (workspace or "").strip()
-    if not workspace:
-        return True
-    if entity.path.startswith("shared/"):
+    if not workspace or index_owns_workspace:
         return True
     if entity.path.startswith(f"{workspace}/"):
         return True
@@ -223,16 +255,25 @@ def _entity_visible_in_workspace(
     return False
 
 
-_index_cache: _Index | None = None
+# One entry per agent root, not one entry total. A single slot was right when
+# every workspace shared one INDEX.md; with an index per root, chats alternating
+# between workspaces evicted each other's index and re-parsed it on every prompt.
+# Keyed by path and bounded by the number of roots an install has.
+_index_cache: dict[Path, _Index] = {}
+_INDEX_CACHE_LIMIT = 8
 
 
 def get_index(vault_root: Path) -> _Index:
     """Return the process-wide entity index for a given vault root."""
-    global _index_cache
     index_path = vault_root / "INDEX.md"
-    if _index_cache is None or _index_cache._path != index_path:
-        _index_cache = _Index(index_path)
-    return _index_cache
+    cached = _index_cache.get(index_path)
+    if cached is not None:
+        return cached
+    if len(_index_cache) >= _INDEX_CACHE_LIMIT:
+        _index_cache.clear()
+    index = _Index(index_path)
+    _index_cache[index_path] = index
+    return index
 
 
 def find_entities(
@@ -241,22 +282,39 @@ def find_entities(
     *,
     workspace: str | None = None,
     legacy_workspace: str = "",
+    index_owns_workspace: bool = False,
 ) -> list[VaultEntity]:
     """Scan ``prompt`` and return whole-word matches against INDEX.md.
 
     ``legacy_workspace`` is the workspace that owns unprefixed pre-migration
     vault entries — pass ``config.primary_workspace()``.
+
+    ``index_owns_workspace`` marks a per-root index, whose every entry belongs to
+    the workspace asking. Both callers resolve the root through the same seam
+    that knows which layout the install is in, so neither has to guess.
     """
     return get_index(vault_root).find(
-        prompt, workspace=workspace, legacy_workspace=legacy_workspace
+        prompt,
+        workspace=workspace,
+        legacy_workspace=legacy_workspace,
+        index_owns_workspace=index_owns_workspace,
     )
 
 
 def format_entities(entities: list[VaultEntity]) -> str:
-    """Render matched entities as one compact additionalContext block."""
+    """Render matched entities as one compact additionalContext block.
+
+    Emits relative markdown links, the vault's only link dialect. Paths are
+    vault-root-relative with a `./` prefix because this block goes into a
+    *prompt*, not into a note — there is no containing file to be relative to,
+    and the vault root is the one anchor the model can rely on.
+    """
     if not entities:
         return ""
     lines: list[str] = []
     for entity in entities:
-        lines.append(f"- [[{entity.path}]] ({entity.category.rstrip('s').lower()})")
+        target = markdown_destination(f"./{entity.path}.md")
+        lines.append(
+            f"- [{entity.name}]({target}) ({entity.category.rstrip('s').lower()})"
+        )
     return "mentioned_entities:\n" + "\n".join(lines)

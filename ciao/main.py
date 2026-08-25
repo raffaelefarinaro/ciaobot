@@ -100,10 +100,38 @@ class StartupTracker:
         }
 
 
-def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> bool:
-    """Regenerate memory-vault/INDEX.md from frontmatter. Non-fatal on failure."""
+def _refresh_vault_index(
+    workspace: Path,
+    vault_root: Path | None = None,
+    targets: list[tuple[Path, str, Path]] | None = None,
+) -> bool:
+    """Regenerate each vault's INDEX.md from frontmatter. Non-fatal on failure.
+
+    ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one shared vault
+    before the re-rooting and one per agent root after it. Without it this wrote
+    a single index at ``config.vault_root``, which on a migrated install is a
+    directory that no longer exists — so every root's index went stale and the
+    startup log said only "does not exist yet; skipping".
+    """
     try:
         from ciao import vault_index
+
+        if targets:
+            written = 0
+            for root, workspace_name, _prefix in targets:
+                if not Path(root).is_dir():
+                    logger.info("Vault root %s does not exist yet; skipping", root)
+                    continue
+                # Each root owns exactly one vault, so its index carries no
+                # workspace prefix; the stamp keeps `Entry.workspace` correct for
+                # anything reading the index back.
+                entries = vault_index.scan_vault(root, workspace=workspace_name)
+                vault_index.write_index_file(entries, Path(root) / "INDEX.md")
+                written += 1
+            if not written:
+                return False
+            logger.info("Vault index refreshed for %d root(s).", written)
+            return True
 
         root = vault_root or (workspace / "memory-vault")
         if not root.is_dir():
@@ -268,12 +296,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
     setup_error_logging(config.workspace_root)
+    # When CIAO_LOG_LEVEL=debug, also capture DEBUG+ records into a rotating
+    # server_debug.log so verbose runtime detail is inspectable after the fact
+    # (surfaced through the debug issue report). No-op at the default INFO.
+    from ciao.error_log import resolve_log_level, setup_debug_logging
+
+    setup_debug_logging(config.workspace_root)
+    log_level = resolve_log_level()
     # Keep the SDK's benign closed-transport control-task errors out of the
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
 
-    # No model discovery at startup: each provider serves its own catalog on
-    # demand (Codex and opencode) or has a fixed tier vocabulary (Claude Code),
+    # No model discovery at startup: opencode serves its catalog on demand and
+    # Claude Code has a fixed tier vocabulary,
     # so there is no allowlist to warm here.
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
@@ -367,11 +402,51 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("sync_workspace", "git sync failed")
             logger.exception("Workspace sync failed")
 
+    # Re-root the install, once, before anything reads the vault. After the git
+    # sync so the clean-tree gate judges the real tree; before the index refresh
+    # so the indexes are rebuilt for the layout that now exists; and before the
+    # server binds, so no chat is holding a session in a directory that moves.
+    tracker.start("reroot_workspaces")
+    try:
+        from ciao.workspace_reroot import migrate_if_needed
+
+        reroot = await asyncio.to_thread(migrate_if_needed, config)
+        status = str(reroot.get("status", ""))
+        if status == "migrated":
+            tracker.done("reroot_workspaces", f"{len(reroot.get('applied') or [])} moves")
+            # This `config` was loaded before the move, so every per-workspace
+            # vault path it holds now points at a directory that has gone —
+            # `workspace_vault_root("personal")` still says `memory-vault/personal`.
+            # Patching the object in place would leave anything already derived
+            # from it stale, so restart into a process that reads the new
+            # registry from disk. Receipt-gated, so the next boot is a no-op and
+            # this happens exactly once in an install's life.
+            logger.info("re-root: restarting to pick up the new layout")
+            # Returned, not raised: the `except RestartRequested` handler wraps
+            # only `server.serve()`, and this happens long before that. The exit
+            # code is the same one that path returns, so the supervisor restarts
+            # us identically.
+            return config.restart_exit_code
+        elif status == "refused":
+            # Surfaced by the `workspace-unmigrated` action, which reads the
+            # refusal back out of the receipt and offers the retry.
+            tracker.fail("reroot_workspaces", "refused; see the housekeeping strip")
+        else:
+            tracker.done("reroot_workspaces", status or "skipped")
+    except Exception:
+        tracker.fail("reroot_workspaces", "re-root check failed")
+        logger.exception("Workspace re-root check failed")
+
     # Refresh vault index after git pull so INDEX.md reflects any remote changes
     if config.auto_vault_index:
         tracker.start("refresh_vault_index")
         try:
-            await asyncio.to_thread(_refresh_vault_index, config.workspace_root, config.vault_root)
+            await asyncio.to_thread(
+                _refresh_vault_index,
+                config.workspace_root,
+                config.vault_root,
+                config.vault_scan_targets(),
+            )
             tracker.done("refresh_vault_index")
         except Exception:
             tracker.fail("refresh_vault_index", "index refresh failed")
@@ -383,17 +458,21 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # Update skills in the background, startup should not wait on npm.
     def _skills_task():
         try:
-            update_skills(str(config.workspace_root))
+            # Every AGENT ROOT, not the install root. After the re-rooting the
+            # install root is not one: syncing it there seeded a stock CLAUDE.md
+            # beside the real per-root guides and pruned the install root's now
+            # stale `.agents/skills` links, reporting 17 tracked deletions for
+            # mirrors nothing reads any more.
+            targets = config.agent_root_targets()
+            for root, _name in targets:
+                update_skills(str(root))
             tracker.done("update_skills")
         except Exception:
             tracker.fail("update_skills", "skill install failed")
             logger.exception("Skill update failed")
 
-    if getattr(config, "benchmark_mode", False):
-        logger.info("Benchmark mode: skipping autonomous skill refresh.")
-    else:
-        tracker.start("update_skills")
-        asyncio.create_task(asyncio.to_thread(_skills_task))
+    tracker.start("update_skills")
+    asyncio.create_task(asyncio.to_thread(_skills_task))
 
     if config.insights_backfill_on_startup:
         tracker.start("backfill_insights")
@@ -416,10 +495,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         default_model=config.claude_default_model,
         default_mode=config.claude_mode,
     )
-    transcript_root = config.vault_root / "Logs" / "Chats"
+    transcript_root = config.logs_root / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
-    schedule_store = ScheduleStore(config.state_path.parent, include_system=True)
+    # `workspace_names` is read on every list, not captured once, so adding a
+    # workspace produces its per-workspace system routines without a restart.
+    schedule_store = ScheduleStore(
+        config.state_path.parent,
+        include_system=True,
+        workspace_names=config.workspace_names,
+    )
 
     # Create ProjectChatManager
     pcm = ProjectChatManager(
@@ -573,7 +658,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             project_chat_manager=pcm,
             schedule_manager=schedule_manager,
             loop_manager=loop_manager,
-            local_session_manager=app.state.local_session_manager,
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
@@ -590,7 +674,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
-    pcm._push_manager = app.state.push_manager
 
     # A read mutation is already broadcast to every connected PWA. Fan the
     # same mutation out to delivered OS notifications in the background: the
@@ -725,10 +808,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     if getattr(config, "bootstrap_mode", False):
         logger.info(
             "Bootstrap mode: holding schedule/loop dispatch until setup completes."
-        )
-    elif getattr(config, "benchmark_mode", False):
-        logger.info(
-            "Benchmark mode: holding autonomous schedule/loop dispatch."
         )
     else:
         schedule_manager.start()
@@ -883,8 +962,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             except Exception:
                 logger.exception("Branch backup push failed")
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_branch_backup_loop())
+    asyncio.create_task(_branch_backup_loop())
 
     # ── Google Workspace token health ────────────────────────
     # Cheap periodic `auth status` ping per configured GWS profile. When a
@@ -921,9 +999,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.exception("GWS token health check failed")
             await asyncio.sleep(_gws_health_interval)
 
-    if not getattr(config, "bootstrap_mode", False) and not getattr(
-        config, "benchmark_mode", False
-    ):
+    if not getattr(config, "bootstrap_mode", False):
         asyncio.create_task(_gws_health_loop())
 
 
@@ -933,7 +1009,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         app,
         host=config.pwa_host,
         port=config.pwa_port,
-        log_level="info",
+        log_level="debug" if log_level <= logging.DEBUG else "info",
     )
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
@@ -1016,8 +1092,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
-    if control_plane is not None:
-        control_plane.set_lifecycle_callback(request_restart)
 
     # ── Startup error triage ─────────────────────────────────
     # Cap the append-only launchd service logs, then — when the error log
@@ -1034,8 +1108,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Startup error triage failed")
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_startup_error_triage())
+    asyncio.create_task(_startup_error_triage())
 
     # ── Stale-install self-heal ──────────────────────────────
     # Production updates replace the complete app bundle atomically and then
@@ -1060,8 +1133,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 request_restart(config.restart_exit_code)
                 return
 
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_watch_installed_version())
+    asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
     async def _shutdown_providers() -> None:
@@ -1106,7 +1178,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
 def main() -> None:
     """CLI entrypoint."""
-    logging.basicConfig(level=logging.INFO)
+    from ciao.error_log import resolve_log_level
+
+    logging.basicConfig(level=resolve_log_level())
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:

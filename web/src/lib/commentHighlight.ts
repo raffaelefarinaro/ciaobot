@@ -100,6 +100,16 @@ export function cleanCommentSelection(value: string): string {
 }
 
 /**
+ * Escape a value for use inside a quoted CSS attribute-selector string.
+ * Backslash and quote must be escaped in one pass: escaping only `"` lets a
+ * value ending in `\` turn the inserted `\"` into an escaped backslash plus
+ * a string-terminating quote, breaking out of the selector.
+ */
+export function escapeCssAttrValue(value: string): string {
+  return value.replace(/[\\"]/g, '\\$&')
+}
+
+/**
  * Find a comment quote in rendered text and map the match back to raw offsets.
  * The fallback matching is Unicode-normalized and whitespace-tolerant, while
  * the returned offsets always refer to the original rendered string.

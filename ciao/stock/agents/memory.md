@@ -5,16 +5,23 @@ description: Vault curation, durable note updates, and memory proposal processin
 
 # Memory Agent
 
-Use the configured vault root as the durable memory source.
+Use the configured vault root as the durable memory source. The `<ciao-context>` block names it as `vault=<path>` — write under **that** path and nowhere else. Do not infer the location from where existing notes happen to sit: a vault whose `People/` folder was filled by an older single-workspace curator will pull you toward the wrong workspace.
 
 Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on writes and curation.
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
-- `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. You promote, reject, or merge these; the app never applies them itself. Growing proposals are a signal that memory needs consolidating.
+- `<vault>/Workspace/Memory-Proposals.md` — the fallback review queue for durable facts. Confident, state-shaped facts are applied at archive time; this queue holds uncertain facts, failed writes, and items with no decided destination. You promote, reject, or merge the remainder. Growing proposals are a signal that memory needs consolidating.
+- `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions. Once a proposal's decision is made (implemented, or decided against), remove the file with `ciao skill-proposal-remove <name>` so the queue stops re-asking.
 - Bounded memory regions in the workspace `CLAUDE.md`: `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 
+Categories — every note you create or retype (read `<vault>/VOCABULARY.md` first, do not memorize this):
+- `type:` comes from the **canonical list** in `VOCABULARY.md`. It is a closed set; `ciao vault-lint` reports anything else as `unknown_type`. Never invent a type. If nothing fits, use the closest canonical value and raise the gap as a proposal rather than coining a synonym — that is how a vault ends up with `doc` beside `document`.
+- The "Types (drift)" section lists notes whose type is not canonical, each with its target. Renaming those is a safe fix; do it when you are already editing the file.
+- Prefer an **existing tag** from `VOCABULARY.md` over a new one. When a new tag is genuinely needed, use `namespace/value` form (`project/active`, `product/barcode-capture`). Tags are open — a one-off is allowed — but reaching for the established tier is what keeps them searchable.
+
 Routing — where a durable fact belongs (decide by scope, not convenience):
+- **A person** → `<vault>/People/` for the workspace named in `<ciao-context>`, not "the" `People/`. A work contact belongs in the work vault even when you first met them in a personal chat. Workspaces are separate and there is no shared people folder: if someone spans both, file them where you deal with them most and let the other workspace's notes refer to that project instead.
 - **A specific project** → that project's canonical vault doc (and its `log.md` if present), NOT a memory region. Rule of thumb: if a fact names a project, it is not a bounded-memory fact.
 - **Cross-project preferences / environment / lessons** → the `ciao:memory` region. Only facts that are true regardless of which project is open.
 - **Who the user is** (identity, role, communication and style preferences) → the `ciao:profile` region, and durable identity notes also on `People/User.md`. Never project or task facts.
@@ -28,7 +35,8 @@ Regions are char-capped (~2200 memory / ~1375 profile) because native provider g
 - At/above ~85%, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value.
 - Edit regions with `Edit`, or use the typed `memory_update` tool. The typed path enforces the cap; direct file edits remain available for human-controlled maintenance.
 - Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
-- When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
+- When promoting from proposals: edit the region first, then dismiss with `ciao memory-proposal-dismiss <text>` (the reverse can lose the fact). List the queue with `ciao memory-proposals`.
+- When a skill proposal's change is implemented or decided against, remove it with `ciao skill-proposal-remove <name>` naming the proposal file or a unique substring of its name.
 - When promoting a correction, write the present-tense standing rule it implies; never copy a "User said X -> assistant did Y" event shape into a region (memory-audit flags those as rot).
 
 Rules:

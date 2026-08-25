@@ -10,7 +10,7 @@
 - Blocker: <none, or the blocker>
 - Implementation repository: <path>
 - Generated plan output: <path to this file>
-- Visual companions: <optional `.html` and `.excalidraw` paths beside this file>
+- Visual companions: <optional `.html` path beside this file>
 - Verified on: <date> against <files read>
 
 This block is the handoff contract. Any model that resumes the work should read it first, then read the current checkpoint and open questions before doing anything else.
@@ -45,7 +45,7 @@ Out of scope for this release:
 
 ## Visual review
 
-<If applicable: which companion (HTML, Excalidraw, or both) answers the review question, and why. Keep it grounded in real product labels, current app chrome, actual file paths, and stated assumptions.>
+<If applicable: which companion (HTML) answers the review question, and why. Diagrams go in the companion as inline SVG. Keep it grounded in real product labels, current app chrome, actual file paths, and stated assumptions.>
 
 ## Decisions and hard-to-reverse bets
 
@@ -102,17 +102,15 @@ Exit evidence: the plan is executable in one direction. It is not a menu of unde
 ### C3. Build the review artifact
 
 - Write the Markdown plan.
-- Create an Excalidraw companion only when relationships need a spatial view.
-- Create an HTML companion only when the reviewer needs to inspect interaction, layout, or state changes, and author it by loading the stock `html-artifact` skill. If that skill is not installed, write the plan without the companion and say so; do not re-derive its sandbox rules from memory.
-- Keep the Markdown plan and companions aligned on names, statuses, and state IDs.
+- Create an HTML companion only when the reviewer needs to inspect interaction, layout, state changes, or a diagram; draw any diagram as inline SVG in that companion. Author it by loading the stock `html-artifact` skill. If that skill is not installed, write the plan without the companion and say so; do not re-derive its sandbox rules from memory.
+- Keep the Markdown plan and companion aligned on names, statuses, and state IDs.
 
 Exit evidence: `file_surface` has been called for the Markdown plan, and each companion passes its format-specific checks.
 
 ### C4. Review the artifact
 
 - Inspect the Markdown in the pinned panel.
-- Inspect the HTML at narrow and wide widths when it exists.
-- Inspect the Excalidraw diagram at its default zoom when it exists.
+- Inspect the HTML at narrow and wide widths when it exists, including any inline-SVG diagram.
 - Remove filler, duplicate explanations, invented file paths, and visuals that do not answer a review question.
 
 Exit evidence: the first screen or first page makes the proposed outcome understandable without the chat transcript.

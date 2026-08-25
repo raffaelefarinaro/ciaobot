@@ -69,38 +69,6 @@ async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_codex_capacity_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("retry", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="retry-test")
-    capacity_error = "Selected model is at capacity. Please try a different model."
-
-    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        yield ResultEvent(
-            type="result",
-            result=capacity_error,
-            session_id="sess-retry",
-            is_error=True,
-            effective_model=chat.model,
-            usage={},
-            quota={},
-            cost_usd=0.0,
-        )
-
-    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
-
-    stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
-
-    updated = pcm.get_chat(chat.chat_id)
-    assert updated is not None
-    assert updated.retry_status == "pending"
-    assert updated.retry_interval_seconds == 3600
-    assert updated.retry_last_error == capacity_error
-    assert any(e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events)
-    pcm.stop_chat_retry(chat.chat_id)
-
-
 def test_manual_retry_can_be_set_and_stopped(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
@@ -371,7 +339,6 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
         _is_retryable_connection_error,
         _is_retryable_provider_startup_error,
         _is_retryable_quota_error,
-        _is_billing_or_spend_limit_error,
     )
 
     banner = (
@@ -385,20 +352,23 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_retryable_provider_startup_error(
         "the model said database is locked"
     ) is False
+    # A server that stayed alive but never answered /global/health is the
+    # same transient startup wedge (shared SQLite contention) and gets the
+    # same bounded auto-retry.
+    assert _is_retryable_provider_startup_error(
+        "opencode serve did not become healthy: "
+        "server stayed alive but never answered /global/health"
+    ) is True
     # It is NOT a quota error — must not be routed to the hourly retry path.
     assert _is_retryable_quota_error(banner) is False
 
     # Out of credits / spend limits must be classified as retryable quota errors
-    credits_err = "Title generation via codex gpt-5.6-terra failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+    credits_err = "Title generation failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
     spend_limit_err = "You've hit your org's monthly spend limit"
     rate_limit_err = "API Error: Request rejected (429): rate limit exceeded"
     assert _is_retryable_quota_error(credits_err) is True
     assert _is_retryable_quota_error(spend_limit_err) is True
     assert _is_retryable_quota_error(rate_limit_err) is True
-
-    assert _is_billing_or_spend_limit_error(credits_err) is True
-    assert _is_billing_or_spend_limit_error(spend_limit_err) is True
-    assert _is_billing_or_spend_limit_error(rate_limit_err) is False
 
 
 async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:

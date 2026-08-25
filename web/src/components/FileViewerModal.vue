@@ -114,7 +114,7 @@
       </nav>
 
       <div class="fv-main">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw', 'fv-body-csv': isCsv }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -127,18 +127,8 @@
                No history/diff while editing — finish or cancel first. -->
           <template v-else-if="store.editing">
             <div class="fv-edit-shell">
-              <ExcalidrawViewer
-                v-if="store.kind === 'excalidraw'"
-                :content="store.editBuffer"
-                :name="basename"
-                :file-path="store.path"
-                :chat-id="store.chatId"
-                :read-only="false"
-                @change="store.editBuffer = $event"
-                style="flex: 1; min-height: 0; height: auto;"
-              />
               <CsvViewer
-                v-else-if="isCsv"
+                v-if="isCsv"
                 :content="store.editBuffer"
                 :read-only="false"
                 @change="store.editBuffer = $event"
@@ -217,15 +207,7 @@
 
           <template v-else>
             <!-- Metadata card synthesized from YAML frontmatter -->
-            <ExcalidrawViewer
-              v-if="store.kind === 'excalidraw'"
-              :content="store.content"
-              :name="basename"
-              :file-path="store.path"
-              :chat-id="store.chatId"
-              :read-only="true"
-            />
-            <div v-else-if="store.kind === 'pdf' && store.pptxNeedsLibreoffice" class="fv-libreoffice-notice hint hint--warn">
+            <div v-if="store.kind === 'pdf' && store.pptxNeedsLibreoffice" class="fv-libreoffice-notice hint hint--warn">
               <strong>LibreOffice is required to preview PowerPoint files.</strong>
               <span v-if="store.libreofficeInstallError"> {{ store.libreofficeInstallError }}</span>
               <button
@@ -320,7 +302,7 @@
           <!-- Backlinks Tab -->
           <div v-if="store.tab === 'backlinks'" class="fv-backlinks-pane">
             <div v-if="loadingBacklinks" class="fv-loading">Loading backlinks…</div>
-            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming wikilinks found for this note</div>
+            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming links found for this note</div>
             <ul v-else class="fv-backlinks-list">
               <li v-for="b in backlinks" :key="b.path">
                 <button
@@ -410,14 +392,14 @@ import { useProjectStore } from '../stores/projects'
 import { api } from '../lib/api'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
-import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
+import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
 import { askConfirm } from '../lib/confirm'
 import { useFileComments } from '../composables/useFileComments'
+import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
-const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
@@ -459,7 +441,7 @@ const canEdit = computed(() => {
   // Editing an artifact edits its source, which only exists once Code view has
   // fetched it. Preview view has nothing to put in the textarea.
   if (store.kind === 'html') return store.htmlView === 'code' && store.sourceLoaded
-  return store.kind === 'text' || store.kind === 'excalidraw'
+  return store.kind === 'text'
 })
 
 // History tab timestamp formatting. Snapshots store ISO 8601; we want a
@@ -584,20 +566,21 @@ const fmProse = computed(() => {
   return ''
 })
 
-// `related`/`links` frontmatter items are [[wikilink]] references to other
-// vault notes — resolve them to file paths so the pills are clickable (same
-// resolution as body wikilinks). `aliases` are alternative names for THIS
-// note, not links, so they stay plain text.
+// `related`/`links` frontmatter items are bare vault refs (`People/Mo`) —
+// resolve them to file paths so the pills are clickable (same resolution as
+// body links). A `[[...]]` wrapper is still tolerated so notes that predate
+// the markdown-link swap keep working. `aliases` are alternative names for
+// THIS note, not links, so they stay plain text.
 const _LINK_LIST_KEYS = new Set(['related', 'links'])
-const _wikiIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
-const _wikiPathSet = computed(() => new Set<string>(store.markdownPaths || []))
+const _linkIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
+const _linkPathSet = computed(() => new Set<string>(store.markdownPaths || []))
 
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
   const label = (alias ?? ref).trim()
   const path = ref.trim()
-    ? resolveWikilinkTarget(ref.trim(), store.path, _wikiIndex.value, _wikiPathSet.value)
+    ? resolveVaultLinkTarget(ref.trim(), store.path, _linkIndex.value, _linkPathSet.value)
     : null
   return { label, path }
 }
@@ -1262,11 +1245,10 @@ watch(
 )
 
 async function copyPath(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(store.path)
-    copyState.value = 'ok'
-    setTimeout(() => { copyState.value = '' }, 1200)
-  } catch { /* clipboard may be unavailable; silently ignore */ }
+  const copied = await writeClipboard(store.path)
+  if (!copied) return
+  copyState.value = 'ok'
+  setTimeout(() => { copyState.value = '' }, 1200)
 }
 
 async function openExternally(): Promise<void> {
@@ -1401,7 +1383,7 @@ if (typeof window !== 'undefined') {
   color: var(--bg);
 }
 .fv-actions .btn-icon.ok {
-  color: var(--ok, #4ade80);
+  color: var(--success);
 }
 .fv-actions .btn-icon:disabled {
   opacity: 0.45;
@@ -1482,8 +1464,9 @@ if (typeof window !== 'undefined') {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
-  white-space: pre;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: var(--fg);
 }
 /* ── Metadata card (parsed frontmatter) ─────────────────────────── */
@@ -1644,8 +1627,8 @@ if (typeof window !== 'undefined') {
 .fv-md :deep(a:hover) {
   color: var(--accent-strong);
 }
-.fv-md :deep(.wikilink-unresolved) {
-  color: var(--fg-muted, #888);
+.fv-md :deep(.vault-link-unresolved) {
+  color: var(--fg2);
   text-decoration: underline dotted;
   cursor: help;
 }
@@ -1717,7 +1700,7 @@ if (typeof window !== 'undefined') {
   font-size: var(--text-sm);
   font-weight: 600;
   color: white;
-  background: var(--danger, #e06c75);
+  background: var(--error);
   border: none;
   border-radius: 999px;
   cursor: pointer;

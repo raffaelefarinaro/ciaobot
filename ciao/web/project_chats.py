@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optio
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
-    from ciao.web.push import PushManager
 
 RESTART_DRAIN_MESSAGE = (
     "Ciaobot is waiting for active chats to finish before restarting"
@@ -53,7 +52,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, native_sidecar, provider_registry, subagent_tracking
+from ciao import job_runs, provider_registry, subagent_tracking
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -77,12 +76,6 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.model_tiers import canonical_tier, is_tier
-from ciao.providers.codex import (
-    CODEX_FABLE_THINKING_LEVEL,
-    CodexProvider,
-    is_codex_fable,
-    codex_collab_tree_counts,
-)
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
     OpencodeProvider,
@@ -90,7 +83,11 @@ from ciao.providers.opencode import (
 )
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.sessions import StateStore
-from ciao.transcripts import TranscriptStore, _claude_projects_dir
+from ciao.transcripts import (
+    TranscriptStore,
+    _claude_projects_dir,
+    _journal_event_record,
+)
 from ciao.web.chat_broker import (
     ChatStream,
     ChatStreamBroker,
@@ -99,7 +96,6 @@ from ciao.web.chat_broker import (
     remove_pending_list,
     reorder_pending_list,
 )
-from ciao.web.commands import expand_slash_command
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
@@ -131,7 +127,7 @@ _PROJECT_TEXT_EXTS = frozenset({
     ".css", ".html", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv", ".excalidraw",
+    ".cfg", ".ini", ".log", ".csv",
 })
 _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
@@ -376,9 +372,9 @@ def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
     if "reached your session usage limit" in low:
         return True
-    # Codex reports temporary model saturation as a capacity error rather
-    # than a 429/quota error. Treat it as hourly retryable so the user does
-    # not have to keep the chat open and press Retry manually.
+    # Temporary model saturation is a capacity error rather than a 429/quota
+    # error. Treat it as hourly retryable so the user does not have to keep the
+    # chat open and press Retry manually.
     if "at capacity" in low:
         return True
     if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
@@ -386,15 +382,6 @@ def _is_retryable_quota_error(text: str) -> bool:
     if "429" not in low and "too many requests" not in low:
         return False
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
-
-
-def _is_billing_or_spend_limit_error(text: str) -> bool:
-    low = (text or "").lower()
-    if "reached your session usage limit" in low:
-        return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
-        return True
-    return False
 
 
 
@@ -433,10 +420,37 @@ def _is_retryable_connection_error(text: str) -> bool:
 def _is_retryable_provider_startup_error(text: str) -> bool:
     """Recognize a transient provider-launch failure before turn progress."""
     low = (text or "").lower()
-    return (
-        "opencode serve exited" in low
-        and ("database is locked" in low or "database is busy" in low)
-    )
+    if "opencode serve exited" in low and (
+        "database is locked" in low or "database is busy" in low
+    ):
+        return True
+    # A server that stays alive but never answers /global/health is the same
+    # transient startup wedge (shared SQLite contention with other opencode
+    # processes); _ensure_server already retries it internally, so a chat
+    # turn that still lands here should get the same bounded auto-retry as
+    # the database-locked exit instead of failing outright.
+    return "opencode serve did not become healthy" in low
+
+
+def _is_retryable_auth_error(text: str) -> bool:
+    """Recognize a transient OAuth session expiry that can recover on retry.
+
+    The Claude CLI surfaces ``Failed to authenticate: OAuth session expired
+    and could not be refreshed`` when its in-memory credentials lapsed
+    mid-turn. The credentials are refreshed on the next process spawn, so
+    retrying the turn (fast 30s interval, bounded like connection errors)
+    recovers without user intervention. Keep this narrow: only the
+    ``oauth session expired`` / ``could not be refreshed`` shape is
+    retried, not every ``Failed to authenticate`` (e.g. revoked keys).
+    """
+    low = (text or "").lower()
+    if "oauth session expired" in low:
+        return True
+    if "failed to authenticate" in low and "could not be refreshed" in low:
+        return True
+    if "session expired" in low and "could not be refreshed" in low:
+        return True
+    return False
 
 
 def _has_running_loop() -> bool:
@@ -748,18 +762,6 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
     return "\n".join(lines[:start] + [quoted] + lines[end:])
 
 
-def _safe_validate(path: Path, root: Path, allowed_ext: set[str], max_bytes: int) -> None:
-    """Validate a file path is safe to use."""
-    resolved = path.resolve()
-    if root.resolve() not in resolved.parents and resolved != root.resolve():
-        raise ValueError("File path escaped media root")
-    if path.suffix.lower() not in allowed_ext:
-        raise ValueError(f"Unsupported extension: {path.suffix}")
-    if path.exists() and path.is_symlink():
-        raise ValueError("Symlinks not allowed")
-    if path.exists() and path.stat().st_size > max_bytes:
-        path.unlink(missing_ok=True)
-        raise ValueError("File too large")
 
 
 # ── Data models ──────────────────────────────────────────────────────────
@@ -893,6 +895,16 @@ class ChatInfo:
     # `to_dict` so the PWA can rebuild its interactive picker after a reload
     # instead of showing the dead `{"questions": ...}` trace row.
     pending_question: str = ""
+    # Raw PermissionRequestEvent fields (JSON: request_id/tool_name/message/
+    # tool_input) when the model is blocked mid-turn on an unanswered
+    # Approve/Deny prompt. Unlike `pending_question`, this does not pause the
+    # turn across a reconnect — it exists so a chat sitting in the background
+    # (not the currently open WS stream) still shows up as needing attention
+    # in-app instead of only firing an OS push. Cleared on answer
+    # (respond_permission) or when the turn ends by any other path (the
+    # `finally` in `_drive`'s turn loop), since no permission can outlive its
+    # turn.
+    pending_permission: str = ""
     # User messages that were queued (mode="queue") while a turn was running
     # and then parked when that turn paused on an AskUserQuestion. The pause
     # tears down the stream (and its in-memory pending queue), so they are
@@ -955,6 +967,7 @@ class ChatInfo:
             "last_read_at": self.last_read_at,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
+            "pending_permission": self.pending_permission,
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
             "fork_root_chat_id": self.fork_root_chat_id,
@@ -1158,11 +1171,15 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # Fold turn journals left behind by a crashed process into their
+        # transcripts as is_partial turns before anything reads history.
+        try:
+            transcript_store.recover_journals()
+        except Exception:  # noqa: BLE001 — recovery must never block startup
+            logger.exception("Turn journal recovery failed")
         # Bound by main.py when the embedded MCP control plane is enabled.
         # Tests and legacy-only instances intentionally leave it unset.
         self._mcp_service: Optional["CiaoMcpService"] = None
-        # Bound by main.py; unset on tests and legacy-only instances.
-        self._push_manager: Optional["PushManager"] = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
@@ -1277,12 +1294,11 @@ class ProjectChatManager:
         self._recover_orphaned_active_chats()
         self._reconcile_half_archived_chats()
         self._rehome_orphaned_chats()
-        # Sweep any empty chats left over from a previous run (user closed the
-        # tab before typing, server crashed mid-compose, etc.). An "empty"
-        # chat has no messages, no SDK session, and still the default title —
-        # it's indistinguishable from no chat at all, so don't leave it in
-        # the sidebar.
-        self._cleanup_empty_chats()
+        # NOTE: the automatic empty-chat sweep is intentionally disabled. It
+        # raced the just-created chat on every new-chat POST (create_chat
+        # swept the empty chat the user had just opened), closing the panel
+        # behind a stale /api/chats poll and causing the "flash". Users can
+        # still delete an empty chat by hand via DELETE ?only_if_empty=1.
         self._ensure_retry_tasks()
 
     # ── Persistence ──────────────────────────────────────────────────────
@@ -1353,6 +1369,7 @@ class ProjectChatManager:
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
+                pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
                 forked_from_turn_index=cd.get("forked_from_turn_index"),
@@ -1449,6 +1466,7 @@ class ProjectChatManager:
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
                     "pending_question": c.pending_question,
+                    "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
                     "forked_from_turn_index": c.forked_from_turn_index,
@@ -1691,6 +1709,59 @@ class ProjectChatManager:
         registry and the legacy-path handling.
         """
         return self._config.workspace_vault_root(workspace)
+
+    def _workspace_vault_display(self, workspace: str) -> str:
+        """The workspace's vault as a path the model can use verbatim.
+
+        Relative to the provider's cwd (`config.workspace_root`) when it sits
+        underneath it, which is the normal layout — so the model gets
+        `memory-vault/work`, not an absolute path it would have to trim.
+        """
+        if not workspace or not self._is_known_workspace(workspace):
+            return ""
+        try:
+            root = self._workspace_vault_root(workspace)
+        except ValueError:
+            return ""
+        try:
+            return str(root.relative_to(Path(self._config.workspace_root)))
+        except ValueError:
+            return str(root)
+
+    def _entity_index_is_per_root(self, workspace: str = "") -> bool:
+        """Whether ``_entity_index_root`` resolved a per-root index.
+
+        A per-root index covers exactly one workspace, so its entries need no
+        prefix filtering; a shared one still does. Derived from the same
+        ``agent_root`` receipt the root itself comes from, so the two answers
+        cannot disagree.
+        """
+        if not workspace:
+            return False
+        try:
+            return Path(self._config.agent_root(workspace)) != Path(
+                self._config.workspace_root
+            )
+        except (AttributeError, ValueError):
+            return False
+
+    def _entity_index_root(self, workspace: str = "") -> Path:
+        """Return the root that owns the vault entity index.
+
+        Entity hints resolve against the INDEX.md that covers this chat, which
+        is ``agent_vault_root(workspace)``: the ONE shared index before the
+        re-rooting, and this root's own index after it. Deliberately not
+        ``_workspace_vault_root`` — before the migration that is a subtree of the
+        shared vault holding no index at all, which reads as "no entities" rather
+        than failing. Workspace scoping within a shared index is still applied
+        inside ``find_entities`` via its ``workspace`` argument.
+        """
+        if workspace:
+            try:
+                return self._config.agent_vault_root(workspace)
+            except (AttributeError, ValueError):
+                logger.debug("could not resolve the agent vault root for %r", workspace)
+        return Path(self._config.vault_root)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
@@ -2220,7 +2291,7 @@ class ProjectChatManager:
 
     def _discover_archived_chats(self) -> None:
         """Scan the vault's archived transcripts and import missing chats."""
-        chats_root = self._config.vault_root / "Logs" / "Chats"
+        chats_root = self._config.logs_root / "Chats"
         if not chats_root.is_dir():
             return
 
@@ -2297,7 +2368,9 @@ class ProjectChatManager:
         if new_chats_discovered or pruned_chats:
             self._save(reason="archived_transcript_discovery")
 
-    def _claude_session_exists(self, session_id: str) -> bool:
+    def _claude_session_exists(
+        self, session_id: str, *, agent_root: Path | None = None
+    ) -> bool:
         if not session_id:
             return False
         # Claude session ids are UUIDs; anything else (e.g. an opencode
@@ -2307,12 +2380,18 @@ class ProjectChatManager:
             uuid.UUID(session_id)
         except ValueError:
             return False
-        projects_dir = _claude_projects_dir(self._config.workspace_root)
+        root = agent_root if agent_root is not None else self._config.workspace_root
+        projects_dir = _claude_projects_dir(root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
+        # The glob scan stays for every caller. The projects dir is a slug of
+        # the cwd, so a session recorded under a different cwd is only findable
+        # this way. Isolating roots belongs in the re-rooting release, when
+        # agent_root actually differs; removing the net now would drop sessions
+        # while the hazard is still live.
         try:
-            root = Path.home() / ".claude" / "projects"
-            return root.exists() and any(root.glob(f"*/{session_id}.jsonl"))
+            projects_root = Path.home() / ".claude" / "projects"
+            return projects_root.exists() and any(projects_root.glob(f"*/{session_id}.jsonl"))
         except OSError:
             return False
 
@@ -2346,6 +2425,10 @@ class ProjectChatManager:
             if audit_status == "deleted":
                 continue
             if provider == "claude":
+                # No chat in hand here, only a transcript row, so there is no
+                # workspace to resolve an agent root from. Defaults to
+                # workspace_root, which is what every root resolves to until the
+                # re-rooting release.
                 if (
                     not self._claude_session_exists(session_id)
                     and audit_status != "present"
@@ -2443,7 +2526,7 @@ class ProjectChatManager:
             if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
                 continue  # never archived -> not the corrupt state
             if chat.provider == "claude" and self._claude_session_exists(
-                chat.session_id
+                chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
             ):
                 continue  # session blob still present -> not archived
             chat.archived = True
@@ -2994,10 +3077,12 @@ class ProjectChatManager:
 
         # Only Claude has a local session-file contract we can probe
         # (a ``<session>.jsonl`` under ``.claude/projects``). Every other
-        # provider (codex, opencode, pi, ...) owns its sessions and resumes
+        # non-Claude provider owns its sessions and resumes
         # them by id through its own server, so treat those as local.
         if chat.provider in ("", "claude"):
-            return self._claude_session_exists(chat.session_id)
+            return self._claude_session_exists(
+                chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
+            )
         return True
 
     def list_chats_dicts(self, project_id: str | None = None) -> list[dict]:
@@ -3047,12 +3132,11 @@ class ProjectChatManager:
         chat_model = self._resolve_and_validate_chat_model(
             chat_model, chat_provider, project_id
         )
-        # Sweep any other empty chats only after all model and routing-bucket
-        # validation has succeeded. Opening a fresh "New Chat" signals the
-        # user has moved on from whatever they had open and never sent, so we
-        # don't let empty shells pile up; a rejected request must not delete
-        # those drafts as a side effect (#259).
-        self._cleanup_empty_chats()
+        # The empty-chat sweep was removed from create_chat: it deleted the
+        # brand-new chat the user had just opened (racing the POST's own
+        # response), which closed the panel and caused the "new chat flashes
+        # and then opens" bug. Empty chats now live until the user deletes
+        # them explicitly.
         cid = f"chat-{_uuid8()}"
         # Per-provider default thinking level for new chats; a missing entry
         # leaves it to the provider default ("" = auto).
@@ -3072,8 +3156,6 @@ class ProjectChatManager:
             spawned_from_chat_id=spawned_from_chat_id,
             delegation_id=delegation_id,
         )
-        if is_codex_fable(chat_provider, chat_model):
-            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
@@ -3145,15 +3227,6 @@ class ProjectChatManager:
         if empty_ids:
             self._save()
         return empty_ids
-
-    def rename_chat(self, chat_id: str, title: str) -> ChatInfo | None:
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        chat.title = title
-        self._save()
-        return chat
-
     def update_chat(
         self,
         chat_id: str,
@@ -3176,7 +3249,6 @@ class ProjectChatManager:
             raise ValueError(
                 f"Unknown mode '{mode}' (allowed: normal, plan, auto, bypass)"
             )
-        was_codex_fable = is_codex_fable(chat.provider, chat.model)
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         target_provider = provider or chat.provider
@@ -3243,14 +3315,7 @@ class ProjectChatManager:
             chat.provider = new_provider
         if mode is not None:
             chat.mode = mode  # type: ignore[assignment]
-        chat_is_codex_fable = is_codex_fable(chat.provider, chat.model)
-        if chat_is_codex_fable:
-            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
-        elif was_codex_fable and thinking_level is None:
-            # Leaving the Fable preset restores the target model's default
-            # effort unless the caller explicitly chose another level.
-            chat.thinking_level = ""
-        elif thinking_level is not None:
+        if thinking_level is not None:
             chat.thinking_level = thinking_level
         self._save()
         if moved_from is not None:
@@ -3519,13 +3584,8 @@ class ProjectChatManager:
         chat.handover_context_pending = True
         chat.provider = provider
         chat.model = resolved_model
-        # Thinking levels are provider-native and don't carry across, except
-        # that the Codex Fable preset is defined as Sol with Ultra effort.
-        chat.thinking_level = (
-            CODEX_FABLE_THINKING_LEVEL
-            if is_codex_fable(provider, resolved_model)
-            else ""
-        )
+        # Thinking levels are provider-native and don't carry across a handover.
+        chat.thinking_level = ""
         chat.session_id = ""
         chat.context_digest = ""
         chat.context_session_id = ""
@@ -3558,9 +3618,8 @@ class ProjectChatManager:
     ) -> None:
         """Drop provider-side session blobs/threads for abandoned chats.
 
-        Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
-        rollouts under ``~/.codex/sessions`` are reclaimed the same way.
-        OpenCode deletes its persisted session through ``DELETE /session/{id}``.
+        Claude deletes the SDK JSONL blob. OpenCode deletes its persisted
+        session through ``DELETE /session/{id}``.
         Provider cleanup is fail-open: the Ciaobot archive remains durable even
         when an external provider is unavailable.
         """
@@ -3579,8 +3638,6 @@ class ProjectChatManager:
             try:
                 if chat.provider == "claude":
                     deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
-                elif chat.provider == "codex":
-                    deleted = await CodexProvider.delete_thread(workspace, sid)
                 elif chat.provider == "opencode":
                     deleted = await OpencodeProvider.delete_thread(workspace, sid)
                 else:
@@ -3593,7 +3650,7 @@ class ProjectChatManager:
                     chat.chat_id,
                 )
                 continue
-            if chat.provider in {"codex", "opencode"} and not deleted:
+            if chat.provider == "opencode" and not deleted:
                 logger.warning(
                     "Provider returned no cleanup confirmation for %s session %s "
                     "(chat %s)",
@@ -3675,7 +3732,7 @@ class ProjectChatManager:
         """Archive a chat's transcript and mark it as archived.
 
         Also disconnects any live provider and reclaims provider-side session
-        storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
+        storage (Claude SDK JSONL blob or an opencode session). The markdown
         transcript in the vault is the durable record. Active delegate
         subchats are archived as part of the same operation, so a supervisor
         cannot leave its nested work chats running or visible on their own.
@@ -3856,7 +3913,7 @@ class ProjectChatManager:
                     "Failed to pre-filter JSONL for chat %s", chat_id
                 )
                 filtered_jsonl = None
-        elif chat.provider in {"codex", "opencode"}:
+        elif chat.provider == "opencode":
             filtered_jsonl = self._transcripts.current_filtered_jsonl(
                 ctx, chat.provider
             ) or None
@@ -4195,6 +4252,15 @@ class ProjectChatManager:
                         workspace_root=config.workspace_root,
                         vault_root=config.vault_root,
                         proposal_vault_root=proposal_vault_root,
+                        # Region auto-promotion writes the workspace the chat
+                        # ran in. Without this the live archive path left every
+                        # [memory]/[profile] fact queued instead of promoted,
+                        # because `apply_proposals` will not guess a guide.
+                        guide_path=(
+                            Path(config.agent_root(workspace)) / "CLAUDE.md"
+                            if workspace and config.workspace(workspace) is not None
+                            else None
+                        ),
                         provider=chat_meta.provider if chat_meta else "claude",
                         project_doc_path=project_doc_path,
                     ),
@@ -4245,7 +4311,12 @@ class ProjectChatManager:
             db_path = get_db_path()
             conn = sqlite3.connect(db_path)
             init_db(conn)
-            index_file(conn, config.vault_root, outcome.path)
+            index_file(
+                conn,
+                config.vault_root,
+                outcome.path,
+                path_base=Path(config.workspace_root),
+            )
             conn.close()
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -4296,6 +4367,7 @@ class ProjectChatManager:
         # with follow-ups parked for that answer turn — they must not leak
         # into the new conversation.
         chat.pending_question = ""
+        chat.pending_permission = ""
         chat.pending_queue = []
         if chat.retry_status:
             self._clear_chat_retry(chat)
@@ -4313,10 +4385,28 @@ class ProjectChatManager:
         if chat_id not in self._providers:
             chat = self._chats.get(chat_id)
             provider_name = chat.provider if chat else ""
+            agent_root = self._agent_root_for_chat(chat_id)
             self._providers[chat_id] = ProviderService(
-                self._config, provider=provider_name
+                self._config,
+                provider=provider_name,
+                agent_root=agent_root,
             )
         return self._providers[chat_id]
+
+    def _agent_root_for_chat(self, chat_id: str) -> Path:
+        """Resolve the agent root for a chat's owning workspace.
+
+        The chat's project names a workspace; that workspace's agent root is
+        threaded to the provider factory. A project with no workspace, or a
+        chat with no project at all, falls back to ``primary_workspace()`` so
+        every caller still lands on ``workspace_root`` today.
+        """
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat else None
+        workspace = project.workspace if project else ""
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        return self._config.agent_root(workspace)
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
@@ -4353,19 +4443,17 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
-        vault_root = (
-            self._workspace_vault_root(workspace)
-            if workspace
-            else Path(self._config.vault_root)
-        )
+        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt=prompt,
+            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
             vault_root=vault_root,
+            workspace_vault_root=self._workspace_vault_display(workspace),
             legacy_entity_workspace=self._config.legacy_entity_workspace(),
             unattended=unattended,
             handover=handover,
@@ -4403,19 +4491,17 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        vault_root = (
-            self._workspace_vault_root(workspace)
-            if workspace
-            else Path(self._config.vault_root)
-        )
+        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
             prompt="",
+            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
             vault_root=vault_root,
+            workspace_vault_root=self._workspace_vault_display(workspace),
             legacy_entity_workspace=self._config.legacy_entity_workspace(),
             include_stable=True,
         )
@@ -4590,8 +4676,17 @@ class ProjectChatManager:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
         Applies the default harness set plus any workspace "extra disallowed
-        tools" (``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``_WORK`` or the PWA
-        field). claude.ai connector MCPs are always allowed.
+        tools" (the workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
+        field), plus a derived ``mcp__<server>`` deny for every server declared
+        in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
+        does not name.
+
+        Two limits stated plainly. This scopes REACHABILITY, not authority: a
+        shared account behind a reachable server still holds that account's full
+        authority. And ``disallowed_tools`` is only applied when the chat's
+        provider is ``claude`` (see the guard below); it does NOT constrain
+        opencode chats at all. Closing that non-Claude gap needs a
+        per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
             return []
@@ -4622,20 +4717,35 @@ class ProjectChatManager:
         return self._config.default_provider_for_workspace(workspace)
 
     def _schedule_workspace_hint(self, entry: object) -> str:
-        """Return the persisted or legacy-inferred workspace for a schedule."""
+        """Return the persisted or legacy-inferred workspace for a schedule.
+
+        Per-workspace system routines are fanned out with a real ``workspace``
+        already set, so they never reach the fallback. What does reach it is a
+        global routine and any pre-`workspace`-field user entry, which is why the
+        fallback resolves rather than failing: skipping the dispatch would stop
+        the routine firing at all, which is worse than running it in the primary
+        workspace. The mismatch is logged so a misconfigured entry is visible.
+        """
         workspace = (getattr(entry, "workspace", "") or "").strip().lower()
         if self._is_known_workspace(workspace):
             return workspace
 
         schedule_id = getattr(entry, "schedule_id", "") or ""
-        legacy_workspace = (
-            "work" if schedule_id.startswith("sched-work") else "personal"
-        )
-        if self._is_known_workspace(legacy_workspace):
-            return legacy_workspace
+        if schedule_id.startswith("sched-work") and self._is_known_workspace("work"):
+            return "work"
 
-        names = self._config.workspace_names()
-        return names[0] if names else legacy_workspace
+        # `primary_workspace` owns the "no better idea" choice; callers must not
+        # hardcode "personal", since an install may have no workspace by that
+        # name at all.
+        primary = self._config.primary_workspace()
+        if workspace:
+            logger.info(
+                "Schedule %s names unknown workspace %r; running in %r",
+                schedule_id or "<unknown>",
+                workspace,
+                primary,
+            )
+        return primary
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
@@ -4681,6 +4791,25 @@ class ProjectChatManager:
         )
         return provider, model, workspace
 
+    def reassign_workspace(self, old: str, new: str) -> int:
+        """Repoint every project on *old* at *new*; returns how many moved.
+
+        Deleting a workspace kept its projects and chats, still naming a
+        registry entry that no longer existed - and `_agent_root_for_chat`
+        then fell through to `primary_workspace()`, so continuing one of those
+        chats silently loaded the primary workspace's guide and could read and
+        write its vault. Migrating the projects makes that move explicit and
+        recorded rather than an accident of the fallback.
+        """
+        moved = 0
+        for project in self._projects.values():
+            if project.workspace == old:
+                project.workspace = new
+                moved += 1
+        if moved:
+            self._save(reason="workspace_deleted")
+        return moved
+
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()
         self._discover_vault_projects()
@@ -4714,12 +4843,11 @@ class ProjectChatManager:
         resolved one — sending the alias straight through gets rejected by
         that provider's own backend. Fall back to the provider's operator
         default instead (empty is fine: dispatch already treats an empty
-        model as "let the provider pick its own"). Codex's own "fable" is a
-        real, meaningful preset (see CODEX_FABLE_THINKING_LEVEL) rather than
-        a foreign alias, so it is preserved rather than resolved away.
+        model as "let the provider pick its own"). Tier aliases are resolved
+        to the provider's configured default on non-Claude providers.
         """
         resolved = (model or "").strip()
-        if provider != "claude" and is_tier(resolved) and not is_codex_fable(provider, resolved):
+        if provider != "claude" and is_tier(resolved):
             return self._config.default_model_for_provider(provider)
         return _normalize_tier(resolved)
 
@@ -4744,7 +4872,7 @@ class ProjectChatManager:
         which every provider resolves against its own catalog, or a member of
         ``config.claude_models``.
 
-        Providers that discover their own catalog (Codex, opencode) are exempt:
+        Providers that discover their own catalog (opencode) are exempt:
         that catalog is async, so this synchronous validator has nothing to
         check against, and those CLIs reject an unknown id with a clear error on
         the first turn anyway. Keyed on the capability rather than a provider
@@ -4773,8 +4901,6 @@ class ProjectChatManager:
         before a guard fix). Dispatch falls back to the provider default
         instead of failing the turn.
         """
-        if is_codex_fable(chat.provider, chat.model):
-            return CODEX_FABLE_THINKING_LEVEL
         if chat.thinking_level in THINKING_LEVELS.get(chat.provider, ()):
             return chat.thinking_level
         return ""
@@ -4789,6 +4915,22 @@ class ProjectChatManager:
         project = self._projects.get(chat.project_id)
         env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
         workspace = project.workspace if project else ""
+        # The vault this chat's CLI commands should read and write. Exported
+        # explicitly rather than inherited, because there is one process-level
+        # CIAO_VAULT_ROOT and after the re-rooting there are N vaults, so a
+        # single inherited value cannot name the right one. `agent_vault_root`
+        # returns today's shared vault until this install has re-rooted, so this
+        # changes nothing yet; afterwards a per-workspace routine running
+        # `ciao vault-index --write` rebuilds its own root's index instead of a
+        # shared path that no longer exists.
+        #
+        # CIAO_WORKSPACE deliberately stays the install root: `.env`, `.runtime`
+        # and the registry are the global layer and live there, not in a root.
+        try:
+            if workspace:
+                env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
+        except (AttributeError, ValueError, OSError):
+            logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
         env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
@@ -4913,7 +5055,7 @@ class ProjectChatManager:
                 outcome.had_error = bool(event.is_error)
                 outcome.effective_model = event.effective_model or chat.model
                 if (
-                    chat.provider in {"codex", "opencode"}
+                    chat.provider == "opencode"
                     and not chat.model
                     and outcome.effective_model
                 ):
@@ -4990,12 +5132,7 @@ class ProjectChatManager:
         if not prefix:
             context_digest = ""
             context_session_id = ""
-        if chat.provider == "codex":
-            provider_prompt = (
-                expand_slash_command(prompt, self._config.workspace_root) or prompt
-            )
-        else:
-            provider_prompt = prompt
+        provider_prompt = prompt
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
@@ -5174,7 +5311,7 @@ class ProjectChatManager:
         if chat.archived:
             raise ValueError("Cannot send messages to an archived chat")
 
-        provider = self._get_provider(chat_id)
+        self._get_provider(chat_id)
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
@@ -5290,10 +5427,18 @@ class ProjectChatManager:
                         # A pick of the current (disabled) model falls through
                         # to normal dispatch; the ladder handles a rejection.
                     elif action == "picker":
-                        # The PWA opens the model selector and the user
-                        # re-sends through the normal path. This turn ends
-                        # with no result event and no bubble: the user is
-                        # mid-flow.
+                        # The PWA opens the model selector on the answering
+                        # device and the user re-sends through the normal
+                        # path. The turn ends with no result event, but not
+                        # silently: the system bubble tells every connected
+                        # client (this one included — the picker renders above
+                        # it) why the turn closed with nothing on the
+                        # transcript, and gives them a system row so their
+                        # stale "thinking" state can settle.
+                        yield SystemStatusEvent(
+                            type="system",
+                            status=_CAPABILITY_IMAGE_MSG,
+                        )
                         return
                     elif action == "cancel":
                         # The user declined to switch. Tell them the images
@@ -5305,39 +5450,71 @@ class ProjectChatManager:
                         return
 
         outcome = _StreamOutcome(effective_model=chat.model)
-        async for event in self._drive_stream(
-            chat_id=chat_id,
-            request=request,
-            outcome=outcome,
-        ):
-            yield event
-        response_text = outcome.response_text
-        had_error = outcome.had_error
-        effective_model = outcome.effective_model
-        usage = outcome.usage
-        quota = outcome.quota
-        cost_usd = outcome.cost_usd
-        tool_events = outcome.tool_events
-
-        # Record transcript turn
-        if handover_context_sent and not had_error:
-            self.mark_handover_context_used(chat_id)
-
-        ctx = ChatContext.for_web(chat_id)
-        self._transcripts.record_turn(
-            request,
-            ctx=ctx,
-            response_text=response_text,
-            effective_model=effective_model,
-            session_id=chat.session_id or None,
-            usage=usage,
-            quota=quota,
-            input_kind="text",
-            context_label=chat.title,
-            provider=chat.provider,
-            tool_events=tool_events,
-            is_error=had_error,
+        # Crash journal: mirror user-visible events while the turn streams so
+        # a server crash or provider abort mid-turn can be recovered as an
+        # is_partial turn on next startup instead of losing the exchange.
+        # Finalization below is synchronous, so cancellation cannot interrupt
+        # it mid-write; no shield wrapper is needed.
+        journal = self._transcripts.open_turn_journal(
+            ChatContext.for_web(chat_id), chat.provider
         )
+        journal.begin({
+            "provider": chat.provider,
+            "prompt": (request.display_prompt or request.prompt)[:2000],
+            "started_at": _now_iso(),
+        })
+
+        async def _journalled_stream():
+            async for event in self._drive_stream(
+                chat_id=chat_id,
+                request=request,
+                outcome=outcome,
+            ):
+                record = _journal_event_record(event)
+                if record is not None:
+                    journal.append(record)
+                yield event
+
+        try:
+            async for event in _journalled_stream():
+                yield event
+            response_text = outcome.response_text
+            had_error = outcome.had_error
+            effective_model = outcome.effective_model
+            usage = outcome.usage
+            quota = outcome.quota
+            cost_usd = outcome.cost_usd
+            tool_events = outcome.tool_events
+
+            # Record transcript turn
+            if handover_context_sent and not had_error:
+                self.mark_handover_context_used(chat_id)
+
+            ctx = ChatContext.for_web(chat_id)
+            self._transcripts.record_turn(
+                request,
+                ctx=ctx,
+                response_text=response_text,
+                effective_model=effective_model,
+                session_id=chat.session_id or None,
+                usage=usage,
+                quota=quota,
+                input_kind="text",
+                context_label=chat.title,
+                provider=chat.provider,
+                tool_events=tool_events,
+                is_error=had_error,
+            )
+            # The transcript owns this turn now, so a death before the
+            # unlink below must not let recovery replay it as a second
+            # partial turn.
+            journal.mark_committed()
+        finally:
+            # A provider exception (or a Stop that raises) used to unwind
+            # straight past `finish()`, leaving a journal that the next
+            # startup folded back in even though the outer handler had
+            # already persisted the turn.
+            journal.finish()
 
         # Update global cost
         if cost_usd > 0:
@@ -5400,69 +5577,6 @@ class ProjectChatManager:
         stream.publish({
             "type": "queued",
             "id": resolved_id,
-            "text": text,
-            "images": image_refs,
-        })
-        return True
-
-    async def steer_stream(
-        self,
-        chat_id: str,
-        text: str,
-        images: list[ImageAttachment] | None = None,
-    ) -> bool:
-        """Inject a user message into the active SDK turn.
-
-        Returns True if the message reached the live client, False otherwise
-        (caller should fall back to queuing).
-        """
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
-            # No live turn to steer into during a background drain; the
-            # caller falls through to queue → start_stream.
-            return False
-        provider = self._providers.get(chat_id)
-        if provider is None:
-            return False
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return False
-        prefix = self._build_prompt_prefix(chat)
-        full_prompt = prefix + text if prefix else text
-        request = AgentRequest(
-            prompt=full_prompt,
-            model=self._runtime_model_for_chat(chat),
-            provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
-            resume_session=chat.session_id or None,
-            images=images or [],
-            extra_env=self._build_extra_env(chat),
-            disallowed_tools=self.disallowed_tools_for_chat(chat),
-            thinking_level=self._thinking_level_for_chat(chat),
-        )
-        ok = await provider.steer(request)
-        if not ok:
-            return False
-        dirty = self._invalidate_reentry_summary(chat)
-        image_refs: list[str] = []
-        for img in images or []:
-            ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
-            if ref:
-                image_refs.append(str(ref))
-        # Bump the chat's user-turn counter so image-replay for history lines up
-        # with the additional turn we just injected.
-        if image_refs:
-            turn_index = chat.user_turn_count
-            chat.user_turn_count = turn_index + 1
-            chat.user_turn_images[str(turn_index)] = list(image_refs)
-            now = _now_iso()
-            chat.last_activity_at = now
-            chat.last_read_at = now  # user sending = implicitly read
-            dirty = True
-        if dirty:
-            self._save()
-        stream.publish({
-            "type": "steered",
             "text": text,
             "images": image_refs,
         })
@@ -5619,10 +5733,10 @@ class ProjectChatManager:
         had_progress: bool,
         reason: str,
     ) -> bool:
-        """Arm a deferred retry for a quota/connection/startup failure.
+        """Arm a deferred retry for a quota/connection/startup/auth failure.
 
-        ``kind`` is ``"quota"``, ``"connection"``, or ``"startup"``. A
-        connection failure that dropped *after* streaming output
+        ``kind`` is ``"quota"``, ``"connection"``, ``"startup"``, or ``"auth"``.
+        A connection/auth failure that dropped *after* streaming output
         (``had_progress``) resumes the session with a "continue" nudge instead
         of replaying the prompt — replaying could re-run tool calls the partial
         turn already executed — and is capped at
@@ -5646,10 +5760,10 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # The connection/startup cap guards against a transient-looking local
-        # failure looping forever; quota retries are time-gated by the hourly
-        # retry interval instead.
-        if kind in {"connection", "startup"}:
+        # The connection/startup/auth cap guards against a transient-looking
+        # local failure looping forever; quota retries are time-gated by the
+        # hourly retry interval instead.
+        if kind in {"connection", "startup", "auth"}:
             attempts = chat.retry_attempts if chat is not None else 0
             if attempts >= _MAX_CONNECTION_DROP_RETRIES:
                 logger.warning(
@@ -5670,7 +5784,7 @@ class ProjectChatManager:
             image_refs = self._image_refs(current_images)
         interval = (
             _RETRY_CONNECTION_INTERVAL_SECONDS
-            if kind in {"connection", "startup"}
+            if kind in {"connection", "startup", "auth"}
             else _RETRY_INTERVAL_SECONDS
         )
         armed = self.set_chat_retry(
@@ -6137,11 +6251,9 @@ class ProjectChatManager:
                                 if cm_q is not None:
                                     cm_q.pending_question = question_payload
                                     self._save()
-                                # Codex exposes a native blocking app-server
-                                # request. Keep consuming the turn while the
-                                # PWA answers that request in-band. Claude's
-                                # SDK picker still requires the interrupt and
-                                # next-turn answer flow documented above.
+                                # Provider-native requests can be answered in
+                                # band; the Claude SDK picker still requires
+                                # the interrupt and next-turn answer flow.
                                 if event.request_id:
                                     if unattended:
                                         q_provider = self._providers.get(chat_id)
@@ -6231,6 +6343,16 @@ class ProjectChatManager:
                                             current_images=current_images,
                                             had_progress=had_provider_progress,
                                             reason=result_text or "connection error",
+                                        )
+                                    elif _is_retryable_auth_error(result_text):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="auth",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "auth error",
                                         )
                                 else:
                                     turn_assistant_text = event.result or ""
@@ -6338,6 +6460,16 @@ class ProjectChatManager:
                                     chat_id,
                                     stream,
                                     kind="connection",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            elif _is_retryable_auth_error(error_msg):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="auth",
                                     current_prompt=current_prompt,
                                     current_images=current_images,
                                     had_progress=had_provider_progress,
@@ -6463,7 +6595,14 @@ class ProjectChatManager:
                 # this only fires a second chat_title event when the late title
                 # actually differs from the early one. An empty reply (error /
                 # abort) falls back to the user-only prompt path.
-                if prompt and chat_meta and chat_meta.title == "New Chat":
+                # Also re-run when the early poll fell back to the deterministic
+                # truncation — the late poll can then upgrade that fallback to
+                # the provider's native title once it finally lands.
+                _late_fallback = _fallback_title(prompt) if prompt else None
+                if prompt and chat_meta and (
+                    chat_meta.title == "New Chat"
+                    or (_late_fallback is not None and chat_meta.title == _late_fallback)
+                ):
                     asyncio.create_task(
                         self._auto_title_and_publish(
                             chat_id, prompt, last_assistant_text
@@ -6473,6 +6612,15 @@ class ProjectChatManager:
                 # ResultEvent (errored / aborted turn) so the dict stays bounded.
                 if current_turn_index is not None:
                     self._turn_perf_started.pop((chat_id, current_turn_index), None)
+                # A permission prompt cannot outlive its turn: the gate's own
+                # cancel_all denies anything still pending as the turn tears
+                # down (stop/error/disconnect), but that path doesn't know
+                # about the persisted attention flag. Clear it here so a
+                # denied-by-teardown prompt doesn't leave the chat stuck
+                # looking like it still needs approval.
+                if chat_meta is not None and chat_meta.pending_permission:
+                    chat_meta.pending_permission = ""
+                    self._save()
                 # Always clean up the per-chat stream entry first so subsequent
                 # sends can start a new one immediately.
                 stream.finish()
@@ -6773,14 +6921,13 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return
-        if chat.provider == "codex":
-            await self._watch_codex_subagent_completion(chat_id, project_id)
-            return
         if chat.provider == "opencode":
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
         path = subagent_tracking.find_parent_session_file(
-            chat.session_id, self._config.workspace_root
+            chat.session_id,
+            self._config.workspace_root,
+            agent_root=self._agent_root_for_chat(chat_id),
         )
         if path is None:
             return
@@ -6845,48 +6992,6 @@ class ProjectChatManager:
                     # no longer watching, so announce zero. Cancellation by a
                     # replacement watcher skips this: it already owns the slot
                     # and will publish the real count on its first tick.
-                    self._publish_subagent_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
-
-    async def _watch_codex_subagent_completion(
-        self, chat_id: str, project_id: str
-    ) -> None:
-        """Poll app-server thread state while Codex collaboration children run."""
-        last_count = -1
-        deadline = time.perf_counter() + 3600
-        try:
-            while time.perf_counter() < deadline:
-                chat = self._chats.get(chat_id)
-                if chat is None or chat.provider != "codex" or not chat.session_id:
-                    break
-                thread = await CodexProvider.read_thread(
-                    self._config.workspace_root, chat.session_id
-                )
-                if thread is None:
-                    break
-                tree = await CodexProvider.read_collab_tree(
-                    self._config.workspace_root, thread
-                )
-                count, had_subagents = codex_collab_tree_counts(tree)
-                if count != last_count:
-                    if count == 0 and last_count > 0:
-                        chat.last_activity_at = _now_iso()
-                        self._save()
-                        # No separate "Background agents finished" push — the
-                        # chat's own result notification covers it; the extra
-                        # generic ping was redundant (user feedback).
-                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
-                    last_count = count
-                if not had_subagents or count == 0:
-                    break
-                await asyncio.sleep(3)
-        finally:
-            current = self._pending_subagent_watchers.get(chat_id)
-            if current is asyncio.current_task():
-                self._pending_subagent_watchers.pop(chat_id, None)
-                if last_count > 0:
-                    # See the Claude watcher: never leave clients holding a
-                    # count we have stopped maintaining.
                     self._publish_subagent_count(chat_id, project_id, 0)
             self._background_agents_last.pop(chat_id, None)
 
@@ -6981,7 +7086,19 @@ class ProjectChatManager:
             thinking_level=self._thinking_level_for_chat(chat),
         )
         try:
-            return await provider.steer(request)
+            # Prefer the ProviderService wrapper when available (restored in
+            # ciao/provider_service.py for the internal synthesis nudge), but
+            # also support a raw provider impl (as used in
+            # tests/test_chat_subagents.py's FakeProvider) and the direct
+            # ``provider.provider`` path suggested in #306.
+            steer = getattr(provider, "steer", None)
+            if not callable(steer):
+                impl = getattr(provider, "provider", None)
+                if impl is not None:
+                    steer = getattr(impl, "steer", None)
+            if not callable(steer):
+                return False
+            return bool(await steer(request))
         except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
             logger.exception(
                 "Subagent synthesis nudge failed for chat %s", chat_id
@@ -7472,15 +7589,18 @@ class ProjectChatManager:
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
     ) -> None:
-        """Fire the configured permission-push callback, if any.
+        """Persist the pending approval and fire the push callback, if any.
+
+        Persisting onto the chat (mirroring `pending_question`) is what lets
+        the PWA's attention state — home banner, sidebar dot, menu bar — see a
+        chat blocked on Approve/Deny even when it isn't the foreground chat
+        receiving the live WS stream; before this the prompt only reached the
+        OS push and the open ChatPanel's ephemeral `pendingPermissions`.
 
         Callback errors are swallowed: a broken push subscription or a transient
         send failure must never kill the turn (the user can still answer via
         the in-app bubble on their current device).
         """
-        cb = self.notify_permission_cb
-        if cb is None:
-            return
         chat = self._chats.get(chat_id)
         if chat is not None and chat.spawned_from_chat_id:
             logger.debug(
@@ -7488,6 +7608,22 @@ class ProjectChatManager:
                 chat_id,
                 chat.spawned_from_chat_id,
             )
+            return
+        if chat is not None:
+            payload = json.dumps(
+                {
+                    "request_id": event.request_id,
+                    "tool_name": event.tool_name,
+                    "message": event.message,
+                    "tool_input": event.tool_input,
+                },
+                ensure_ascii=False,
+            )
+            if chat.pending_permission != payload:
+                chat.pending_permission = payload
+                self._save()
+        cb = self.notify_permission_cb
+        if cb is None:
             return
         try:
             cb(chat_id, event.tool_name, event.message, event.request_id)
@@ -7552,6 +7688,19 @@ class ProjectChatManager:
         replies still indicate the user has dealt with the prompt, and
         the buffered event should not pop back up.
         """
+        # Clear the persisted attention flag only if it still names this
+        # request — a stale/duplicate reply for an already-superseded prompt
+        # must not wipe out a newer pending one.
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_permission:
+            try:
+                stored = json.loads(chat.pending_permission)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if not isinstance(stored, dict) or stored.get("request_id") == request_id:
+                chat.pending_permission = ""
+                self._save()
+
         provider_service = self._providers.get(chat_id)
         provider = provider_service.provider if provider_service is not None else None
 
@@ -7562,18 +7711,17 @@ class ProjectChatManager:
             stream.resolve_permission(request_id)
             if not approved:
                 # The refused call never ran, so retract any file card it
-                # already painted. On the SDK providers `request_id` *is* the
-                # tool_use_id; Codex mints its own `codex-N` request ids, so ask
-                # it which tool call the id belongs to or the retraction would
-                # silently match nothing. Done before the provider is told, so
-                # the mapping is still there to look up.
+                # already painted. Custom adapters may use a request id that
+                # differs from the tool id, so resolve it before retracting.
+                # Done before the provider is told, so the mapping is still
+                # there to look up.
                 resolver = getattr(provider, "tool_use_id_for_request", None)
                 retract_id = resolver(request_id) if callable(resolver) else ""
                 stream.deny_tool_use(retract_id or request_id)
 
         if provider_service is None or provider is None:
             return False
-        # Provider adapters with custom permission handling (e.g. Codex)
+        # Provider adapters may expose custom permission handling.
         if hasattr(provider, "send_permission_response"):
             return cast(bool, provider.send_permission_response(request_id, approved))
         # permission_gate is defined on the concrete SDK providers, not on
@@ -7648,11 +7796,13 @@ class ProjectChatManager:
 
     # A provider writes its session title asynchronously, *after* the turn it
     # was derived from: opencode's `title` agent runs once the first exchange
-    # lands, Claude Code writes `aiTitle` after the turn is persisted, and
-    # Codex names the thread on its own schedule. A single read at turn end
+    # lands, and Claude Code writes `aiTitle` after the turn is persisted. A
+    # single read at turn end
     # therefore almost always finds nothing, which left every chat stuck on
-    # "New Chat". Poll instead, with a bounded backoff, and give up quietly.
-    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
+    # "New Chat". Poll instead, with a bounded backoff, and fall back to a
+    # deterministic truncation so the sidebar never stays on "New Chat".
+    # Total budget ~120s covers long Opus turns (e.g. 2m33s in the Wild).
+    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
@@ -7660,25 +7810,40 @@ class ProjectChatManager:
         """If chat title is still the default, read the provider's native title.
 
         Each provider generates its own session title for free (opencode's
-        ``title`` agent, Claude Code's ``aiTitle``, Codex's thread ``name``), so
+        ``title`` agent or Claude Code's ``aiTitle``), so
         there is no separate model call or title-model setting. Returns the new
         title or None if nothing was changed.
 
         The provider publishes that title some time after the turn, so this
         polls ``_TITLE_POLL_DELAYS`` rather than reading once. Every wait
         re-checks the chat, so a manual rename or a delete during the poll
-        stops it instead of overwriting the user.
+        stops it instead of overwriting the user. When the provider never
+        publishes a title within the poll window the deterministic
+        ``_fallback_title`` (first 6 words of the prompt) is returned so the
+        sidebar never stays stuck on "New Chat"; the late-turn poll can still
+        overwrite that fallback with the provider's native title when it
+        finally lands.
 
-        ``user_text`` / ``assistant_text`` are accepted for call-site
-        compatibility but unused: the native title is authoritative.
+        ``assistant_text`` is accepted for call-site compatibility but unused:
+        the native title is authoritative.
         """
+        fallback = _fallback_title(user_text)
+
+        def _is_titling_target(title: str) -> bool:
+            # "New Chat" is always a target; the deterministic fallback is also
+            # considered a target so a late poll can upgrade it to the native
+            # title once the provider finally publishes one.
+            return title == "New Chat" or (fallback is not None and title == fallback)
+
         for delay in self._TITLE_POLL_DELAYS:
             if delay:
                 await asyncio.sleep(delay)
             chat = self._chats.get(chat_id)
             # Bail on rename/delete, but not on a missing session: the turn
             # may still be creating it, and a later poll will find it.
-            if chat is None or chat.title != "New Chat":
+            # The fallback title is still considered title-able so the late
+            # poll (fired after the turn) can upgrade it to the native title.
+            if chat is None or not _is_titling_target(chat.title):
                 return None
             if not chat.session_id:
                 continue
@@ -7689,12 +7854,23 @@ class ProjectChatManager:
 
             # Re-check: user may have renamed while we were reading.
             chat = self._chats.get(chat_id)
-            if chat is None or chat.title != "New Chat":
+            if chat is None or not _is_titling_target(chat.title):
                 return None
             chat.title = title
             self._save()
             return title
-        return None
+        # Native title never arrived within the window — use the deterministic
+        # fallback so the sidebar leaves "New Chat". The late-turn poll
+        # (fired from _drive's finally) will still attempt to overwrite this
+        # with the native title when it lands.
+        if fallback is None:
+            return None
+        chat = self._chats.get(chat_id)
+        if chat is None or not _is_titling_target(chat.title):
+            return None
+        chat.title = fallback
+        self._save()
+        return fallback
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
@@ -7705,17 +7881,23 @@ class ProjectChatManager:
         title lands instead of accepting the placeholder as final.
         """
         provider = getattr(chat, "provider", "claude")
-        workspace = self._config.workspace_root
+        # The chat's OWN agent root, not the install root. Both readers below
+        # are root-scoped - Claude Code keys sessions by directory, and
+        # `read_thread` caches on `(workspace_root, session_id)` - and the
+        # provider that created the session was handed the agent root by
+        # `_agent_root_for_chat`. Reading from `workspace_root` therefore looked
+        # up a directory the session was never written under, so after the
+        # re-rooting every chat outside the primary workspace found no native
+        # title and sat on the deterministic fallback (or "New Chat" when the
+        # prompt yielded none) forever.
+        workspace = self._agent_root_for_chat(chat.chat_id)
         try:
             if provider == "opencode":
                 thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
                 info = thread.get("info") if isinstance(thread, dict) else None
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
                 return _real_title(title)
-            if provider == "codex":
-                codex_thread = await CodexProvider.read_thread(workspace, chat.session_id)
-                if isinstance(codex_thread, dict):
-                    return _real_title(str(codex_thread.get("name") or ""))
+            if provider != "claude":
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
             session_info = get_session_info(chat.session_id, directory=str(workspace))
@@ -7749,25 +7931,6 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return True, False
-        if chat.provider == "codex":
-            deadline = time.perf_counter() + timeout_s
-            had_async = False
-            running = 0
-            while time.perf_counter() < deadline:
-                thread = await CodexProvider.read_thread(
-                    self._config.workspace_root, chat.session_id
-                )
-                if thread is None:
-                    return True, had_async
-                tree = await CodexProvider.read_collab_tree(
-                    self._config.workspace_root, thread
-                )
-                running, had_now = codex_collab_tree_counts(tree)
-                had_async = had_async or had_now
-                if running == 0:
-                    return True, had_async
-                await asyncio.sleep(3)
-            return running == 0, had_async
         if chat.provider == "opencode":
             deadline = time.perf_counter() + timeout_s
             had_async = False
@@ -7786,7 +7949,9 @@ class ProjectChatManager:
             return True, False
         try:
             path = subagent_tracking.find_parent_session_file(
-                chat.session_id, self._config.workspace_root
+                chat.session_id,
+                self._config.workspace_root,
+                agent_root=self._agent_root_for_chat(chat_id),
             )
         except Exception:  # noqa: BLE001
             logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
@@ -7895,26 +8060,15 @@ class ProjectChatManager:
                 else getattr(entry, "provider", "")
                 or self.schedule_default_provider(project_id)
             )
-            if classifier_provider == "codex":
-                model = (
-                    fixed_chat.model if fixed_chat is not None
-                    else getattr(entry, "model", "")
-                    or self.schedule_default_model(project_id, classifier_provider)
-                )
-                env = (
-                    self._build_extra_env(fixed_chat)
-                    if fixed_chat is not None
-                    else {"CIAO_PROVIDER": "codex"}
-                )
-                note = None
-            else:
-                insights_model = resolve_insights_model(self._config, workspace)
-                env = {}
-                model, classifier_provider, note = _resolve_insights_call(
-                    self._config,
-                    insights_model,
-                    provider=classifier_provider,
-                )
+            if classifier_provider not in supported_providers():
+                return True
+            insights_model = resolve_insights_model(self._config, workspace)
+            env: dict[str, str] = {}
+            model, classifier_provider, note = _resolve_insights_call(
+                self._config,
+                insights_model,
+                provider=classifier_provider,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
@@ -7949,11 +8103,11 @@ class ProjectChatManager:
                     provider=classifier_provider,
                     cwd=self._config.workspace_root,
                 )
-                raw = text.strip()
-                if raw.startswith("```"):
-                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                    raw = re.sub(r"\s*```$", "", raw)
-                verdict = json.loads(raw)
+                from ciao.critique import extract_json
+
+                verdict = extract_json(text)
+                if verdict is None:
+                    raise ValueError("classifier returned no parseable JSON")
                 needs_user = bool(verdict.get("needs_user", True))
                 run.extra["needs_user"] = needs_user
                 reason = str(verdict.get("reason", "")).strip()

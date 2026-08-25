@@ -49,7 +49,9 @@ made, open loops added or resolved, status changes.
 Rules:
 - Preserve the doc's existing frontmatter, structure, headings, and voice.
 - Do not invent facts. Do not summarise the chat. Do not append a changelog.
-- Strip `[idx=N]` citations from anything you carry over.
+- Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
+  `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
+  you carry over.
 - If nothing in the insights materially changes the doc, reply with exactly
   NO_CHANGES and nothing else.
 - Otherwise reply with the complete updated doc content and nothing else —

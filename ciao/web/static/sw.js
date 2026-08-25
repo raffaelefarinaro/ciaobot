@@ -1,8 +1,8 @@
-const CACHE_NAME = 'ciaobot-v0.9.1'
-const STATIC_ASSETS = ['/', '/index.html', '/manifest.json']
+const CACHE_NAME = 'ciaobot-v0.10.0'
+const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
-const UNREAD_CACHE = 'ciaobot-unread-v0.9.1'
+const UNREAD_CACHE = 'ciaobot-unread-v0.10.0'
 const UNREAD_KEY = '/__unread__'
 
 self.addEventListener('install', (event) => {
@@ -285,6 +285,35 @@ self.addEventListener('fetch', (event) => {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return
   if (event.request.method !== 'GET') return
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return
+
+  // Hashed / immutable UI assets (vite outputs /assets/* with content hash,
+  // plus icons) — serve cache-first so they are not re-fetched every
+  // navigation. The hash in the filename makes them immutable; the versioned
+  // CACHE_NAME busts them on each release.
+  const isImmutableAsset =
+    url.pathname.startsWith('/assets/') ||
+    url.pathname.startsWith('/icons/') ||
+    /\.(woff2|woff|ttf|otf|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
+
+  if (isImmutableAsset) {
+    event.respondWith(
+      caches.match(event.request).then(async (cached) => {
+        if (cached) return cached
+        try {
+          const response = await fetch(event.request)
+          if (response.ok) {
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
+          }
+          return response
+        } catch {
+          return cached || Response.error()
+        }
+      })
+    )
+    return
+  }
+
   event.respondWith(
     fetch(event.request)
       .then((response) => {

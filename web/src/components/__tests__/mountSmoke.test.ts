@@ -21,19 +21,9 @@ vi.mock('../../lib/api', () => {
     insights_model: '',
 
     critique_models: '',
-    codex_haiku_model: '',
-    codex_sonnet_model: '',
-    codex_opus_model: '',
-    codex_fable_model: '',
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-    // Built-in default: every provider starts on the app-wide mode.
-    provider_default_modes_effective: {
-      claude: 'auto',
-      codex: 'auto',
-      opencode: 'auto',
-    },
 
     transcription: {
       engine: 'local',
@@ -69,7 +59,7 @@ vi.mock('../../lib/api', () => {
       service_keys: {
         OPENAI_API_KEY: {
           label: 'OpenAI voice API key',
-          description: 'Used directly by Ciaobot for cloud transcription and speech, not for Codex login.',
+          description: 'Used directly by Ciaobot for cloud transcription and speech.',
           configured: false,
         },
       },
@@ -84,17 +74,6 @@ vi.mock('../../lib/api', () => {
           protocol: 'Agent SDK ready',
           label: 'Claude Code',
           short_label: 'Claude',
-        },
-        codex: {
-          name: 'codex',
-          ok: true,
-          auth: 'chatgpt',
-          command: 'ciao auth codex',
-          version: 'codex-cli 0.144.0-alpha.4',
-          account: 'ChatGPT account',
-          protocol: 'app-server protocol compatible',
-          label: 'OpenAI Codex',
-          short_label: 'Codex',
         },
         opencode: {
           name: 'opencode',
@@ -148,118 +127,6 @@ vi.mock('../../lib/api', () => {
       ],
     },
     '/api/agent-assets': {
-      context: [
-        {
-          id: 'claude-code-project-instructions',
-          title: 'Project CLAUDE.md',
-          description: 'Project-local Claude Code instructions loaded by the CLI.',
-          source: 'file',
-          path: 'CLAUDE.md',
-          editable: true,
-          content: '# Instructions\n',
-          scope: 'project',
-          provider: 'claude',
-        },
-        {
-          id: 'claude-import-rtk',
-          title: 'Import: RTK.md',
-          description: 'Imported by Claude Code global instructions.',
-          source: 'file-import',
-          path: '/tmp/.claude/RTK.md',
-          editable: false,
-          content: '# Claude-only instructions\n',
-          scope: 'import',
-          provider: 'claude',
-        },
-        {
-          id: 'codex-project-instructions',
-          title: 'Project AGENTS.md',
-          description: 'Project-local Codex instructions loaded by the CLI.',
-          source: 'file',
-          path: 'AGENTS.md',
-          editable: true,
-          content: '# Codex instructions\n',
-          scope: 'project',
-          provider: 'codex',
-        },
-        {
-          id: 'ciaobot-system-prompt',
-          title: 'Ciaobot system prompt append',
-          description: 'Generated instructions appended for both providers.',
-          source: 'generated',
-          path: '',
-          editable: false,
-          content: '# Ciaobot System Instructions\n',
-          scope: 'generated',
-          provider: 'shared',
-        },
-        {
-          id: 'ciaobot-memory',
-          title: 'Agent memory',
-          description: 'Bounded memory injected at session start.',
-          source: 'file',
-          path: '/tmp/.ciao/memory.md',
-          editable: false,
-          content: 'Prefer concise answers.\n',
-          scope: 'bounded-memory',
-          provider: 'shared',
-        },
-        {
-          id: 'ciaobot-user',
-          title: 'User profile',
-          description: 'Bounded user profile injected at session start.',
-          source: 'file',
-          path: '/tmp/.ciao/user.md',
-          editable: false,
-          content: 'Name: Ada\n',
-          scope: 'bounded-memory',
-          provider: 'shared',
-        },
-        {
-          id: 'workspace-memory-personal',
-          title: 'Workspace memory (personal)',
-          description: 'Durable personal workspace memory.',
-          source: 'file',
-          path: 'memory-vault/personal/MEMORY.md',
-          editable: true,
-          content: '# Personal memory\n',
-          scope: 'vault',
-          provider: 'shared',
-        },
-        {
-          id: 'workspace-memory-work',
-          title: 'Workspace memory (work)',
-          description: 'Durable work workspace memory.',
-          source: 'file',
-          path: 'memory-vault/work/MEMORY.md',
-          editable: true,
-          content: '# Work memory\n',
-          scope: 'vault',
-          provider: 'shared',
-        },
-        {
-          id: 'runtime-context-hook',
-          title: 'Per-turn runtime context hook',
-          description: 'Project context and runtime details sent with each turn.',
-          source: 'generated',
-          path: '',
-          editable: false,
-          content: '<ciao-runtime>\nworkspace=personal\n</ciao-runtime>',
-          scope: 'generated',
-          provider: 'shared',
-        },
-        {
-          id: 'memory-proposals',
-          title: 'Memory proposals',
-          description: 'Not injected.',
-          source: 'proposal-queue',
-          path: 'memory-vault/Workspace/Memory-Proposals.md',
-          editable: true,
-          content: '- [memory] proposal\n',
-          scope: 'review',
-          provider: 'shared',
-        },
-      ],
       subagents: [
         {
           name: 'researcher',
@@ -302,25 +169,11 @@ vi.mock('../../lib/api', () => {
       default: 'sonnet',
       provider_models: {
         claude: ['haiku', 'sonnet', 'opus', 'fable'],
-        codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
+        opencode: ['opus', 'sonnet', 'haiku'],
       },
-      provider_defaults: { claude: 'sonnet', codex: 'gpt-5.6-terra' },
-      codex_models: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
-      alias_tiers: {
-        codex: {
-          haiku: 'gpt-5.6-luna',
-          sonnet: 'gpt-5.6-terra',
-          opus: 'gpt-5.6-sol',
-          fable: 'gpt-5.6-sol',
-        },
-      },
-      codex_tier_defaults: {
-        haiku: 'gpt-5.6-luna',
-        sonnet: 'gpt-5.6-terra',
-        opus: 'gpt-5.6-sol',
-        fable: 'gpt-5.6-sol',
-      },
-      backends: { codex: true },
+      provider_defaults: { claude: 'sonnet', opencode: 'opus' },
+      opencode_models: ['opus', 'sonnet', 'haiku'],
+      backends: { opencode: true },
     },
     '/api/projects': [],
     '/api/chats': [],
@@ -331,7 +184,6 @@ vi.mock('../../lib/api', () => {
       active: null,
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     },
@@ -472,16 +324,21 @@ vi.mock('../../lib/push', () => ({
 // the module path because Vue SFCs import siblings directly via ESM, which
 // bypasses `config.global.stubs`.
 const NoopStub = { name: 'NoopStub', render: () => h('div') }
+// `__esModule: true` on the destination stubs is load-bearing: ChatLayout
+// imports those four with defineAsyncComponent, and Vue only unwraps a
+// resolved module's `default` when it can recognise the object as an ES
+// module. Without the flag it hands the whole mock namespace to the renderer
+// as the component.
+const AsyncNoopStub = { default: NoopStub, __esModule: true }
 vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
 vi.mock('../FileViewerModal.vue', () => ({ default: NoopStub }))
 vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))
-vi.mock('../SchedulePanel.vue', () => ({ default: NoopStub }))
+vi.mock('../SchedulePanel.vue', () => AsyncNoopStub)
 const MemoryMapStub = { name: 'MemoryMapStub', render: () => h('div', { 'data-testid': 'memory-map-stub' }) }
-vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub }))
-vi.mock('../NotificationBell.vue', () => ({ default: NoopStub }))
+vi.mock('../MemoryMapView.vue', () => ({ default: MemoryMapStub, __esModule: true }))
 vi.mock('../ProjectSidebar.vue', () => ({ default: NoopStub }))
 vi.mock('../InAppToast.vue', () => ({ default: NoopStub }))
 
@@ -591,99 +448,6 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('SettingsView explains the generic context recipe for each CLI', async () => {
-    const router = makeRouter()
-    await router.push('/settings/context')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const visibleContextRows = () => wrapper.findAll('.skill-list > .instruction-row')
-      .map((row) => row.text())
-      .join('\n')
-
-    expect(wrapper.findAll('.memory-context-row')).toHaveLength(1)
-    expect(wrapper.findAll('.memory-source')).toHaveLength(3)
-    expect(wrapper.text()).toContain('independent of the current chat, project, and workspace')
-    expect(wrapper.text()).toContain('Global session memory is appended at chat start')
-    expect(wrapper.text()).toContain('Global · included automatically at chat start')
-    expect(wrapper.text()).toContain('Workspace-specific · opened only when relevant')
-    expect(wrapper.text()).toContain('Global remembered facts')
-    expect(wrapper.text()).toContain('Global user profile')
-    expect(wrapper.text()).toContain('Workspace notes (MEMORY.md)')
-    expect(wrapper.findAll('.memory-source-summary-copy').map((row) => row.text())).toEqual([
-      'Cross-session facts, conventions, and lessons shared across all workspaces.',
-      'Your identity and response preferences, shared across all workspaces.',
-      'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
-    ])
-    expect(wrapper.findAll('.memory-source-badges').map((row) => row.text())).toEqual([
-      'Built-insession start',
-      'Built-insession start',
-      'Built-inon demand',
-    ])
-    expect(wrapper.findAll('.memory-source-file .inline-path-button').map((row) => row.text())).toEqual([
-      '/tmp/.ciao/memory.md',
-      '/tmp/.ciao/user.md',
-      'memory-vault/personal/MEMORY.md',
-      'memory-vault/work/MEMORY.md',
-    ])
-    expect(wrapper.text()).not.toContain('3 sources')
-    expect(visibleContextRows()).toContain('CLI instructions (CLAUDE.md · AGENTS.md)')
-    expect(wrapper.findAll('.context-provider-toggle')).toHaveLength(0)
-    expect(wrapper.findAll('.skill-list > .instruction-row .skill-name').map((row) => row.text())).toEqual([
-      'CLI instructions (CLAUDE.md · AGENTS.md)',
-      'Ciaobot system instructions',
-      'Memory sources',
-      'Per-turn runtime context hook',
-    ])
-    expect(wrapper.text()).not.toContain('Review queue')
-    expect(wrapper.text()).not.toContain('Memory proposals')
-    expect(wrapper.text()).toContain('memory-vault/personal/MEMORY.md')
-    expect(wrapper.text()).toContain('memory-vault/work/MEMORY.md')
-    expect(wrapper.text()).not.toContain('Name: Ada')
-    expect(wrapper.text()).not.toContain('Import: RTK.md')
-    expect(wrapper.text()).not.toContain('Imported by Claude Code global instructions')
-
-    const instructionRow = wrapper.findAll('.skill-list > .instruction-row')
-      .find((row) => row.text().includes('CLI instructions (CLAUDE.md · AGENTS.md)'))
-    expect(instructionRow).toBeTruthy()
-    expect(instructionRow!.text()).toContain('Custom')
-    expect(instructionRow!.text()).toContain('CLAUDE.md and AGENTS.md are linked')
-    await instructionRow!.trigger('click')
-    await nextTick()
-    // Single row: AGENTS.md is linked to CLAUDE.md, one link covers both.
-    expect(instructionRow!.findAll('.inline-path-button').map((button) => button.text())).toEqual([
-      'CLAUDE.md / AGENTS.md',
-    ])
-    // One guide, not one per CLI: say CLAUDE.md and mention the symlink once.
-    expect(instructionRow!.text()).toContain('your user-level CLAUDE.md')
-    expect(instructionRow!.text()).toContain('AGENTS.md is a symlink to it')
-
-    const systemRow = wrapper.findAll('.skill-list > .instruction-row')
-      .find((row) => row.text().includes('Ciaobot system instructions'))
-    expect(systemRow).toBeTruthy()
-    expect(systemRow!.text()).toContain('Built-in')
-    await systemRow!.trigger('click')
-    await nextTick()
-    expect(systemRow!.find('.inline-path-button').text()).toBe('ciao/system_prompt.md')
-
-    expect(visibleContextRows()).not.toContain('RTK.md')
-
-    const runtimeRow = wrapper.findAll('.skill-list > .instruction-row')
-      .find((row) => row.text().includes('Per-turn runtime context hook'))
-    expect(runtimeRow).toBeTruthy()
-    await runtimeRow!.trigger('click')
-    await nextTick()
-    expect(runtimeRow!.text()).toContain('Project context:')
-    expect(runtimeRow!.text()).toContain('Project document:')
-    expect(runtimeRow!.text()).toContain('README.md or canonical document')
-    expect(runtimeRow!.text()).not.toContain('<ciao-runtime>')
-    wrapper.unmount()
-  })
 
   it('SettingsView renders skills with custom and github labels on /settings/skills', async () => {
     const router = makeRouter()
@@ -784,13 +548,13 @@ describe('component mount smoke', () => {
     expect(select.exists()).toBe(true)
     // Default keeps the configured model; options are concrete model ids.
     expect(select.findAll('option')[0].text()).toContain('Configured')
-    await select.setValue('gpt-5.6-terra')
+    await select.setValue('opus')
     await failing.find('.btn-run').trigger('click')
     await flushPromises()
 
     expect(api.post).toHaveBeenCalledWith(
       '/api/automation/backfill-insights',
-      { model: 'gpt-5.6-terra' },
+      { model: 'opus' },
     )
     wrapper.unmount()
   })
@@ -817,20 +581,20 @@ describe('component mount smoke', () => {
     // entry routes to that provider's app-server.
     const opusOption = critiqueSelector.findAll('.model-selector__item')
       .find((el) => el.text() === 'opus')
-    const codexOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'codex:opus')
+    const opencodeOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'opencode:opus')
     expect(opusOption).toBeTruthy()
-    expect(codexOption).toBeTruthy()
+    expect(opencodeOption).toBeTruthy()
 
     await opusOption!.trigger('click')
     await flushPromises()
-    await codexOption!.trigger('click')
+    await opencodeOption!.trigger('click')
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'opus,codex:opus',
+      critique_models: 'opus,opencode:opus',
     })
-    expect(wrapper.text()).toContain('codex:opus')
+    expect(wrapper.text()).toContain('opencode:opus')
     wrapper.unmount()
   })
 
@@ -852,7 +616,6 @@ describe('component mount smoke', () => {
 
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
-    expect(providerOptions).toContain('OpenAI (via Codex)')
     expect(providerOptions).toContain('opencode')
     // Provider and GWS profile are native selects; Default model uses the
     // custom ModelSelector component, not a third native <select>.
@@ -861,7 +624,7 @@ describe('component mount smoke', () => {
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
     expect(providerField).toBeTruthy()
-    await providerField!.find('select').setValue('codex')
+    await providerField!.find('select').setValue('opencode')
     await nextTick()
     wrapper.unmount()
   })
@@ -883,7 +646,6 @@ describe('component mount smoke', () => {
       active: 'legacy',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     })
@@ -930,14 +692,13 @@ describe('component mount smoke', () => {
       active: 'personal',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'codex', label: 'OpenAI (via Codex)' },
         { value: 'opencode', label: 'opencode' },
       ],
     })
 
     const patchSpy = vi.spyOn(api, 'patch').mockRejectedValueOnce(Object.assign(
       new Error('HTTP 400'),
-      { payload: { error: 'default_provider must be one of: claude, codex, opencode' } },
+      { payload: { error: 'default_provider must be one of: claude, opencode' } },
     ))
     const router = makeRouter()
     await router.push('/settings/workspaces')
@@ -956,11 +717,11 @@ describe('component mount smoke', () => {
       const result = wrapper.find('.action-result[role="alert"]')
       expect(result.exists()).toBe(true)
       expect(result.classes()).toContain('action-result--error')
-      expect(result.text()).toContain('default_provider must be one of: claude, codex, opencode')
+      expect(result.text()).toContain('default_provider must be one of: claude, opencode')
       const store = (await import('../../stores/projects')).useProjectStore()
       expect(store.toasts).toContainEqual(expect.objectContaining({
         title: 'Workspace "personal" not saved',
-        body: 'default_provider must be one of: claude, codex, opencode',
+        body: 'default_provider must be one of: claude, opencode',
         variant: 'error',
       }))
     } finally {
@@ -984,11 +745,11 @@ describe('component mount smoke', () => {
     const names = wrapper.findAll('.provider-connections .routine-name').map((el) => el.text())
     // Names come from the payload, so a provider the PWA has never heard of
     // still gets its own card rather than another provider's label.
-    expect(names).toEqual(['Claude Code', 'OpenAI Codex', 'opencode'])
+    expect(names).toEqual(['Claude Code', 'opencode'])
 
     // The unauthenticated provider offers Connect but not Log out.
     const rows = wrapper.findAll('.provider-connections .credential-row')
-    const opencodeRow = rows[2]!
+    const opencodeRow = rows[1]!
     expect(opencodeRow.text()).toContain('Not connected')
     const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
     expect(actions).toEqual(['Connect', 'Verify'])
@@ -1030,25 +791,25 @@ describe('component mount smoke', () => {
 
     expect(wrapper.text()).toContain('defaults per provider')
     expect(wrapper.text()).not.toContain('model routing')
-    // Codex exposes an editable default-model selector.
-    const codexSelector = wrapper.find('.model-selector')
-    expect(codexSelector.exists()).toBe(true)
-    await codexSelector.find('.model-selector__trigger').trigger('click')
+    // opencode exposes an editable default-model selector.
+    const opencodeSelector = wrapper.find('.model-selector')
+    expect(opencodeSelector.exists()).toBe(true)
+    await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
-    const codexOption = codexSelector.findAll('.model-selector__item')
-      .find((el) => el.attributes('data-model') === 'gpt-5.6-terra')
-    expect(codexOption).toBeTruthy()
-    await codexOption!.trigger('click')
+    const opencodeOption = opencodeSelector.findAll('.model-selector__item')
+      .find((el) => el.attributes('data-model') === 'opus')
+    expect(opencodeOption).toBeTruthy()
+    await opencodeOption!.trigger('click')
     await flushPromises()
     // Per-provider default models go through the provider_default_models map.
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_models: { codex: 'gpt-5.6-terra' },
+      provider_default_models: { opencode: 'opus' },
     })
 
     wrapper.unmount()
   })
 
-  it('SettingsView saves a per-provider default mode', async () => {
+  it('SettingsView no longer offers a per-provider default mode', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1059,19 +820,11 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The defaults card carries a "Default mode" row per provider. Target the
-    // provider by data-provider rather than by the "Automatic (...)" label:
-    // every provider now resolves to the same app-wide default, so the label
-    // no longer identifies one.
-    const modeSelect = wrapper.find('.routine-select[data-provider="codex"]')
-    expect(modeSelect.exists()).toBe(true)
-    expect(modeSelect.findAll('option').map((o) => o.text())).toContain('Automatic (Auto)')
-
-    await modeSelect.setValue('bypass')
-    await flushPromises()
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_modes: { codex: 'bypass' },
-    })
+    // The default execution mode is fixed at auto for every provider; the
+    // per-provider "Default mode" selector is gone.
+    const modeSelect = wrapper.find('.routine-select[data-provider="opencode"]')
+    expect(modeSelect.exists()).toBe(false)
+    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Default mode')).toBe(false)
 
     wrapper.unmount()
   })
@@ -1082,6 +835,16 @@ describe('component mount smoke', () => {
     // /api/settings/routines' backends field. The shared fixture already
     // omits opencode there, so it is "signed out" by default: its
     // "defaults per provider" row must not render at all.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const originalModels = testApi.getResponse('/api/models') as Record<string, unknown>
+    testApi.setResponse('/api/models', {
+      ...originalModels,
+      provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
+      opencode_models: [],
+    })
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1092,12 +855,14 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
-    expect(rowTitles).toContain('Anthropic (via Claude Code)')
-    expect(rowTitles).toContain('OpenAI (via Codex)')
-    expect(rowTitles).not.toContain('opencode')
-
-    wrapper.unmount()
+    try {
+      const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
+      expect(rowTitles).toContain('Anthropic (via Claude Code)')
+      expect(rowTitles).not.toContain('opencode')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/models', originalModels)
+    }
   })
 
   it('SettingsView saves routine models by provider', async () => {
@@ -1146,7 +911,7 @@ describe('component mount smoke', () => {
     const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
     const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]
     const body = last[1] as Record<string, string>
-    expect(body.insights_model).toMatch(/^opencode:anthropic\/claude-(opus|sonnet|haiku)-4\.5$/)
+    expect(body.insights_model).toBe('opencode:opus')
 
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)

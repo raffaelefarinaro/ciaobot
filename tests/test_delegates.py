@@ -110,6 +110,48 @@ def test_delegate_gets_supervisor_env_marker_and_parent_does_not(
     assert "CIAO_DELEGATE_OF" not in manager._build_extra_env(parent)
 
 
+def test_chat_env_names_its_own_agent_vault_root(tmp_path: Path) -> None:
+    """P10.8. The vault a chat's CLI commands read and write, named explicitly.
+
+    There is one process-level ``CIAO_VAULT_ROOT`` and, after the re-rooting, N
+    vaults, so a single inherited value cannot name the right one. Today
+    ``agent_vault_root`` returns the shared vault for every workspace, so this
+    changes nothing yet; the point is that the per-workspace hygiene routine
+    running ``ciao vault-index --write`` writes its own root's index once
+    ``agent_root`` differs, rather than a shared path that no longer exists.
+
+    ``CIAO_WORKSPACE`` deliberately stays the install root: ``.env``,
+    ``.runtime`` and the registry are the global layer and live there.
+    """
+    manager = _make_manager(
+        tmp_path,
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    project = manager.create_project("Roots", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Hygiene")
+
+    env = manager._build_extra_env(chat)
+
+    assert env["CIAO_VAULT_ROOT"] == str(manager._config.agent_vault_root("work"))
+    assert env["CIAO_WORKSPACE"] == str(tmp_path)
+
+
+def test_a_chat_with_no_workspace_inherits_the_ambient_vault(tmp_path: Path) -> None:
+    """No workspace means no root to name, so the variable must not be invented.
+
+    Exporting a guessed vault here would point a project that has never chosen a
+    workspace at whichever root sorted first.
+    """
+    manager = _make_manager(tmp_path, vault_root=tmp_path / "memory-vault")
+    project = manager.create_project("No workspace", workspace="")
+    chat = manager.create_chat(project.project_id, title="Chat")
+
+    assert "CIAO_VAULT_ROOT" not in manager._build_extra_env(chat)
+
+
 # ── wake prompt content ──────────────────────────────────────────────────
 
 
@@ -529,6 +571,8 @@ def test_delegate_spawn_clamps_child_mode_to_parent(tmp_path: Path) -> None:
     child = manager.get_chat(result["data"]["chat_id"])
     assert child is not None
     assert child.mode == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
 
 
 def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
@@ -537,13 +581,85 @@ def test_chat_update_cannot_upgrade_mode_through_mcp(tmp_path: Path) -> None:
     parent = manager.create_chat(project.project_id, title="Supervisor", mode="normal")
     plane = _control_plane(manager)
 
-    plane.chat_update(
+    result = plane.chat_update(
         _principal(parent.chat_id, project.project_id),
         "",
         mode="bypass",
     )
 
     assert manager.get_chat(parent.chat_id).mode == "normal"
+    assert result["data"]["mode_clamped"] is True
+    assert result["data"]["requested_mode"] == "bypass"
+
+
+def test_chat_update_does_not_raise_another_chat_to_the_callers_mode(
+    tmp_path: Path,
+) -> None:
+    """The child-mode clamp is a ceiling, not a pin.
+
+    ``_child_mode`` returned the parent's mode unconditionally, so from a
+    ``bypass`` chat an explicit ``mode="normal"`` on *another* chat raised that
+    target to ``bypass`` — the clamp escalating a chat instead of restricting
+    it. A weaker request must always be honoured.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    caller = manager.create_chat(project.project_id, title="Supervisor", mode="bypass")
+    target = manager.create_chat(project.project_id, title="Worker", mode="bypass")
+    plane = _control_plane(manager)
+
+    result = plane.chat_update(
+        _principal(caller.chat_id, project.project_id),
+        target.chat_id,
+        mode="normal",
+    )
+
+    assert manager.get_chat(target.chat_id).mode == "normal"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_chat_update_honours_a_downgrade_to_plan(tmp_path: Path) -> None:
+    """A requested restriction must not be silently discarded.
+
+    In an ``auto`` chat a ``mode="plan"`` downgrade was written back as
+    ``auto`` while the response still reported success, so the caller believed
+    it had dropped to read-only while the chat kept acting with auto approvals.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Worker", mode="auto")
+    plane = _control_plane(manager)
+
+    result = plane.chat_update(
+        _principal(chat.chat_id, project.project_id),
+        "",
+        mode="plan",
+    )
+
+    assert manager.get_chat(chat.chat_id).mode == "plan"
+    assert result["data"]["mode"] == "plan"
+    assert "mode_clamped" not in result["data"]
+
+
+def test_delegate_spawn_honours_a_weaker_mode_than_its_parent(tmp_path: Path) -> None:
+    """A ``bypass`` supervisor must be able to dispatch a read-only delegate."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor", mode="bypass")
+    manager.active_chat_ids = lambda: []  # type: ignore[method-assign]
+    manager.queue_message = lambda _chat_id, _text: True  # type: ignore[method-assign]
+    plane = _control_plane(manager)
+
+    result = plane.delegate_spawn(
+        _principal(parent.chat_id, project.project_id),
+        prompt="read the docs and report",
+        mode="plan",
+    )
+
+    child = manager.get_chat(result["data"]["chat_id"])
+    assert child is not None
+    assert child.mode == "plan"
+    assert "mode_clamped" not in result["data"]
 
 
 def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
@@ -782,20 +898,6 @@ def test_delegate_spawn_preserves_non_model_errors(tmp_path: Path) -> None:
     assert "Unknown provider 'bogus'" in str(excinfo.value)
 
 
-def test_create_chat_codex_exemption_only_for_native_ids(tmp_path: Path) -> None:
-    """A bare id on the codex provider stays exempt.
-
-    The native Codex catalog is async, so plain ids pass through to the
-    Codex CLI, which rejects unknown ones with a clear error at the first
-    turn (#259).
-    """
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Delegates", workspace="work")
-
-    chat = manager.create_chat(project.project_id, provider="codex", model="gpt-5.6")
-    assert chat.model == "gpt-5.6"
-
-
 # ── model validation ────────────────────────────────────────────────────
 # Every model now belongs to a runtime provider that owns its own catalog, so
 # validation is a much smaller question than it was under env-routed backends.
@@ -820,7 +922,7 @@ def test_create_chat_accepts_a_tier_alias_and_a_configured_model(tmp_path: Path)
 def test_create_chat_exempts_providers_that_serve_their_own_catalog(
     tmp_path: Path,
 ) -> None:
-    """Codex and opencode discover models asynchronously.
+    """opencode discovers models asynchronously.
 
     A synchronous validator has nothing to check them against, and both CLIs
     reject an unknown id with a clear error on the first turn, so an id Ciaobot
@@ -828,10 +930,7 @@ def test_create_chat_exempts_providers_that_serve_their_own_catalog(
     """
     manager = _make_manager(tmp_path, claude_models=["opus"])
     project = manager.create_project("p", workspace="work")
-    for provider, model in (
-        ("codex", "gpt-5.6-terra"),
-        ("opencode", "some-provider/some-model"),
-    ):
+    for provider, model in (("opencode", "some-provider/some-model"),):
         chat = manager.create_chat(
             project.project_id, provider=provider, model=model
         )

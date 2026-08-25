@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -90,8 +91,16 @@ def test_relogin_full_flow(tmp_path: Path) -> None:
     start = client.post("/api/integrations/gws/relogin/start", json={"profile": "personal"})
     assert start.status_code == 200
     data = start.json()
-    assert "accounts.google.com" in data["auth_url"]
+    auth = urlparse(data["auth_url"])
+    assert auth.scheme == "https"
+    assert auth.hostname == "accounts.google.com"
+    assert auth.path == "/o/oauth2/auth"
+    query = parse_qs(auth.query)
+    assert query["client_id"] == ["cid"]
+    assert query["response_type"] == ["code"]
+    assert query["redirect_uri"][0] == data["redirect_uri"]
     port, state = data["port"], data["state"]
+    assert urlparse(query["redirect_uri"][0]).port == port
 
     # Before the redirect, status is pending.
     pending = client.get("/api/integrations/gws/relogin/status?profile=personal")

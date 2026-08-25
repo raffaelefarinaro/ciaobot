@@ -13,8 +13,6 @@ export function settingsTabTitle(tab: string | undefined): string {
       return 'providers'
     case 'models':
       return 'models'
-    case 'context':
-      return 'agent context'
     case 'workspaces':
       return 'workspaces'
     case 'skills':

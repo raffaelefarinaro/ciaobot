@@ -35,6 +35,8 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
         assert entry in gitignore.splitlines()
 
     tracked = _git(root, "ls-files").stdout.splitlines()
+    # Written by hand above, at the root this test controls: `ensure_workspace_git`
+    # commits what is there and does not scaffold a layout of its own.
     assert "CLAUDE.md" in tracked
     assert ".gitignore" in tracked
     assert ".env" not in tracked
@@ -183,14 +185,14 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     assert not any(path.startswith(".runtime/") for path in tracked)
     assert not any(path.startswith(".claude/") for path in tracked)
     assert not any(path.startswith(".agents/") for path in tracked)
-    assert "CLAUDE.md" in tracked
-    assert "AGENTS.md" in tracked
+    assert "personal/CLAUDE.md" in tracked
+    assert "personal/AGENTS.md" in tracked
     assert _git(ws, "status", "--porcelain").stdout.strip() == ""
 
     # Default layout: the vault lives inside the workspace repo and is
     # tracked there — no second repo is created.
     assert not (ws / "memory-vault" / ".git").exists()
-    assert "memory-vault/personal/MEMORY.md" in tracked
+    assert "personal/memory-vault/MEMORY.md" in tracked
 
 
 def test_setup_workspace_rejects_a_traversal_workspace_name_before_writes(
@@ -319,11 +321,14 @@ def test_setup_workspace_rerun_does_not_scaffold_the_vault_container(
     )
 
     assert registry.read_text(encoding="utf-8") == registry_before
-    assert (ws / "memory-vault" / "research" / "MEMORY.md").is_file()
-    assert not (ws / "memory-vault" / "MEMORY.md").exists()
-    assert not (ws / "memory-vault" / "INDEX.md").exists()
-    assert not (ws / "memory-vault" / "Logs").exists()
-    assert not (ws / "memory-vault" / "personal").exists()
+    # `<workspace>/memory-vault`, not `memory-vault/<workspace>`. The assertions
+    # this replaces were about the shared CONTAINER — that setup must not scaffold
+    # `memory-vault/` itself as though it were a vault. There is no container any
+    # more, so its absence is what carries that intent.
+    assert (ws / "research" / "memory-vault" / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault").exists()
+    # And no root is invented for a workspace nobody registered.
+    assert not (ws / "personal").exists()
 
 
 def test_setup_workspace_rerun_supports_a_configured_vault_alias(
@@ -365,13 +370,15 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
         launch_agents_dir=tmp_path / "LaunchAgents",
         app_dir=tmp_path / "Applications",
     )
-    installed = sorted(p.name for p in (ws / ".claude" / "agents").glob("*.md"))
+    # Per-root: the catalog and its generated mirror both live in the workspace.
+    root = ws / "personal"
+    installed = sorted(p.name for p in (root / ".claude" / "agents").glob("*.md"))
     assert installed, "setup_workspace should seed at least one stock agent"
     name = installed[0]
 
-    custom = ws / "subagents" / name
+    custom = root / "subagents" / name
     custom.write_text("# custom override\n", encoding="utf-8")
-    link = ws / ".claude" / "agents" / name
+    link = root / ".claude" / "agents" / name
     link.unlink()
     link.symlink_to(custom)
 

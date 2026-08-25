@@ -5,7 +5,7 @@ import yaml
 from pathlib import Path
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -21,6 +21,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in ("personal", "work")
+        },
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -276,21 +280,21 @@ def test_recovers_non_claude_orphan_when_audit_proves_it_was_active(
     project = pcm.create_project("Audited Project", workspace="work")
     chat = pcm.create_chat(
         project.project_id,
-        title="Audited Codex chat",
-        provider="codex",
-        model="gpt-5.4",
+        title="Audited opencode chat",
+        provider="opencode",
+        model="anthropic/claude-sonnet-4-6",
     )
     transcript_path = pcm._transcripts.current_path(
-        ChatContext.for_web(chat.chat_id), "codex"
+        ChatContext.for_web(chat.chat_id), "opencode"
     )
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(
         json.dumps(
             {
-                "provider": "codex",
+                "provider": "opencode",
                 "started_at": "2026-07-14T11:00:00Z",
                 "updated_at": "2026-07-14T11:05:00Z",
-                "selected_model": "gpt-5.4",
+                "selected_model": "anthropic/claude-sonnet-4-6",
                 "session_id": "thread-123",
                 "context_key": chat.chat_id,
                 "context_label": chat.title,
@@ -319,7 +323,7 @@ def test_recovers_non_claude_orphan_when_audit_proves_it_was_active(
     restarted = _make_manager(tmp_path)
     recovered = restarted.get_chat(chat.chat_id)
     assert recovered is not None
-    assert recovered.provider == "codex"
+    assert recovered.provider == "opencode"
     assert recovered.project_id == project.project_id
 
 
@@ -336,7 +340,6 @@ def test_explicit_delete_removes_recovery_signals(tmp_path: Path) -> None:
     assert pcm.delete_chat(chat.chat_id) is True
     assert not transcript_path.exists()
     assert pcm._state.peek_context(ctx) is None
-    assert pcm._state.peek_session_id(ctx) == ""
     assert pcm._audited_chat_status(chat.chat_id) == "deleted"
 
     restarted = _make_manager(tmp_path)

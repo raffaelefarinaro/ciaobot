@@ -1,30 +1,21 @@
 # Visual output rules
 
-Markdown is always the canonical approval artifact. HTML and Excalidraw are optional companions that answer a specific review question. This file defines the *decision* rules for when to reach for each, how to keep them aligned with the Markdown, and when to skip them. It does not re-inline authoring rules.
+Markdown is always the canonical approval artifact. HTML is an optional companion that answers a specific review question, including a diagram drawn as inline SVG. This file defines the *decision* rules for when to reach for it, how to keep it aligned with the Markdown, and when to skip it. It does not re-inline authoring rules.
 
 ## Markdown is canonical
 
 - Always create the Markdown plan first. It is the source of truth.
-- HTML and Excalidraw are companions, never the only copy of the plan.
+- HTML is a companion, never the only copy of the plan.
 - Re-surface Markdown last before approval because it is the commentable canonical surface.
 
 ## HTML
 
-Use HTML only when the reviewer needs to inspect interaction, layout, or state changes: an interactive UI flow, a side-by-side comparison, a timeline, or a prototype. It is for when the visual *is* the answer.
+Use HTML when the reviewer needs to inspect interaction, layout, state changes, or a diagram that argues a relationship: an interactive UI flow, a side-by-side comparison, a timeline, a prototype, or an architecture/flow/sequence drawn as inline SVG. It is for when the visual *is* the answer.
 
-- Author interactive HTML companions by **loading and following the stock `html-artifact` skill**. Do not re-inline its sandbox rules; the stock skill already ships to every workspace and defines the CSP and panel constraints. If that skill is not installed, write the plan without the companion and say so.
+- Author interactive HTML companions and inline-SVG diagrams by **loading and following the stock `html-artifact` skill**. Do not re-inline its sandbox rules; the stock skill already ships to every workspace and defines the CSP and panel constraints. If that skill is not installed, write the plan without the companion and say so.
 - Keep the HTML self-contained: one file, everything inline, no network at runtime, no forms, no animation loops, under 2 MB.
 - A narrow panel is a first-class review target. Design for roughly 420px wide first and let it grow.
 - The HTML is never the commentable source. Keep the decisions in Markdown.
-
-## Excalidraw
-
-Use Excalidraw only when spatial relationships are easier to inspect visually: an architecture, a process flow, a data model, or a diagram that argues a relationship words alone cannot express.
-
-- Excalidraw has no stock skill, so this file carries the minimum contract. Do not depend on any workspace-only `excalidraw-diagram` skill.
-- The diagram is a companion, not a replacement for the plan's decisions.
-- Keep it grounded in real product labels, current app chrome, actual file paths, and stated assumptions.
-- Keep the Markdown plan and the diagram aligned on names, statuses, and state IDs.
 
 ## When to skip visual output
 

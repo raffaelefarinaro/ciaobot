@@ -255,36 +255,30 @@ async def ws_chat(websocket: WebSocket) -> None:
                     if attachment:
                         images.append(attachment)
 
-                # Concurrent-send handling. `mode` drives behavior when a
-                # stream is already in flight:
-                #   "queue" (default): buffer for flush when the turn finishes.
-                #   "steer":           inject into the current SDK turn; if
-                #                      that fails (no active client), fall
-                #                      back to queue.
-                send_mode = msg.get("mode") or "queue"
+                # Concurrent-send handling. A message sent while a stream is in
+                # flight is buffered for flush when the turn finishes. Same-turn
+                # injection was removed in favor of this single next-turn queue;
+                # an older PWA may still send `mode: "steer"`, which now queues.
                 active_stream = pcm.get_active_stream(chat_id)
                 if active_stream is not None:
-                    handled = False
-                    if send_mode == "steer":
-                        try:
-                            handled = await pcm.steer_stream(chat_id, text, images=images or None)
-                        except Exception:
-                            logger.exception("steer_stream failed for %s", chat_id)
-                    if not handled:
-                        handled = pcm.queue_message(
-                            chat_id, text, images=images or None,
-                            entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
-                        )
+                    handled = pcm.queue_message(
+                        chat_id, text, images=images or None,
+                        entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
+                    )
                     if handled:
                         continue
                     # Else: the stream raced-finish between check and queue;
                     # fall through to start a new stream below.
 
-                try:
-                    await websocket.send_json({"type": "status", "message": "thinking"})
-                except (WebSocketDisconnect, RuntimeError):
-                    break
-
+                # Start the turn BEFORE touching the socket. The stream runs
+                # in a broker-owned background task and buffers every event
+                # (user_echo included) for replay, so it does not need this
+                # connection to survive. The previous order wrote a
+                # "thinking" status first and dropped the whole message when
+                # that write hit a socket that had just died (WebKit
+                # suspension closes it right after the send frame arrives) —
+                # the turn never started and the client's optimistic bubble
+                # was wiped by the reconnecting history reload.
                 try:
                     pcm.start_stream(chat_id, text, images=images or None)
                 except RestartDrainingError as exc:
@@ -306,6 +300,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                     except (WebSocketDisconnect, RuntimeError):
                         break
                     continue
+                # Best-effort ack. A dead socket here must not drop the turn:
+                # breaking only ends this connection, and the reconnecting
+                # client replays the buffered user_echo from the live stream.
+                try:
+                    await websocket.send_json({"type": "status", "message": "thinking"})
+                except (WebSocketDisconnect, RuntimeError):
+                    break
                 # The attach loop picks the new stream up on its next tick;
                 # the user_echo is buffered so nothing is lost to the gap.
 

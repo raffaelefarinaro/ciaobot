@@ -40,7 +40,6 @@ class ProviderCapabilities:
     fork: bool = False
     images: bool = False
     stop: bool = False
-    steer: bool = False
     permissions: bool = False
     structured_questions: bool = False
     dynamic_models: bool = False

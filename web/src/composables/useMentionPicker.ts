@@ -1,6 +1,6 @@
 import { computed, nextTick, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 
-export type MentionKind = 'file' | 'agent' | 'chat' | 'project'
+type MentionKind = 'file' | 'agent' | 'chat' | 'project'
 
 export interface MentionFile {
   path: string

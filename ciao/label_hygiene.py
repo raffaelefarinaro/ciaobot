@@ -1,7 +1,7 @@
 """Label-hygiene audit for open GitHub issues.
 
 Checks open issues on ``raffaelefarinaro/ciaobot`` against the title-prefix
-to classification-label convention in ``ciao/system_prompt.md`` and adds
+to classification-label convention in the ``ciao-support`` skill and adds
 missing classification labels. Never removes or replaces a label: removal
 would risk overriding intentional human labeling.
 
@@ -49,10 +49,6 @@ PREFIX_LABELS: dict[str, str] = {
 # is treated as unknown and surfaced the same way.
 HUMAN_PREFIXES: frozenset[str] = frozenset({"agent"})
 RETIRED_PREFIXES: frozenset[str] = frozenset({"report"})
-
-# The full set of classification labels the convention knows about. Used
-# only to describe issue state in the report, never to remove labels.
-CLASSIFICATION_LABELS: frozenset[str] = frozenset(PREFIX_LABELS.values())
 
 # Matches a leading "[token]" prefix. Tolerant of surrounding whitespace
 # and lowercase/odd spacing: "[Bug]", "[ bug ]", "[BUG]foo" all parse to
@@ -121,14 +117,6 @@ class LabelHygieneReport:
     needs_human: tuple[HumanReview, ...] = field(default_factory=tuple)
     no_prefix: tuple[TriageCandidate, ...] = field(default_factory=tuple)
 
-    @property
-    def has_actions(self) -> bool:
-        return bool(self.additions)
-
-    @property
-    def has_findings(self) -> bool:
-        return bool(self.additions or self.needs_human or self.no_prefix)
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "additions": [a.__dict__ for a in self.additions],
@@ -140,7 +128,8 @@ class LabelHygieneReport:
 def plan_label_actions(issues: Iterable[Issue]) -> LabelHygieneReport:
     """Pure decision: map each issue to planned actions, no side effects.
 
-    Rules (from ciao/system_prompt.md and issue #235):
+    Rules (from the ciao-support skill's GitHub issue-label table and
+    issue #235):
     - Known prefix -> add the expected classification label if missing.
     - ``[Agent]`` -> needs human; never auto-apply.
     - ``[Report]`` or other unknown bracket -> needs human; never auto-apply.

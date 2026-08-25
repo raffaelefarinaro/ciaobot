@@ -90,8 +90,8 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     # Ciaobot's own non-destructive control plane is pre-approved so Auto
     # mode's classifier stops raising an Approve/Deny card for "create the
     # loop you just asked for". Destructive tools stay off the allowlist.
-    assert "mcp__ciaobot__loop_create" in options.allowed_tools
-    assert "mcp__ciaobot__schedule_create" in options.allowed_tools
+    assert "mcp__ciaobot__loop" in options.allowed_tools
+    assert "mcp__ciaobot__schedule" in options.allowed_tools
     assert "mcp__ciaobot__chat_delete" not in options.allowed_tools
     assert "mcp__ciaobot__loop_action" not in options.allowed_tools
     # The bundled schedule/loop skills are removed from the model's context

@@ -48,10 +48,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
+| POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
 | POST | `/api/chats/{chat_id}/retry-insights` | Re-run session-insights extraction for an archived chat (text-mode, on demand) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
+| GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
+| GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | POST | `/api/chats/{chat_id}/reentry-summary` | Return an ephemeral Apple Intelligence orientation summary for a reopened chat |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
@@ -71,6 +74,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
+| DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create schedules |
 | POST | `/api/schedule-run/{schedule_id}` | Run schedule now |
@@ -82,7 +86,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
-| GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
+| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
@@ -91,6 +95,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
+| GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`) |
+| POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
@@ -118,7 +124,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
 | GET, PATCH | `/api/settings/providers` | Read or update provider/service key status and the GitHub-skill refresh setting; credentials are redacted |
-| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -195,7 +201,7 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 **Agent assets**
 
 ```bash
-# Inspect Claude Code context sources, generated Ciaobot prompt blocks, subagents, and commands.
+# Inspect subagents, commands, and workspace health.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
 
 # Inspect workspace/vault health only.
@@ -216,7 +222,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agen
 
 # Create a workspace-owned slash command.
 # Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
-# then syncs it into .claude/commands/ plus a Codex .agents/skills/ wrapper.
+# then syncs it into the provider-native command locations.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
   -H 'content-type: application/json' \
   -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
@@ -226,6 +232,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
   -H 'content-type: application/json' \
   -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
+
+**Housekeeping (operator-action strip)**
+
+```bash
+# List the home-screen operator actions. Each carries run_label, chat_label,
+# and chat_prompt; the browser renders the buttons and seeds the chat itself.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/housekeeping"
+
+# Run one action's mechanical work. The response re-runs detection and returns
+# the fresh action list so the client cannot render a stale strip.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housekeeping/vault-vocabulary/run"
 ```
 
 **Projects**
@@ -278,7 +296,7 @@ downloads rather than executable inline content.
 
 ```bash
 # Create — title/model/mode/provider all optional.
-# provider is any id from the registry (`claude`, `codex`, `opencode`); see
+# provider is any id from the registry (`claude`, `opencode`); see
 # GET /api/models -> providers[] for the live list and per-provider
 # '' = auto from the project's configured workspace bucket. Legacy
 # configured names. Unknown buckets are rejected unless a workspace config
@@ -300,7 +318,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
 # Handover — switch model/backend inside the same visible chat.
-# Body keys: provider = claude|codex|opencode, model, messages
+# Body keys: provider = claude|opencode, model, messages
 # (visible rows). Starts the next provider turn as a fresh session seeded
 # with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
@@ -347,6 +365,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' -d '{"action":"stop"}'
 
+# Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
+# `stop` message; use this when driving a chat over plain HTTP or when a
+# socket may not be connected.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/stop"
+
 # Start a new provider session inside an existing chat (resets context).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/new"
 
@@ -356,7 +379,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # Create Provider Sub-chat.
 # Body keys: parent_turn_index, owner (object with provider, model, label), participant (object), task_prompt (optional), user_authorized (optional).
   -H 'content-type: application/json' \
-  -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"codex","model":"gpt-4","label":"Codex"},"task_prompt":"Analyze this issue"}'
+  -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"opencode","model":"provider/model","label":"opencode"},"task_prompt":"Analyze this issue"}'
 
 # Read Sub-chat Events.
 
@@ -505,7 +528,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"codex":"gpt-5.6-terra"}}'
+  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -566,6 +589,55 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
   -H 'content-type: application/json' -d '{"branch":"main"}'
 ```
 
+**Proposal queue**
+
+Routes: `GET /api/proposals`, `POST /api/proposals/{id}/{action}` (action is
+`accept` or `dismiss`), `POST /api/proposals/batch`,
+`POST /api/proposals/dismiss-older-than`.
+
+`accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
+into that workspace's bounded region (resolved through `agent_root`, so the right
+guide in either layout), and only then is the bullet dropped. Write-then-dismiss,
+never the reverse — a failed write returns **409** with the bullet still queued,
+so an over-cap region cannot silently swallow the fact. A `rehome` row is not
+moved here: relocating a note and rewriting every reference to it is
+`vault_rehome`'s job, reversible through its own receipt, and doing half of it
+from a queue row would leave links pointing at a path that moved. `dismiss` writes
+nothing. Batch accept applies the same rule per row and reports `promoted` and
+`dismissed` for each, keeping the bullets it could not write.
+
+```bash
+# List every queued proposal across all workspaces, plus skill-proposal files.
+# Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
+# content-derived hash (survives other rows being dismissed). Rehome rows carry
+# `rehome: {destination, candidates[], justified, reason}` so a UI never
+# pre-accepts a destination no tag backs; region rows carry `region` and
+# `leak_warning` (true when accepting would write a foreign workspace's fact
+# into the primary workspace's injected region).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
+
+# Accept one row. Dispatches through the kind's own accept descriptor: memory/
+# profile/user are region edits (returns {action: edit_region, region,
+# leak_warning}), rehome is a file move (returns {action: move_file,
+# destination, justified}). The row is dismissed from the queue; promotion is
+# a separate explicit step, matching the MCP resolve path.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
+
+# Dismiss one row from the queue. No region/file is touched.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss"
+
+# Accept or dismiss a set atomically. Body: {"action":"accept|dismiss","ids":[...]}.
+# Every id must resolve or the whole batch is rejected (404) with no file change.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
+  -H 'content-type: application/json' \
+  -d '{"action":"accept","ids":["<id1>","<id2>"]}'
+
+# Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
+# A July proposal about a forgotten chat is not worth promoting.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/dismiss-older-than?date=2026-08-01"
+```
+
+
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.
 
 **WebSocket events**
@@ -583,7 +655,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.
 
 **Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by up to 3 same-backend vision models. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted), `picker` closes the question so the PWA can open the model selector and the user re-sends, and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The question is skipped entirely for text-only turns and for unattended (loop/schedule) turns, which close with the bubble instead of waiting.
 
@@ -595,7 +667,7 @@ Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (w
 
 Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` (provider-agnostic) and persisted under `ChatInfo.user_turn_timings` as `{ "<turn_index>": {sent_at, completed_at, duration_ms} }`.
 
-- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to both Claude SDK and Codex app-server history. Pre-feature chats with no recorded timings get no extra fields.
+- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to provider history. Pre-feature chats with no recorded timings get no extra fields. With an `offset` and/or `limit` query param the endpoint returns a `{items, total, offset, limit, hasMore, nextOffset}` envelope instead of a flat array; `offset=0` is the newest tail. Envelope rows carry `i` (absolute index) and long `_thinking` rows are truncated head+tail with `lazy: true`; the full row is fetchable from `GET /api/chats/{chat_id}/messages/part?i=<index>`. Without params the legacy flat array is returned unchanged.
 - WS `/ws/chat/{chat_id}` `user_echo` event: adds optional `sent_at`.
 - WS `/ws/chat/{chat_id}` `result` event: adds optional `sent_at`, `completed_at`, `duration_ms`.
 
@@ -641,6 +713,17 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 - `GET /api/file-content?chat_id=&file_path=&seq=` returns `{content: str, meta}`. 413 if the snapshot was over `MAX_SNAPSHOT_BYTES` at capture time, 415 if the snapshot was binary.
 - `POST /api/file-restore` body `{chat_id, file_path, seq}` writes the snapshot back to its recorded host path (absolute paths are intentional) and captures a new snapshot with `action="restored"` so the timeline stays linear. Returns `{ok, restored_seq, new_seq}`.
 - `POST /api/workspace-file` body `{chat_id?, path, content}` writes user-edited content back (FileViewerModal edit mode). It has the same intentional unrestricted host-path behavior and extension/size guards as the GET. When `chat_id` is supplied, the write is captured as a snapshot with `tool="PWAEdit"` so PWA edits show up in the history alongside agent edits.
+
+**Vault**
+
+```bash
+# Permanently delete one vault note. Unlike workspace-file, this is scoped to
+# config.vault_root — the path must be the Entry.path string form from
+# /api/vault/graph, e.g. "memory-vault/work/People/Mo.md". Every other note
+# that links to it (frontmatter related:/relatedTo: or a body [[wikilink]])
+# is rewritten first so no dangling link is left behind. No undo.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/vault/note?path=memory-vault/work/People/Mo.md"
+```
 
 ## State
 

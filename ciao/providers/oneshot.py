@@ -1,7 +1,7 @@
 """One-shot model calls, dispatched to a runtime provider.
 
-``provider`` selects the runner: ``claude`` (Claude Agent SDK), ``codex``, or
-``opencode``. The Apple on-device sentinel is handled ahead of all three, in
+``provider`` selects the runner: ``claude`` (Claude Agent SDK) or
+``opencode``. The Apple on-device sentinel is handled ahead of both, in
 :func:`run_oneshot`. On the ``claude`` path the upstream can still be
 redirected by the caller through the ``env`` dict -- the same
 ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` injection used for chats.
@@ -183,45 +183,6 @@ async def _run_claude_oneshot(
     return "".join(parts).strip()
 
 
-async def _run_codex_oneshot(
-    prompt: str,
-    *,
-    system_prompt: str,
-    model: str,
-    env: dict[str, str] | None,
-    cwd: Path | None,
-) -> str:
-    from ciao.models import AgentRequest, ResultEvent
-    from ciao.providers.codex import CodexProvider
-
-    codex = CodexProvider(
-        (cwd or Path.cwd()).resolve(),
-        developer_instructions=system_prompt,
-        ephemeral=True,
-    )
-    try:
-        async for event in codex.run_streaming(
-            AgentRequest(
-                prompt=prompt,
-                model=model,
-                mode="plan",
-                provider="codex",
-                extra_env=env or {},
-            ),
-            lambda _handle: None,
-        ):
-            if isinstance(event, ResultEvent):
-                if event.is_error:
-                    detail = (event.result or "").strip() or "codex one-shot failed"
-                    # Codex surfaces its own retriable errors internally; treat
-                    # a returned error as terminal here so we don't double-retry.
-                    raise OneShotError(detail, transient=False)
-                return event.result
-        return ""
-    finally:
-        await codex.disconnect()
-
-
 async def _run_opencode_oneshot(
     prompt: str,
     *,
@@ -326,16 +287,7 @@ async def run_oneshot(
             # off", "still downloading" — a retry fails the same way.
             raise OneShotError(str(exc)) from exc
 
-    if provider == "codex":
-        async def _attempt() -> str:
-            return await _run_codex_oneshot(
-                prompt,
-                system_prompt=system_prompt,
-                model=model,
-                env=env,
-                cwd=cwd,
-            )
-    elif provider == "opencode":
+    if provider == "opencode":
         async def _attempt() -> str:
             return await _run_opencode_oneshot(
                 prompt,
