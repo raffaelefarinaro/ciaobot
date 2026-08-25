@@ -30,10 +30,20 @@
         </p>
 
         <!-- Whether memory extraction is useful, not only whether it ran:
-             proposals promoted vs dismissed, over time. -->
-        <p v-if="proposalsLine" class="automation-proposals" :title="proposalsTitle">
-          {{ proposalsLine }}
-        </p>
+              proposals promoted vs dismissed, over time. -->
+        <div v-if="proposalsLine" class="automation-proposals">
+          <p class="automation-proposals-total">{{ proposalsLine }}</p>
+          <!-- Visible, not hover-only: touch and keyboard users get the
+               per-workspace split too. -->
+          <p
+            v-for="entry in proposalsByWorkspace"
+            :key="entry.workspace"
+            class="automation-proposals-workspace"
+          >
+            {{ entry.workspace }}: {{ entry.counts.promoted }} promoted ·
+            {{ entry.counts.dismissed }} dismissed
+          </p>
+        </div>
 
         <!-- Failing first: the only rows that need a decision. -->
         <section v-if="groups.attention.length" class="automation-group">
@@ -154,16 +164,14 @@ const proposalsLine = computed(() => {
   )
 })
 
-// The per-workspace split rides on the title attribute — real data, no second
-// row of UI to maintain.
-const proposalsTitle = computed(() => {
-  const entries = Object.entries(props.proposalOutcomes?.by_workspace ?? {})
-  if (!entries.length) return ''
-  return entries
-    .map(([workspace, counts]) =>
-      `${workspace || 'shared'}: ${counts.promoted} promoted · ${counts.dismissed} dismissed`)
-    .join('\n')
-})
+// The per-workspace split, rendered as visible lines — a title tooltip is
+// unreachable on touch and not keyboard-focusable.
+const proposalsByWorkspace = computed(() =>
+  Object.entries(props.proposalOutcomes?.by_workspace ?? {}).map(([workspace, counts]) => ({
+    workspace: workspace || 'shared',
+    counts,
+  })),
+)
 
 const retryModelOptions = computed(() =>
   buildRetryModelOptions(props.providerModels, props.providerLabels),
@@ -309,6 +317,15 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-proposals {
   margin: 0;
   font-size: var(--text-sm);
+}
+
+.automation-proposals-total,
+.automation-proposals-workspace {
+  margin: 0;
+}
+
+.automation-proposals-workspace {
+  color: var(--fg3);
 }
 
 .automation-group {

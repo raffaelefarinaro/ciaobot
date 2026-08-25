@@ -83,17 +83,20 @@ describe('SettingsAutomation proposal outcomes line', () => {
 
   it('renders one compact promoted/dismissed line with the 30-day count', () => {
     const view = mountPanel({ proposalOutcomes: outcomes() })
-    const line = view.find('.automation-proposals')
+    const line = view.find('.automation-proposals-total')
     expect(line.exists()).toBe(true)
     expect(line.text()).toBe('Memory proposals: 3 promoted · 1 dismissed (2 in last 30 days)')
   })
 
-  it('carries the per-workspace breakdown on the title attribute', () => {
-    // Real data without a second row of UI to maintain.
+  it('renders the per-workspace breakdown as visible text, not hover-only', () => {
+    // Touch and keyboard users cannot reveal a title tooltip; the split must
+    // be real content.
     const view = mountPanel({ proposalOutcomes: outcomes() })
-    expect(view.find('.automation-proposals').attributes('title')).toBe(
-      'personal: 2 promoted · 1 dismissed\nwork: 1 promoted · 0 dismissed',
-    )
+    const lines = view.findAll('.automation-proposals-workspace')
+    expect(lines.map((l) => l.text())).toEqual([
+      'personal: 2 promoted · 1 dismissed',
+      'work: 1 promoted · 0 dismissed',
+    ])
   })
 
   it('labels the install-wide bucket instead of an empty workspace name', () => {
@@ -102,9 +105,8 @@ describe('SettingsAutomation proposal outcomes line', () => {
         by_workspace: { '': { promoted: 1, dismissed: 0 } },
       }),
     })
-    expect(view.find('.automation-proposals').attributes('title')).toBe(
-      'shared: 1 promoted · 0 dismissed',
-    )
+    const lines = view.findAll('.automation-proposals-workspace')
+    expect(lines.map((l) => l.text())).toEqual(['shared: 1 promoted · 0 dismissed'])
   })
 
   it('tolerates a payload missing the newer fields', () => {

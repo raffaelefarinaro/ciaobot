@@ -7530,10 +7530,18 @@ async def proposals_batch(request: Request) -> JSONResponse:
     # promotion) and records nothing — the tally measures decisions, not
     # attempts.
     by_pid = {ctx["row"]["id"]: ctx for ctx in requested}
+    recorded: set[str] = set()
     for result in results:
         if not result.get("dismissed"):
             continue
-        row_ctx = by_pid.get(str(result.get("id") or ""))
+        pid = str(result.get("id") or "")
+        # A successful batch rehome appears twice (its move result above the
+        # grouping AND its bullet-drop result inside it); one decision, one
+        # event.
+        if pid in recorded:
+            continue
+        recorded.add(pid)
+        row_ctx = by_pid.get(pid)
         kind = str(row_ctx["row"].get("kind", "")) if row_ctx else ""
         if kind == "skill":
             # Not recorded: this ledger measures the MEMORY extraction

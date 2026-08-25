@@ -946,6 +946,20 @@ def test_a_rehome_accept_records_a_promotion(tmp_path: Path) -> None:
     assert [(e["kind"], e["action"]) for e in events] == [("rehome", "promoted")]
 
 
+def test_a_batch_rehome_accept_is_recorded_once(tmp_path: Path) -> None:
+    """A successful batch rehome produces two results (the move above the
+    grouping and the bullet drop inside it); one decision must record exactly
+    one event."""
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+
+    assert response.status_code == 200, response.json()
+    assert all(r.get("dismissed") for r in response.json()["results"]), response.json()
+    events = _outcome_events(tmp_path)
+    assert [(e["kind"], e["action"]) for e in events] == [("rehome", "promoted")]
+
+
 # ---- concurrent queue rewrites ---------------------------------------------
 
 
