@@ -1306,7 +1306,13 @@
                         </button>
                       </div>
                       <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
-                        Sign-in in progress: complete it in the browser tab that opened. It will connect automatically.
+                        <template v-if="gwsAuthUrls[profile.name]">
+                          The sign-in tab was blocked. Open this link, then finish in the browser — it connects automatically:
+                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
+                        </template>
+                        <template v-else>
+                          Sign-in in progress: complete it in the browser tab that opened. It will connect automatically.
+                        </template>
                         <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
                       </p>
                       <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
@@ -1377,7 +1383,13 @@
                         </button>
                       </div>
                       <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
-                        Re-authentication in progress: complete it in the browser tab that opened. It will connect automatically.
+                        <template v-if="gwsAuthUrls[profile.name]">
+                          The re-auth tab was blocked. Open this link, then finish in the browser — it connects automatically:
+                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
+                        </template>
+                        <template v-else>
+                          Re-authentication in progress: complete it in the browser tab that opened. It will connect automatically.
+                        </template>
                         <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
                       </p>
                       <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
@@ -3066,17 +3078,45 @@ function gwsReloginHelpUrl(): string {
   return 'https://cloud.google.com/sdk/docs/install'
 }
 
+// The loopback re-login listener binds to the *engine's* 127.0.0.1, so the
+// consent redirect only reaches it when the browser is on the engine host
+// (localhost). From a phone, LAN browser, or client-mode node the popup's
+// redirect would target the client's own loopback and never arrive — those
+// users must use the manual paste flow instead.
+function gwsOnEngineHost(): boolean {
+  if (inDesktopApp) return true
+  const host = window.location.hostname
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]'
+}
+
 async function gwsReloginStart(profileName: string) {
   gwsReloginError.value[profileName] = ''
+  if (!gwsOnEngineHost()) {
+    gwsReloginError.value[profileName] =
+      'One-click sign-in only works from a browser on this machine. Use Manual connect (paste code) instead.'
+    return
+  }
   gwsSavingProfile.value = profileName
+  // Open a placeholder tab synchronously so the browser does not treat it as a
+  // popup (blocked outside the click's user-activation window); navigate it to
+  // the consent URL once the backend hands one back. If the popup is blocked,
+  // surface the link so the flow can still proceed manually.
+  const tab = window.open('', '_blank')
   try {
     const res = await api.post<{ auth_url: string }>('/api/integrations/gws/relogin/start', {
       profile: profileName,
     })
     gwsReloginPending.value[profileName] = true
-    window.open(res.auth_url, '_blank')
+    if (tab && tab.location) {
+      tab.location.href = res.auth_url
+    } else {
+      gwsReloginError.value[profileName] =
+        'The sign-in tab was blocked by the browser. Open this link, then finish here:'
+      gwsAuthUrls.value[profileName] = res.auth_url
+    }
     gwsPollRelogin(profileName)
   } catch (e) {
+    if (tab) tab.close()
     gwsReloginError.value[profileName] = errorMessage(e, 'Could not start the sign-in flow.')
   } finally {
     gwsSavingProfile.value = null
@@ -3106,9 +3146,13 @@ function gwsPollRelogin(profileName: string) {
           delete gwsReloginError.value[name]
           await fetchGwsIntegration()
           notifySaved('Google account connected.')
-        } else if (status.status === 'error') {
+        } else if (status.status === 'error' || status.status === 'none') {
           delete gwsReloginPending.value[name]
-          gwsReloginError.value[name] = status.error || 'The sign-in failed.'
+          gwsReloginError.value[name] =
+            status.error ||
+            (status.status === 'none'
+              ? 'The sign-in timed out before you finished it. Try again.'
+              : 'The sign-in failed.')
           await fetchGwsIntegration()
         }
       } catch (e) {
