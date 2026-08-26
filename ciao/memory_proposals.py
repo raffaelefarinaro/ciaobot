@@ -73,6 +73,18 @@ _DESTINATION_RE = re.compile(
 _IDX_TAG_RE = re.compile(r"\s*\[idx\s*=\s*[\d,\s]+\]\s*$")
 
 
+def _one_line(value: str) -> str:
+    """Collapse every whitespace run (newlines included) into a single space.
+
+    The proposals queue is line-oriented Markdown: one bullet is one line. A
+    field carrying an embedded newline would otherwise split into a truncated
+    bullet plus a continuation the parser reads as its own spurious proposal,
+    and the original value would never appear as one parsed bullet, so
+    re-filing it would dodge the text dedupe.
+    """
+    return " ".join(value.split())
+
+
 def _peel_trailing_metadata(text: str) -> tuple[str, str, str]:
     """Split trailing citation and destination metadata off a bullet.
 
@@ -112,8 +124,15 @@ class MemoryProposal:
         # Deliberately total: an unknown target is written through rather than
         # raising, so one odd proposal cannot fail a whole archive batch.
         target = "profile" if self.target == "user" else self.target
-        head = f"[{target} {self.payload}]" if self.payload else f"[{target}]"
-        return f"- {head} {self.text}  _(from: {self.source_section})_"
+        # Every field is forced onto one line and kept clear of the delimiter
+        # that closes its own slot: a `]` inside the payload would end the
+        # destination head early, and a `)` inside the source would break the
+        # `_(from: ...)_` tail so the whole bullet stops parsing — invisible
+        # to the review UI and to dedupe alike.
+        payload = _one_line(self.payload).replace("]", "")
+        source = _one_line(self.source_section).replace(")", "")
+        head = f"[{target} {payload}]" if payload else f"[{target}]"
+        return f"- {head} {_one_line(self.text)}  _(from: {source})_"
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────
@@ -483,7 +502,10 @@ def append_proposals(
         existing = _STUB_HEADER
 
     already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
-    fresh = [p for p in proposals if p.text.strip() not in already]
+    # Compare the text exactly as ``as_bullet`` will write it, or a proposal
+    # whose text is only whitespace-different from a queued/dismissed one
+    # slips past dedupe and lands as a visually identical duplicate row.
+    fresh = [p for p in proposals if _one_line(p.text) not in already]
     if not fresh:
         return None
 
