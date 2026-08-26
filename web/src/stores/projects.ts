@@ -2305,16 +2305,19 @@ export const useProjectStore = defineStore('projects', () => {
         if (shouldClear) {
           activeChatId.value = null
           persistState()
-          // Only force the `/` navigation while still in the chat area
-          // itself (home, or any open chat). Settings/Schedules/Memory/
-          // Proposals/a project retain activeChatId across navigation by
-          // design, and pages like /device sit outside ChatLayout entirely
-          // - forcing a `/` push onto any of them would eject the user from
-          // wherever they've gone, even though the stale id above still
-          // needed clearing.
+          // Only force the `/` navigation from a route this close owns: the
+          // closed chat's own route, or a bare chat route where the push is a
+          // no-op. Settings/Schedules/Memory/Proposals/a project retain
+          // activeChatId across navigation by design, and pages like /device
+          // sit outside ChatLayout entirely - forcing a `/` push onto any of
+          // them would eject the user from wherever they've gone, even though
+          // the stale id above still needed clearing. `/chat/<other>` is the
+          // same hazard: selecting a chat navigates first and only sets
+          // activeChatId once the async open finishes, so a late cleanup can
+          // see a null id with the router already on the new chat.
           const { router } = await import('../router')
           const path = router.currentRoute.value.path
-          if (path === '/' || path === '/chat' || path.startsWith('/chat/')) {
+          if (path === '/' || path === '/chat' || path === `/chat/${chatId}`) {
             await router.push('/')
           }
         }

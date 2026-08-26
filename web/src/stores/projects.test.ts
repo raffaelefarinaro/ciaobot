@@ -1432,6 +1432,35 @@ describe('chat closing and re-entry orientation', () => {
     expect(store.activeChatId).toBe(otherId)
   })
 
+  test('leaves a newly opened chat route alone when the draft delete lands late', async () => {
+    // Selecting a chat navigates first and sets activeChatId only once the
+    // async open (workspace switch, history fetch) finishes, so the stale
+    // cleanup can run with activeChatId still null while the router is
+    // already on the new chat. Keying the `/` push off "any chat route"
+    // bounced the user straight back home.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    router.currentRoute.value.path = '/chat/chat-other'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
   test('clears the reopened draft once its own delete succeeds', async () => {
     // Same race, but the user reopens the *same* draft. Once the delete
     // lands it is gone server-side, so the view must not stay pointed at it.
