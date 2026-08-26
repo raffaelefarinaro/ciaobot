@@ -37,13 +37,17 @@ _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS = 15.0
 _CLAUDE_MCP_LIST_TIMEOUT_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
-_claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
+_claude_mcps_cache: tuple[float, str, tuple[str, ...], int] | None = None
 _claude_mcps_refreshing = False
 _claude_mcps_lock = threading.Lock()
-# Set while one runner (startup warm-up or a request thread) is executing the
-# ``claude mcp list`` probe, so latecomers wait for it instead of stacking a
-# second full health pass.
+# Set while one runner (startup warm-up, a request thread, or the stale-TTL
+# background refresh) is executing the ``claude mcp list`` probe, so
+# latecomers wait for it instead of stacking a second full health pass.
 _claude_mcps_inflight: threading.Event | None = None
+# Bumped on every ``clear_claude_discovery_cache`` so a probe result produced
+# from a pre-clear configuration (e.g. the startup warm-up finishing right
+# after Verify) is not served or cached as current.
+_claude_mcps_generation = 0
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
 
 
@@ -69,14 +73,40 @@ def clear_claude_discovery_cache() -> None:
     An in-flight probe is deliberately left registered: the Verify endpoint
     calls this while the startup warm-up may still be running, and
     unregistering the probe would let the next payload claim single-flight
-    ownership and stack a second blocking ``claude mcp list``. The running
-    owner still finishes, stamps the cache, and clears the pointer itself.
-    Tests that need a clean single-flight state reset ``_claude_mcps_inflight``
-    directly.
+    ownership and stack a second blocking ``claude mcp list``. Instead the
+    generation bump marks any result that pre-clear probe produces as stale,
+    so the next discovery waits it out and then re-probes with current
+    configuration. Tests that need a clean single-flight state reset
+    ``_claude_mcps_inflight`` directly.
     """
-    global _claude_mcps_cache, _claude_skills_cache
+    global _claude_mcps_cache, _claude_skills_cache, _claude_mcps_generation
     _claude_mcps_cache = None
     _claude_skills_cache = None
+    _claude_mcps_generation += 1
+
+
+def _acquire_mcps_probe() -> threading.Event | None:
+    """Try to become the sole ``claude mcp list`` runner.
+
+    Returns the event this caller owns (``release_mcps_probe`` must be called
+    on it), or ``None`` when another probe is already in flight.
+    """
+    global _claude_mcps_inflight
+    with _claude_mcps_lock:
+        if _claude_mcps_inflight is not None:
+            return None
+        event: threading.Event = threading.Event()
+        _claude_mcps_inflight = event
+        return event
+
+
+def _release_mcps_probe(event: threading.Event) -> None:
+    """Finish this caller's probe run and hand single-flight back."""
+    global _claude_mcps_inflight
+    event.set()
+    with _claude_mcps_lock:
+        if _claude_mcps_inflight is event:
+            _claude_mcps_inflight = None
 
 
 def detect_nested_workspaces(vault_path: Path) -> list[str]:
@@ -287,7 +317,7 @@ def discover_claude_mcps(
     waits. Empty results expire fast (see ``_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS``)
     because they usually mean the probe timed out, not that nothing is connected.
     """
-    global _claude_mcps_cache, _claude_mcps_inflight
+    global _claude_mcps_cache
     now = time.monotonic()
     ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
     cached = _claude_mcps_cache
@@ -300,48 +330,53 @@ def discover_claude_mcps(
         cached is not None
         and now - cached[0] < ttl
         and cached[1] == ws_key
+        and cached[3] == _claude_mcps_generation
     )
     if cached is not None and cached[1] == ws_key:
         if not fresh:
             _refresh_claude_mcps_async(ws_key, config_path)
         return list(cached[2])
 
-    # Single-flight: the startup warm-up (or another request thread) may
-    # already be paying for the probe. Wait for it to finish instead of
-    # stacking a second ``claude mcp list``; only become a runner once no
-    # other probe is in flight. The wait is unbounded on purpose: the owner's
-    # ``finally`` always fires and the probe itself is bounded by the
-    # subprocess timeout, so the event cannot stay unset forever. A waiter
-    # whose owner finished without a usable entry for this root (failed probe
-    # or different workspace root) loops and reacquires ownership — it never
-    # times out into running a duplicate probe alongside the in-flight one.
+    # Single-flight: the startup warm-up, the stale-TTL background refresh, or
+    # another request thread may already be paying for the probe. Wait for it
+    # to finish instead of stacking a second ``claude mcp list``; only become
+    # a runner once no other probe is in flight. The wait is unbounded on
+    # purpose: the owner's ``finally`` always fires and the probe itself is
+    # bounded by the subprocess timeout, so the event cannot stay unset
+    # forever. A waiter whose owner finished without a usable entry for this
+    # root (failed probe, different workspace root, or a result invalidated by
+    # a cache clear mid-probe) loops and reacquires ownership — it never times
+    # out into running a duplicate probe alongside the in-flight one.
     while True:
-        with _claude_mcps_lock:
-            inflight = _claude_mcps_inflight
-            if inflight is None:
-                _claude_mcps_inflight = inflight = threading.Event()
-                owner = True
-            else:
-                owner = False
-        if owner:
+        inflight = _acquire_mcps_probe()
+        if inflight is not None:
             break
-        inflight.wait()
+        with _claude_mcps_lock:
+            running = _claude_mcps_inflight
+        running.wait()
         cached = _claude_mcps_cache
-        if cached is not None and cached[1] == ws_key:
+        if (
+            cached is not None
+            and cached[1] == ws_key
+            and cached[3] == _claude_mcps_generation
+        ):
             return list(cached[2])
 
+    probe_generation = _claude_mcps_generation
     try:
         connected = _discover_claude_mcps_uncached(
             workspace_root=Path(ws_key) if ws_key else None,
             config_path=config_path,
         )
-        _claude_mcps_cache = (time.monotonic(), ws_key, tuple(connected))
+        _claude_mcps_cache = (
+            time.monotonic(),
+            ws_key,
+            tuple(connected),
+            probe_generation,
+        )
         return connected
     finally:
-        inflight.set()
-        with _claude_mcps_lock:
-            if _claude_mcps_inflight is inflight:
-                _claude_mcps_inflight = None
+        _release_mcps_probe(inflight)
 
 
 def _claude_config_path_from_env(source: Mapping[str, str] | None = None) -> Path:
@@ -386,8 +421,12 @@ def warm_claude_discovery_cache(
 def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
     """Re-discover in the background, at most one refresh in flight.
 
-    Failures are swallowed on purpose: the stale list already went out to the
-    caller, and a discovery error must not surface as a broken Settings page.
+    The refresh joins the same single-flight as the warm-up and the request
+    path: if another probe is running it skips entirely (that probe's result
+    is at least as fresh), and while it runs, Verify's cache bust cannot stack
+    a second probe on top of it. Failures are swallowed on purpose: the stale
+    list already went out to the caller, and a discovery error must not
+    surface as a broken Settings page.
     """
     global _claude_mcps_refreshing
     with _claude_mcps_lock:
@@ -397,15 +436,28 @@ def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
 
     def run() -> None:
         global _claude_mcps_cache, _claude_mcps_refreshing
+        inflight = _acquire_mcps_probe()
         try:
+            if inflight is None:
+                return  # a newer probe is already running; its result wins
+            # Record the generation before probing: a cache clear mid-probe
+            # must invalidate this result just like the request path's.
+            probe_generation = _claude_mcps_generation
             connected = _discover_claude_mcps_uncached(
                 workspace_root=Path(ws_key) if ws_key else None,
                 config_path=config_path,
             )
-            _claude_mcps_cache = (time.monotonic(), ws_key, tuple(connected))
+            _claude_mcps_cache = (
+                time.monotonic(),
+                ws_key,
+                tuple(connected),
+                probe_generation,
+            )
         except Exception:  # noqa: BLE001 - a stale list is already serving
             logger.debug("background Claude MCP discovery failed", exc_info=True)
         finally:
+            if inflight is not None:
+                _release_mcps_probe(inflight)
             with _claude_mcps_lock:
                 _claude_mcps_refreshing = False
 

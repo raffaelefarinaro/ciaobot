@@ -1165,9 +1165,11 @@ def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch)
 
     # Expire the entry; the next call must return the stale value immediately
     # rather than paying the discovery again.
-    stamp, ws_key, value = ss._claude_mcps_cache
+    stamp, ws_key, value, gen = ss._claude_mcps_cache
     monkeypatch.setattr(
-        ss, "_claude_mcps_cache", (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value)
+        ss,
+        "_claude_mcps_cache",
+        (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value, gen),
     )
     assert ss.discover_claude_mcps(None) == ["mcp-1"]
 
@@ -1241,10 +1243,10 @@ def test_an_empty_mcp_cache_expires_fast_and_recovers(monkeypatch):
 
     # Age the entry past the empty TTL but well short of the success TTL: the
     # stale empty list still serves instantly, but a refresh must kick off.
-    stamp, ws_key, value = ss._claude_mcps_cache
+    stamp, ws_key, value, gen = ss._claude_mcps_cache
     assert value == ()
     aged = stamp - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", (aged, ws_key, value))
+    monkeypatch.setattr(ss, "_claude_mcps_cache", (aged, ws_key, value, gen))
 
     assert ss.discover_claude_mcps(None) == []
     assert done.wait(timeout=5), "empty cache must re-discover in the background"
@@ -1390,8 +1392,139 @@ def test_clear_preserves_an_in_flight_probe(monkeypatch, tmp_path):
     release.set()
     assert request_done.wait(timeout=5), "request never served"
     waiter.join(timeout=5)
+    # The surviving probe started pre-clear, so its result is generation-stamped
+    # stale: the waiter re-probes rather than serving it — but only after the
+    # first probe fully finished (never two probes at once).
     assert results == [["Airtable"]]
-    assert len(calls) == 1, "request must reuse the probe that survived clear"
+    assert len(calls) == 2
+
+
+def test_verify_reprobes_after_waiting_out_a_preclear_probe(monkeypatch, tmp_path):
+    """A probe that started before Verify's bust must not be served or kept.
+
+    The startup warm-up may still be running when the user changes a connector
+    and clicks Verify. The cache clear preserves the in-flight probe, but its
+    result reflects pre-change configuration: the waiter must discard it,
+    re-probe with current configuration (without overlapping the old run),
+    and cache only the fresh result.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def probe(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            release.wait(timeout=5)
+            return ["Stale"]
+        return ["Fresh"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    ss.clear_claude_discovery_cache()
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "no probe may overlap the in-flight one"
+
+    release.set()
+    assert request_done.wait(timeout=5), "waiter never re-probed"
+    waiter.join(timeout=5)
+    assert results == [["Fresh"]], "pre-clear result must not be served"
+    assert len(calls) == 2, "waiter must re-probe after the invalidated result"
+
+    # Only the fresh result may be cached, and it must serve without a re-probe.
+    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
+    assert len(calls) == 2
+
+
+def test_stale_refresh_joins_the_single_flight(monkeypatch, tmp_path):
+    """The empty-TTL background refresh must register as the active probe.
+
+    Otherwise a Verify bust during the refresh claims ownership and stacks a
+    second concurrent `claude mcp list` racing the background cache write.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Refreshed"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    # Seed a cache entry the refresh path will treat as expired-empty.
+    stamp = _time.monotonic() - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
+    monkeypatch.setattr(
+        ss,
+        "_claude_mcps_cache",
+        (stamp, str(tmp_path), (), ss._claude_mcps_generation),
+    )
+
+    assert ss.discover_claude_mcps(tmp_path) == []
+
+    deadline = _time.monotonic() + 5
+    while len(calls) < 1 and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "expired-empty entry must start the background refresh"
+
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_inflight is None and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_inflight is not None, "refresh never joined single-flight"
+
+    # A Verify-style bust + payload during the refresh must wait, not re-probe.
+    ss.clear_claude_discovery_cache()
+    assert ss._claude_mcps_inflight is not None
+
+    results: list[list[str]] = []
+    request_done = threading.Event()
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "payload must not stack a probe on the refresh"
+
+    release.set()
+    assert request_done.wait(timeout=5), "payload never served"
+    waiter.join(timeout=5)
+    # The refresh's result was stamped pre-clear (old generation), so the
+    # payload discards it and re-probes with the current generation.
+    assert results == [["Refreshed"]]
+    assert len(calls) == 2
 
 
 def test_waiter_reacquires_ownership_when_warmup_targets_another_root(
