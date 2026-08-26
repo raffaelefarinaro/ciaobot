@@ -2259,7 +2259,33 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Shared workspace/vault resolution for the memory-proposal commands."""
+    """Shared workspace/vault resolution for the memory-proposal commands.
+
+    A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
+    name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
+    shared vault on layouts that have not re-rooted yet. Appending to that
+    raw value would file every workspace's proposals into one stray queue
+    the review UI never reads, so an active workspace name is resolved
+    through the workspace registry instead — the same authority the PWA's
+    ``workspace_vault_root`` reads with. Explicit arguments still win for
+    manual invocations.
+    """
+    active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
+        if active:
+            try:
+                from ciao.config import CiaoConfig
+
+                # A read-only resolution must not mint a session secret just
+                # because the CLI runs outside the server env (same rule as
+                # the memory-audit command).
+                env_source = dict(os.environ)
+                env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+                config = CiaoConfig.from_env(env_source)
+                if config.workspace(active) is not None:
+                    return config.workspace_root, Path(config.workspace_vault_root(active))
+            except Exception:  # noqa: BLE001 — fall through to the legacy path
+                pass
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
     vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import unittest.mock
 from pathlib import Path
 
 from ciao import memory_proposals as mp
@@ -888,8 +890,76 @@ def test_dismissed_facts_are_not_refiled_by_the_next_run(tmp_path: Path) -> None
 
     assert exit_code == 0
     assert mp.list_proposals(queue) == []
-    log = queue.with_suffix(".dismissed.log")
+    log = queue.with_suffix(".dismissed.jsonl")
     assert "release train" in log.read_text(encoding="utf-8")
+
+
+def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
+    """A scheduled run files into the logical workspace's queue, not the shared vault.
+
+    Scheduled chats export ``CIAO_VAULT_ROOT`` at the install-wide shared
+    vault while re-rooting is still pending; appending to that raw value
+    strands the fact in a stray file the review UI never reads. The active
+    workspace name must win and resolve through the registry — the same
+    authority the PWA's ``workspace_vault_root`` reads with.
+    """
+    import argparse
+    import json as json_module
+
+    from ciao.cli import _memory_proposal_add_command
+
+    root = tmp_path / "install"
+    runtime = root / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json_module.dumps([
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "client", "vault_root": "memory-vault/client"},
+        ]),
+        encoding="utf-8",
+    )
+    shared = tmp_path / "shared-vault"
+    shared.mkdir()
+    monkeypatch_env = {
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_ACTIVE_WORKSPACE": "client",
+        "CIAO_VAULT_ROOT": str(shared),
+    }
+
+    args = argparse.Namespace(
+        workspace=None,
+        vault_root=None,
+        text="A client-scoped fact.",
+        kind="memory",
+        payload="",
+        source="chat-abc",
+        json=False,
+    )
+    with unittest.mock.patch.dict(os.environ, monkeypatch_env):
+        exit_code = _memory_proposal_add_command(args)
+
+    assert exit_code == 0
+    queue = root / "memory-vault" / "client" / "Workspace" / "Memory-Proposals.md"
+    assert queue.is_file()
+    assert not (shared / "Workspace" / "Memory-Proposals.md").exists()
+
+    # An explicit --workspace is a manual invocation: it keeps winning over
+    # the ambient active-workspace name. With no explicit vault root and no
+    # exported one either, the queue lands under that folder's own default.
+    explicit_dir = tmp_path / "manual"
+    manual_env = {k: v for k, v in monkeypatch_env.items() if k != "CIAO_VAULT_ROOT"}
+    explicit_args = argparse.Namespace(
+        workspace=explicit_dir,
+        vault_root=None,
+        text="A manual fact.",
+        kind="memory",
+        payload="",
+        source="chat-abc",
+        json=False,
+    )
+    with unittest.mock.patch.dict(os.environ, manual_env):
+        assert _memory_proposal_add_command(explicit_args) == 0
+    assert (explicit_dir / "memory-vault" / "Workspace" / "Memory-Proposals.md").is_file()
 
 
 def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
@@ -911,3 +981,8 @@ def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert mp._dismissed_texts(queue) == {"kept fact"}
+    # The pre-rename .log sidecar is read too, so history written before the
+    # extension change keeps protecting across the upgrade.
+    legacy = queue.with_suffix(".dismissed.log")
+    legacy.write_text('{"text": "legacy fact", "kind": "memory"}\n', encoding="utf-8")
+    assert mp._dismissed_texts(queue) == {"kept fact", "legacy fact"}

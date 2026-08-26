@@ -509,11 +509,17 @@ def _existing_proposal_texts(file_text: str) -> set[str]:
     return out
 
 
-_DISMISSED_LOG_SUFFIX = ".dismissed.log"
+_DISMISSED_LOG_SUFFIX = ".dismissed.jsonl"
+_DISMISSED_LOG_LEGACY_SUFFIXES = (".dismissed.log",)
 
 
 def dismissed_log_path(proposals_path: Path) -> Path:
-    """Sidecar that holds the texts of already-decided proposals."""
+    """Sidecar that holds the texts of already-decided proposals.
+
+    ``.jsonl`` rather than ``.log`` because setup writes ``*.log`` into the
+    workspace gitignore: the history only prevents re-filing while it stays
+    put, so it must be tracked and sync like the queue itself.
+    """
     return proposals_path.with_suffix(_DISMISSED_LOG_SUFFIX)
 
 
@@ -544,22 +550,23 @@ def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
     """Texts of previously decided proposals, from the sidecar log."""
-    try:
-        raw = dismissed_log_path(proposals_path).read_text(encoding="utf-8")
-    except OSError:
-        return set()
     out: set[str] = set()
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         try:
-            entry = json.loads(line)
-        except ValueError:
+            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
             continue
-        text = str(entry.get("text", "")).strip()
-        if text:
-            out.add(text)
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            text = str(entry.get("text", "")).strip()
+            if text:
+                out.add(text)
     return out
 
 
