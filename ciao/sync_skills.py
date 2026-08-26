@@ -356,13 +356,27 @@ def _refresh_upstream_skills(
     return refreshed, len(plan["to_prune"])
 
 
-def _install_stock_skills(workspace: Path) -> tuple[int, int]:
+def _install_stock_skills(
+    workspace: Path,
+    *,
+    gws_profile: str | None = None,
+) -> tuple[int, int]:
     """Copy packaged ``ciao.stock/skills`` into ``.claude/skills``.
 
     A workspace ``skills/<name>`` always wins over the packaged skill of the
     same name.  Copies carry ``STOCK_SKILL_MARKER`` so they are refreshed on
     every sync and pruned once they disappear from the package (or become
     shadowed by a workspace skill).
+
+    The ``gws-*`` skills are Google-Workspace integrations and are only
+    installed when the workspace has a GWS profile to use them against (see
+    ``gws_auth.workspace_gws_profile``). A workspace with no profile connected
+    gets the generic skills only — shipping GWS wrappers that name a credential
+    directory nobody created just produces auth errors and wasted catalog
+    surface. ``gws_profile`` carries the resolved account name: ``None`` (the
+    default) installs them unconditionally for callers that predate the profile
+    check, ``""`` skips them (no account linked), and a non-empty slug installs
+    them.
     """
     from importlib import resources
 
@@ -383,6 +397,12 @@ def _install_stock_skills(workspace: Path) -> tuple[int, int]:
             continue
         if (custom_dir / entry.name / "SKILL.md").is_file():
             continue  # workspace skill shadows the packaged one
+        # Google-account skills are gated on an actual profile for this
+        # workspace. `gws_profile` is deliberately passed through as a resolved
+        # value rather than recomputed here, so callers who already know the
+        # workspace's effective profile do not read it twice.
+        if entry.name.startswith("gws-") and gws_profile == "":
+            continue
         target = claude_skills / entry.name
         if target.is_symlink():
             continue  # user-managed link, leave it alone
@@ -1102,11 +1122,62 @@ def _resolve_runtime_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
+def _resolve_workspace_gws_profile(
+    root: Path, workspace_name: str | None, gws_profile: str | None
+) -> str | None:
+    """The GWS profile to gate ``gws-*`` stock skills on, or ``None``.
+
+    ``None`` means "no gate" (the caller predates the profile check, or this
+    root cannot be tied to a registered workspace), ``""`` means "no profile
+    connected, skip GWS skills", and a non-empty slug installs them. Callers
+    with a ``CiaoConfig`` pass ``workspace_name``/``gws_profile`` explicitly;
+    the fallback here loads the config so CLI/startup sync still applies the
+    rule from a root path alone.
+    """
+    if gws_profile is not None:
+        return gws_profile
+    if workspace_name is None:
+        workspace_name = _resolve_root_workspace(root)
+    if workspace_name is None:
+        return None
+    try:
+        from ciao.config import CiaoConfig  # noqa: PLC0415
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        config = CiaoConfig.from_env()
+        return workspace_gws_profile(config, workspace_name)
+    except Exception:
+        return None
+
+
+def _resolve_root_workspace(root: Path) -> str | None:
+    """Map an agent root back to its registered workspace name, if any.
+
+    ``root`` is an agent root (``<install>/<name>`` after the re-rooting, or the
+    install root itself before it). Reads the registry through ``CiaoConfig``,
+    which owns the pre-/post-re-rooting layout decision, so a re-rooted install
+    resolves each named root and a single-root or unregistered install resolves
+    to ``None``.
+    """
+    try:
+        from ciao.config import CiaoConfig  # noqa: PLC0415
+
+        config = CiaoConfig.from_env()
+        for candidate, name in config.agent_root_targets():
+            if Path(candidate).resolve() == root.resolve():
+                return name
+    except Exception:
+        return None
+    return None
+
+
 def sync_workspace_skills(
     workspace: Path | str,
     *,
     refresh_upstream: bool = True,
     runner=subprocess.run,
+    gws_profile: str | None = None,
+    workspace_name: str | None = None,
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_linked_workspace_guides(root)
@@ -1190,7 +1261,8 @@ def sync_workspace_skills(
         upstream_updated, upstream_pruned = _refresh_upstream_skills(root, runner=runner)
 
     legacy_codex_pruned = _cleanup_legacy_codex_projections(root)
-    stock_installed, stock_pruned = _install_stock_skills(root)
+    gws = _resolve_workspace_gws_profile(root, workspace_name, gws_profile)
+    stock_installed, stock_pruned = _install_stock_skills(root, gws_profile=gws)
     custom_installed, custom_pruned = _rebuild_custom_skill_links(root)
     stock_agents_installed, stock_agents_pruned = _install_stock_agents(root)
     print(

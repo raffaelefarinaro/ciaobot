@@ -223,6 +223,29 @@ def known_profiles(config) -> list[str]:
     return names
 
 
+def workspace_gws_profile(config, workspace_name: str | None) -> str:
+    """The Google account a workspace actually uses, or "" when none is linked.
+
+    The operator-level default only counts when it names an account that
+    actually exists: pointing a chat at a credential directory nobody ever
+    created just produces confusing auth errors mid-task. A workspace with no
+    explicit link and no resolvable default gets "" — which is exactly the
+    "no profile connected to this workspace" case skill sync must recognise.
+    """
+    if not config:
+        return ""
+    workspace_config = getattr(config, "workspace", lambda _name: None)(workspace_name)
+    if workspace_config and getattr(workspace_config, "gws_profile", ""):
+        return str(workspace_config.gws_profile)
+    default = getattr(config, "gws_default_profile", "")
+    if not default:
+        return ""
+    try:
+        return default if default in known_profiles(config) else ""
+    except Exception:
+        return default
+
+
 def load_client_secret(config_dir: Path) -> dict[str, Any]:
     """Return the ``installed``/``web`` section of a profile's client secret.
 

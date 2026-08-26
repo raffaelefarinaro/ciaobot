@@ -611,3 +611,65 @@ def test_slugify_profile_cannot_escape_the_secrets_directory(tmp_path: Path) -> 
     assert gws_auth.profile_config_dir(cfg, "../../etc") == (
         tmp_path / "secrets" / "gws-etc"
     )
+
+
+def _profile_config(
+    tmp_path: Path,
+    *,
+    gws_default_profile: str = "",
+    workspaces: dict | None = None,
+) -> SimpleNamespace:
+    (tmp_path / ".runtime").mkdir(exist_ok=True)
+    return SimpleNamespace(
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        gws_default_profile=gws_default_profile,
+        workspaces=workspaces or {},
+        _workspace_registry_changed=False,
+    )
+
+
+def _workspace_cfg(name: str, gws_profile: str = "") -> SimpleNamespace:
+    return SimpleNamespace(name=name, gws_profile=gws_profile)
+
+
+def test_workspace_gws_profile_uses_explicit_link(tmp_path: Path) -> None:
+    """An explicit per-workspace link wins regardless of the default."""
+    cfg = _profile_config(
+        tmp_path,
+        gws_default_profile="personal",
+        workspaces={"home": _workspace_cfg("home", "acme")},
+    )
+    cfg.workspace = lambda name: cfg.workspaces.get(name)
+    assert gws_auth.workspace_gws_profile(cfg, "home") == "acme"
+
+
+def test_workspace_gws_profile_falls_back_only_to_a_real_default(
+    tmp_path: Path,
+) -> None:
+    """A default that names no existing account is not used."""
+    cfg = _profile_config(
+        tmp_path,
+        gws_default_profile="personal",
+        workspaces={"home": _workspace_cfg("home", "")},
+    )
+    cfg.workspace = lambda name: cfg.workspaces.get(name)
+    # No account named personal exists → the workspace has no profile.
+    assert gws_auth.workspace_gws_profile(cfg, "home") == ""
+
+
+def test_workspace_gws_profile_default_when_account_exists(
+    tmp_path: Path,
+) -> None:
+    cfg = _profile_config(
+        tmp_path,
+        gws_default_profile="personal",
+        workspaces={"home": _workspace_cfg("home", "")},
+    )
+    cfg.workspace = lambda name: cfg.workspaces.get(name)
+    _write_client_secret(tmp_path / "secrets" / "gws-personal")
+    assert gws_auth.workspace_gws_profile(cfg, "home") == "personal"
+
+
+def test_workspace_gws_profile_no_config_returns_empty(tmp_path: Path) -> None:
+    assert gws_auth.workspace_gws_profile(None, "home") == ""

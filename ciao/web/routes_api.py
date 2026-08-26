@@ -917,7 +917,14 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     try:
         # `refresh_upstream=False`: this is a local seeding on a user-facing
         # request, not the periodic upstream regeneration.
-        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        await asyncio.to_thread(
+            sync_workspace_skills,
+            root,
+            refresh_upstream=False,
+            gws_profile=workspace_gws_profile(config, name),
+        )
     except Exception:  # noqa: BLE001 - creation already succeeded
         logger.exception("Could not seed agent root for new workspace %s", name)
         return False

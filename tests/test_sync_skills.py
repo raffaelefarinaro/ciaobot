@@ -260,6 +260,40 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
     assert result.stock_installed >= 3
 
 
+def test_gws_stock_skills_skipped_without_a_profile(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace, gws_profile="")
+
+    assert not (workspace / ".claude" / "skills" / "gws-gmail").exists()
+    assert (
+        workspace / ".claude" / "skills" / "ciao-capabilities" / "SKILL.md"
+    ).is_file()
+    assert result[0] >= 1  # generic skills still installed
+
+
+def test_gws_stock_skills_installed_with_a_profile(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace, gws_profile="personal")
+
+    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
+    assert result[0] >= 1
+
+
+def test_gws_stock_skills_unconditional_by_default(tmp_path: Path) -> None:
+    """Callers that predate the profile check still install GWS skills."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace)
+
+    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
+    assert result[0] >= 1
+
+
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")
