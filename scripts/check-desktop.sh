@@ -43,7 +43,7 @@ fi
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
-step "sidecar build (swiftc, universal)"
+step "sidecar build (swiftc, aarch64)"
 "$DESKTOP/native/build.sh"
 
 step "cargo fmt --check"
@@ -61,26 +61,24 @@ if [[ "$FAST" -eq 1 ]]; then
   exit 0
 fi
 
-step "tauri build (app bundle, universal)"
-# Universal is what release CI builds, and it resolves a different sidecar
+step "tauri build (app bundle, aarch64)"
+# aarch64 is what release CI builds, and it resolves a different sidecar
 # filename than a native build, so this is the shape worth checking. Updater
 # artifacts are disabled: signing them needs TAURI_SIGNING_PRIVATE_KEY, which
 # only CI holds.
 (cd "$DESKTOP" && npm run tauri build -- \
-  --target universal-apple-darwin \
+  --target aarch64-apple-darwin \
   --bundles app \
   --config '{"bundle":{"createUpdaterArtifacts":false}}')
 
-APP="$DESKTOP/src-tauri/target/universal-apple-darwin/release/bundle/macos/Ciaobot.app"
+APP="$DESKTOP/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Ciaobot.app"
 SIDECAR="$APP/Contents/MacOS/ciaobot-native"
 
 step "bundle contents"
 [[ -x "$SIDECAR" ]] || { echo "FAIL: $SIDECAR missing — externalBin did not bundle the sidecar" >&2; exit 1; }
-lipo -info "$SIDECAR" | grep -q "x86_64 arm64" \
-  || { echo "FAIL: bundled sidecar is not universal" >&2; exit 1; }
 codesign -v "$APP" || { echo "FAIL: bundle signature invalid" >&2; exit 1; }
 "$SIDECAR" probe >/dev/null \
   || { echo "FAIL: bundled sidecar does not run" >&2; exit 1; }
 
 echo
-echo "Desktop gate passed: sidecar bundled, universal, signed, and runnable."
+echo "Desktop gate passed: sidecar bundled, aarch64, signed, and runnable."

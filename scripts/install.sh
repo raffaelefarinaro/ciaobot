@@ -120,13 +120,20 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed grep; do
+for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed grep sysctl; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 
 [ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS only"
+# A terminal running under Rosetta reports x86_64 even on Apple Silicon, so an
+# x86_64 process is only rejected when the hardware is not arm64 underneath.
 case "$(uname -m)" in
-    arm64|x86_64) ;;
+    arm64) ;;
+    x86_64)
+        if [ "$(sysctl -in sysctl.proc_translated 2>/dev/null)" != "1" ]; then
+            fail "Ciaobot now requires Apple Silicon (arm64); Intel Macs are no longer supported"
+        fi
+        ;;
     *) fail "unsupported macOS architecture: $(uname -m)" ;;
 esac
 
@@ -152,9 +159,9 @@ case "$version" in
     *) base="$release_base/v$version" ;;
 esac
 
-archive_name=${CIAO_ARCHIVE_NAME:-Ciaobot_${version}_universal.app.tar.gz}
+archive_name=${CIAO_ARCHIVE_NAME:-Ciaobot_${version}_aarch64.app.tar.gz}
 signature_name=${archive_name}.sig
-verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_universal}
+verifier_name=${CIAO_VERIFIER_NAME:-ciaobot-installer-verify_aarch64}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-install.XXXXXX")
 # The staging bundle cannot live under $tmp: it has to sit next to the install
 # target so the final move is a rename on one filesystem rather than a ~350 MB
