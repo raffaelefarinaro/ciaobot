@@ -25,11 +25,29 @@ from ciao import provider_registry
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
 _CLAUDE_DISCOVERY_TTL_SECONDS = 300.0
+# An empty discovery is usually a timeout or a transient health-check failure,
+# not a real "nothing connected" answer. Serve it only briefly so the
+# stale-while-revalidate retry lands within seconds instead of showing "(0)"
+# for the full success TTL.
+_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS = 15.0
+# ``claude mcp list`` health-checks every configured connector before printing.
+# With ~30 claude.ai connectors a healthy run measures ~11-12s, and under load
+# it blows past 12s — at which point the old timeout swallowed the error and
+# cached the empty list for five minutes. Give the health pass real headroom.
+_CLAUDE_MCP_LIST_TIMEOUT_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
-_claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
+_claude_mcps_cache: tuple[float, str, tuple[str, ...], int] | None = None
 _claude_mcps_refreshing = False
 _claude_mcps_lock = threading.Lock()
+# Set while one runner (startup warm-up, a request thread, or the stale-TTL
+# background refresh) is executing the ``claude mcp list`` probe, so
+# latecomers wait for it instead of stacking a second full health pass.
+_claude_mcps_inflight: threading.Event | None = None
+# Bumped on every ``clear_claude_discovery_cache`` so a probe result produced
+# from a pre-clear configuration (e.g. the startup warm-up finishing right
+# after Verify) is not served or cached as current.
+_claude_mcps_generation = 0
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
 
 
@@ -50,10 +68,45 @@ def _resolve_root(raw: Any) -> Path:
 
 
 def clear_claude_discovery_cache() -> None:
-    """Drop Claude MCP/skill discovery caches (tests and forced refresh)."""
-    global _claude_mcps_cache, _claude_skills_cache
+    """Drop Claude MCP/skill discovery caches (tests and forced refresh).
+
+    An in-flight probe is deliberately left registered: the Verify endpoint
+    calls this while the startup warm-up may still be running, and
+    unregistering the probe would let the next payload claim single-flight
+    ownership and stack a second blocking ``claude mcp list``. Instead the
+    generation bump marks any result that pre-clear probe produces as stale,
+    so the next discovery waits it out and then re-probes with current
+    configuration. Tests that need a clean single-flight state reset
+    ``_claude_mcps_inflight`` directly.
+    """
+    global _claude_mcps_cache, _claude_skills_cache, _claude_mcps_generation
     _claude_mcps_cache = None
     _claude_skills_cache = None
+    _claude_mcps_generation += 1
+
+
+def _acquire_mcps_probe() -> threading.Event | None:
+    """Try to become the sole ``claude mcp list`` runner.
+
+    Returns the event this caller owns (``release_mcps_probe`` must be called
+    on it), or ``None`` when another probe is already in flight.
+    """
+    global _claude_mcps_inflight
+    with _claude_mcps_lock:
+        if _claude_mcps_inflight is not None:
+            return None
+        event: threading.Event = threading.Event()
+        _claude_mcps_inflight = event
+        return event
+
+
+def _release_mcps_probe(event: threading.Event) -> None:
+    """Finish this caller's probe run and hand single-flight back."""
+    global _claude_mcps_inflight
+    event.set()
+    with _claude_mcps_lock:
+        if _claude_mcps_inflight is event:
+            _claude_mcps_inflight = None
 
 
 def detect_nested_workspaces(vault_path: Path) -> list[str]:
@@ -176,7 +229,7 @@ def _cli_version(binary: str) -> str:
 
 
 def discover_claude_system_skills() -> list[str]:
-    """Discover enabled Claude Code plugins via CLI, falling back to installed_plugins.json."""
+    """Discover enabled Claude Code plugins plus standalone ~/.claude/skills."""
     global _claude_skills_cache
     now = time.monotonic()
     if (
@@ -190,7 +243,17 @@ def discover_claude_system_skills() -> list[str]:
     return skills
 
 
+def _claude_standalone_skills_dir() -> Path:
+    """Directory of standalone (non-plugin) Claude skills, injectable for tests."""
+    return Path.home() / ".claude" / "skills"
+
+
 def _discover_claude_system_skills_uncached() -> list[str]:
+    skills: set[str] = set()
+    # A clean `claude plugin list` exit is authoritative even when zero plugins
+    # are enabled; only a failure (missing binary, timeout, nonzero exit) needs
+    # the installed_plugins.json fallback below.
+    cli_ok = False
     binary = claude_cli_path()
     if binary:
         try:
@@ -198,11 +261,11 @@ def _discover_claude_system_skills_uncached() -> list[str]:
                 [binary, "plugin", "list"],
                 capture_output=True, text=True, timeout=8.0, check=False,
             )
+            cli_ok = res.returncode == 0
             output = (res.stdout or "") + "\n" + (res.stderr or "")
             # Claude Code uses a multi-line block format:
             #   ❯ plugin-name@source
             #     Status: ✔ enabled  (or ✘ disabled)
-            skills: set[str] = set()
             current_name: str | None = None
             for line in output.splitlines():
                 stripped = line.strip()
@@ -212,27 +275,27 @@ def _discover_claude_system_skills_uncached() -> list[str]:
                     if "enabled" in stripped and "disabled" not in stripped:
                         skills.add(current_name)
                     current_name = None
-            if skills:
-                return sorted(skills)
         except Exception:
-            pass
-    # Fallback: read installed_plugins.json (all installed regardless of enabled state)
-    skills_fb: set[str] = set()
-    installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-    if installed_json.is_file():
-        try:
-            data = json.loads(installed_json.read_text(encoding="utf-8"))
-            plugins = data.get("plugins", {})
-            for key in plugins.keys():
-                skills_fb.add(str(key).split("@")[0])
-        except Exception:
-            pass
-    skills_dir = Path.home() / ".claude" / "skills"
+            cli_ok = False
+    # Standalone skills under ~/.claude/skills never appear in `claude plugin
+    # list`, so merge them in whether or not the CLI reported plugins.
+    skills_dir = _claude_standalone_skills_dir()
     if skills_dir.is_dir():
-        for f in skills_dir.glob("*"):
-            if f.is_dir() or f.name.endswith(".md"):
-                skills_fb.add(f.stem)
-    return sorted(skills_fb)
+        for entry in skills_dir.glob("*"):
+            if entry.is_dir() or entry.name.endswith(".md"):
+                skills.add(entry.stem)
+    if not cli_ok:
+        # The CLI could not report (missing, failed, timed out): list every
+        # installed plugin so the page still shows something actionable.
+        installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+        if installed_json.is_file():
+            try:
+                data = json.loads(installed_json.read_text(encoding="utf-8"))
+                for key in (data.get("plugins") or {}).keys():
+                    skills.add(str(key).split("@")[0])
+            except Exception:
+                pass
+    return sorted(skills)
 
 
 def discover_claude_mcps(
@@ -246,39 +309,128 @@ def discover_claude_mcps(
     in the per-project ``/mcp`` panel. Those disables live in
     ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
 
-    Served stale-while-revalidate: ``claude mcp list`` measures ~12s on a real
-    install, and it is on the Settings -> Providers load path, so a plain TTL
-    made every visit after the window pay the full cost. An expired entry is
-    returned immediately and refreshed on a background thread, so only the first
-    call after startup ever waits.
+    Served stale-while-revalidate: ``claude mcp list`` health-checks every
+    connector and measures ~12s on a real install, and discovery is on the
+    Settings -> Providers load path, so a plain TTL made every visit after the
+    window pay the full cost. An expired entry is returned immediately and
+    refreshed on a background thread, so only the first call after startup ever
+    waits. Empty results expire fast (see ``_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS``)
+    because they usually mean the probe timed out, not that nothing is connected.
     """
     global _claude_mcps_cache
     now = time.monotonic()
     ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
     cached = _claude_mcps_cache
+    ttl = (
+        _CLAUDE_DISCOVERY_TTL_SECONDS
+        if cached is not None and cached[2]
+        else _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS
+    )
     fresh = (
         cached is not None
-        and now - cached[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+        and now - cached[0] < ttl
         and cached[1] == ws_key
+        and cached[3] == _claude_mcps_generation
     )
     if cached is not None and cached[1] == ws_key:
         if not fresh:
             _refresh_claude_mcps_async(ws_key, config_path)
         return list(cached[2])
 
-    connected = _discover_claude_mcps_uncached(
-        workspace_root=Path(ws_key) if ws_key else None,
-        config_path=config_path,
-    )
-    _claude_mcps_cache = (now, ws_key, tuple(connected))
-    return connected
+    # Single-flight: the startup warm-up, the stale-TTL background refresh, or
+    # another request thread may already be paying for the probe. Wait for it
+    # to finish instead of stacking a second ``claude mcp list``; only become
+    # a runner once no other probe is in flight. The wait is unbounded on
+    # purpose: the owner's ``finally`` always fires and the probe itself is
+    # bounded by the subprocess timeout, so the event cannot stay unset
+    # forever. A waiter whose owner finished without a usable entry for this
+    # root (failed probe, different workspace root, or a result invalidated by
+    # a cache clear mid-probe) loops and reacquires ownership — it never times
+    # out into running a duplicate probe alongside the in-flight one.
+    while True:
+        inflight = _acquire_mcps_probe()
+        if inflight is not None:
+            break
+        with _claude_mcps_lock:
+            running = _claude_mcps_inflight
+        if running is None:
+            # The owner finished between our failed acquire and this read;
+            # loop to serve its freshly stamped cache or take over.
+            continue
+        running.wait()
+        cached = _claude_mcps_cache
+        if (
+            cached is not None
+            and cached[1] == ws_key
+            and cached[3] == _claude_mcps_generation
+        ):
+            return list(cached[2])
+
+    probe_generation = _claude_mcps_generation
+    try:
+        connected = _discover_claude_mcps_uncached(
+            workspace_root=Path(ws_key) if ws_key else None,
+            config_path=config_path,
+        )
+        _claude_mcps_cache = (
+            time.monotonic(),
+            ws_key,
+            tuple(connected),
+            probe_generation,
+        )
+        return connected
+    finally:
+        _release_mcps_probe(inflight)
+
+
+def _claude_config_path_from_env(source: Mapping[str, str] | None = None) -> Path:
+    """The Claude config file the provider payload would read.
+
+    Honors ``CLAUDE_CONFIG_PATH`` so the startup warm-up probes the same
+    connector set the Settings -> Providers route will report.
+    """
+    src = source if source is not None else os.environ
+    raw = str(src.get("CLAUDE_CONFIG_PATH", "")).strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".claude.json"
+
+
+def warm_claude_discovery_cache(
+    workspace_root: Path | str | None = None,
+    *,
+    config_path: Path | None = None,
+) -> None:
+    """Pre-populate the Claude MCP/skill caches off the request path.
+
+    ``claude mcp list`` health-checks every connector (~12s on a real install),
+    so run it at app startup instead of letting the first Settings -> Providers
+    visit block on it. ``config_path`` defaults to the same ``CLAUDE_CONFIG_PATH``
+    derivation the payload uses, so the warmed cache cannot disagree with what
+    the route would report. Fire-and-forget: a failure just leaves the cache
+    cold and the first request pays the cost as before.
+    """
+
+    def run() -> None:
+        try:
+            discover_claude_mcps(
+                workspace_root,
+                config_path=config_path or _claude_config_path_from_env(),
+            )
+            discover_claude_system_skills()
+        except Exception:  # noqa: BLE001 - warm-up must never break startup
+            logger.debug("Claude discovery warm-up failed", exc_info=True)
+
+    threading.Thread(target=run, name="claude-discovery-warmup", daemon=True).start()
 
 
 def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
     """Re-discover in the background, at most one refresh in flight.
 
-    Failures are swallowed on purpose: the stale list already went out to the
-    caller, and a discovery error must not surface as a broken Settings page.
+    The refresh joins the same single-flight as the warm-up and the request
+    path: if another probe is running it skips entirely (that probe's result
+    is at least as fresh), and while it runs, Verify's cache bust cannot stack
+    a second probe on top of it. Failures are swallowed on purpose: the stale
+    list already went out to the caller, and a discovery error must not
+    surface as a broken Settings page.
     """
     global _claude_mcps_refreshing
     with _claude_mcps_lock:
@@ -288,15 +440,28 @@ def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
 
     def run() -> None:
         global _claude_mcps_cache, _claude_mcps_refreshing
+        inflight = _acquire_mcps_probe()
         try:
+            if inflight is None:
+                return  # a newer probe is already running; its result wins
+            # Record the generation before probing: a cache clear mid-probe
+            # must invalidate this result just like the request path's.
+            probe_generation = _claude_mcps_generation
             connected = _discover_claude_mcps_uncached(
                 workspace_root=Path(ws_key) if ws_key else None,
                 config_path=config_path,
             )
-            _claude_mcps_cache = (time.monotonic(), ws_key, tuple(connected))
+            _claude_mcps_cache = (
+                time.monotonic(),
+                ws_key,
+                tuple(connected),
+                probe_generation,
+            )
         except Exception:  # noqa: BLE001 - a stale list is already serving
             logger.debug("background Claude MCP discovery failed", exc_info=True)
         finally:
+            if inflight is not None:
+                _release_mcps_probe(inflight)
             with _claude_mcps_lock:
                 _claude_mcps_refreshing = False
 
@@ -395,7 +560,7 @@ def _discover_claude_mcps_uncached(
             [binary, "mcp", "list"],
             capture_output=True,
             text=True,
-            timeout=12.0,
+            timeout=_CLAUDE_MCP_LIST_TIMEOUT_SECONDS,
             check=False,
         )
         output = (res.stdout or "") + "\n" + (res.stderr or "")
@@ -672,12 +837,7 @@ def setup_status(
         or (Path(raw_credentials_path).expanduser() if raw_credentials_path else None)
         or Path.home() / ".claude" / ".credentials.json"
     )
-    raw_config_path = source.get("CLAUDE_CONFIG_PATH", "").strip()
-    config_path = (
-        claude_config_path
-        or (Path(raw_config_path).expanduser() if raw_config_path else None)
-        or Path.home() / ".claude.json"
-    )
+    config_path = claude_config_path or _claude_config_path_from_env(source)
 
     checks = [
         _check(
