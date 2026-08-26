@@ -226,24 +226,41 @@ def known_profiles(config) -> list[str]:
 def workspace_gws_profile(config, workspace_name: str | None) -> str:
     """The Google account a workspace actually uses, or "" when none is linked.
 
-    The operator-level default only counts when it names an account that
-    actually exists: pointing a chat at a credential directory nobody ever
-    created just produces confusing auth errors mid-task. A workspace with no
-    explicit link and no resolvable default gets "" — which is exactly the
+    An explicit per-workspace link and the operator-level default both only
+    count when they name an account that actually exists: pointing a chat at a
+    credential directory nobody ever created just produces confusing auth
+    errors mid-task. The explicit link is validated against the same
+    ``known_profiles()`` set as the default, because on an install without a
+    persisted registry the bootstrap registry assigns ``gws_profile``
+    synthetically (e.g. ``"personal"``) even before any account is connected.
+    A workspace with no resolvable account gets "" — which is exactly the
     "no profile connected to this workspace" case skill sync must recognise.
     """
     if not config:
         return ""
+    known: set[str] | None = None
+
+    def _known() -> set[str]:
+        nonlocal known
+        if known is None:
+            try:
+                known = set(known_profiles(config))
+            except Exception:
+                known = set()
+        return known
+
     workspace_config = getattr(config, "workspace", lambda _name: None)(workspace_name)
-    if workspace_config and getattr(workspace_config, "gws_profile", ""):
-        return str(workspace_config.gws_profile)
+    explicit = str(getattr(workspace_config, "gws_profile", "") or "")
+    if explicit and explicit in _known():
+        return explicit
+    if explicit:
+        # A synthetic or stale explicit link (no account actually exists).
+        # Fall through to the default rather than treating it as connected.
+        pass
     default = getattr(config, "gws_default_profile", "")
-    if not default:
-        return ""
-    try:
-        return default if default in known_profiles(config) else ""
-    except Exception:
+    if default and default in _known():
         return default
+    return ""
 
 
 def load_client_secret(config_dir: Path) -> dict[str, Any]:

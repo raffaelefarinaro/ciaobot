@@ -634,14 +634,33 @@ def _workspace_cfg(name: str, gws_profile: str = "") -> SimpleNamespace:
 
 
 def test_workspace_gws_profile_uses_explicit_link(tmp_path: Path) -> None:
-    """An explicit per-workspace link wins regardless of the default."""
+    """A real, registered explicit per-workspace link wins."""
     cfg = _profile_config(
         tmp_path,
         gws_default_profile="personal",
         workspaces={"home": _workspace_cfg("home", "acme")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
+    _write_client_secret(tmp_path / "secrets" / "gws-acme")
     assert gws_auth.workspace_gws_profile(cfg, "home") == "acme"
+
+
+def test_workspace_gws_profile_synthetic_link_is_not_connected(tmp_path: Path) -> None:
+    """A bootstrap synthetic link names no real account, so it is not connected.
+
+    `_bootstrap_registry` assigns `gws_profile` synthetically (e.g. "personal")
+    on installs without a persisted registry, even before any account exists.
+    Skill sync must not treat that as connected, or it keeps installing the
+    `gws-*` skills for the exact no-account case the gate exists to catch.
+    """
+    cfg = _profile_config(
+        tmp_path,
+        gws_default_profile="personal",
+        workspaces={"home": _workspace_cfg("home", "personal")},
+    )
+    cfg.workspace = lambda name: cfg.workspaces.get(name)
+    # No account named personal exists anywhere.
+    assert gws_auth.workspace_gws_profile(cfg, "home") == ""
 
 
 def test_workspace_gws_profile_falls_back_only_to_a_real_default(

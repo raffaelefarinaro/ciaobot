@@ -295,19 +295,32 @@ def test_gws_stock_skills_unconditional_by_default(tmp_path: Path) -> None:
 
 
 def _gws_aware_config(tmp_path: Path, workspaces: dict[str, str]) -> object:
-    """A minimal config whose workspaces map names to gws_profiles."""
+    """A minimal config whose workspaces map names to gws_profiles.
+
+    Linked (non-empty) profiles get a credential directory under
+    ``secrets/gws-<profile>`` so ``known_profiles`` treats them as real accounts
+    (mirroring ``gws_auth.profile_config_dir``'s mapping), and a workspace whose
+    profile does not actually exist resolves to "" the way the gate expects.
+    """
     from types import SimpleNamespace
 
     ws = {
         name: SimpleNamespace(name=name, gws_profile=profile)
         for name, profile in workspaces.items()
     }
+    for profile in set(workspaces.values()):
+        if profile:
+            (tmp_path / "secrets" / f"gws-{profile}").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "secrets" / f"gws-{profile}" / "credentials.json").write_text(
+                "{}", encoding="utf-8"
+            )
     return SimpleNamespace(
         workspaces=ws,
         gws_default_profile="",
         workspace=lambda name: ws.get(name),
         workspace_names=lambda: list(ws.keys()),
         workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
         agent_root=lambda name: tmp_path / name,
     )
 

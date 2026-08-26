@@ -1208,8 +1208,9 @@ def test_updating_gws_profile_resyncs_the_agent_root(tmp_path, monkeypatch):
     )
     assert patched.status_code == 200
     assert config.workspace("personal").gws_profile == "acme"
-    # Shared root: any workspace now links a profile, so the gate is None.
-    assert seeded == [(Path(config.agent_root("personal")), None)]
+    # No real `acme` account exists in this fixture, so the effective profile is
+    # "" and the shared-root gate skips the gws-* skills.
+    assert seeded == [(Path(config.agent_root("personal")), "")]
 
 
 def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypatch):
