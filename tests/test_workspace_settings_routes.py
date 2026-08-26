@@ -1187,7 +1187,10 @@ def test_updating_gws_profile_resyncs_the_agent_root(tmp_path, monkeypatch):
 
     Skill sync otherwise runs only at startup or explicit repair, so changing a
     workspace's Google account would leave the GWS skills absent (first link) or
-    installed (unlink) until a restart. The update must resync that root.
+    installed (unlink) until a restart. The update must resync that root. This
+    fixture is a pre-re-root install (one shared root), so the gate aggregates
+    all workspaces: once `personal` links a profile, the shared catalog is kept
+    (gate None).
     """
     client, config, _pcm = _client(tmp_path)
     seeded: list[tuple[Path, str | None]] = []
@@ -1205,7 +1208,8 @@ def test_updating_gws_profile_resyncs_the_agent_root(tmp_path, monkeypatch):
     )
     assert patched.status_code == 200
     assert config.workspace("personal").gws_profile == "acme"
-    assert seeded == [(Path(config.agent_root("personal")), "acme")]
+    # Shared root: any workspace now links a profile, so the gate is None.
+    assert seeded == [(Path(config.agent_root("personal")), None)]
 
 
 def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypatch):

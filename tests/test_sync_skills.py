@@ -307,6 +307,8 @@ def _gws_aware_config(tmp_path: Path, workspaces: dict[str, str]) -> object:
         gws_default_profile="",
         workspace=lambda name: ws.get(name),
         workspace_names=lambda: list(ws.keys()),
+        workspace_root=tmp_path,
+        agent_root=lambda name: tmp_path / name,
     )
 
 
@@ -326,22 +328,36 @@ def test_shared_root_resolves_to_none_when_any_workspace_has_gws(tmp_path, monke
     An empty workspace name means the shared root serves every workspace, so a
     single linked account must keep the GWS skills installed there.
     """
-    from ciao import config as config_module
-
-    fake = type("Cfg", (), {"from_env": staticmethod(lambda: _gws_aware_config(tmp_path, {"personal": "", "work": "acme"}))})
-    monkeypatch.setattr(config_module, "CiaoConfig", fake)
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
 
     # Any workspace has a profile -> no gate (None) -> GWS skills installed.
     assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) is None
 
 
 def test_shared_root_gates_when_no_workspace_has_gws(tmp_path, monkeypatch) -> None:
-    from ciao import config as config_module
-
-    fake = type("Cfg", (), {"from_env": staticmethod(lambda: _gws_aware_config(tmp_path, {"personal": "", "work": ""}))})
-    monkeypatch.setattr(config_module, "CiaoConfig", fake)
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
 
     assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) == ""
+
+
+def test_shared_root_gate_aggregates_all_workspaces(tmp_path) -> None:
+    """Unlinking one workspace must not prune the shared catalog while another links one."""
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    # Pre-re-root: every workspace's agent_root is the shared install root.
+    config.agent_root = lambda _name: tmp_path
+    config.workspace_root = tmp_path
+
+    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") is None
+
+
+def test_shared_root_gate_gates_when_none_linked(tmp_path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    config.agent_root = lambda _name: tmp_path
+    config.workspace_root = tmp_path
+
+    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") == ""
 
 
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:

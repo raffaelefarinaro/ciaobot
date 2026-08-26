@@ -1141,6 +1141,67 @@ def _any_workspace_has_gws_profile(config) -> bool:
         return True
 
 
+def _config_for_root(root: Path):
+    """``CiaoConfig`` for the install that owns ``root``, or ``None``.
+
+    Derives the install root from the supplied agent root rather than the
+    ambient ``CIAO_WORKSPACE``/cwd, so a manual ``ciao sync-skills
+    --workspace /path/to/install/workspace`` run from anywhere resolves the
+    right registry. A post-re-root agent root is a child of the install root;
+    a pre-re-root root IS the install root. The config is only accepted when
+    it actually names ``root`` among its agent roots, so an unrelated install
+    is never matched. When both spellings match, the one that names ``root``
+    as a real (non-empty) workspace wins — that is the re-rooted layout.
+    """
+    from ciao.config import CiaoConfig  # noqa: PLC0415
+
+    candidates = [root.parent, root] if root.parent != root else [root]
+    best: tuple[int, object] | None = None
+    for candidate in candidates:
+        env = dict(os.environ)
+        env["CIAO_WORKSPACE"] = str(candidate)
+        try:
+            config = CiaoConfig.from_env(env)
+        except Exception:
+            continue
+        try:
+            targets = config.agent_root_targets()
+        except Exception:
+            continue
+        matched = [
+            name
+            for r, name in targets
+            if Path(r).resolve() == root.resolve()
+        ]
+        if not matched:
+            continue
+        # Prefer a named match (re-rooted) over an unnamed single-root match.
+        score = 1 if any(name for name in matched) else 0
+        if best is None or score > best[0]:
+            best = (score, config)
+    return best[1] if best is not None else None
+
+
+def resolve_workspace_skills_gws_gate(config, root: Path, workspace_name: str) -> str | None:
+    """The ``gws-*`` gate for a sync target, aggregating when the root is shared.
+
+    ``None`` means "no gate" (install the GWS skills), ``""`` means "no profile
+    connected, skip them", and a non-empty slug installs them. On a pre-re-root
+    install every workspace's ``agent_root`` resolves to the same install root,
+    so the gate must consider ALL workspaces: unlinking one must not prune the
+    shared catalog while another still links an account. On a re-rooted install
+    each root is its own workspace and the gate is that workspace's profile.
+    """
+    try:
+        if config.agent_root(workspace_name) == config.workspace_root:
+            return "" if not _any_workspace_has_gws_profile(config) else None
+    except Exception:
+        pass
+    from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+    return workspace_gws_profile(config, workspace_name)
+
+
 def _resolve_workspace_gws_profile(
     root: Path, workspace_name: str | None, gws_profile: str | None
 ) -> str | None:
@@ -1151,51 +1212,44 @@ def _resolve_workspace_gws_profile(
     pre-re-root catalog that any workspace may use), ``""`` means "no profile
     connected, skip GWS skills", and a non-empty slug installs them. Callers
     with a ``CiaoConfig`` pass ``workspace_name``/``gws_profile`` explicitly;
-    the fallback here loads the config so CLI/startup sync still applies the
-    rule from a root path alone.
+    the fallback here derives the config from ``root`` so CLI/startup sync
+    still applies the rule from a root path alone.
     """
     if gws_profile is not None:
         return gws_profile
+    config = _config_for_root(root)
+    if config is None:
+        return None
     if workspace_name is None:
-        workspace_name = _resolve_root_workspace(root)
+        workspace_name = _resolve_root_workspace(root, config)
     if not workspace_name:
         # An empty name is the pre-re-root SHARED catalog, one skill set served
         # to every workspace. Gating it on a single (empty) name would prune the
         # gws-* skills even though a linked workspace relies on them, so the
         # whole catalog is kept unless no registered workspace has a profile.
-        try:
-            from ciao.config import CiaoConfig  # noqa: PLC0415
+        return "" if not _any_workspace_has_gws_profile(config) else None
+    from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
 
-            config = CiaoConfig.from_env()
-            return "" if not _any_workspace_has_gws_profile(config) else None
-        except Exception:
-            return None
-    try:
-        from ciao.config import CiaoConfig  # noqa: PLC0415
-        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
-
-        config = CiaoConfig.from_env()
-        return workspace_gws_profile(config, workspace_name)
-    except Exception:
-        return None
+    return workspace_gws_profile(config, workspace_name)
 
 
-def _resolve_root_workspace(root: Path) -> str | None:
+def _resolve_root_workspace(root: Path, config=None) -> str | None:
     """Map an agent root back to its registered workspace name, if any.
 
     ``root`` is an agent root (``<install>/<name>`` after the re-rooting, or the
-    install root itself before it). Reads the registry through ``CiaoConfig``,
-    which owns the pre-/post-re-rooting layout decision, so a re-rooted install
-    resolves each named root and a single-root or unregistered install resolves
-    to ``None``.
+    install root itself before it). Reads the registry through ``CiaoConfig``
+    derived from ``root``, which owns the pre-/post-re-rooting layout decision,
+    so a re-rooted install resolves each named root and a single-root or
+    unregistered install resolves to ``None``.
     """
+    if config is None:
+        config = _config_for_root(root)
+    if config is None:
+        return None
     try:
-        from ciao.config import CiaoConfig  # noqa: PLC0415
-
-        config = CiaoConfig.from_env()
         for candidate, name in config.agent_root_targets():
             if Path(candidate).resolve() == root.resolve():
-                return name
+                return str(name) if name else None
     except Exception:
         return None
     return None

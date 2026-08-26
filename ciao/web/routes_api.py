@@ -900,9 +900,14 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         # Linking a workspace to its first account (or unlinking it) changes
         # which `gws-*` stock skills it should get, and skill sync only runs at
         # startup/repair. Resync now so the catalog matches the new linkage
-        # instead of waiting for a restart.
-        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
-        from ciao.sync_skills import sync_workspace_skills  # noqa: PLC0415
+        # instead of waiting for a restart. On a pre-re-root install the target
+        # root is shared by every workspace, so the gate aggregates all of them
+        # (unlinking one must not prune the shared catalog while another still
+        # links an account).
+        from ciao.sync_skills import (  # noqa: PLC0415
+            resolve_workspace_skills_gws_gate,
+            sync_workspace_skills,
+        )
 
         try:
             root = Path(config.agent_root(workspace.name))
@@ -910,7 +915,9 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                 sync_workspace_skills,
                 root,
                 refresh_upstream=False,
-                gws_profile=workspace_gws_profile(config, workspace.name),
+                gws_profile=resolve_workspace_skills_gws_gate(
+                    config, root, workspace.name
+                ),
             )
         except Exception:  # noqa: BLE001 - the update already succeeded
             logger.exception(
