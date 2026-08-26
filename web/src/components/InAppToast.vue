@@ -65,10 +65,11 @@ const swipeStyle = computed(() => ({
 function onPointerDown(toast: InAppToast, e: PointerEvent) {
   if (e.pointerType === 'mouse' && e.button !== 0) return
   // Capturing the pointer on the toast div also redirects the compatibility
-  // `click` event to it, so a press starting on a button (Fix/Close) would
-  // never reach the button's own handler. Skip swipe tracking entirely when
-  // the gesture starts on a button and let the click behave normally.
-  if ((e.target as HTMLElement | null)?.closest('button')) return
+  // `click` event to it, so a press starting on a button or the link action
+  // (Fix/Close / "What's new") would never reach that element's own handler.
+  // Skip swipe tracking entirely when the gesture starts on either and let the
+  // click behave normally.
+  if ((e.target as HTMLElement | null)?.closest('button, a.toast-link')) return
   swipeId.value = toast.id
   swipeStartX.value = e.clientX
   swipeDX.value = 0

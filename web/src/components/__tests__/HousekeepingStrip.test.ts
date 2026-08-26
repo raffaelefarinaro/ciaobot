@@ -144,6 +144,24 @@ describe('HousekeepingStrip', () => {
     expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ title: '★ Starred — thank you!' }))
     wrapper.unmount()
   })
+
+  it('does not run the action when a non-star link is clicked', async () => {
+    // The update tile's "Release notes" link must open the notes WITHOUT
+    // starting an update the user never asked for.
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'package-update',
+      link_label: 'Release notes',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
+      run_label: 'Update',
+    })]
+    const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await wrapper.find('a.housekeeping-link').trigger('click')
+    expect(runSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })
 
 describe('a tile that names an existing surface', () => {

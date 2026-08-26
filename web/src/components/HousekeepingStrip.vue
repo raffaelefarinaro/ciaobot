@@ -69,13 +69,23 @@ function hasActions(): boolean {
 async function runAction(action: OperatorAction): Promise<void> {
   const { ok } = await housekeeping.run(action.id)
   // The star nudge's run records the star; the tile then disappears, so the
-  // only feedback is this toast. The link itself opens GitHub in a new tab.
+  // only feedback is this toast.
   if (ok && action.id === 'github-star') {
     projectStore.pushToast({
       chat_id: '',
       title: '★ Starred — thank you!',
       body: 'It genuinely helps other developers discover Ciaobot.',
     })
+  }
+}
+
+// A tile's external link opens in a new tab. Only the GitHub-star nudge
+// records the run too (so the tile clears after starring). Other links —
+// e.g. release notes on the update tile — must NOT run the action, or
+// clicking "Release notes" would start an update the user never asked for.
+async function onLinkClick(action: OperatorAction): Promise<void> {
+  if (action.id === 'github-star') {
+    await runAction(action)
   }
 }
 
@@ -150,7 +160,7 @@ async function openChat(action: OperatorAction): Promise<void> {
           :href="action.link_url"
           target="_blank"
           rel="noopener noreferrer"
-          @click="runAction(action)"
+          @click="onLinkClick(action)"
         >{{ action.link_label || 'Open' }}</a>
         <button
           v-if="action.view_route"
