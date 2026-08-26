@@ -81,13 +81,13 @@ When a chat is archived, `ciao/insights.py` extracts `## Session insights`, then
 
 | Auto — filed right away | Asks you — queued for review |
 |---|---|
-| Confident facts → written to their destination (bounded regions, project doc, people notes, `Workspace/Learnings.md`). | Unsure facts → `Workspace/Memory-Proposals.md` — one bullet per fact, with `[memory]` / `[project]` / `[rehome]` kind. |
+| Confident facts → written to their destination (bounded regions, project doc, people notes, `Workspace/Learnings.md`). | Unsure facts → `Workspace/Memory-Proposals.md` — one bullet per fact. Unclassified facts default to the `[review]` kind; routing uses `[memory]` / `[profile]` / `[user]` / `[project]` / `[people]` / `[learnings]` / `[rehome]` (`[rehome]` is the separate vault-rehoming workflow). |
 | `[expires: YYYY-MM-DD]` entries past their date are pruned before the next provider turn and removed during daily curation. | Aging notes → **Needs review** (Memory Map sidebar, `ciao memory-audit`). Project 30d / person 90d / other 180d staleness horizons; `updated:` frontmatter or mtime. |
 | Daily curation (still under review): consolidates duplicates/superseded entries at ~85% cap, copies every removal to `Workspace/Memory-Consolidations.md` for undo, and never drops a fact just to fit a cap. | Weekly hygiene: `ciao vault-index --write` + `ciao os-audit --json`. A `[review]` queue entry stays until you act — dismiss keeps it, dropping it takes an attended edit. |
 
 ![Memory pipeline](docs/diagrams/memory-pipeline.svg)
 
-Self-heal without silent edits: `ciao memory-audit` flags event-shaped or stale-path entries in the always-loaded regions and moves them to `Workspace/Learnings.md`; `os-audit` can repair low-risk link/index drift and then reports what still needs attention. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline and the consolidation guardrails.
+Self-heal without silent edits: `ciao memory-audit` is read-only — it reports event-shaped or stale-path entries in the always-loaded regions; the daily memory-curation agent then moves them to `Workspace/Learnings.md`. `os-audit` can repair low-risk link/index drift and then reports what still needs attention. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline and the consolidation guardrails.
 
 ## What we change from stock Claude Code
 
