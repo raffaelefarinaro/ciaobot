@@ -10,6 +10,9 @@ processed it. No errors means no chat and no model call.
 A cooldown marker prevents a crash-looping server from opening a new
 triage chat on every boot. The prompt tells the agent it may escalate
 Ciaobot's own bugs as GitHub issues when the ``gh`` CLI is available.
+The chat dispatches with ``archive_policy="auto"``: a triage that ends
+without anything the user must act on archives itself instead of
+piling an unread chat into General for every transient hiccup.
 
 This module also caps the launchd service logs (``ciao.stdout.log``
 and friends): launchd appends to them forever and nothing else rotates
@@ -66,7 +69,15 @@ repr or test mock, do not file a report; say so in your summary instead. If `gh`
 unavailable, unauthenticated, or the command fails, do not file anything — end with:
    - A clickable pre-filled GitHub issue URL (https://github.com/raffaelefarinaro/ciaobot/issues/new?title=...&body=...) pre-filling the title and summary (properly URL-encoded).
    - A separate, paste-ready detailed traceback and system info block for them to copy into the issue description.
-5. Close with a short summary: what was found, what was fixed, what was escalated.
+5. Your reply is read by a non-technical user, so keep it short and plain:
+   - Open with one verdict line: either "No action needed — all errors were \
+transient or environmental." or "Action needed:".
+   - Under "Action needed:", list only what the user must do themselves (a \
+command to run, a setting to change, a bug report to review), one line each.
+   - Do NOT write per-issue forensic write-ups, log excerpts, timestamps, \
+recovery evidence, or inventories of non-errors. That detail belongs in the \
+GitHub issue body from step 4, not in your reply. Issues that resolved \
+themselves or need no user decision get no individual mention.
 
 The error log is cleared automatically after this triage completes cleanly.\
 """
@@ -161,6 +172,7 @@ def build_triage_entry(workspace: str, web_project_id: str):
         scope="system",
         editable=False,
         removable=False,
+        archive_policy="auto",
     )
 
 
