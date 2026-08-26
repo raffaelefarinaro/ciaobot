@@ -202,6 +202,31 @@ def test_migrate_region_caps_ignores_nonnumeric_override(
     )
 
 
+def test_migrate_region_caps_reconciles_current_default_stamp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A freshly seeded guide stamped with the shipped default follows too.
+
+    Seeding stamps cap=3000; when an explicit override enforces 2200 the
+    guide must say 2200, otherwise sync leaves a brand-new guide advertising
+    a cap nothing enforces. Only known shipped defaults reconcile — custom
+    caps stay.
+    """
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=3000 -->\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
+
+    assert mt.migrate_region_caps(guide) == ["memory"]
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=2200 -->" in text
+
+
 def test_migrate_region_caps_caller_limit_beats_env(
     tmp_path: Path,
     monkeypatch: Any,

@@ -644,14 +644,15 @@ def migrate_region_caps(
     *,
     char_limit: int | None = None,
 ) -> list[str]:
-    """Restamp region markers still carrying a former shipped default cap.
+    """Restamp region markers carrying a known shipped default cap.
 
-    ``ensure_regions`` never rewrites existing markers, so a guide installed
-    before a default-cap change would advertise the old number to every agent
-    and operator while the runtime enforces the new one. Only markers whose
-    cap equals the recorded former default are rewritten; they are restamped
-    to the EFFECTIVE limit so the guide advertises what the runtime actually
-    enforces: ``char_limit`` when the caller resolved configuration (including
+    ``ensure_regions`` never rewrites existing markers, so guides can end up
+    advertising a cap number the runtime does not enforce: a pre-3000 guide
+    still says ``cap=2200``, and a freshly seeded guide says ``cap=3000``
+    even when an explicit limit overrides the shipped default. Any marker
+    whose cap is a KNOWN shipped default (the former or the current one) is
+    restamped to the EFFECTIVE limit so the guide advertises what the runtime
+    actually enforces: ``char_limit`` when the caller resolved configuration (including
     a workspace ``.env``, which this module cannot see), else an explicit
     ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
     default. Any other marker value is an intentional custom cap and is never
@@ -676,13 +677,15 @@ def migrate_region_caps(
         updated = text
         restamped: list[str] = []
         for region, former in _FORMER_CAPS.items():
+            shipped_current = _REGION_FACTS[region][1]
             effective = (
-                override if override is not None else _REGION_FACTS[region][1]
+                override if override is not None else shipped_current
             )
-            if former == effective:
+            candidates = sorted({former, shipped_current} - {effective})
+            if not candidates:
                 continue
             pattern = re.compile(
-                rf"(<!--\s*ciao:{region}:start\s+cap=){former}(\s*-->)"
+                rf"(<!--\s*ciao:{region}:start\s+cap=)(?:{'|'.join(str(c) for c in candidates)})(\s*-->)"
             )
             new_text, count = pattern.subn(
                 rf"\g<1>{effective}\g<2>", updated

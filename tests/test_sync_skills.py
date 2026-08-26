@@ -137,6 +137,38 @@ def test_sync_honors_dotenv_cap_override_over_stale_stamp(
     assert guide.read_text(encoding="utf-8") == stamped
 
 
+def test_sync_reads_install_dotenv_for_nested_agent_root(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Setup scaffolds per-workspace agent roots under an install root whose
+    ``.env`` sits one level up and is never exported; the walk-up must find
+    it or a freshly seeded 3000 stamp gets left contradicting the enforced
+    2200.
+    """
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    install = tmp_path / "install"
+    workspace = install / "personal"
+    workspace.mkdir(parents=True)
+    (install / ".env").write_text(
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    # Fresh seeding stamped the shipped default; effective limit is 2200.
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=2200 -->" in text
+    assert re.search(r"ciao:memory:start cap=3000", text) is None
+
+
 def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     canonical = workspace / ".agents" / "skills" / "upstream"

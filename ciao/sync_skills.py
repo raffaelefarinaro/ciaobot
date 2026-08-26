@@ -1052,23 +1052,29 @@ def _configured_memory_char_limit(workspace: Path) -> int | None:
 
     Resolution order mirrors what the server does at start (dotenv loads
     without overriding exported variables): the process environment wins,
-    then this workspace's ``.env``, then ``None`` meaning "use memory_tool's
-    shipped default". The dotenv side is parsed with python-dotenv itself
-    (``dotenv_values``, which mutates nothing) so exactly the syntaxes the
-    server accepts are honoured here — ``export`` prefixes, quoting, inline
-    comments. Reading the file here (instead of building a ``CiaoConfig``,
-    whose constructor mutates shared env state mid-sync) is what keeps a
-    standalone ``ciao sync-skills --workspace <root>`` from restamping a
-    marker that a later server start would enforce differently.
-    Unparseable numeric values are ignored, falling through to the next
-    source or the shipped default.
+    then the nearest ``.env`` defining the variable — the workspace's own,
+    walking up through owning directories (an install root that scaffolds
+    per-workspace agent roots keeps its ``.env`` there, and ``ciao setup``
+    re-scaffolding passes agent roots to sync without exporting its parsed
+    values), bounded at four levels up — then ``None`` meaning "use
+    memory_tool's shipped default". Each dotenv is parsed with python-dotenv
+    itself (``dotenv_values``, which mutates nothing) so exactly the syntaxes
+    the server accepts are honoured here — ``export`` prefixes, quoting,
+    inline comments. Building no ``CiaoConfig`` matters: its constructor
+    mutates shared env state mid-sync. Unparseable numeric values are
+    ignored, falling through to the next source or the shipped default.
     """
     sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
-    dotenv = workspace / ".env"
-    if dotenv.exists():
+    try:
+        from dotenv import dotenv_values
+    except ImportError:  # pragma: no cover - dotenv ships with the app
+        logger.debug("memory: python-dotenv unavailable for cap migration")
+        return None
+    for ancestor in [workspace, *workspace.parents[:4]]:
+        dotenv = ancestor / ".env"
+        if not dotenv.exists():
+            continue
         try:
-            from dotenv import dotenv_values
-
             values = dotenv_values(dotenv) or {}
         except Exception:  # noqa: BLE001 — advisory migration must not block sync
             logger.debug(
@@ -1076,8 +1082,11 @@ def _configured_memory_char_limit(workspace: Path) -> int | None:
                 dotenv,
                 exc_info=True,
             )
-            values = {}
-        sources.append(str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or ""))
+            continue
+        raw = str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or "").strip()
+        if raw:
+            sources.append(raw)
+            break
     for raw in sources:
         if raw:
             try:
