@@ -205,9 +205,14 @@ async function onFix(toast: InAppToast) {
 .toast-fix:hover { background: var(--error); color: var(--bg); }
 
 /* Info-toast external link (e.g. "What's new" on the update toast): a quiet
-   accent action, distinct from the error Fix button. */
+   accent action, distinct from the error Fix button. The 44px minimum height
+   keeps the tap target comfortably above the 44×44px touch guideline even
+   though the visual is compact. */
 .toast-link {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   margin-top: 8px;
   padding: 4px 12px;
   background: transparent;
@@ -218,6 +223,7 @@ async function onFix(toast: InAppToast) {
   font-size: var(--text-sm);
   text-decoration: none;
   cursor: pointer;
+  box-sizing: border-box;
 }
 .toast-link:hover { background: var(--accent); color: var(--bg); }
 
