@@ -13,13 +13,13 @@ Install `gws` from Settings → Workspaces (or see the Ciaobot README). The bina
 
 ## Authentication (Ciaobot)
 
-Run every Google API call through the profile wrapper — never bare `gws`:
+Run every Google API call through the `ciao` CLI — never bare `gws`:
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" <service> <subcommand> [flags]
+ciao gws "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+Use the chat's `GWS_PROFILE` unless the user asks otherwise. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
 OAuth setup: Settings → Workspaces (Google Workspace card). Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
 
