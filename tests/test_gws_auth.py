@@ -162,6 +162,26 @@ def test_store_credentials_omits_scopes_when_none_granted(tmp_path: Path) -> Non
     assert "scopes" not in creds
 
 
+def test_client_uses_loopback_detects_web_clients(tmp_path: Path) -> None:
+    config_dir = tmp_path / "secrets" / "gws-personal"
+    config_dir.mkdir(parents=True)
+    # Web-only client: the one-click loopback flow cannot work.
+    (config_dir / "client_secret.json").write_text(
+        json.dumps({"web": {"client_id": "cid", "client_secret": "s"}}),
+        encoding="utf-8",
+    )
+    assert gws_auth.client_uses_loopback(config_dir) is False
+    # Desktop/installed client (with no web section): loopback is fine.
+    (config_dir / "client_secret.json").write_text(
+        json.dumps({"installed": {"client_id": "cid", "client_secret": "s"}}),
+        encoding="utf-8",
+    )
+    assert gws_auth.client_uses_loopback(config_dir) is True
+    # Missing file / no dir → True so the UI can still offer the button.
+    assert gws_auth.client_uses_loopback(tmp_path / "nope") is True
+    assert gws_auth.client_uses_loopback(None) is True
+
+
 def test_exchange_and_store_uses_injected_exchange(tmp_path: Path, monkeypatch) -> None:
     cfg = _config(tmp_path)
     config_dir = gws_auth.profile_config_dir(cfg, "personal")

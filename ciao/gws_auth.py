@@ -234,6 +234,31 @@ def load_client_secret(config_dir: Path) -> dict[str, Any]:
     return installed
 
 
+def client_uses_loopback(config_dir: Path | None) -> bool:
+    """Whether a profile's OAuth client can use the random-port loopback redirect.
+
+    ``GwsReloginManager.start`` always redirects to ``http://127.0.0.1:<port>/``.
+    Installed/desktop clients accept any loopback port, but *web* clients require
+    an exact authorized redirect URI match, so the one-click flow cannot complete
+    for them. Returns ``False`` when the client is a ``web`` app, and ``True``
+    for an ``installed``/desktop client (or when the file is absent, so the UI
+    can still offer the button before an upload).
+    """
+    if config_dir is None:
+        return True
+    secret_path = config_dir / "client_secret.json"
+    if not secret_path.is_file():
+        return True
+    try:
+        with open(secret_path, "r", encoding="utf-8") as handle:
+            secret = json.load(handle)
+    except (OSError, ValueError):
+        return True
+    # A web section (with no installed section) is the incompatible case.
+    return bool(secret.get("installed")) or not bool(secret.get("web"))
+
+
+
 # ── Consent URL + token exchange (shared by all flows) ───────────────────
 
 
