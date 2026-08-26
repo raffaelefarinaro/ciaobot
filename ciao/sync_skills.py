@@ -1053,24 +1053,31 @@ def _configured_memory_char_limit(workspace: Path) -> int | None:
     Resolution order mirrors what the server does at start (dotenv loads
     without overriding exported variables): the process environment wins,
     then this workspace's ``.env``, then ``None`` meaning "use memory_tool's
-    shipped default". Reading the dotenv here (instead of building a
-    ``CiaoConfig``, whose constructor mutates shared env state mid-sync) is
-    what keeps a standalone ``ciao sync-skills --workspace <root>`` from
-    restamping a marker that a later server start would enforce differently.
-    Unparseable values are ignored, like in :mod:`ciao.config`.
+    shipped default". The dotenv side is parsed with python-dotenv itself
+    (``dotenv_values``, which mutates nothing) so exactly the syntaxes the
+    server accepts are honoured here — ``export`` prefixes, quoting, inline
+    comments. Reading the file here (instead of building a ``CiaoConfig``,
+    whose constructor mutates shared env state mid-sync) is what keeps a
+    standalone ``ciao sync-skills --workspace <root>`` from restamping a
+    marker that a later server start would enforce differently.
+    Unparseable numeric values are ignored, falling through to the next
+    source or the shipped default.
     """
     sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
-    try:
-        dotenv = workspace / ".env"
-        if dotenv.exists():
-            for line in dotenv.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("CIAO_MEMORY_CHAR_LIMIT"):
-                    _, _, value = line.partition("=")
-                    sources.append(value.strip().strip("'\""))
-                    break
-    except OSError:
-        logger.debug("memory: could not read %s/.env", workspace, exc_info=True)
+    dotenv = workspace / ".env"
+    if dotenv.exists():
+        try:
+            from dotenv import dotenv_values
+
+            values = dotenv_values(dotenv) or {}
+        except Exception:  # noqa: BLE001 — advisory migration must not block sync
+            logger.debug(
+                "memory: could not parse %s for cap migration",
+                dotenv,
+                exc_info=True,
+            )
+            values = {}
+        sources.append(str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or ""))
     for raw in sources:
         if raw:
             try:

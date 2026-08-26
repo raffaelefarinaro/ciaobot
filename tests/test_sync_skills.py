@@ -114,8 +114,10 @@ def test_sync_honors_dotenv_cap_override_over_stale_stamp(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    # export prefix + quotes: valid python-dotenv syntax the server accepts
+    # and a hand-rolled line parser does not.
     (workspace / ".env").write_text(
-        "CIAO_MEMORY_CHAR_LIMIT=2200\n", encoding="utf-8"
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
     )
     monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
     guide = workspace / "CLAUDE.md"
