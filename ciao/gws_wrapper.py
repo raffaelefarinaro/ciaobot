@@ -25,7 +25,7 @@ from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
 from ciao.tool_path import login_shell_path, resolve_tool
 
 
-def _configured_workspace_root(config) -> Path:
+def _configured_workspace_root(config) -> Path | None:
     """Resolve the real workspace root when ``CiaoConfig.from_env`` cannot.
 
     When ``ciao gws`` is run from a plain terminal (no ``CIAO_WORKSPACE`` in the

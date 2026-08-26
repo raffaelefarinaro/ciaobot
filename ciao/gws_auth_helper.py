@@ -83,8 +83,8 @@ def main_entry(argv: Sequence[str] | None = None) -> int:
     workspace_root = gws_wrapper._configured_workspace_root(config) or Path(
         config.workspace_root
     )
-    config = SimpleNamespace(workspace_root=str(workspace_root))
-    config_dir = gws_auth.profile_config_dir(config, args.profile)
+    root_config: SimpleNamespace = SimpleNamespace(workspace_root=str(workspace_root))
+    config_dir = gws_auth.profile_config_dir(root_config, args.profile)
     if config_dir is None:
         print(f"Error: '{args.profile}' is not a usable profile name", file=sys.stderr)
         return 2
