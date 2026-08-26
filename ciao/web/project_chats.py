@@ -6775,6 +6775,26 @@ class ProjectChatManager:
                 logger.exception("clear_notifications_cb failed for %s", chat_id)
         return chat
 
+    def mark_unread(self, chat_id: str) -> ChatInfo | None:
+        """Mark a chat as unread on purpose ("come back to this").
+
+        Clears ``last_read_at`` so ``last_activity_at > last_read_at`` holds on
+        every device, and publishes `chat_unread` so other tabs/devices raise
+        their badge. Opening the chat (or sending a turn) marks it read again
+        through the normal paths.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        chat.last_read_at = ""
+        self._save()
+        self._events.publish({
+            "type": "chat_unread",
+            "chat_id": chat_id,
+            "last_read_at": "",
+        })
+        return chat
+
     def mark_all_read(self) -> list[str]:
         """Mark every non-archived unread chat as read. Returns the list of
         chat_ids that were touched. Emits one `chat_read` event per chat so

@@ -20,6 +20,14 @@
         class="toast-fix"
         @click.stop="onFix(t)"
       >{{ t.restoreDraft ? 'Restore draft' : (t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error') }}</button>
+      <a
+        v-else-if="t.linkUrl"
+        class="toast-link"
+        :href="t.linkUrl"
+        target="_blank"
+        rel="noopener noreferrer"
+        @click.stop
+      >{{ t.linkLabel || 'Open' }}</a>
       <button
         class="toast-close"
         @click.stop="onDismiss(t)"
@@ -194,6 +202,23 @@ async function onFix(toast: InAppToast) {
   cursor: pointer;
 }
 .toast-fix:hover { background: var(--error); color: var(--bg); }
+
+/* Info-toast external link (e.g. "What's new" on the update toast): a quiet
+   accent action, distinct from the error Fix button. */
+.toast-link {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  cursor: pointer;
+}
+.toast-link:hover { background: var(--accent); color: var(--bg); }
 
 .toast-title {
   font-size: var(--text-base);

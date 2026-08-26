@@ -289,6 +289,9 @@
                 <p v-if="changelog.compare_url" class="hint hint--spaced">
                   <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
                 </p>
+                <p v-if="packageStatus.source" class="hint hint--spaced">
+                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
+                </p>
               </template>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
@@ -460,6 +463,52 @@
               You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
             </p>
           </div>
+        </div>
+      </template>
+
+      <!-- NOTIFICATIONS TAB -->
+      <template v-if="currentTab === 'notifications'">
+        <div v-if="!inDesktopApp" class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">notifications</p>
+              <p class="hint">
+                Get a notification when a chat replies and the app is not focused.
+              </p>
+            </div>
+            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
+              <button
+                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
+                @click="togglePush"
+                :disabled="pushPending"
+              >
+                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
+              </button>
+            </div>
+          </div>
+          <div v-if="needsIosInstall" class="hint hint--warn">
+            On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
+          </div>
+          <div v-else-if="permissionDenied" class="hint hint--warn">
+            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
+          </div>
+          <div v-else-if="!pushSupportedFlag" class="loading">
+            Push notifications are not supported here. On macOS, install Ciaobot as an app
+            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
+          </div>
+          <template v-else>
+            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+              You're covered — the menu bar already shows a notification when a chat
+              replies and the app isn't focused. Nothing to enable.
+            </p>
+            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+              Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
+              open the exact chat (and keep working even if you quit the menu bar), install
+              Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
+              &ldquo;Add to Dock&rdquo;), then enable it here.
+            </p>
+          </template>
+          <div v-if="pushError" class="action-result">{{ pushError }}</div>
         </div>
       </template>
 

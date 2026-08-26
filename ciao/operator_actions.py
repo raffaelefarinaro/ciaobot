@@ -31,10 +31,11 @@ Contract, enforced in tests
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -76,6 +77,14 @@ class OperatorAction:
     # unreachable from the one place that mentions them.
     view_label: str = ""
     view_route: str = ""
+    # An external page this action links to (release notes, the repository).
+    # Rendered like a run button but opens a new tab; pressing it may also
+    # record the run (see the GitHub star nudge).
+    link_label: str = ""
+    link_url: str = ""
+    # A "not now" button for ask-style actions: records a suppression receipt
+    # via dismiss_action() instead of running a fix.
+    dismiss_label: str = ""
     # Unmissable and not dismissible: a precondition the install cannot get past
     # on its own. Deliberately NOT an app-wide lock — the one realistic cause is
     # an uncommitted vault, and locking the app would take away the assistant the
@@ -97,6 +106,9 @@ class OperatorAction:
             "chat_prompt": self.chat_prompt,
             "view_label": self.view_label,
             "view_route": self.view_route,
+            "link_label": self.link_label,
+            "link_url": self.link_url,
+            "dismiss_label": self.dismiss_label,
             "blocking": self.blocking,
         }
 
@@ -174,6 +186,8 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
     if not status.get("update_available"):
         return []
     latest = status.get("latest_version") or ""
+    from ciao.package_version import latest_release_redirect_url
+
     return [
         OperatorAction(
             id="package-update",
@@ -184,6 +198,8 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             f"{status.get('current_version') or 'unknown'}.",
             glyph="▲",
             workspace="",
+            link_label="Release notes",
+            link_url=latest_release_redirect_url(),
             chat_label="How to install",
             chat_prompt=(
                 f"A new Ciaobot version ({latest}) is available. The current "
@@ -191,6 +207,94 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
                 "installer; check Settings for the update, and explain how to "
                 "install it on this machine without losing data."
             ),
+        )
+    ]
+
+
+# -- GitHub star nudge ------------------------------------------------------
+
+# Promotional, so it sorts after every machine-condition tile (the strip is
+# ordered by ascending severity). A star is the cheapest way a happy user can
+# help the project, but it is an ask, not a condition — hence the receipt.
+_STAR_NUDGE_SEVERITY = 80
+# "Later" suppresses the ask for this long, then it may surface once more.
+_STAR_SNOOZE_DAYS = 30
+
+
+def _star_receipt_path(context: DetectionContext) -> Path | None:
+    runtime = context.runtime
+    if runtime is None:
+        return None
+    return Path(runtime) / "star-receipt.json"
+
+
+def _read_star_receipt(context: DetectionContext) -> dict[str, Any]:
+    path = _star_receipt_path(context)
+    if path is None:
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_star_receipt(context: DetectionContext, status: str) -> None:
+    path = _star_receipt_path(context)
+    if path is None:
+        return
+    now = context.now or datetime.now(UTC)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"status": status, "at": now.isoformat()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.exception("operator actions: could not write star receipt")
+
+
+def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
+    """A one-time ask, not a machine condition: after setup has completed, a
+    GitHub star is the cheapest way for a happy user to help the project.
+
+    Receipt-gated like every one-timer: ``starred`` silences it for good, and
+    "Later" snoozes it instead of nagging on every home visit. Bootstrap
+    installs (the first-run wizard) stay silent — the ask only makes sense
+    once there is something to be happy about.
+    """
+    config = context.config
+    if getattr(config, "bootstrap_mode", False):
+        return []
+    receipt = _read_star_receipt(context)
+    status = str(receipt.get("status", ""))
+    if status == "starred":
+        return []
+    if status == "later":
+        try:
+            at = datetime.fromisoformat(str(receipt.get("at", "")))
+        except ValueError:
+            at = None
+        now = context.now or datetime.now(UTC)
+        if at is not None and now - at < timedelta(days=_STAR_SNOOZE_DAYS):
+            return []
+    from ciao.package_version import latest_release_redirect_url
+
+    repo_url = latest_release_redirect_url().removesuffix("/releases/latest")
+    return [
+        OperatorAction(
+            id="github-star",
+            kind="github-star",
+            severity=_STAR_NUDGE_SEVERITY,
+            title="Enjoying Ciaobot?",
+            detail=(
+                "If Ciaobot is working well for you, a GitHub star helps other "
+                "developers discover it."
+            ),
+            glyph="★",
+            workspace="",
+            link_label="Star on GitHub",
+            link_url=repo_url,
+            dismiss_label="Later",
         )
     ]
 
@@ -1039,6 +1143,7 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_skill_triage_pending,
     _detect_legacy_env_ignored,
     _detect_mcp_uncomposed,
+    _detect_github_star,
 ]
 
 
@@ -1055,6 +1160,8 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
     """
     if action_id == "package-update":
         return _run_package_update(context)
+    if action_id == "github-star":
+        return _run_github_star(context)
     if action_id == "vault-vocabulary":
         return _run_vault_vocabulary(context)
     if action_id == "missed-schedules":
@@ -1064,6 +1171,30 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
     if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
         return _run_workspace_repair(context)
     raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Record a "not now" for one action id.
+
+    Same contract as :func:`run_action`: returns ``(result, summary_text)`` and
+    raises :class:`ValueError` for an unknown id. Only ask-style actions accept
+    a dismissal; a machine condition is never dismissed, only fixed.
+    """
+    if action_id == "github-star":
+        return _dismiss_github_star(context)
+    raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Record the star so the ask never surfaces again."""
+    _write_star_receipt(context, "starred")
+    return {"status": "starred"}, "Thank you!"
+
+
+def _dismiss_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Snooze the ask for a while instead of nagging on every home visit."""
+    _write_star_receipt(context, "later")
+    return {"status": "later"}, "Maybe later."
 
 
 def _run_workspace_repair(context: DetectionContext) -> tuple[dict[str, Any], str]:

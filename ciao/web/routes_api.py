@@ -2706,6 +2706,19 @@ async def chat_mark_read(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "last_read_at": chat.last_read_at})
 
 
+async def chat_mark_unread(request: Request) -> JSONResponse:
+    """Mark a chat as unread on purpose ("come back to this"). Clears the
+    server-side read stamp and emits a chat_unread event so other tabs and
+    devices raise their unread state too.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.mark_unread(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "last_read_at": chat.last_read_at})
+
+
 async def chats_mark_all_read(request: Request) -> JSONResponse:
     """Mark every unread, non-archived chat as read. Returns the affected ids."""
     pcm = request.app.state.project_chat_manager
@@ -7953,6 +7966,34 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
                 ],
             }
         )
+    actions = operator_actions.detect_actions(context)
+    return JSONResponse(
+        {
+            "ok": True,
+            "action_id": action_id,
+            "result": result,
+            "summary": summary,
+            "actions": [action.as_dict() for action in actions],
+        }
+    )
+
+
+async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
+    """Record a "not now" for one action, then re-detect and return the list.
+
+    Only ask-style actions (e.g. the GitHub star nudge) accept a dismissal; it
+    writes a suppression receipt so the tile stops surfacing for a while. The
+    response shape mirrors ``run_housekeeping_action`` so the client re-renders
+    the strip the same way. Unknown id is 404, never 500.
+    """
+    from ciao import operator_actions
+
+    action_id = request.path_params["action_id"]
+    context = _housekeeping_context(request)
+    try:
+        result, summary = operator_actions.dismiss_action(action_id, context)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     actions = operator_actions.detect_actions(context)
     return JSONResponse(
         {

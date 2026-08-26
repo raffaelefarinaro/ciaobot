@@ -820,6 +820,13 @@ async fn try_apply_pending_navigation(app: AppHandle) {
             };
             main.navigate(destination).is_ok()
         }
+        NavigationIntent::Notifications => {
+            let destination = match url_with_segments(&runtime, &["settings", "notifications"]) {
+                Ok(destination) => destination,
+                Err(_) => return,
+            };
+            main.navigate(destination).is_ok()
+        }
     };
     if applied
         && let Ok(mut pending) = app.state::<DesktopModel>().pending_navigation.lock()
@@ -1337,6 +1344,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     // prompt, so turning the toggle on has to ask for it now.
                     maybe_request_notification_permission(app, enabled);
                     let _ = refresh_tray(app);
+                }
+                "notification-settings" => {
+                    queue_navigation(app, NavigationIntent::Notifications);
                 }
                 "hide-dock-icon" => {
                     let model = app.state::<DesktopModel>();

@@ -468,6 +468,22 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('SettingsView renders the notifications card on /settings/notifications', async () => {
+    const router = makeRouter()
+    await router.push('/settings/notifications')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('notifications')
+    expect(wrapper.text()).toContain('Get a notification when a chat replies')
+    wrapper.unmount()
+  })
+
   it('SettingsView keeps subagents and commands on separate settings pages', async () => {
     const router = makeRouter()
     await router.push('/settings/subagents')
