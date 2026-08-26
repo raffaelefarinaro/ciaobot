@@ -96,7 +96,8 @@ async def test_native_title_claude_rejects_leaked_context_capsule(monkeypatch) -
     Some providers' own titlers degrade on occasion and echo the literal
     first session message back as the "title" - which carries our injected
     [CIAO_CONTEXT_BEGIN] capsule. Accepting it verbatim would leak internal
-    routing state into the sidebar.
+    routing state into the sidebar. A clean summary should still win when
+    only the custom title is contaminated.
     """
     from ciao.web import project_chats as pc
 
@@ -105,6 +106,21 @@ async def test_native_title_claude_rejects_leaked_context_capsule(monkeypatch) -
     class FakeInfo:
         custom_title = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
         summary = "Claude Summary"
+
+    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
+
+
+@pytest.mark.asyncio
+async def test_native_title_claude_rejects_leaked_context_capsule_in_both(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    leaked = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
+
+    class FakeInfo:
+        custom_title = leaked
+        summary = leaked
 
     monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None

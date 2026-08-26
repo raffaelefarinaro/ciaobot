@@ -7942,8 +7942,9 @@ class ProjectChatManager:
             session_info = get_session_info(chat.session_id, directory=str(workspace))
             if session_info is None:
                 return None
-            title = (session_info.custom_title or "").strip() or (session_info.summary or "").strip()
-            return _real_title(title)
+            custom_title = (session_info.custom_title or "").strip()
+            summary = (session_info.summary or "").strip()
+            return _real_title(custom_title) or _real_title(summary)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None
