@@ -3172,6 +3172,11 @@ const gwsRedirectUrls = ref<Record<string, string>>({})
 const gwsReloginPending = ref<Record<string, boolean>>({})
 const gwsReloginError = ref<Record<string, string>>({})
 let gwsReloginTimer: ReturnType<typeof setInterval> | null = null
+// A tick can outlast its own interval: the completed branch awaits
+// fetchGwsIntegration(), which runs a health check that shells out per profile
+// with a 30s timeout. Without this, every 2s tick in that window starts another
+// round of status polls and another concurrent health scan.
+let gwsReloginPolling = false
 
 function gwsReloginHelpUrl(): string {
   return 'https://cloud.google.com/sdk/docs/install'
@@ -3236,6 +3241,7 @@ function gwsClearRelogin(profileName: string) {
 function gwsPollRelogin(profileName: string) {
   if (gwsReloginTimer) return
   gwsReloginTimer = setInterval(async () => {
+    if (gwsReloginPolling) return
     const pending = Object.entries(gwsReloginPending.value)
       .filter(([, p]) => p)
       .map(([name]) => name)
@@ -3246,30 +3252,35 @@ function gwsPollRelogin(profileName: string) {
       }
       return
     }
-    for (const name of pending) {
-      try {
-        const status = await api.get<{ status: string; email?: string; error?: string }>(
-          `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
-        )
-        if (status.status === 'completed') {
-          gwsClearRelogin(name)
-          await fetchGwsIntegration()
-          notifySaved('Google account connected.')
-        } else if (status.status === 'error' || status.status === 'none') {
-          const msg =
-            status.error ||
-            (status.status === 'none'
-              ? 'The sign-in timed out before you finished it. Try again.'
-              : 'The sign-in failed.')
+    gwsReloginPolling = true
+    try {
+      for (const name of pending) {
+        try {
+          const status = await api.get<{ status: string; email?: string; error?: string }>(
+            `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
+          )
+          if (status.status === 'completed') {
+            gwsClearRelogin(name)
+            await fetchGwsIntegration()
+            notifySaved('Google account connected.')
+          } else if (status.status === 'error' || status.status === 'none') {
+            const msg =
+              status.error ||
+              (status.status === 'none'
+                ? 'The sign-in timed out before you finished it. Try again.'
+                : 'The sign-in failed.')
+            gwsClearRelogin(name)
+            gwsReloginError.value[name] = msg
+            await fetchGwsIntegration()
+          }
+        } catch (e) {
+          const msg = errorMessage(e, 'Could not check the sign-in status.')
           gwsClearRelogin(name)
           gwsReloginError.value[name] = msg
-          await fetchGwsIntegration()
         }
-      } catch (e) {
-        const msg = errorMessage(e, 'Could not check the sign-in status.')
-        gwsClearRelogin(name)
-        gwsReloginError.value[name] = msg
       }
+    } finally {
+      gwsReloginPolling = false
     }
   }, 2000)
 }
