@@ -31,7 +31,7 @@
   <circle cx="32" cy="114" r="6" class="dot-amber"/><text x="46" y="118" class="label">client-acme</text>
 </g>
 <rect x="26" y="132" width="170" height="38" rx="6" class="badge"/>
-<text x="34" y="146" class="mono">memory-vault/&lt;ws&gt;/</text>
+<text x="34" y="146" class="mono">&lt;ws&gt;/memory-vault/</text>
 <text x="34" y="160" class="mono">e.g. personal/</text>
 
 <!-- Arrow 1 -->

@@ -10,8 +10,8 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 **Workspace → Project → Chat.** That's the whole app.
 
-- **Workspace** — a life area (personal, work, a client). It owns a vault slice (`memory-vault/<workspace>/`), its own projects, and its default model. Switch workspaces in the sidebar — the Home lanes swap with it.
-- **Project** — a folder + doc (`projects/active/<name>/<name>.md`). Its frontmatter `description:` is injected as `[Project context: …]` into every turn, and the doc's body stays out of the prompt until the agent opens it.
+- **Workspace** — a life area (personal, work, a client). It owns its own vault (`<workspace>/memory-vault/` on a fresh install), its own projects, and its default model. Switch workspaces in the sidebar — the Home lanes swap with it.
+- **Project** — a folder + doc (`projects/active/<name>/<name>.md`) for vault-backed projects. Its frontmatter `description:` is injected as `[Project context: …]` into every turn, and the doc's body stays out of the prompt until the agent opens it. A project created from the PWA's **+ New Project** is lightweight (name + context only) until it gains a vault folder.
 - **Chat** — turns, tool calls, and file touches in one project. Fork it, delegate parallel subchats to it, or loop a prompt inside it.
 
 ![Workspace → Project → Chat hierarchy](docs/diagrams/workspace-hierarchy.svg)
@@ -43,7 +43,7 @@ For security-conscious users, download `install.sh` first, inspect it, and run i
 
 Then open `http://localhost:8443` and follow the setup wizard:
 
-- **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
+- **Workspace folder** (default `~/ciaobot`) — your second brain: one folder per workspace, each with its own `memory-vault/`, plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
 - **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
 - **Model provider** — Claude Code, opencode, or another configured backend.
 
@@ -57,24 +57,24 @@ Contributors running from a git checkout: see [docs/DEVELOPMENT.md](docs/DEVELOP
 
 Pick a workspace in the sidebar, then work inside projects. Each workspace keeps its own notes, so `personal` never pollutes `work`.
 
-1. **Pick or create a workspace** in the sidebar (personal, work, a client …). Each one gets a colour dot and owns `memory-vault/<workspace>/`.
-2. **New Project** → name it (`q4-planning`). That creates `memory-vault/<workspace>/projects/active/<name>/<name>.md` with frontmatter `name:` / `description:`.
+1. **Pick or create a workspace** in the sidebar (personal, work, a client …). Each one gets a colour dot and owns its own vault — `<workspace>/memory-vault/` on a fresh install.
+2. **New Project** → name it (`q4-planning`). This creates a lightweight project (name + context only). To give it a vault-backed folder + doc, create the folder `projects/active/<name>/<name>.md` (or let the agent scaffold it) — auto-discovery then binds the project to it and injects its `description:` as `[Project context: …]`.
 3. **Chat** inside that project — mention a name the vault knows and the agent is quietly pointed at the right note; pin a doc beside the chat and comment on any passage (it rides with your next prompt).
 4. **Archive** the chat when done → Session insights are extracted and a follow-up queue is filed.
 5. **Review proposals** under Memory → clear the queue, or let the daily/weekly curation do its pass (see [Memory that compounds (and asks)](#memory-that-compounds-and-asks)).
 
-A project completes with the PWA's **Complete** button (`projects/completed/<name>/`); restore it from the archive icon next to "+ New Project". Every workspace has an auto-created **General** project for ad-hoc chats. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full naming rules and frontmatter contract.
+A vault-backed project completes with the PWA's **Complete** button (`projects/completed/<name>/`); restore it from the archive icon next to "+ New Project". Every workspace has an auto-created **General** project for ad-hoc chats. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full naming rules and frontmatter contract.
 
 ![Vault layout per workspace](docs/diagrams/vault-layout.svg)
 
-Paths shown are `memory-vault/<workspace>/projects/active/<name>/`, `Workspace/Learnings.md`, and `INDEX.md` per workspace. `Logs/Chats/` stays global (a sibling of the workspaces). After the per-workspace re-rooting it promotes to `<install>/Logs/` without moving files.
+Paths shown are `<workspace>/memory-vault/projects/active/<name>/`, `Workspace/Learnings.md`, and `INDEX.md` per workspace. `Logs/Chats/` stays global (a sibling of the workspaces). After the per-workspace re-rooting it promotes to `<install>/Logs/` without moving files.
 
 ## Memory that compounds (and asks)
 
 Ciaobot keeps memory in layers so the agent recalls what matters without stuffing every prompt. **Settings → Context** shows what actually loads.
 
 - **Short agent memory** (fenced `ciao:memory` / `ciao:profile` in workspace `CLAUDE.md`) — a small, capped scratchpad: preferences, conventions, lessons, profile. Add `[expires: YYYY-MM-DD]` to a temporary entry; it is hidden after that date and removed on the next daily curation pass.
-- **Your vault** (`memory-vault/`, or one vault slice per workspace) — durable markdown you own. Browse in Obsidian or any editor; sync via GitHub/Drive/iCloud. A generated `INDEX.md` + `VOCABULARY.md` and the Memory Map graph come from `ciao vault-index`.
+- **Your vault** — durable markdown you own, one `memory-vault/` per workspace (`<workspace>/memory-vault/` on a fresh install). Browse in Obsidian or any editor; sync via GitHub/Drive/iCloud. A generated `INDEX.md` + `VOCABULARY.md` and the Memory Map graph come from `ciao vault-index`.
 - **One behavior file for the install** — `<workspace>/CLAUDE.md`, linked as `AGENTS.md` for shared runtime discovery.
 
 When a chat is archived, `ciao/insights.py` extracts `## Session insights`, then `ciao/memory_proposals.py` routes each fact to its destination and `ciao/project_doc_update.py` folds decisions into the canonical project doc. Track the background steps under **Settings → Automation**.

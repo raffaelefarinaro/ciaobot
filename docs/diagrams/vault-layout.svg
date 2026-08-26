@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img" aria-labelledby="title desc">
 <title id="title">Vault layout per workspace</title>
-<desc id="desc">Each workspace owns a slice under memory-vault. Paths shown for personal and work; global Logs/Chats stays outside.</desc>
+<desc id="desc">Each workspace owns its own vault under the install root. Paths shown for personal and work; global Logs/Chats stays outside.</desc>
 <style>
   .bg { fill: #f4f4fa; }
   .card { fill: #ffffff; stroke: #d2d4e3; stroke-width: 1.2; rx: 10; }
@@ -16,28 +16,31 @@
 <rect width="720" height="220" rx="12" class="bg"/>
 
 <!-- Header -->
-<text x="20" y="26" class="label label-bold">memory-vault/  (vault root)</text>
-<text x="20" y="40" class="mono-muted">~/ciaobot/memory-vault/  ·  one folder per workspace</text>
+<text x="20" y="26" class="label label-bold">~/ciaobot/  (install root)</text>
+<text x="20" y="40" class="mono-muted">one folder per workspace · each owns its own memory-vault/</text>
 
 <!-- Personal column -->
 <g>
   <rect x="16" y="52" width="330" height="156" rx="10" class="card"/>
   <rect x="24" y="60" width="314" height="24" rx="7" class="folder"/>
   <circle cx="34" cy="72" r="4" fill="#ff4d6d"/><text x="44" y="76" class="mono">personal/</text>
+  <text x="150" y="76" class="mono-muted">← workspace folder</text>
   <!-- tree -->
   <line x1="32" y1="88" x2="32" y2="196" class="tree-line"/>
+  <!-- Row: memory-vault -->
+  <rect x="44" y="92" width="286" height="24" rx="6" class="folder"/>
+  <text x="50" y="108" class="mono">memory-vault/</text><text x="150" y="108" class="mono-muted">← this workspace's vault</text>
+  <line x1="60" y1="120" x2="60" y2="196" class="tree-line"/>
   <!-- Row: INDEX.md -->
-  <rect x="44" y="92" width="170" height="18" rx="5" class="file file-pink"/>
-  <text x="50" y="104" class="mono">INDEX.md</text><text x="130" y="104" class="mono-muted">← generated index</text>
+  <rect x="72" y="124" width="170" height="18" rx="5" class="file file-pink"/>
+  <text x="78" y="136" class="mono">INDEX.md</text><text x="158" y="136" class="mono-muted">← generated index</text>
   <!-- Row: Workspace/ -->
-  <rect x="44" y="114" width="200" height="38" rx="6" class="folder"/>
-  <text x="50" y="128" class="mono">Workspace/</text>
-  <text x="50" y="142" class="mono-muted">Learnings.md · Memory-Proposals.md</text>
+  <rect x="72" y="146" width="200" height="38" rx="6" class="folder"/>
+  <text x="78" y="160" class="mono">Workspace/</text>
+  <text x="78" y="174" class="mono-muted">Learnings.md · Memory-Proposals.md</text>
   <!-- Row: projects/active -->
-  <rect x="44" y="156" width="286" height="44" rx="6" class="folder"/>
-  <text x="50" y="170" class="mono">projects/active/  &amp;  completed/</text>
-  <text x="50" y="184" class="mono-muted">q4-planning/q4-planning.md</text>
-  <text x="50" y="196" class="mono-muted">trip-2026/trip-2026.md</text>
+  <rect x="72" y="188" width="258" height="20" rx="6" class="folder"/>
+  <text x="78" y="202" class="mono">projects/active/  &amp;  completed/</text>
 </g>
 
 <!-- Work column -->
@@ -45,18 +48,20 @@
   <rect x="368" y="52" width="336" height="156" rx="10" class="card"/>
   <rect x="376" y="60" width="320" height="24" rx="7" class="folder"/>
   <circle cx="386" cy="72" r="4" fill="#06b6d4"/><text x="396" y="76" class="mono">work/</text>
+  <text x="502" y="76" class="mono-muted">← workspace folder</text>
   <line x1="384" y1="88" x2="384" y2="196" class="tree-line"/>
-  <rect x="396" y="92" width="170" height="18" rx="5" class="file file-pink"/>
-  <text x="402" y="104" class="mono">INDEX.md</text><text x="482" y="104" class="mono-muted">← per-root after re-root</text>
-  <rect x="396" y="114" width="200" height="38" rx="6" class="folder"/>
-  <text x="402" y="128" class="mono">Workspace/</text>
-  <text x="402" y="142" class="mono-muted">Learnings.md · …</text>
-  <rect x="396" y="156" width="292" height="44" rx="6" class="folder"/>
-  <text x="402" y="170" class="mono">projects/active/  &amp;  completed/</text>
-  <text x="402" y="184" class="mono-muted">client-acme/client-acme.md</text>
-  <text x="402" y="196" class="mono-muted">general/general.md</text>
+  <rect x="396" y="92" width="292" height="24" rx="6" class="folder"/>
+  <text x="402" y="108" class="mono">memory-vault/</text><text x="502" y="108" class="mono-muted">← this workspace's vault</text>
+  <line x1="412" y1="120" x2="412" y2="196" class="tree-line"/>
+  <rect x="424" y="124" width="170" height="18" rx="5" class="file file-pink"/>
+  <text x="430" y="136" class="mono">INDEX.md</text><text x="510" y="136" class="mono-muted">← per-root index</text>
+  <rect x="424" y="146" width="200" height="38" rx="6" class="folder"/>
+  <text x="430" y="160" class="mono">Workspace/</text>
+  <text x="430" y="174" class="mono-muted">Learnings.md · …</text>
+  <rect x="424" y="188" width="264" height="20" rx="6" class="folder"/>
+  <text x="430" y="202" class="mono">projects/active/  &amp;  completed/</text>
 </g>
 
 <!-- Footer note global Logs -->
-<text x="20" y="218" class="mono-muted">Logs/Chats/ is global (sibling of workspaces before re-root, &lt;install&gt;/Logs/ after) — not inside any workspace.</text>
+<text x="20" y="218" class="mono-muted">Logs/Chats/ is global (&lt;install&gt;/Logs/) — a sibling of the workspace folders, not inside any one of them.</text>
 </svg>
