@@ -1250,8 +1250,14 @@ function expirationInfo(entry: string): { expired: boolean; malformed: boolean }
   if (!m) return { expired: false, malformed: hasPrefix }
   const raw = m[1].trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { expired: false, malformed: true }
-  const d = new Date(raw + 'T00:00:00')
-  if (Number.isNaN(d.getTime())) return { expired: false, malformed: true }
+  // Reject impossible dates (e.g. 2026-02-30): JS normalizes them to a later
+  // day, so Number.isNaN alone would report them as valid. Round-trip the
+  // parsed year/month/day back to the original string to agree with the
+  // backend validator, which rejects these as malformed.
+  const [y, mo, da] = raw.split('-').map(Number)
+  const d = new Date(y, mo - 1, da)
+  const roundTrips = d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da
+  if (!roundTrips) return { expired: false, malformed: true }
   const today = new Date(); today.setHours(0,0,0,0)
   return { expired: d < today, malformed: false }
 }
@@ -1294,9 +1300,18 @@ async function fetchGuide(): Promise<void> {
   const seq = ++guideFetchSeq
   guideLoading.value = true
   guideError.value = ''
-  // Workspace-relative fetch: the server anchors to the active workspace root.
-  // Try CLAUDE.md first, then AGENTS.md (which is often a symlink to it).
-  for (const candidate of ['CLAUDE.md', 'AGENTS.md']) {
+  // After the workspace re-root migration each guide lives under
+  // `<workspace>/CLAUDE.md`, so a bare basename would let /api/workspace-file's
+  // fuzzy lookup silently resolve to the lexicographically-first workspace's
+  // guide. Try the workspace-qualified path first (retained for Open/Discuss/
+  // pin), then fall back to the bare basename for installs that have not
+  // re-rooted (guide still at the install root).
+  const ws = store.activeWorkspace
+  const candidates = [
+    `${ws}/CLAUDE.md`, `${ws}/AGENTS.md`,
+    'CLAUDE.md', 'AGENTS.md',
+  ]
+  for (const candidate of candidates) {
     try {
       const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
       if (seq !== guideFetchSeq) return
@@ -3352,6 +3367,13 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   cursor: pointer;
   font-family: var(--font);
+  /* Touch-safe hit area: the visible 3px/8px padding is too small to tap
+     reliably on the mobile sidebar, so guarantee a 44px minimum target. */
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .guide-card-btn:disabled { opacity: 0.5; cursor: default; }
 .guide-card-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }

@@ -288,8 +288,15 @@ function safeSetDetailWidth(v: number) {
 }
 const detailWidth = ref(safeGetDetailWidth())
 const isDraggingDetail = ref(false)
+// The inline grid-template-columns would otherwise outrank the
+// `@media (max-width: 900px)` rule that restores a single full-width column
+// (and hides the panel). Only apply the persisted width above the desktop
+// breakpoint so a phone never reserves a 220-560px column for a hidden panel.
+const isNarrow = ref(window.innerWidth <= 900)
+function onResizeNarrow() { isNarrow.value = window.innerWidth <= 900 }
+if (typeof window !== 'undefined') window.addEventListener('resize', onResizeNarrow)
 const detailBodyStyle = computed(() => {
-  if (!mm.selectedNode) return undefined
+  if (!mm.selectedNode || isNarrow.value) return undefined
   return { gridTemplateColumns: `1fr ${detailWidth.value}px` } as Record<string, string>
 })
 let detailDragStartX = 0
@@ -1402,6 +1409,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('mousemove', handleDetailDrag)
   window.removeEventListener('mouseup', stopDetailDrag)
+  window.removeEventListener('resize', onResizeNarrow)
   document.body.classList.remove('is-dragging-layout')
 })
 </script>
