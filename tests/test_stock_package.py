@@ -97,7 +97,14 @@ def test_stock_curation_prompt_files_discovered_bounded_facts() -> None:
         if entry["schedule_id"] == "system-memory-curation"
     )
 
-    assert "ciao memory-proposal-add --kind memory --source <chat title>" in prompt
+    assert (
+        'ciao memory-proposal-add --kind memory --source "<chat title>"' in prompt
+    )
+    # The fact travels by file, never as a shell argument: transcript text
+    # routinely carries $(), backticks, or quotes that a copied command line
+    # would interpolate.
+    assert "--text-file <fact-file>" in prompt
+    assert "--source <chat title>" not in prompt
     assert "no review path" in prompt
     assert "dedupes" in prompt
 

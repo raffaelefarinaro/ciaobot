@@ -32,6 +32,7 @@ queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -481,7 +482,7 @@ def append_proposals(
     else:
         existing = _STUB_HEADER
 
-    already = _existing_proposal_texts(existing)
+    already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
     fresh = [p for p in proposals if p.text.strip() not in already]
     if not fresh:
         return None
@@ -505,6 +506,60 @@ def _existing_proposal_texts(file_text: str) -> set[str]:
         m = _BULLET_RE.match(line)
         if m:
             out.add(m.group(1).strip())
+    return out
+
+
+_DISMISSED_LOG_SUFFIX = ".dismissed.log"
+
+
+def dismissed_log_path(proposals_path: Path) -> Path:
+    """Sidecar that holds the texts of already-decided proposals."""
+    return proposals_path.with_suffix(_DISMISSED_LOG_SUFFIX)
+
+
+def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+    """Record a decided proposal so the queue stops re-asking about it.
+
+    ``append_proposals`` dedupes against bullets still in the queue file, so
+    removing a dismissed row erases the only evidence of the decision: the
+    next curator pass that re-reads the same transcript would re-file the
+    fact verbatim. The decision therefore has to outlive the row itself, in
+    a sidecar this module owns rather than in the outcomes ledger (which
+    counts by kind and is trimmed).
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    log_path = dismissed_log_path(proposals_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "dismissed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "kind": kind,
+        "text": cleaned,
+    }
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return True
+
+
+def _dismissed_texts(proposals_path: Path) -> set[str]:
+    """Texts of previously decided proposals, from the sidecar log."""
+    try:
+        raw = dismissed_log_path(proposals_path).read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    out: set[str] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        text = str(entry.get("text", "")).strip()
+        if text:
+            out.add(text)
     return out
 
 
@@ -714,14 +769,15 @@ def list_proposals(
 def remove_proposal_by_substring(
     proposals_path: Path,
     needle: str,
-) -> str | None:
+) -> tuple[str, str] | None:
     """Remove the single proposal whose bullet matches ``needle``.
 
     Matches a unique substring case-insensitively across the pending bullets
     (the same contract the removed MCP resolve tool used). Returns the removed
-    bullet's kind, or None when the file is missing or no match exists. An
-    ambiguous match (more than one) is left unresolved and returns None so
-    the caller can ask for a longer substring.
+    bullet's ``(kind, text)`` so the caller can record the decision, or None
+    when the file is missing or no match exists. An ambiguous match (more
+    than one) is left unresolved and returns None so the caller can ask for a
+    longer substring.
     """
     from ciao.proposal_kinds import parse_bullet
 
@@ -740,9 +796,11 @@ def remove_proposal_by_substring(
     if len(candidates) != 1:
         return None
     bullet = parse_bullet(lines[candidates[0]])
+    if bullet is None:
+        return None
     del lines[candidates[0]]
     proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return bullet.kind if bullet is not None else None
+    return bullet.kind, bullet.text
 
 
 def dismiss_proposal_by_substring(

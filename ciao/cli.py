@@ -2307,8 +2307,22 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     """
     from ciao.memory_proposals import DESTINATIONS, MemoryProposal, append_proposals
 
-    _, vault = _resolve_workspace_and_vault(args)
-    text = args.text.strip()
+    workspace, vault = _resolve_workspace_and_vault(args)
+    text_file = (getattr(args, "text_file", "") or "").strip()
+    text = (args.text or "").strip()
+    if text and text_file:
+        print(
+            "pass the fact either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        fact_path = Path(text_file)
+        try:
+            text = fact_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
     if not text:
         print("a proposal text is required", file=sys.stderr)
         return 2
@@ -2319,11 +2333,22 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    payload = args.payload.strip()
+    if kind in {"people", "project"} and not payload:
+        # The PWA accept handlers refuse these bullets ("the bullet names no
+        # person" / "...no project doc"), so queueing one would create a row
+        # nobody can ever promote.
+        print(
+            f"kind {kind!r} requires a --payload naming its target "
+            "(person name for people, doc path for project)",
+            file=sys.stderr,
+        )
+        return 2
     proposal = MemoryProposal(
         target=kind,
         text=text,
         source_section=args.source.strip() or "curation",
-        payload=args.payload.strip(),
+        payload=payload,
     )
     path = append_proposals([proposal], vault)
     if args.json:
@@ -2333,7 +2358,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "duplicate": path is None,
                 "path": str(path) if path else None,
                 "text": text,
-                "workspace": args.workspace or "",
+                # argparse supplies a Path when --workspace is explicit, and
+                # json.dump cannot serialize one; report the resolved root.
+                "workspace": str(workspace),
             },
             sys.stdout,
             ensure_ascii=False,
@@ -2356,7 +2383,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     substring.
     """
     from ciao import proposal_outcomes
-    from ciao.memory_proposals import remove_proposal_by_substring
+    from ciao.memory_proposals import record_dismissal, remove_proposal_by_substring
 
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
@@ -2364,14 +2391,19 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
-    kind = remove_proposal_by_substring(path, needle)
-    if kind is None:
+    removed = remove_proposal_by_substring(path, needle)
+    if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
             "(the text may be ambiguous or absent).",
             file=sys.stderr,
         )
         return 1
+    kind, removed_text = removed
+    # Preserve what was decided, not just that something was: append-time
+    # dedupe consults this history, so without it the next curator pass that
+    # re-reads the same transcript re-files the fact the user just rejected.
+    record_dismissal(path, text=removed_text, kind=kind)
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
     # a .runtime beside the shell. Precedence: explicit --runtime-root, then
@@ -2397,7 +2429,10 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             via="agent",
         )
     if args.json:
-        json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
+        json.dump(
+            {"removed": True, "text": needle, "workspace": str(workspace)},
+            sys.stdout,
+        )
         sys.stdout.write("\n")
     else:
         verb = "Promoted" if args.promoted else "Dismissed"
@@ -3489,7 +3524,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposal_add_parser.add_argument(
         "text",
-        help="The durable fact to queue.",
+        nargs="?",
+        default="",
+        help="The durable fact to queue. Omit when --text-file supplies it.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--text-file",
+        default="",
+        help=(
+            "Read the fact verbatim from this file instead of the positional "
+            "text. Transcript-derived facts routinely contain $(), backticks, "
+            "or quotes; writing them to a file first keeps the shell from "
+            "interpreting them before the CLI sees them."
+        ),
     )
     memory_proposal_add_parser.add_argument(
         "--kind",
@@ -3502,7 +3549,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposal_add_parser.add_argument(
         "--payload",
         default="",
-        help="Kind payload: person name for people, doc path for project.",
+        help=(
+            "Kind payload: person name for people, doc path for project. "
+            "Required for those two kinds."
+        ),
     )
     memory_proposal_add_parser.add_argument(
         "--source",

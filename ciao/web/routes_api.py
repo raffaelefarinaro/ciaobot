@@ -7845,6 +7845,15 @@ async def proposal_action(request: Request) -> JSONResponse:
                 kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
             )
         return JSONResponse({"ok": True, "result": result})
+    if removed_ours and action == "dismiss":
+        # Preserve the decided row's text: append-time dedupe consults this
+        # history, so without it the nightly curator re-files the fact the
+        # operator just rejected while its transcript is still recent.
+        from ciao.memory_proposals import record_dismissal
+
+        record_dismissal(
+            queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+        )
     if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
         proposal_outcomes.record(
             kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",

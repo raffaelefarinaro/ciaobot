@@ -730,3 +730,151 @@ def test_add_command_rejects_an_unknown_kind(tmp_path: Path) -> None:
     assert not (
         tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
     ).exists()
+
+
+def test_add_command_requires_payload_for_addressed_kinds(tmp_path: Path) -> None:
+    """`people`/`project` without a payload would queue an unroutable bullet.
+
+    The PWA accept handlers refuse such rows ("the bullet names no person" /
+    "the bullet names no project doc"), so a successful CLI invocation must
+    not be able to create one.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    for kind in ("people", "project"):
+        exit_code = _memory_proposal_add_command(
+            _add_args(tmp_path, kind=kind, payload="")
+        )
+
+        assert exit_code == 2, kind
+        assert not (
+            tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+        ).exists()
+
+    # Naming the target unblocks both kinds.
+    assert (
+        _memory_proposal_add_command(
+            _add_args(tmp_path, kind="people", payload="Mo Salah")
+        )
+        == 0
+    )
+
+
+def test_add_command_json_serializes_an_explicit_workspace(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--json with an explicit --workspace emits parseable JSON.
+
+    argparse supplies the workspace as a Path, which json.dump refuses to
+    serialize; the command reports the resolved root instead so a caller
+    never sees a TypeError after the queue was already modified.
+    """
+    import json as json_module
+
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, json=True, workspace=tmp_path)
+    )
+
+    assert exit_code == 0
+    payload = json_module.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+    assert payload["workspace"] == str(tmp_path)
+
+
+def test_add_command_queues_verbatim_text_from_file(tmp_path: Path) -> None:
+    """A fact filed via --text-file lands byte-for-byte, shell hazards and all.
+
+    The curator reads transcripts full of `$(...)`, backticks, `$VARS`, and
+    quotes. Passing such text as a shell argument executes or mangles it;
+    the file path is the non-interpolated input route, so what reaches the
+    queue must equal what the agent wrote.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    hazardous = (
+        'Deploy tag is "$(cat VERSION)" on `runner-2`; $CI_ENV says "staging"'
+    )
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text(hazardous + "\n", encoding="utf-8")
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["text"] == hazardous
+
+
+def test_add_command_rejects_ambiguous_fact_inputs(tmp_path: Path) -> None:
+    """Both or neither of text/--text-file is a usage error, not a guess."""
+    from ciao.cli import _memory_proposal_add_command
+
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text("A fact.", encoding="utf-8")
+
+    both = _memory_proposal_add_command(
+        _add_args(tmp_path, text="A fact.", text_file=str(fact_file))
+    )
+    neither = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file="")
+    )
+    missing = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(tmp_path / "absent.txt"))
+    )
+
+    assert both == neither == missing == 2
+    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_dismissed_facts_are_not_refiled_by_the_next_run(tmp_path: Path) -> None:
+    """A dismissal outlives its row: dedupe consults the decision history.
+
+    Removing the bullet is not enough — the nightly run re-reads the same
+    transcript while it counts as recent and would re-file identical text,
+    resurrecting a decision the user already made.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    text = "The release train freezes every second Tuesday."
+    assert _memory_proposal_add_command(_add_args(tmp_path, text=text)) == 0
+
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    removed = mp.remove_proposal_by_substring(queue, "release train")
+    assert removed is not None
+    kind, removed_text = removed
+    mp.record_dismissal(queue, text=removed_text, kind=kind)
+
+    # The next nightly pass re-files what the transcript still supports.
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path, text=text))
+
+    assert exit_code == 0
+    assert mp.list_proposals(queue) == []
+    log = queue.with_suffix(".dismissed.log")
+    assert "release train" in log.read_text(encoding="utf-8")
+
+
+def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
+    """Blank decisions record nothing; unreadable sidecar lines never crash."""
+    from ciao.cli import _memory_proposal_add_command
+    from ciao.memory_proposals import dismissed_log_path
+
+    assert _memory_proposal_add_command(_add_args(tmp_path)) == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+
+    assert mp.record_dismissal(queue, text="   ") is False
+
+    log = dismissed_log_path(queue)
+    log.write_text("{not json}\n\n", encoding="utf-8")
+    assert mp._dismissed_texts(queue) == set()
+    # A well-formed entry alongside junk still contributes its text.
+    log.write_text(
+        '{not json}\n{"text": "kept fact", "kind": "memory"}\n',
+        encoding="utf-8",
+    )
+    assert mp._dismissed_texts(queue) == {"kept fact"}

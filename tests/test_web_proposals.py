@@ -136,6 +136,37 @@ def test_ids_are_stable_across_calls(tmp_path: Path) -> None:
     assert first == second
 
 
+def test_dismiss_preserves_the_text_for_append_dedupe(tmp_path: Path) -> None:
+    """A PWA dismissal must stop the nightly curator from re-filing the fact.
+
+    The curator re-reads the same recent transcripts every night; dedupe
+    against live bullets alone forgets the decision the moment the row is
+    dropped, so the sidecar has to carry the rejected text.
+    """
+    from ciao.memory_proposals import append_proposals, dismissed_log_path
+    from ciao.memory_proposals import MemoryProposal
+
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    row = next(r for r in rows if r["text"].startswith("Remember the lesson"))
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss")
+    assert resp.status_code == 200
+
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert row["text"] in dismissed_log_path(queue).read_text(encoding="utf-8")
+
+    # The nightly pass finds the same fact and tries again: refused as a dupe.
+    assert (
+        append_proposals(
+            [MemoryProposal(target="memory", text=row["text"], source_section="curation")],
+            config.workspace_vault_root("personal"),
+        )
+        is None
+    )
+
+
 def test_ids_survive_another_row_being_removed(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
     client = _client(config)
