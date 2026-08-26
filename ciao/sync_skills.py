@@ -1158,8 +1158,21 @@ def _config_for_root(root: Path):
     candidates = [root.parent, root] if root.parent != root else [root]
     best: tuple[int, object] | None = None
     for candidate in candidates:
-        env = dict(os.environ)
+        # `from_env` only loads <root>/.env when its argument is None, but this
+        # caller runs from an arbitrary cwd and must see the target install's
+        # env (CIAO_RUNTIME_ROOT, CIAO_WORKSPACES, GWS_PROFILE, …), so read it
+        # into an isolated mapping exactly the way from_env's None path does.
+        env: dict[str, str] = {k: v for k, v in os.environ.items()}
         env["CIAO_WORKSPACE"] = str(candidate)
+        dotenv_path = Path(candidate) / ".env"
+        if dotenv_path.is_file():
+            try:
+                from dotenv import dotenv_values
+                for key, value in (dotenv_values(dotenv_path) or {}).items():
+                    if value is not None and key not in env:
+                        env[key] = value
+            except Exception:  # noqa: BLE001 — env loading must not block sync
+                logger.debug("sync: could not load %s", dotenv_path, exc_info=True)
         try:
             config = CiaoConfig.from_env(env)
         except Exception:
