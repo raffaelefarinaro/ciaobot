@@ -524,7 +524,21 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
         [f"Durable lesson {index}: " + "x" * 380 for index in range(6)],
     )
 
-    for name in ("CIAO_WORKSPACES", "CIAO_VAULT_ROOT", "CIAO_WORKSPACE"):
+    # _memory_audit_command reads the whole process environment, and several
+    # code paths under test elsewhere (_load_env_file, from_env()'s dotenv
+    # load, the setup wizard) write os.environ directly, so leaks survive
+    # their tests. Anything that redirects the audit — a runtime root holding
+    # a workspaces.json, raised caps — flips this test's outcome, so scrub
+    # every variable it consumes instead of just the workspace trio.
+    for name in (
+        "CIAO_WORKSPACES",
+        "CIAO_VAULT_ROOT",
+        "CIAO_WORKSPACE",
+        "CIAO_VAULT_MODE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_MEMORY_CHAR_LIMIT",
+        "CIAO_USER_CHAR_LIMIT",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     exit_code = _memory_audit_command(
