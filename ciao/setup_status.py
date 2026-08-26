@@ -298,6 +298,30 @@ def _discover_claude_system_skills_uncached() -> list[str]:
     return sorted(skills)
 
 
+def _usable_mcps_cache(ws_key: str) -> tuple[tuple[str, ...], bool] | None:
+    """Return ``(names, fresh)`` for a cache entry usable for ``ws_key``.
+
+    An entry stamped with a superseded generation belongs to a probe that
+    started before ``clear_claude_discovery_cache`` and therefore describes
+    pre-clear configuration. Reporting it as absent (rather than merely stale)
+    keeps Verify's forced-refresh contract: the caller re-probes instead of
+    serving the answer the user just invalidated.
+    """
+    cached = _claude_mcps_cache
+    if (
+        cached is None
+        or cached[1] != ws_key
+        or cached[3] != _claude_mcps_generation
+    ):
+        return None
+    ttl = (
+        _CLAUDE_DISCOVERY_TTL_SECONDS
+        if cached[2]
+        else _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS
+    )
+    return cached[2], (time.monotonic() - cached[0] < ttl)
+
+
 def discover_claude_mcps(
     workspace_root: Path | str | None = None,
     *,
@@ -318,24 +342,13 @@ def discover_claude_mcps(
     because they usually mean the probe timed out, not that nothing is connected.
     """
     global _claude_mcps_cache
-    now = time.monotonic()
     ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
-    cached = _claude_mcps_cache
-    ttl = (
-        _CLAUDE_DISCOVERY_TTL_SECONDS
-        if cached is not None and cached[2]
-        else _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS
-    )
-    fresh = (
-        cached is not None
-        and now - cached[0] < ttl
-        and cached[1] == ws_key
-        and cached[3] == _claude_mcps_generation
-    )
-    if cached is not None and cached[1] == ws_key:
+    entry = _usable_mcps_cache(ws_key)
+    if entry is not None:
+        names, fresh = entry
         if not fresh:
             _refresh_claude_mcps_async(ws_key, config_path)
-        return list(cached[2])
+        return list(names)
 
     # Single-flight: the startup warm-up, the stale-TTL background refresh, or
     # another request thread may already be paying for the probe. Wait for it
@@ -350,6 +363,14 @@ def discover_claude_mcps(
     while True:
         inflight = _acquire_mcps_probe()
         if inflight is not None:
+            # Ownership can also fall to us because the previous owner just
+            # finished. Re-check before probing: otherwise the narrow window
+            # between a failed acquire and this one turns a completed probe
+            # into a duplicate full health pass.
+            entry = _usable_mcps_cache(ws_key)
+            if entry is not None and entry[1]:
+                _release_mcps_probe(inflight)
+                return list(entry[0])
             break
         with _claude_mcps_lock:
             running = _claude_mcps_inflight
@@ -358,13 +379,9 @@ def discover_claude_mcps(
             # loop to serve its freshly stamped cache or take over.
             continue
         running.wait()
-        cached = _claude_mcps_cache
-        if (
-            cached is not None
-            and cached[1] == ws_key
-            and cached[3] == _claude_mcps_generation
-        ):
-            return list(cached[2])
+        entry = _usable_mcps_cache(ws_key)
+        if entry is not None and entry[1]:
+            return list(entry[0])
 
     probe_generation = _claude_mcps_generation
     try:
