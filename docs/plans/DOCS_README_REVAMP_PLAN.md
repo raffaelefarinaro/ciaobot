@@ -6,7 +6,7 @@
 - Current checkpoint: C0
 - Next action: User review of Markdown + HTML companion; approve direction before file edits
 - Blocker: none
-- Implementation repository: /Users/raffaelefarinaro/repos/ciaobot
+- Implementation repository: raffaelefarinaro/ciaobot
 - Generated plan output: docs/plans/DOCS_README_REVAMP_PLAN.md
 - Visual companions: docs/plans/DOCS_README_REVAMP_PLAN.html (interactive before/after + diagrams)
 - Verified on: 2026-08-24 against README.md:1-254, docs/ARCHITECTURE.md:1-414, ciao/config.py:22-47, ciao/execution_modes.py:1-58, ciao/providers/claude.py:540-543, CHANGELOG.md:699-704

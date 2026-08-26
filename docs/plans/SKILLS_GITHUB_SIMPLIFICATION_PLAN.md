@@ -7,7 +7,7 @@
 - Next action: Review plan and HTML companion, decide on zip validation scope and migration message
 - Blocker: none
 - Note (2026-08-25): still unimplemented — `ciao/skills_sync.py`, `scripts/skills_add.py`, and the `auto_update_github_skills` config/routes surface are all present. Written before the Codex provider removal (`9ab168ee`); where it mentions Codex projection in `sync_skills.py`, read that as the surviving claude/opencode projection.
-- Implementation repository: /Users/raffaelefarinaro/repos/ciaobot
+- Implementation repository: raffaelefarinaro/ciaobot
 - Generated plan output: docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.md
 - Visual companions: docs/plans/SKILLS_GITHUB_SIMPLIFICATION_PLAN.html (side-by-side Settings before/after)
 - Verified on: 2026-08-23 against ciao/sync_skills.py:319, ciao/skills_sync.py:1, ciao/skills_inventory.py:15, ciao/config.py:477, ciao/web/routes_api.py:981/6686, web/src/components/SettingsView.vue:1481, scripts/skills_add.py:1, ciao/stock/skills (29), tests/test_sync_skills.py:340

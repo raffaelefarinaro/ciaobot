@@ -23,7 +23,7 @@ Two things make this heavy but faithful: the embedded runtime is rebuilt (it pip
 ### 1. Preflight
 
 ```bash
-cd /Users/raffaelefarinaro/repos/ciaobot
+cd <path to your ciaobot checkout>
 git switch develop
 git pull --ff-only
 git status --short   # must be clean, or stop and ask
