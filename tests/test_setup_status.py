@@ -909,6 +909,7 @@ def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path
     from ciao import setup_status
 
     setup_status.clear_claude_discovery_cache()
+    monkeypatch.setattr(setup_status, "_claude_mcps_inflight", None)
     calls = {"n": 0}
     config = tmp_path / ".claude.json"
     config.write_text(
@@ -1003,7 +1004,9 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     assert calls == {"clear": 1, "payload": 2}
 
 
-def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -> None:
+def test_discover_claude_system_skills_filters_enabled_and_caches(
+    monkeypatch, tmp_path
+) -> None:
     from ciao import setup_status
 
     setup_status.clear_claude_discovery_cache()
@@ -1017,6 +1020,7 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -
             "  Status: ✘ disabled\n"
         )
         stderr = ""
+        returncode = 0
 
     def fake_run(*_args, **_kwargs):
         calls["n"] += 1
@@ -1024,10 +1028,109 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -
 
     monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
     monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: tmp_path / "absent"
+    )
 
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert calls["n"] == 1
+
+
+def test_discover_claude_system_skills_merges_standalone_skills(
+    monkeypatch, tmp_path
+) -> None:
+    """Standalone ~/.claude/skills entries show up alongside enabled plugins.
+
+    `claude plugin list` only knows about plugins, so a user with a hand-installed
+    skill directory would otherwise never see it on the Providers tab.
+    """
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    class FakeResult:
+        stdout = "❯ skill-creator@claude-plugins-official\n  Status: ✔ enabled\n"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(
+        setup_status.subprocess, "run", lambda *_a, **_k: FakeResult()
+    )
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "ego-browser").mkdir(parents=True)
+    (skills_dir / "note-taking.md").write_text("---\n---\n", encoding="utf-8")
+    (skills_dir / "ignored.txt").write_text("not a skill", encoding="utf-8")
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+
+    assert setup_status.discover_claude_system_skills() == [
+        "ego-browser",
+        "note-taking",
+        "skill-creator",
+    ]
+
+
+def test_discover_claude_system_skills_falls_back_to_installed_plugins(
+    monkeypatch, tmp_path
+) -> None:
+    """With no CLI and no standalone skills, installed plugins still surface."""
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: tmp_path / "absent"
+    )
+
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"legacy-plugin@source": {}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert setup_status.discover_claude_system_skills() == ["legacy-plugin"]
+
+
+def test_discover_claude_system_skills_falls_back_when_cli_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """A failed `claude plugin list` must not hide installed plugins.
+
+    Fallback eligibility tracks CLI success, not the merged result: otherwise
+    one standalone skill would suppress the installed_plugins recovery whenever
+    the CLI transiently fails or times out.
+    """
+    import subprocess as _subprocess
+
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    def boom(*_args, **_kwargs):
+        raise _subprocess.TimeoutExpired(cmd="claude plugin list", timeout=8)
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", boom)
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "ego-browser").mkdir(parents=True)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"legacy-plugin@source": {}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert setup_status.discover_claude_system_skills() == [
+        "ego-browser",
+        "legacy-plugin",
+    ]
 
 
 # ── Claude MCP discovery cache ──────────────────────────────────────────
@@ -1054,6 +1157,7 @@ def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch)
     monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_discovery)
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     # First call has nothing to serve, so it waits.
     assert ss.discover_claude_mcps(None) == ["mcp-1"]
@@ -1061,9 +1165,11 @@ def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch)
 
     # Expire the entry; the next call must return the stale value immediately
     # rather than paying the discovery again.
-    stamp, ws_key, value = ss._claude_mcps_cache
+    stamp, ws_key, value, gen = ss._claude_mcps_cache
     monkeypatch.setattr(
-        ss, "_claude_mcps_cache", (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value)
+        ss,
+        "_claude_mcps_cache",
+        (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value, gen),
     )
     assert ss.discover_claude_mcps(None) == ["mcp-1"]
 
@@ -1084,7 +1190,403 @@ def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
     )
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     ss.discover_claude_mcps(None)
     ss.discover_claude_mcps(None)
     assert len(calls) == 1, "a fresh entry must not spawn a discovery"
+
+
+# An empty discovery usually means the health pass timed out, not that nothing
+# is connected, so it must expire fast instead of poisoning the tab for the
+# full five-minute success TTL.
+
+
+def test_a_fresh_empty_mcp_cache_serves_without_refresh(monkeypatch):
+    from ciao import setup_status as ss
+
+    calls = []
+    monkeypatch.setattr(
+        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or []
+    )
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    assert ss.discover_claude_mcps(None) == []
+    assert ss.discover_claude_mcps(None) == []
+    assert len(calls) == 1, "a fresh (empty) entry must not spawn a discovery"
+
+
+def test_an_empty_mcp_cache_expires_fast_and_recovers(monkeypatch):
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    done = threading.Event()
+
+    def discovery(**kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            done.set()
+        return [] if len(calls) == 1 else ["recovered"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", discovery)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    assert ss.discover_claude_mcps(None) == []
+    assert calls == [1]
+
+    # Age the entry past the empty TTL but well short of the success TTL: the
+    # stale empty list still serves instantly, but a refresh must kick off.
+    stamp, ws_key, value, gen = ss._claude_mcps_cache
+    assert value == ()
+    aged = stamp - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", (aged, ws_key, value, gen))
+
+    assert ss.discover_claude_mcps(None) == []
+    assert done.wait(timeout=5), "empty cache must re-discover in the background"
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_cache[2] != ("recovered",) and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_cache[2] == ("recovered",)
+
+
+def test_warm_claude_discovery_cache_populates_both_caches(monkeypatch, tmp_path):
+    import time
+
+    from ciao import setup_status as ss
+
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+    monkeypatch.setattr(ss, "_claude_skills_cache", None)
+    seen = []
+
+    def fake_mcps(workspace_root=None, **kwargs):
+        seen.append(("mcps", workspace_root))
+        return ["Airtable"]
+
+    def fake_skills():
+        seen.append(("skills", None))
+        return ["skill-creator"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", fake_mcps)
+    monkeypatch.setattr(ss, "_discover_claude_system_skills_uncached", fake_skills)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    deadline = time.monotonic() + 5
+    while len(seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ("mcps", tmp_path) in seen
+    assert ("skills", None) in seen
+    assert ss._claude_mcps_cache is not None
+    assert ss._claude_mcps_cache[2] == ("Airtable",)
+    assert ss._claude_skills_cache is not None
+    assert ss._claude_skills_cache[1] == ("skill-creator",)
+
+
+def test_requests_wait_for_an_in_flight_warmup(monkeypatch, tmp_path):
+    """A request arriving mid-warm-up reuses the probe instead of stacking one.
+
+    The warm-up thread and the request path must share a single
+    `claude mcp list` run: otherwise a Providers visit right after startup
+    blocks for another full health pass and pays for a duplicate probe.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Airtable"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    # Wait until the warm-up thread owns the in-flight probe.
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "a second probe must not start mid-warm-up"
+
+    release.set()
+    assert request_done.wait(timeout=5), "request never served"
+    waiter.join(timeout=5)
+    assert results == [["Airtable"]]
+    assert len(calls) == 1, "request must reuse the warm-up probe"
+
+
+def test_clear_preserves_an_in_flight_probe(monkeypatch, tmp_path):
+    """Verify's cache bust must not unregister a still-running warm-up probe.
+
+    Clearing only the cached values keeps the single-flight registration: the
+    next payload waits for the in-flight probe instead of claiming ownership
+    and stacking a second blocking `claude mcp list`.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Airtable"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    ss.clear_claude_discovery_cache()
+    assert ss._claude_mcps_inflight is not None, "clear dropped an active probe"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "clear must not let a second probe start"
+
+    release.set()
+    assert request_done.wait(timeout=5), "request never served"
+    waiter.join(timeout=5)
+    # The surviving probe started pre-clear, so its result is generation-stamped
+    # stale: the waiter re-probes rather than serving it — but only after the
+    # first probe fully finished (never two probes at once).
+    assert results == [["Airtable"]]
+    assert len(calls) == 2
+
+
+def test_verify_reprobes_after_waiting_out_a_preclear_probe(monkeypatch, tmp_path):
+    """A probe that started before Verify's bust must not be served or kept.
+
+    The startup warm-up may still be running when the user changes a connector
+    and clicks Verify. The cache clear preserves the in-flight probe, but its
+    result reflects pre-change configuration: the waiter must discard it,
+    re-probe with current configuration (without overlapping the old run),
+    and cache only the fresh result.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def probe(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            release.wait(timeout=5)
+            return ["Stale"]
+        return ["Fresh"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    ss.clear_claude_discovery_cache()
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "no probe may overlap the in-flight one"
+
+    release.set()
+    assert request_done.wait(timeout=5), "waiter never re-probed"
+    waiter.join(timeout=5)
+    assert results == [["Fresh"]], "pre-clear result must not be served"
+    assert len(calls) == 2, "waiter must re-probe after the invalidated result"
+
+    # Only the fresh result may be cached, and it must serve without a re-probe.
+    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
+    assert len(calls) == 2
+
+
+def test_stale_refresh_joins_the_single_flight(monkeypatch, tmp_path):
+    """The empty-TTL background refresh must register as the active probe.
+
+    Otherwise a Verify bust during the refresh claims ownership and stacks a
+    second concurrent `claude mcp list` racing the background cache write.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Refreshed"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    # Seed a cache entry the refresh path will treat as expired-empty.
+    stamp = _time.monotonic() - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
+    monkeypatch.setattr(
+        ss,
+        "_claude_mcps_cache",
+        (stamp, str(tmp_path), (), ss._claude_mcps_generation),
+    )
+
+    assert ss.discover_claude_mcps(tmp_path) == []
+
+    deadline = _time.monotonic() + 5
+    while len(calls) < 1 and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "expired-empty entry must start the background refresh"
+
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_inflight is None and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_inflight is not None, "refresh never joined single-flight"
+
+    # A Verify-style bust + payload during the refresh must wait, not re-probe.
+    ss.clear_claude_discovery_cache()
+    assert ss._claude_mcps_inflight is not None
+
+    results: list[list[str]] = []
+    request_done = threading.Event()
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "payload must not stack a probe on the refresh"
+
+    release.set()
+    assert request_done.wait(timeout=5), "payload never served"
+    waiter.join(timeout=5)
+    # The refresh's result was stamped pre-clear (old generation), so the
+    # payload discards it and re-probes with the current generation.
+    assert results == [["Refreshed"]]
+    assert len(calls) == 2
+
+
+def test_waiter_reacquires_ownership_when_warmup_targets_another_root(
+    monkeypatch, tmp_path
+):
+    """A waiter never starts a probe while another is in flight.
+
+    If the in-flight warm-up finishes without a usable entry for the waiter's
+    workspace root (here: a different root), the waiter loops and reacquires
+    ownership instead of running a duplicate probe alongside it.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    other_root = tmp_path.parent / "other-ws-root"
+    other_root.mkdir()
+
+    calls: list[object] = []
+    order: list[str] = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def probe(workspace_root=None, **kwargs):
+        calls.append(workspace_root)
+        if workspace_root == other_root:
+            order.append("request-start")
+            return ["Other"]
+        order.append("warmup-start")
+        release.wait(timeout=5)
+        order.append("warmup-end")
+        return ["Warm"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert order == ["warmup-start"], "warm-up probe never started"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(other_root))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert calls == [tmp_path], "waiter must not probe while warm-up owns"
+
+    release.set()
+    assert request_done.wait(timeout=5), "waiter never reacquired ownership"
+    waiter.join(timeout=5)
+    assert results == [["Other"]]
+    assert order == ["warmup-start", "warmup-end", "request-start"], (
+        "request probe must start only after the warm-up finished"
+    )
+    assert calls == [tmp_path, other_root]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -337,12 +336,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     async def check_claude_code():
         try:
-            # Use the bundled Claude Code CLI (the same binary the provider
-            # spawns) rather than a bare ``claude`` on PATH: under launchd
-            # PATH omits ~/.local/bin, and the canonical CLI is the SDK's
-            # bundled one anyway.
+            # Prefer the SDK's bundled Claude CLI when present; otherwise fall
+            # back to an external ``claude`` resolved against the login-shell
+            # PATH, since launchd omits ~/.local/bin and other tool dirs.
             from ciao.providers.claude import get_bundled_claude_path
-            cli = get_bundled_claude_path() or shutil.which("claude")
+            from ciao.tool_path import resolve_tool
+            cli = get_bundled_claude_path() or resolve_tool("claude")
             if not cli:
                 tracker.fail(
                     "connect_claude_code",

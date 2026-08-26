@@ -893,31 +893,32 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
         assert entry.description, f"{entry.schedule_id} missing a description"
 
 
-def test_curation_never_writes_a_bounded_region(tmp_path: Path) -> None:
-    """Per-workspace curation runs must not write the bounded regions.
+def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> None:
+    """Curation may consolidate bounded regions, but never promote into them.
 
-    Each run already targets its own workspace's vault and its own agent-root
-    guide, so the old leak argument ("one CLAUDE.md serves every workspace") no
-    longer holds — but an unattended promotion would still rewrite what every
-    session of that workspace loads with nobody reviewing the judgement, so
-    cross-project facts stay queued for the user either way.
+    An unattended promotion would rewrite what every session of the workspace
+    loads with nobody reviewing the judgement, so cross-project facts stay
+    queued for the user. Consolidation of existing entries used to be banned
+    too, which dead-ended over-cap regions at "needs a human pass"; it is now
+    allowed behind two guardrails: every removal is logged to the undo file,
+    and uncertain removals become [review] yes/no questions instead.
     """
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
     prompt = entry.prompt
-    # Option B: no region writes from this routine, in either layout.
-    assert "Do not edit the bounded" in prompt
+    # Promotion stays forbidden; consolidation is required when needed.
+    assert "Do not promote new facts into the bounded" in prompt
+    assert "consolidate that region now" in prompt
+    # Guardrail 1: nothing is dropped without an undo log entry.
+    assert "Workspace/Memory-Consolidations.md" in prompt
+    assert "undo log" in prompt
+    # Guardrail 2: judgment calls become reviewable questions, not deletions.
+    assert "[review] Keep" in prompt
+    assert "Memory-Proposals.md" in prompt
     assert "memory_status" in prompt
-    assert "agent root" in prompt
-    assert (
-        "Leave cross-project facts in the proposals queue for the user to promote"
-        in prompt
-    )
-    # No layout conditional survives: neither layout may be written.
-    assert "you may promote" not in prompt
-    assert "shared install root" not in prompt
-    assert "one `CLAUDE.md` serves every workspace" not in prompt
+    # The old blanket ban must be gone, or the two instructions cancel out.
+    assert "Do not edit the bounded" not in prompt
 
 
 def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:

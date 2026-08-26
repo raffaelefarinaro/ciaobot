@@ -507,8 +507,8 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
 ) -> None:
     """Over-cap findings must name the region and the actions that shrink it.
 
-    The nightly curator may not edit regions, so its report is the only thing
-    the user sees; "over cap" without a fix reads as a dead end.
+    The report is the only surface many users see; "over cap" without a fix
+    reads as a dead end.
     """
     import argparse
 
@@ -521,7 +521,7 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     write_region(
         guide,
         "memory",
-        [f"Durable lesson {index}: " + "x" * 380 for index in range(6)],
+        [f"Durable lesson {index}: " + "x" * 500 for index in range(7)],
     )
 
     # _memory_audit_command reads the whole process environment, and several

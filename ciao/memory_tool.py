@@ -3,7 +3,7 @@
 Two regions mirror the former ``~/.ciao/memory.md`` / ``user.md`` pair:
 
 * ``ciao:memory`` — environment facts, conventions, lessons learned.
-  Default cap: 2200 chars.
+  Default cap: 3000 chars.
 * ``ciao:profile`` — user identity, preferences, communication style.
   Default cap: 1375 chars.
 
@@ -38,7 +38,7 @@ SECTION_SEP = "§"
 """Section sign U+00A7. On its own line, separates memory entries."""
 
 
-DEFAULT_MEMORY_CHAR_LIMIT = 2200
+DEFAULT_MEMORY_CHAR_LIMIT = 3000
 """Advisory cap on the ``ciao:memory`` region (chars). Tunable via
 ``CIAO_MEMORY_CHAR_LIMIT``."""
 
@@ -610,6 +610,104 @@ def ensure_regions(guide: Path) -> list[str]:
             suffix = "\n" + suffix
         guide.write_text(text + suffix, encoding="utf-8")
     return added
+
+
+FORMER_MEMORY_CHAR_LIMIT = 2200
+"""The shipped ``ciao:memory`` default before it became
+``DEFAULT_MEMORY_CHAR_LIMIT``. Guides stamped with exactly this value are
+restamped by :func:`migrate_region_caps`; any other stamp is an intentional
+custom cap and is never touched."""
+
+_FORMER_CAPS: dict[MemoryRegion, int] = {"memory": FORMER_MEMORY_CHAR_LIMIT}
+
+
+def _explicit_memory_char_limit() -> int | None:
+    """The operator's explicit ``CIAO_MEMORY_CHAR_LIMIT``, when set and valid.
+
+    An unset or non-numeric value means "use the shipped default"; a number
+    is an intentional override that cap migration must respect.
+    """
+    raw = os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "memory: ignoring non-numeric CIAO_MEMORY_CHAR_LIMIT=%r", raw
+        )
+        return None
+
+
+def migrate_region_caps(
+    guide: Path,
+    *,
+    char_limit: int | None = None,
+) -> list[str]:
+    """Restamp region markers carrying a known shipped default cap.
+
+    ``ensure_regions`` never rewrites existing markers, so guides can end up
+    advertising a cap number the runtime does not enforce: a pre-3000 guide
+    still says ``cap=2200``, and a freshly seeded guide says ``cap=3000``
+    even when an explicit limit overrides the shipped default. Any marker
+    whose cap is a KNOWN shipped default (the former or the current one) is
+    restamped to the EFFECTIVE limit so the guide advertises what the runtime
+    actually enforces: ``char_limit`` when the caller resolved configuration (including
+    a workspace ``.env``, which this module cannot see), else an explicit
+    ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
+    default. Any other marker value is an intentional custom cap and is never
+    touched. Idempotent; returns the list of regions restamped. Never creates
+    the guide or any region, and holds the guide lock across
+    read-modify-write so it cannot discard a concurrent
+    ``memory_update``/``write_region``.
+    """
+    if not guide.exists():
+        return []
+    override = char_limit if char_limit is not None else (
+        _explicit_memory_char_limit()
+    )
+    lock = _guide_lock(guide)
+    try:
+        try:
+            text = guide.read_text(encoding="utf-8")
+        except OSError:
+            logger.exception("memory: failed to read %s for cap migration", guide)
+            return []
+
+        updated = text
+        restamped: list[str] = []
+        for region, former in _FORMER_CAPS.items():
+            shipped_current = _REGION_FACTS[region][1]
+            effective = (
+                override if override is not None else shipped_current
+            )
+            candidates = sorted({former, shipped_current} - {effective})
+            if not candidates:
+                continue
+            pattern = re.compile(
+                rf"(<!--\s*ciao:{region}:start\s+cap=)(?:{'|'.join(str(c) for c in candidates)})(\s*-->)"
+            )
+            new_text, count = pattern.subn(
+                rf"\g<1>{effective}\g<2>", updated
+            )
+            if count:
+                updated = new_text
+                restamped.append(region)
+
+        if restamped and updated != text:
+            try:
+                _write_text_atomically(guide, updated)
+            except OSError:
+                logger.exception(
+                    "memory: failed to write %s for cap migration", guide
+                )
+                return []
+        return restamped
+    finally:
+        import fcntl
+
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
 def load_legacy_entries(path: Path) -> list[str]:

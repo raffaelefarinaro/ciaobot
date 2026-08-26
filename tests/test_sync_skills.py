@@ -73,6 +73,102 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     assert result.custom_installed == 1
 
 
+def test_sync_restamps_stale_cap_markers(tmp_path: Path) -> None:
+    """Sync migrates a former-default cap stamp to the shipped default."""
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    stamped = re.sub(
+        r"(<!-- ciao:memory:start cap=)\d+( -->)",
+        r"\g<1>2200\g<2>",
+        guide.read_text(encoding="utf-8"),
+    )
+    guide.write_text(stamped, encoding="utf-8")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = guide.read_text(encoding="utf-8")
+    assert "cap=2200" not in text
+    assert "<!-- ciao:memory:start cap=3000 -->" in text
+
+
+def test_sync_honors_dotenv_cap_override_over_stale_stamp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A limit that lives only in <root>/.env must win over the stamp.
+
+    Standalone sync never loads the dotenv, so without reading it here a
+    `CIAO_MEMORY_CHAR_LIMIT=2200` override would be restamped to 3000 and a
+    later server start would enforce 2200 against a guide advertising 3000.
+    """
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # export prefix + quotes: valid python-dotenv syntax the server accepts
+    # and a hand-rolled line parser does not.
+    (workspace / ".env").write_text(
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    stamped = re.sub(
+        r"(<!-- ciao:memory:start cap=)\d+( -->)",
+        r"\g<1>2200\g<2>",
+        guide.read_text(encoding="utf-8"),
+    )
+    guide.write_text(stamped, encoding="utf-8")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    # The .env override says 2200: the marker is already correct and
+    # must be left byte-identical.
+    assert guide.read_text(encoding="utf-8") == stamped
+
+
+def test_sync_reads_install_dotenv_for_nested_agent_root(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Setup scaffolds per-workspace agent roots under an install root whose
+    ``.env`` sits one level up and is never exported; the walk-up must find
+    it or a freshly seeded 3000 stamp gets left contradicting the enforced
+    2200.
+    """
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    install = tmp_path / "install"
+    workspace = install / "personal"
+    workspace.mkdir(parents=True)
+    (install / ".env").write_text(
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    # Fresh seeding stamped the shipped default; effective limit is 2200.
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=2200 -->" in text
+    assert re.search(r"ciao:memory:start cap=3000", text) is None
+
+
 def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     canonical = workspace / ".agents" / "skills" / "upstream"

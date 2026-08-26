@@ -221,9 +221,9 @@ def auth_command(*, device_auth: bool = False) -> list[str]:
 
     ``device_auth`` has no Claude equivalent and is ignored.
     """
-    import shutil
+    from ciao.tool_path import resolve_tool
 
-    binary = get_bundled_claude_path() or shutil.which("claude")
+    binary = get_bundled_claude_path() or resolve_tool("claude")
     if not binary:
         raise FileNotFoundError("Claude CLI not found")
     return [binary, "login"]
@@ -507,10 +507,11 @@ class ClaudeProvider(BaseSDKProvider):
             return self._client
 
         resume_session = self._validated_resume_session(request.resume_session)
-        system_cli = get_bundled_claude_path()
+        from ciao.tool_path import resolve_tool
+        system_cli = get_bundled_claude_path() or resolve_tool("claude")
         if not system_cli:
-            raise FileNotFoundError("Bundled Claude Code CLI not found in the installed claude-agent-sdk package.")
-        logger.info("Using bundled Claude Code CLI: %s", system_cli)
+            raise FileNotFoundError("Claude Code CLI not found (no bundled binary and not on the login-shell PATH).")
+        logger.info("Using Claude Code CLI: %s", system_cli)
 
 
         system_prompt = system_prompt_payload(

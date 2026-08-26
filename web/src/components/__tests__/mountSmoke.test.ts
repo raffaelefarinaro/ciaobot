@@ -756,7 +756,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows the OpenAI voice key without provider protocol labels', async () => {
+  it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -767,11 +767,12 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const voiceKeyRow = wrapper.findAll('.credential-row')
-      .find((row) => row.text().includes('OpenAI voice API key'))
-    expect(voiceKeyRow).toBeTruthy()
-    expect(voiceKeyRow!.text()).toContain('cloud transcription and speech')
-    expect(voiceKeyRow!.find('input[type="password"]').exists()).toBe(true)
+    // Provider auth goes through each CLI (`ciao auth <provider>`), so the old
+    // key-entry rows and Save Keys button are gone — even if a stale payload
+    // still advertises key metadata.
+    expect(wrapper.text()).not.toContain('OpenAI voice API key')
+    expect(wrapper.findAll('input[type="password"]').length).toBe(0)
+    expect(wrapper.text()).not.toContain('Save Keys')
     expect(wrapper.text()).not.toContain('Agent SDK ready')
     expect(wrapper.text()).not.toContain('app-server protocol compatible')
     expect(wrapper.text()).not.toContain('connection and protocol')

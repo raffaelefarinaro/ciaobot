@@ -256,15 +256,14 @@ def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
 def test_format_audit_markdown_over_cap_names_the_fix(tmp_path: Path) -> None:
     """An over-cap line must arrive with the actions that shrink the region.
 
-    The nightly curator is forbidden from editing regions, so its report used
-    to dead-end at "needs a human consolidation pass". The rendered audit has
-    to carry the fix instead of assuming the reader knows the ritual.
+    The rendered audit has to carry the fix instead of assuming the reader
+    knows the consolidation ritual.
     """
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(
         tmp_path / "CLAUDE.md",
         memory=[
-            f"Durable lesson {index}: " + "x" * 380 for index in range(6)
+            f"Durable lesson {index}: " + "x" * 500 for index in range(7)
         ],
         profile=["Raffa prefers plain, factual notes."],
     )

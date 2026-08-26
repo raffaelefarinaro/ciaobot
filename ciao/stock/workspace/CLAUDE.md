@@ -25,7 +25,7 @@ When helping diagnose Ciaobot or prepare a GitHub issue, use sanitized excerpts 
 
 If the user asks what Ciaobot can customize, start with `CIAO_CUSTOMIZATION.md`.
 
-<!-- ciao:memory:start cap=2200 -->
+<!-- ciao:memory:start cap=3000 -->
 ## Agent memory
 
 <!-- ciao:memory:end -->

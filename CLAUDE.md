@@ -40,7 +40,7 @@ Use plain, factual engineering notes in commits and pull requests.
 - This helps maintain a continuous loop of improvements for the open-source repository.
 
 
-<!-- ciao:memory:start cap=2200 -->
+<!-- ciao:memory:start cap=3000 -->
 ## Agent memory
 
 <!-- ciao:memory:end -->
