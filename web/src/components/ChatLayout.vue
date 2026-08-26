@@ -706,7 +706,16 @@ watch(
   () => route.params.chatId,
   (chatId) => {
     const id = chatId as string
-    if (!id) return
+    if (!id) {
+      // The sidebar's "chats" nav tab (and any other plain link to `/` or
+      // `/chat`) navigates here without going through closeChat(), so
+      // activeChatId - and the ChatPanel/keyboard-shortcut logic keyed off
+      // it - stayed on the chat the user left. Only bare chat routes mean
+      // "go home": project/settings/schedules routes deliberately leave
+      // activeChatId populated underneath them (see the Esc handler above).
+      if (viewMode.value === 'chat' && store.activeChatId) void store.closeChat()
+      return
+    }
     if (!store.chats.find(c => c.chat_id === id)) return
     if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
     else void store.markRead(id)

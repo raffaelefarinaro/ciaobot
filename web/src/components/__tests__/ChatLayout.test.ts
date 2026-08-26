@@ -297,6 +297,69 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  // Regression: the sidebar's "chats" nav tab links straight to `/` instead
+  // of calling closeChat(), so activeChatId used to stay pointed at the chat
+  // the user left. That stale id kept ChatPanel/the home-arrow shortcut
+  // gate thinking a chat was still open even though the URL said otherwise.
+  it('clears the active chat when a plain route change lands on the bare chat route', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    expect(store.activeChatId).toBe('chat-1')
+
+    // Simulates clicking the sidebar's "chats" nav-item / any plain link to
+    // `/`: a route change that never goes through closeChat().
+    await router.push('/')
+    await flushPromises()
+
+    expect(store.activeChatId).toBeNull()
+    wrapper.unmount()
+  })
+
   it('switches to the workspace matching the displayed number', async () => {
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
