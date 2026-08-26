@@ -2291,8 +2291,11 @@ export const useProjectStore = defineStore('projects', () => {
         await deleteChat(chatId, { selectNext: false, onlyIfEmpty: true })
       } finally {
         // The view is already cleared. A failed DELETE must not also strand
-        // the router on /chat/<id> with no active chat behind it.
-        await leaveChatView(wasActive)
+        // the router on /chat/<id> with no active chat behind it. But the
+        // user may have opened a different chat while the DELETE was in
+        // flight - only navigate home if nothing has claimed activeChatId
+        // since, or this would clobber that newly opened chat back to null.
+        await leaveChatView(wasActive && activeChatId.value === null)
       }
       return
     }
