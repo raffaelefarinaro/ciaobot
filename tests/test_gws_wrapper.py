@@ -75,6 +75,18 @@ def test_configured_workspace_root_trusts_explicit(tmp_path) -> None:
     assert gws_wrapper._configured_workspace_root(cfg) == tmp_path.resolve()
 
 
+def _write_plist(launch_agents, workspace) -> None:
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    (launch_agents / "com.ciao.server.plist").write_bytes(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>EnvironmentVariables</key><dict>
+<key>CIAO_WORKSPACE</key><string>{workspace}</string>
+</dict>
+</dict></plist>""".encode()
+    )
+
+
 def test_configured_workspace_root_from_plist_fallback(tmp_path, monkeypatch) -> None:
     real_root = tmp_path / "real-workspace"
     real_root.mkdir()
@@ -83,17 +95,52 @@ def test_configured_workspace_root_from_plist_fallback(tmp_path, monkeypatch) ->
     bootstrap = fake_home / ".ciao" / "bootstrap"
     # config lands on bootstrap (no CIAO_WORKSPACE in a plain terminal)
     cfg = SimpleNamespace(workspace_root=str(bootstrap))
-    launch_agents = fake_home / "Library" / "LaunchAgents"
-    launch_agents.mkdir(parents=True)
-    plist = launch_agents / "com.ciao.server.plist"
-    plist.write_bytes(
-        f"""<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>EnvironmentVariables</key><dict>
-<key>CIAO_WORKSPACE</key><string>{real_root}</string>
-</dict>
-</dict></plist>""".encode()
-    )
+    launch_agents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(launch_agents))
+    _write_plist(launch_agents, real_root)
+    assert gws_wrapper._configured_workspace_root(cfg) == real_root.resolve()
+
+
+def test_configured_workspace_root_honours_launch_agents_override(
+    tmp_path, monkeypatch,
+) -> None:
+    """The plist is read from ``CIAO_LAUNCH_AGENTS_DIR``, not a hardcoded ``~/Library``.
+
+    Harnesses redirect that directory precisely so nothing reads or writes the
+    operator's live LaunchAgent; a hardcoded path silently ignored the override.
+    """
+    real_root = tmp_path / "real-workspace"
+    real_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(fake_home))
+    # A decoy in the home-relative location must lose to the override.
+    _write_plist(fake_home / "Library" / "LaunchAgents", tmp_path / "wrong-workspace")
+    override = tmp_path / "override-agents"
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(override))
+    _write_plist(override, real_root)
+    cfg = SimpleNamespace(workspace_root=str(fake_home / ".ciao" / "bootstrap"))
+    assert gws_wrapper._configured_workspace_root(cfg) == real_root.resolve()
+
+
+def test_configured_workspace_root_detects_overridden_bootstrap(
+    tmp_path, monkeypatch,
+) -> None:
+    """A relocated bootstrap workspace must still be recognised as bootstrap.
+
+    ``CiaoConfig`` honours ``CIAO_BOOTSTRAP_WORKSPACE``; comparing against a
+    hardcoded ``~/.ciao/bootstrap`` made the wrapper trust the bootstrap dir and
+    point ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR`` at the wrong credential store.
+    """
+    real_root = tmp_path / "real-workspace"
+    real_root.mkdir()
+    bootstrap = tmp_path / "elsewhere" / "bootstrap"
+    bootstrap.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(bootstrap))
+    launch_agents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(launch_agents))
+    _write_plist(launch_agents, real_root)
+    cfg = SimpleNamespace(workspace_root=str(bootstrap))
     assert gws_wrapper._configured_workspace_root(cfg) == real_root.resolve()
 
 
