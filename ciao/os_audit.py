@@ -1652,8 +1652,14 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         for finding in memory.get("over_cap", [])[:10]:
             where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
             lines.append(
-                f"  - ⚠️ {where}{finding['region']} over cap: "
+                f"  - ⚠️ {where}ciao:{finding['region']} over cap: "
                 f"{finding['used']}/{finding['limit']} chars"
+            )
+        if memory.get("over_cap"):
+            lines.append(
+                "    Fix: open a chat in that workspace and ask the agent to "
+                "consolidate the region, or raise CIAO_MEMORY_CHAR_LIMIT / "
+                "CIAO_USER_CHAR_LIMIT in .env (restart Ciaobot to apply)."
             )
         for finding in memory.get("event_shaped_entries", [])[:5]:
             lines.append(

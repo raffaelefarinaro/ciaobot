@@ -511,7 +511,7 @@ class CiaoConfig:
     # the workspace CLAUDE.md. Loaded natively by each provider's guide
     # loader at session start; edited with Edit on the guide.
     # See ``ciao/memory_tool.py``.
-    memory_char_limit: int = 2200
+    memory_char_limit: int = 3000
     user_char_limit: int = 1375
     # Ciaobot's managed agent control plane. MCP is the only control surface;
     # the legacy CLI path survives only as a runtime degrade when the MCP
@@ -1414,7 +1414,7 @@ class CiaoConfig:
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
             memory_char_limit=int(
-                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "2200"
+                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "3000"
             ),
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"

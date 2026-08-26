@@ -7598,7 +7598,7 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
 
     region = _resolve(row.get("region") or row["kind"])
     limit = int(
-        getattr(config, "memory_char_limit", 2200)
+        getattr(config, "memory_char_limit", 3000)
         if region == "memory"
         else getattr(config, "user_char_limit", 1375)
     )

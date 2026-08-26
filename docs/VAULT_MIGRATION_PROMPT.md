@@ -88,7 +88,7 @@ on input it cannot classify, or when you want to decide the mapping yourself.
 > The bounded regions look like this and the markers must appear **exactly once**
 > per region per file:
 > ```
-> <!-- ciao:memory:start cap=2200 -->
+> <!-- ciao:memory:start cap=3000 -->
 > - a durable fact
 > <!-- ciao:memory:end -->
 > <!-- ciao:profile:start cap=1375 -->

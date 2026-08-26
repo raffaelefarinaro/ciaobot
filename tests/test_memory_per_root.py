@@ -112,8 +112,9 @@ def test_audit_reports_one_entry_per_registered_guide(tmp_path: Path) -> None:
 def test_audit_over_cap_is_attributed_per_workspace(tmp_path: Path) -> None:
     """An over-cap region names the workspace that owns it, not a global total."""
     config = _config(tmp_path)
-    # Personal is over the memory cap; work is not.
-    huge = ["x" * 2600]
+    # Personal is over the memory cap; work is not. Seeded well above the
+    # shipped default so a future default bump cannot silence this fixture.
+    huge = ["x" * 3600]
     _write_guide(config.workspace_root, memory=huge, profile=[])
     (config.workspace_root / "memory-vault" / "personal").mkdir(parents=True, exist_ok=True)
     (config.workspace_root / "memory-vault" / "work").mkdir(parents=True, exist_ok=True)

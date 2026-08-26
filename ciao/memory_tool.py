@@ -3,7 +3,7 @@
 Two regions mirror the former ``~/.ciao/memory.md`` / ``user.md`` pair:
 
 * ``ciao:memory`` — environment facts, conventions, lessons learned.
-  Default cap: 2200 chars.
+  Default cap: 3000 chars.
 * ``ciao:profile`` — user identity, preferences, communication style.
   Default cap: 1375 chars.
 
@@ -38,7 +38,7 @@ SECTION_SEP = "§"
 """Section sign U+00A7. On its own line, separates memory entries."""
 
 
-DEFAULT_MEMORY_CHAR_LIMIT = 2200
+DEFAULT_MEMORY_CHAR_LIMIT = 3000
 """Advisory cap on the ``ciao:memory`` region (chars). Tunable via
 ``CIAO_MEMORY_CHAR_LIMIT``."""
 
