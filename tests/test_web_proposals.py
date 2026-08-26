@@ -419,6 +419,42 @@ def test_dismiss_older_than_removes_old_sections(tmp_path: Path) -> None:
     rows = client.get("/api/proposals").json()["rows"]
     assert len(rows) == 1
     assert rows[0]["text"] == "A recent fact worth keeping."
+    # The sweep is a decision per row: the dedupe history must carry the
+    # swept text or the nightly curator re-files it from the same transcript.
+    from ciao.memory_proposals import dismissed_log_path
+
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    log_text = dismissed_log_path(queue).read_text(encoding="utf-8")
+    assert "An old fact about a forgotten chat." in log_text
+    assert "A recent fact worth keeping." not in log_text
+
+
+def test_batch_dismiss_records_every_row_in_the_dedupe_history(tmp_path: Path) -> None:
+    """Multi-select dismiss persists each rejected row's text, like the single route."""
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    targets = [r for r in rows if r["kind"] in {"memory", "profile"}]
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [r["id"] for r in targets]},
+    )
+    assert resp.status_code == 200
+
+    from ciao.memory_proposals import append_proposals, dismissed_log_path
+    from ciao.memory_proposals import MemoryProposal
+
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    log_text = dismissed_log_path(queue).read_text(encoding="utf-8")
+    for row in targets:
+        assert row["text"] in log_text
+        assert (
+            append_proposals(
+                [MemoryProposal(target=row["kind"], text=row["text"], source_section="curation")],
+                config.workspace_vault_root("personal"),
+            )
+            is None
+        )
 
 
 def test_the_real_app_serves_every_documented_proposal_route() -> None:

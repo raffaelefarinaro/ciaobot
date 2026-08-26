@@ -7352,6 +7352,7 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         # Swept rows are collected and recorded only AFTER the rewrite lands:
         # a failed write must not leave phantom dismissals in the tally.
         swept_kinds: list[str] = []
+        swept_texts: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
@@ -7363,10 +7364,18 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 removed += 1
                 changed = True
                 swept_kinds.append(bullet.kind)
+                swept_texts.append(bullet.text)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+            from ciao.memory_proposals import record_dismissal
+
+            for swept_kind, swept_text in zip(swept_kinds, swept_texts):
+                # Expiry is a decision too: without the text in the dedupe
+                # history, a curator pass that re-reads the same transcript
+                # re-files the fact the operator just let expire.
+                record_dismissal(queue, text=swept_text, kind=swept_kind)
             for kind in swept_kinds:
                 if proposal_outcomes.is_extraction_kind(kind):
                     proposal_outcomes.record(
@@ -7534,6 +7543,14 @@ async def proposals_batch(request: Request) -> JSONResponse:
             if pid not in removed_here or pid in recorded:
                 continue
             recorded.add(pid)
+            if action == "dismiss":
+                # Same contract as the single-row route: the decision's text
+                # must outlive the row, or the nightly curator re-files it.
+                from ciao.memory_proposals import record_dismissal
+
+                record_dismissal(
+                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                )
             if not proposal_outcomes.is_extraction_kind(row["kind"]):
                 # Not recorded: this ledger measures the MEMORY extraction
                 # pipeline. Skill proposals come from skill evolution and

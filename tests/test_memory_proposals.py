@@ -832,6 +832,39 @@ def test_add_command_rejects_ambiguous_fact_inputs(tmp_path: Path) -> None:
     assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
 
 
+def test_add_command_flattens_a_multiline_fact_file(tmp_path: Path) -> None:
+    """Embedded newlines become one single-line bullet that dedupes cleanly.
+
+    The queue is line-oriented Markdown: a raw multiline fact would parse as
+    a truncated first line, strand the continuation lines (or spawn phantom
+    bullets), and never match itself on re-filing because no parsed bullet
+    carries the full original text.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    multiline = "Deploy froze on Tuesday.\n- [memory] injected-looking line\n"
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text(multiline, encoding="utf-8")
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Deploy froze on Tuesday. - [memory] injected-looking line"
+
+    # The flattened form is what dedupe sees, so a re-file of the same file
+    # is the documented no-op rather than a second copy.
+    again = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+    assert again == 0
+    assert len(mp.list_proposals(queue)) == 1
+
+
 def test_dismissed_facts_are_not_refiled_by_the_next_run(tmp_path: Path) -> None:
     """A dismissal outlives its row: dedupe consults the decision history.
 

@@ -2326,6 +2326,11 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     if not text:
         print("a proposal text is required", file=sys.stderr)
         return 2
+    # One bullet = one line: the queue file is line-oriented Markdown, so an
+    # embedded newline would parse as a truncated bullet, strand the
+    # continuation lines, and dodge text dedupe. Flatten every whitespace run
+    # (newlines included) into a single space.
+    text = " ".join(text.split())
     kind = args.kind.strip().lower()
     if kind not in DESTINATIONS:
         print(
