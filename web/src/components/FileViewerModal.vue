@@ -71,17 +71,24 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
           </button>
+          <button
+            v-if="store.path"
+            class="btn-icon"
+            title="Discuss in chat"
+            aria-label="Discuss in chat"
+            @click="discussInChat"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          </button>
           <button class="btn-icon" @click="store.close()" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
       </header>
 
-      <!-- Tabs strip. Hidden in image mode (no diff/history makes sense for
-           binary image files). History and Diff are also disabled when the
-           viewer was opened without a chat context (e.g. clicking a path in
-           the chat trace text — those flows have no chat_id to key by). -->
-      <nav v-if="store.kind !== 'image' && store.kind !== 'pdf'" class="fv-tabs" aria-label="View mode">
+      <!-- Tabs strip. History and Diff were removed as overkill for the viewer;
+           Preview is the only reading/editing surface, Backlinks stays for markdown notes. -->
+      <nav v-if="store.kind !== 'image' && store.kind !== 'pdf' && isMarkdown" class="fv-tabs" aria-label="View mode">
         <button
           class="fv-tab"
           :class="{ active: store.tab === 'preview' }"
@@ -89,23 +96,6 @@
           type="button"
         >Preview</button>
         <button
-          class="fv-tab"
-          :class="{ active: store.tab === 'history', disabled: !store.chatId }"
-          :disabled="!store.chatId"
-          :title="store.chatId ? '' : 'Open from an inline file card to see history'"
-          @click="store.setTab('history')"
-          type="button"
-        >History<span v-if="store.snapshots.length" class="fv-tab-badge">{{ store.snapshots.length }}</span></button>
-        <button
-          class="fv-tab"
-          :class="{ active: store.tab === 'diff', disabled: !store.chatId }"
-          :disabled="!store.chatId"
-          :title="store.chatId ? '' : 'Open from an inline file card to see diff'"
-          @click="store.setTab('diff')"
-          type="button"
-        >Diff</button>
-        <button
-          v-if="isMarkdown"
           class="fv-tab"
           :class="{ active: store.tab === 'backlinks' }"
           @click="loadBacklinks"
@@ -148,60 +138,6 @@
                   {{ store.editSaving ? 'Saving…' : 'Save' }}
                 </button>
               </div>
-            </div>
-          </template>
-
-          <!-- History tab: snapshot list with action labels and Restore. -->
-          <template v-else-if="store.tab === 'history'">
-            <div v-if="store.snapshotsLoading" class="fv-loading">Loading history…</div>
-            <div v-else-if="store.snapshotsError" class="fv-error">{{ store.snapshotsError }}</div>
-            <div v-else-if="!store.snapshots.length" class="fv-empty">No snapshots yet for this file in this chat.</div>
-            <ul v-else class="fv-history-list">
-              <li
-                v-for="s in [...store.snapshots].reverse()"
-                :key="s.seq"
-                class="fv-history-item"
-              >
-                <div class="fv-history-line">
-                  <span class="fv-history-seq">#{{ s.seq }}</span>
-                  <span class="fv-history-action">{{ s.action }}</span>
-                  <span class="fv-history-tool">{{ s.tool }}</span>
-                  <span class="fv-history-ts">{{ formatHistoryTs(s.ts) }}</span>
-                </div>
-                <div class="fv-history-actions">
-                  <button class="fv-btn-sm" @click="diffAgainstSeq(s.seq)" title="Compare this snapshot with the previous one">Diff</button>
-                  <button class="fv-btn-sm" @click="restoreSeq(s.seq)" title="Write this snapshot back to disk">Restore</button>
-                </div>
-              </li>
-            </ul>
-          </template>
-
-          <!-- Diff tab: terminal-style changed lines only. -->
-          <template v-else-if="store.tab === 'diff'">
-            <div v-if="store.diffLoading" class="fv-loading">Loading diff…</div>
-            <div v-else-if="store.diffError" class="fv-error">{{ store.diffError }}</div>
-            <div v-else-if="!store.snapshots.length" class="fv-empty">No snapshots yet for this file in this chat.</div>
-            <div v-else class="fv-diff-shell">
-              <div class="fv-diff-picker">
-                <label class="fv-diff-label">From
-                  <select v-model.number="store.diffSeqA" @change="store.setDiffSeqs(Number(store.diffSeqA), Number(store.diffSeqB))">
-                    <option v-for="s in store.snapshots" :key="`a-${s.seq}`" :value="s.seq">#{{ s.seq }} {{ s.action }} {{ formatHistoryTs(s.ts) }}</option>
-                  </select>
-                </label>
-                <span class="fv-diff-arrow">→</span>
-                <label class="fv-diff-label">To
-                  <select v-model.number="store.diffSeqB" @change="store.setDiffSeqs(Number(store.diffSeqA), Number(store.diffSeqB))">
-                    <option :value="0">current on disk</option>
-                    <option v-for="s in store.snapshots" :key="`b-${s.seq}`" :value="s.seq">#{{ s.seq }} {{ s.action }} {{ formatHistoryTs(s.ts) }}</option>
-                  </select>
-                </label>
-              </div>
-              <pre class="fv-diff-pre"><code><span
-                v-for="(line, i) in diffLines"
-                :key="i"
-                :class="['fv-diff-line', `fv-diff-${line.kind}`]"
-              >{{ diffPrefix(line.kind) }}{{ line.text }}
-</span></code></pre>
             </div>
           </template>
 
@@ -394,9 +330,7 @@ import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
-import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
-import { askConfirm } from '../lib/confirm'
 import { useFileComments } from '../composables/useFileComments'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -444,20 +378,6 @@ const canEdit = computed(() => {
   return store.kind === 'text'
 })
 
-// History tab timestamp formatting. Snapshots store ISO 8601; we want a
-// short local form: "May 18, 14:32".
-function formatHistoryTs(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
 interface BacklinkItem {
   path: string
   title: string
@@ -503,41 +423,6 @@ watch(
     loadingBacklinks.value = false
   },
 )
-
-// Click Diff next to a snapshot row in History: compares it with the
-// snapshot immediately before it (or the only snapshot vs current on disk
-// when there's just one).
-async function diffAgainstSeq(seq: number): Promise<void> {
-  const snaps = store.snapshots
-  const idx = snaps.findIndex((s: { seq: number }) => s.seq === seq)
-  let a = 0, b = seq
-  if (idx > 0) {
-    a = snaps[idx - 1].seq
-  } else {
-    // First snapshot: diff against current on-disk content. 0 is the
-    // sentinel for "current" in the store's _fetchSeq path.
-    a = seq
-    b = 0
-  }
-  await store.setTab('diff')
-  await store.setDiffSeqs(a, b)
-}
-
-async function restoreSeq(seq: number): Promise<void> {
-  if (!await askConfirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`, {
-    title: 'Restore snapshot',
-    confirmLabel: 'Restore',
-    destructive: true,
-  })) return
-  const ok = await store.restoreSnapshot(seq)
-  if (!ok) projectsStore.pushErrorToast('Restore failed', `Could not restore snapshot #${seq}. See network console for details.`)
-}
-
-const diffLines = computed(() => createTerminalDiffLines(store.diffContentA, store.diffContentB))
-
-function diffPrefix(kind: TerminalDiffKind): string {
-  return terminalDiffPrefix(kind)
-}
 
 // Split frontmatter off so the body renders cleanly and the metadata card
 // at the top can show key fields as pills/chips. Mirrors PinnedFilePanel.
@@ -1262,6 +1147,21 @@ async function openExternally(): Promise<void> {
   }
   openExternalState.value = ''
   projectsStore.pushErrorToast('Could not open file', result.error)
+}
+
+async function discussInChat(): Promise<void> {
+  const path = store.path
+  if (!path) return
+  const ws = projectsStore.activeWorkspace
+  const general = projectsStore.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
+  if (!general) { projectsStore.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
+  const title = `Discuss ${path.split('/').pop() || path}`
+  const seed = `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
+  try {
+    const chat = await projectsStore.createChat(general.project_id, title, seed)
+    projectsStore.pinFile(chat.chat_id, path)
+    await store.close(true)
+  } catch (e) { projectsStore.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e)) }
 }
 
 // Download the currently-open file. For images we hand the browser the
