@@ -135,6 +135,73 @@ def test_migrate_region_caps_is_idempotent_and_tolerates_absence(
     assert not absent.exists()
 
 
+def test_migrate_region_caps_respects_explicit_override(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """An explicit CIAO_MEMORY_CHAR_LIMIT=2200 is a choice, not a stale stamp.
+
+    Restamping the marker to 3000 while the runtime enforces 2200 would
+    recreate the guide/runtime disagreement this migration exists to remove,
+    and every sync would do it again.
+    """
+    guide = tmp_path / "CLAUDE.md"
+    original = (
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:end -->\n"
+    )
+    guide.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
+
+    assert mt.migrate_region_caps(guide) == []
+    assert guide.read_text(encoding="utf-8") == original
+
+
+def test_migrate_region_caps_stamps_explicit_override_value(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """With an explicit non-default limit, the stamp follows that limit.
+
+    The guide must advertise the cap the runtime actually enforces, whatever
+    its source; a leftover former-default stamp is still drift.
+    """
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "5000")
+
+    assert mt.migrate_region_caps(guide) == ["memory"]
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=5000 -->" in text
+    assert "cap=2200" not in text
+
+
+def test_migrate_region_caps_ignores_nonnumeric_override(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A garbage env value falls back to the shipped default, like config."""
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "lots")
+
+    assert mt.migrate_region_caps(guide) == ["memory"]
+    assert "<!-- ciao:memory:start cap=3000 -->" in guide.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_read_and_write_region(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     mt.write_region(guide, "memory", ["alpha", "beta"])

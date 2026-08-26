@@ -621,44 +621,82 @@ custom cap and is never touched."""
 _FORMER_CAPS: dict[MemoryRegion, int] = {"memory": FORMER_MEMORY_CHAR_LIMIT}
 
 
+def _explicit_memory_char_limit() -> int | None:
+    """The operator's explicit ``CIAO_MEMORY_CHAR_LIMIT``, when set and valid.
+
+    An unset or non-numeric value means "use the shipped default"; a number
+    is an intentional override that cap migration must respect.
+    """
+    raw = os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "memory: ignoring non-numeric CIAO_MEMORY_CHAR_LIMIT=%r", raw
+        )
+        return None
+
+
 def migrate_region_caps(guide: Path) -> list[str]:
     """Restamp region markers still carrying a former shipped default cap.
 
     ``ensure_regions`` never rewrites existing markers, so a guide installed
     before a default-cap change would advertise the old number to every agent
     and operator while the runtime enforces the new one. Only markers whose
-    cap equals the recorded former default are rewritten. Idempotent; returns
-    the list of regions restamped. Never creates the guide or any region.
+    cap equals the recorded former default are rewritten; they are restamped
+    to the EFFECTIVE limit — the shipped default, unless the operator set an
+    explicit ``CIAO_MEMORY_CHAR_LIMIT``, in which case stamping anything else
+    would recreate the very disagreement this migration removes. Any other
+    marker value is an intentional custom cap and is never touched.
+    Idempotent; returns the list of regions restamped. Never creates the
+    guide or any region, and holds the guide lock across read-modify-write so
+    it cannot discard a concurrent ``memory_update``/``write_region``.
     """
     if not guide.exists():
         return []
+    override = _explicit_memory_char_limit()
+    lock = _guide_lock(guide)
     try:
-        text = guide.read_text(encoding="utf-8")
-    except OSError:
-        logger.exception("memory: failed to read %s for cap migration", guide)
-        return []
-
-    updated = text
-    restamped: list[str] = []
-    for region, former in _FORMER_CAPS.items():
-        current = _REGION_FACTS[region][1]
-        if former == current:
-            continue
-        pattern = re.compile(
-            rf"(<!--\s*ciao:{region}:start\s+cap=){former}(\s*-->)"
-        )
-        new_text, count = pattern.subn(rf"\g<1>{current}\g<2>", updated)
-        if count:
-            updated = new_text
-            restamped.append(region)
-
-    if restamped and updated != text:
         try:
-            _write_text_atomically(guide, updated)
+            text = guide.read_text(encoding="utf-8")
         except OSError:
-            logger.exception("memory: failed to write %s for cap migration", guide)
+            logger.exception("memory: failed to read %s for cap migration", guide)
             return []
-    return restamped
+
+        updated = text
+        restamped: list[str] = []
+        for region, former in _FORMER_CAPS.items():
+            effective = (
+                override if override is not None else _REGION_FACTS[region][1]
+            )
+            if former == effective:
+                continue
+            pattern = re.compile(
+                rf"(<!--\s*ciao:{region}:start\s+cap=){former}(\s*-->)"
+            )
+            new_text, count = pattern.subn(
+                rf"\g<1>{effective}\g<2>", updated
+            )
+            if count:
+                updated = new_text
+                restamped.append(region)
+
+        if restamped and updated != text:
+            try:
+                _write_text_atomically(guide, updated)
+            except OSError:
+                logger.exception(
+                    "memory: failed to write %s for cap migration", guide
+                )
+                return []
+        return restamped
+    finally:
+        import fcntl
+
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
 def load_legacy_entries(path: Path) -> list[str]:
