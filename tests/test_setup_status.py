@@ -909,6 +909,7 @@ def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path
     from ciao import setup_status
 
     setup_status.clear_claude_discovery_cache()
+    monkeypatch.setattr(setup_status, "_claude_mcps_inflight", None)
     calls = {"n": 0}
     config = tmp_path / ".claude.json"
     config.write_text(
@@ -1338,6 +1339,59 @@ def test_requests_wait_for_an_in_flight_warmup(monkeypatch, tmp_path):
     waiter.join(timeout=5)
     assert results == [["Airtable"]]
     assert len(calls) == 1, "request must reuse the warm-up probe"
+
+
+def test_clear_preserves_an_in_flight_probe(monkeypatch, tmp_path):
+    """Verify's cache bust must not unregister a still-running warm-up probe.
+
+    Clearing only the cached values keeps the single-flight registration: the
+    next payload waits for the in-flight probe instead of claiming ownership
+    and stacking a second blocking `claude mcp list`.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Airtable"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    ss.clear_claude_discovery_cache()
+    assert ss._claude_mcps_inflight is not None, "clear dropped an active probe"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "clear must not let a second probe start"
+
+    release.set()
+    assert request_done.wait(timeout=5), "request never served"
+    waiter.join(timeout=5)
+    assert results == [["Airtable"]]
+    assert len(calls) == 1, "request must reuse the probe that survived clear"
 
 
 def test_waiter_reacquires_ownership_when_warmup_targets_another_root(

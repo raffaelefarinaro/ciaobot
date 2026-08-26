@@ -64,12 +64,18 @@ def _resolve_root(raw: Any) -> Path:
 
 
 def clear_claude_discovery_cache() -> None:
-    """Drop Claude MCP/skill discovery caches (tests and forced refresh)."""
-    global _claude_mcps_cache, _claude_mcps_inflight, _claude_skills_cache
+    """Drop Claude MCP/skill discovery caches (tests and forced refresh).
+
+    An in-flight probe is deliberately left registered: the Verify endpoint
+    calls this while the startup warm-up may still be running, and
+    unregistering the probe would let the next payload claim single-flight
+    ownership and stack a second blocking ``claude mcp list``. The running
+    owner still finishes, stamps the cache, and clears the pointer itself.
+    Tests that need a clean single-flight state reset ``_claude_mcps_inflight``
+    directly.
+    """
+    global _claude_mcps_cache, _claude_skills_cache
     _claude_mcps_cache = None
-    # A still-running warm-up keeps its own event reference and only clears the
-    # global if it still owns it, so dropping the pointer here is safe.
-    _claude_mcps_inflight = None
     _claude_skills_cache = None
 
 
