@@ -10,7 +10,7 @@ metadata:
 > **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" drive <resource> <method> [flags]
+ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
 ```
 
 ## Helper Commands
@@ -38,7 +38,7 @@ scripts/gws-profile.sh "$GWS_PROFILE" drive <resource> <method> [flags]
   - `comment` — Comments on an approval. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals). This sends a notification to both the initiator and the reviewers. Additionally, a message is also added to the approval activity log.
   - `decline` — Declines an approval. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals). This is used to update the ReviewerResponse of the requesting user with a Response of `DECLINED`. This also completes the approval and sets the approval Status to `DECLINED`.
   - `get` — Gets an approval by ID. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals).
-  - `list` — Lists the approvals on a file. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals).
+  - `list` — Lists the approvals on a file. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals). By default, this method returns a minimal response that may not include the items array. To retrieve approval details, you must explicitly specify the fields you want using the `fields` query parameter. To return the exact fields you need, see [Return specific fields](https://developers.google.com/workspace/drive/api/guides/fields-parameter).
   - `reassign` — Reassigns the reviewers on an approval. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals). Adds or replaces reviewers in the ReviewerResponse of the approval. This can be called by any user with the `writer` permission on the file while the approval Status is `IN_PROGRESS` and the Response for the reviewer being reassigned is `NO_RESPONSE`.
   - `start` — Starts an approval on a file. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals).
 
@@ -129,10 +129,10 @@ Before calling any API method, inspect it:
 
 ```bash
 # Browse resources and methods
-scripts/gws-profile.sh "$GWS_PROFILE" drive --help
+ciao gws "$GWS_PROFILE" drive --help
 
 # Inspect a method's required params, types, and defaults
-scripts/gws-profile.sh "$GWS_PROFILE" schema drive.<resource>.<method>
+ciao gws "$GWS_PROFILE" schema drive.<resource>.<method>
 ```
 
 Use `gws schema` output to build your `--params` and `--json` flags.

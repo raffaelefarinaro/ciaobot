@@ -1129,7 +1129,7 @@
                           <strong>gcloud (no console needed):</strong> install the
                           <a href="https://cloud.google.com/sdk/docs/install" target="_blank" rel="noopener noreferrer">gcloud CLI</a>,
                           authenticate once, then run
-                          <code>scripts/gws-profile.sh &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
+                          <code>ciao gws &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
                         </li>
                         <li>
                           <strong>Bring your own client:</strong> in
@@ -1286,7 +1286,7 @@
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
                         First, create an OAuth client. Easiest: run
-                        <code>scripts/gws-profile.sh {{ profile.name }} auth setup</code>
+                        <code>ciao gws {{ profile.name }} auth setup</code>
                         in a terminal with the
                         <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>
                         installed — it creates the client for you. Or upload one you made in

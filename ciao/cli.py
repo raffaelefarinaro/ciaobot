@@ -21,7 +21,7 @@ from typing import cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, package_smoke, public_release, release
+from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 
@@ -3899,6 +3899,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scaffold_parser.set_defaults(func=_scaffold_command)
 
+    gws_parser = subparsers.add_parser(
+        "gws",
+        help="Profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).",
+        description=(
+            "Resolves the Google account profile and execs `gws` with the "
+            "remaining arguments, setting GOOGLE_WORKSPACE_CLI_CONFIG_DIR to "
+            "the profile's credential directory. A leading positional that is "
+            "not a gws service name is the profile; pass --profile or GWS_PROFILE "
+            "when the profile collides with a service name."
+        ),
+    )
+    gws_parser.add_argument("--profile", default=None, help="Google account profile name.")
+    gws_parser.add_argument("args", nargs=argparse.REMAINDER)
+    gws_parser.set_defaults(func=_gws_command)
+
+    gws_helper_parser = subparsers.add_parser(
+        "gws-auth-helper",
+        help="Interactive headless GWS OAuth re-auth (replaces scripts/gws-auth-helper.py).",
+    )
+    gws_helper_parser.add_argument("profile", help="GWS profile (Google account name) to authenticate")
+    gws_helper_parser.add_argument(
+        "--redirect-url",
+        help="Full redirect URL from the browser; skip the interactive prompt.",
+    )
+    gws_helper_parser.add_argument(
+        "--scopes",
+        help="Space-separated OAuth scopes to request instead of the full default set.",
+    )
+    gws_helper_parser.set_defaults(func=_gws_auth_helper_command)
+
     return parser
 
 
@@ -3917,6 +3947,26 @@ def _scaffold_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gws_command(args: argparse.Namespace) -> int:
+    from ciao import gws_wrapper
+
+    argv = ["gws"]
+    if getattr(args, "profile", None):
+        argv += ["--profile", args.profile]
+    argv += list(getattr(args, "args", []) or [])
+    return gws_wrapper.main(argv[1:])
+
+
+def _gws_auth_helper_command(args: argparse.Namespace) -> int:
+    from ciao import gws_auth_helper
+
+    argv = [args.profile]
+    if getattr(args, "redirect_url", None):
+        argv += ["--redirect-url", args.redirect_url]
+    if getattr(args, "scopes", None):
+        argv += ["--scopes", args.scopes]
+    return gws_auth_helper.main_entry(argv)
+
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
@@ -3928,6 +3978,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["gws"]:
+        # Passthrough: forward everything (including leading gws options such as
+        # `--version`) untouched, keeping argparse out of the way.
+        return gws_wrapper.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

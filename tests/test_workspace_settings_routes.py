@@ -532,7 +532,7 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     assert profiles["personal"]["configured"] is True
     assert profiles["personal"]["client_secret_present"] is True
     assert profiles["personal"]["workspaces"] == ["personal"]
-    assert profiles["personal"]["setup_command"] == "scripts/gws-profile.sh personal auth login --full"
+    assert profiles["personal"]["setup_command"] == "ciao gws personal auth login --full"
 
     assert str(personal_dir) in profiles["personal"]["config_dir"]
     # Accounts are the user's: only the connected one is listed. "work" has no
@@ -570,7 +570,7 @@ def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
     assert profiles["acme-corp"]["configured"] is False
     assert (
         profiles["acme-corp"]["setup_command"]
-        == "scripts/gws-profile.sh acme-corp auth login --full"
+        == "ciao gws acme-corp auth login --full"
     )
 
     # Adding the same account twice is a user error, not a silent duplicate.

@@ -14,7 +14,7 @@ Watch for new emails and stream them as NDJSON
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch
+ciao gws "$GWS_PROFILE" gmail +watch
 ```
 
 ## Flags
@@ -35,10 +35,10 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch --project my-gcp-project
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch --project my-project --label-ids INBOX --once
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch --subscription projects/p/subscriptions/my-sub
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +watch --project my-project --cleanup --output-dir ./emails
+ciao gws "$GWS_PROFILE" gmail +watch --project my-gcp-project
+ciao gws "$GWS_PROFILE" gmail +watch --project my-project --label-ids INBOX --once
+ciao gws "$GWS_PROFILE" gmail +watch --subscription projects/p/subscriptions/my-sub
+ciao gws "$GWS_PROFILE" gmail +watch --project my-project --cleanup --output-dir ./emails
 ```
 
 ## Tips

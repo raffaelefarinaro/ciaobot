@@ -157,7 +157,7 @@ def test_rewrite_gws_commands_only_in_code_blocks() -> None:
     text = "# gws — Shared Reference\n\n```bash\ngws gmail +triage\n```\n"
     out = gws_skills.rewrite_gws_commands(text)
     assert out.startswith("# gws — Shared Reference")
-    assert 'scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage' in out
+    assert 'ciao gws "$GWS_PROFILE" gmail +triage' in out
 
 
 def test_curate_gws_shared_replaces_auth_section() -> None:

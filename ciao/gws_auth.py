@@ -26,6 +26,7 @@ Security invariants (see issue #145):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Workspace services gws supports, so the in-process re-login flow can mint
 # tokens that cover any feature the user turns on later (Forms, Contacts, etc.)
 # without a re-consent round-trip. Keep this list in sync with
-# `FULL_SCOPES` in `scripts/gws-auth-helper.py` (both ciao and ciaobot copies).
+# `FULL_SCOPES` in the old `scripts/gws-auth-helper.py` (now `ciao/gws_auth_helper.py`).
 # Extra/enterprise services (admin-reports, keep, classroom, chat, meet) are
 # omitted because they need admin grants or extra API enablement; pass a
 # custom scope set to `GwsReloginManager.start` when one is required.
@@ -72,7 +73,7 @@ _WORK_SCOPES = _PERSONAL_SCOPES
 
 # These names are positional commands to ``gws``.  Profile slugs using one of
 # them would be indistinguishable from the service argument in
-# ``scripts/gws-profile.sh <profile> <service> ...``.
+# ``ciao gws <profile> <service> ...``.
 GWS_SERVICE_NAMES = frozenset(
     {
         "gmail",
@@ -95,6 +96,11 @@ _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
 _KEYRING_BANNER = re.compile(r"^\s*Using keyring backend:.*$", re.MULTILINE)
 
 HEALTH_CACHE_NAME = "gws_health.json"
+
+
+def fingerprint(value: str) -> str:
+    """Short irreversible digest so client_secret.json contents never hit stdout."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 # ── Path + client_secret helpers ─────────────────────────────────────────
@@ -535,10 +541,6 @@ def exchange_and_store(
 # ── Token health (cheap ``auth status`` ping) ─────────────────────────────
 
 
-def wrapper_path(config) -> Path:
-    return Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-
-
 def auth_status(
     config,
     profile: str,
@@ -546,7 +548,11 @@ def auth_status(
     timeout: float = 30.0,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> dict[str, Any]:
-    """Run ``scripts/gws-profile.sh <profile> auth status`` and parse the JSON.
+    """Run ``gws auth status`` for a profile and parse the JSON.
+
+    Computes the profile's environment in-process and invokes ``gws`` directly
+    (no bash wrapper dependency), so the check works on an installed app where
+    ``scripts/gws-profile.sh`` does not ship.
 
     Returns a dict with ``available`` (whether the check could run at all) and,
     when available, ``token_valid`` / ``token_error`` / ``has_refresh_token``.
@@ -554,17 +560,16 @@ def auth_status(
     """
     from ciao.tool_path import login_shell_path, resolve_tool
 
-    script = wrapper_path(config)
-    if not script.is_file():
-        return {"available": False, "reason": "wrapper script not found"}
     if not resolve_tool("gws"):
         return {"available": False, "reason": "gws CLI not installed"}
 
-    env = dict(os.environ)
+    env = _profile_env_for_status(config, profile)
+    if env is None:
+        return {"available": False, "reason": "invalid profile"}
     env["PATH"] = login_shell_path()
     try:
         result = runner(
-            ["bash", str(script), profile, "auth", "status"],
+            ["gws", "auth", "status"],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -590,6 +595,20 @@ def auth_status(
         "token_error": str(payload.get("token_error") or ""),
         "has_refresh_token": bool(payload.get("has_refresh_token")),
     }
+
+
+def _profile_env_for_status(config, profile: str) -> dict[str, str] | None:
+    """Environment for a profile-aware ``gws`` status check (or None if invalid)."""
+    config_dir = profile_config_dir(config, profile)
+    if config_dir is None:
+        return None
+    env = dict(os.environ)
+    env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
+    # The workspace .env stores GOOGLE_APPLICATION_CREDENTIALS as a base64 string
+    # meant for the BigQuery runner; gws expects a file path and must use its own
+    # OAuth token cache, not a service account.
+    env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    return env
 
 
 def read_health_cache(runtime_root: Path) -> dict[str, dict[str, Any]]:

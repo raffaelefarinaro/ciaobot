@@ -2,11 +2,12 @@
 
 ## Resume block
 
-- Status: proposed
-- Current checkpoint: C2 (direction set, awaiting approval)
-- Next action: get approval, then implement C6
+- Status: complete
+- Current checkpoint: C8 (closed)
+- Next action: none
 - Blocker: none
-- Implementation repository: `/Users/raffaelefarinaro/repos/ciaobot`
+- Implementation repository: this repository (`ciaobot`)
+- Implemented 2026-08-26: new `ciao/gws_wrapper.py` (`ciao gws`) and `ciao/gws_auth_helper.py` (`ciao gws-auth-helper`); `auth_status` runs `gws auth status` directly (dropped `wrapper_path`); Settings hints + `types.ts`; `gws_skills.py` rewrite rules + regenerated stock `gws-*` skills from `gws` 0.22.5; `system_prompt.md`/`secretary.md`; repo scripts are thin shims; docs + tests. Verified: focused tests pass, full `pytest tests/` 3111 passed, `cd web && npm run build` succeeded, `ciao gws auth status` runs without the wrapper.
 - Generated plan output: `docs/plans/GWS_CLI_WRAPPER_PLAN.md`
 - Visual companions: none (no spatial/UI-state question to answer)
 - Verified on: 2026-08-26 against `scripts/gws-profile.sh`, `scripts/gws-auth-helper.py`, `ciao/gws_auth.py`, `ciao/gws_skills.py`, `ciao/cli.py`, `ciao/config.py`, `ciao/web/routes_api.py`, `web/src/components/SettingsView.vue`, `ciao/system_prompt.md`, `ciao/stock/agents/secretary.md`, `INTEGRATIONS.md`, `docs/ARCHITECTURE.md`, `desktop/src-tauri/src/service.rs`, `scripts/build-bundled-runtime.sh`, `scripts/install.sh`, `tests/test_gws_auth.py`, `tests/test_gws_skills.py`, `tests/test_core_prompt.py`, `tests/test_workspace_settings_routes.py`
