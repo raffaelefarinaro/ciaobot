@@ -555,6 +555,53 @@
             <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
           </div>
 
+          <!-- Workspace guide (CLAUDE.md / AGENTS.md) — the only file every chat loads.
+               Surfaced here because the vault graph hides it (it is not a vault note)
+               yet its bounded regions budget every session. -->
+          <div class="guide-card" :class="{ 'guide-card--over': guideOverCap }">
+            <div class="guide-card-head">
+              <div class="guide-card-title">
+                <span class="guide-card-icon" aria-hidden="true">◆</span>
+                {{ guidePathLabel }}
+                <span v-if="guideOverCap" class="guide-card-badge guide-card-badge--warn" title="A bounded region is over its advisory cap">over cap</span>
+                <span v-else-if="guideLoading" class="guide-card-badge">loading…</span>
+              </div>
+              <div class="guide-card-actions">
+                <button type="button" class="guide-card-btn" :disabled="guideLoading || !!guideError" @click="openGuideFile" title="Open CLAUDE.md">Open</button>
+                <button type="button" class="guide-card-btn guide-card-btn--primary" :disabled="!canDiscussGuide" @click="discussGuide" title="Start a chat about this guide">Discuss</button>
+              </div>
+            </div>
+            <div v-if="guideError" class="guide-card-error">{{ guideError }}</div>
+            <template v-else-if="guideStats">
+              <div class="guide-card-regions">
+                <div v-for="r in guideStats.regions" :key="r.key" class="guide-region">
+                  <div class="guide-region-head">
+                    <span class="guide-region-name">{{ r.label }}</span>
+                    <span class="guide-region-count" :class="{ 'guide-region-count--warn': r.overCap }">{{ r.usedChars }} / {{ r.charLimit }} chars</span>
+                    <span class="guide-region-tokens" :title="`${r.usedChars} chars ≈ ${r.tokens} tokens`">≈ {{ r.tokens }} tokens</span>
+                  </div>
+                  <div class="guide-region-bar" :class="{ 'guide-region-bar--warn': r.overCap, 'guide-region-bar--high': !r.overCap && r.pct >= 80 }" :title="`${r.pct}% of cap`">
+                    <span :style="{ width: Math.min(100, r.pct) + '%' }"></span>
+                  </div>
+                  <div class="guide-region-meta">
+                    {{ r.entryCount }} {{ r.entryCount === 1 ? 'entry' : 'entries' }} · {{ r.pct }}%
+                    <span v-if="r.expiredCount"> · {{ r.expiredCount }} expired</span>
+                    <span v-if="r.malformedCount" class="guide-region-meta--warn"> · {{ r.malformedCount }} malformed tag</span>
+                  </div>
+                </div>
+              </div>
+              <div class="guide-card-foot">
+                <span class="guide-card-foot-info" :title="guideContent ? `${guideContent.length} chars on disk` : ''">
+                  {{ guideContent ? `${guideContent.length.toLocaleString()} chars` : '' }} · {{ guideStats.totalTokens }} tokens total
+                </span>
+                <button type="button" class="mm-link" @click="openGuideFile">Edit in viewer →</button>
+              </div>
+            </template>
+            <template v-else-if="!guideLoading">
+              <div class="guide-card-hint">No guide file found for this workspace.</div>
+            </template>
+          </div>
+
           <div class="mm-search">
             <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
           </div>
@@ -1172,6 +1219,145 @@ function reviewKindLabel(kind: string): string {
 // the bottom of the sidebar.
 const orphanLimit = ref(8)
 const staleLimit = ref(8)
+
+// ---------- workspace guide card (CLAUDE.md / AGENTS.md) ----------
+const GUIDE_DEFAULTS: Record<string, { label: string; limit: number }> = {
+  memory: { label: 'Agent memory', limit: 3000 },
+  profile: { label: 'User profile', limit: 1375 },
+}
+const guideContent = ref('')
+const guideLoading = ref(false)
+const guideError = ref('')
+const guideResolvedPath = ref('') // actual file that existed: CLAUDE.md or AGENTS.md
+const guidePathLabel = computed(() => guideResolvedPath.value || 'CLAUDE.md')
+const GUIDE_REGION_RE: Record<string, RegExp> = {
+  memory: /<!--\s*ciao:memory:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:memory:end\s*-->/i,
+  profile: /<!--\s*ciao:profile:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:profile:end\s*-->/i,
+}
+function parseEntriesForRegion(raw: string): string[] {
+  const headingStripped = raw.replace(/^\s*##\s*(Agent memory|User profile)\s*\n?/, '')
+  const parts = headingStripped.split(/\n?§\n?/)
+  return parts.map(p => p.trim()).filter(Boolean)
+}
+function serializeLen(entries: string[]): number {
+  if (!entries.length) return 0
+  return entries.join('\n§\n').length + 1 // +1 trailing \n mirrors python serialize_entries
+}
+function tokensFor(chars: number): number { return Math.ceil(chars / 4) || 0 }
+function expirationInfo(entry: string): { expired: boolean; malformed: boolean } {
+  const hasPrefix = /\[expires\s*:/i.test(entry)
+  const m = entry.match(/\[expires:\s*([^\]]*)\]/i)
+  if (!m) return { expired: false, malformed: hasPrefix }
+  const raw = m[1].trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { expired: false, malformed: true }
+  // Reject impossible dates (e.g. 2026-02-30): JS normalizes them to a later
+  // day, so Number.isNaN alone would report them as valid. Round-trip the
+  // parsed year/month/day back to the original string to agree with the
+  // backend validator, which rejects these as malformed.
+  const [y, mo, da] = raw.split('-').map(Number)
+  const d = new Date(y, mo - 1, da)
+  const roundTrips = d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da
+  if (!roundTrips) return { expired: false, malformed: true }
+  const today = new Date(); today.setHours(0,0,0,0)
+  return { expired: d < today, malformed: false }
+}
+const guideStats = computed(() => {
+  const content = guideContent.value
+  if (!content) return null
+  const regions: Array<{
+    key: string; label: string; usedChars: number; charLimit: number; pct: number;
+    tokens: number; entryCount: number; expiredCount: number; malformedCount: number; overCap: boolean
+  }> = []
+  let totalChars = 0
+  for (const key of ['memory', 'profile'] as const) {
+    const re = GUIDE_REGION_RE[key]
+    const match = content.match(re)
+    let cap = GUIDE_DEFAULTS[key].limit
+    let body = ''
+    if (match) {
+      if (match[1]) { const n = Number(match[1]); if (Number.isFinite(n)) cap = n }
+      body = match[2] || ''
+    }
+    const entries = body ? parseEntriesForRegion(body) : []
+    const used = serializeLen(entries)
+    totalChars += used
+    let expired = 0, malformed = 0
+    for (const e of entries) { const info = expirationInfo(e); if (info.expired) expired++; if (info.malformed) malformed++ }
+    const pct = cap ? Math.round((used / cap) * 100 * 10) / 10 : 0
+    regions.push({
+      key, label: GUIDE_DEFAULTS[key].label,
+      usedChars: used, charLimit: cap, pct, tokens: tokensFor(used),
+      entryCount: entries.length, expiredCount: expired, malformedCount: malformed,
+      overCap: used > cap,
+    })
+  }
+  return { regions, totalTokens: tokensFor(content.length), totalChars: content.length }
+})
+const guideOverCap = computed(() => !!guideStats.value?.regions.some(r => r.overCap))
+const canDiscussGuide = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
+let guideFetchSeq = 0
+async function fetchGuide(): Promise<void> {
+  const seq = ++guideFetchSeq
+  guideLoading.value = true
+  guideError.value = ''
+  // After the workspace re-root migration each guide lives under
+  // `<workspace>/CLAUDE.md`, so a bare basename would let /api/workspace-file's
+  // fuzzy lookup silently resolve to the lexicographically-first workspace's
+  // guide. Try the workspace-qualified path first (retained for Open/Discuss/
+  // pin), then fall back to the bare basename for installs that have not
+  // re-rooted (guide still at the install root).
+  const ws = store.activeWorkspace
+  const candidates = [
+    `${ws}/CLAUDE.md`, `${ws}/AGENTS.md`,
+    'CLAUDE.md', 'AGENTS.md',
+  ]
+  for (const candidate of candidates) {
+    try {
+      const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
+      if (seq !== guideFetchSeq) return
+      if (resp.status === 404) continue
+      if (!resp.ok) { guideError.value = `Failed to load ${candidate} (HTTP ${resp.status})`; guideContent.value = ''; guideResolvedPath.value=''; break }
+      const text = await resp.text()
+      if (seq !== guideFetchSeq) return
+      guideContent.value = text
+      guideResolvedPath.value = candidate
+      guideError.value = ''
+      guideLoading.value = false
+      return
+    } catch (e) { if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) } }
+  }
+  if (seq !== guideFetchSeq) return
+  guideContent.value = ''
+  if (!guideError.value) guideError.value = ''
+  guideResolvedPath.value = ''
+  guideLoading.value = false
+}
+watch(() => store.activeWorkspace, () => { void fetchGuide() }, { immediate: true })
+onMounted(() => { void fetchGuide() })
+function openGuideFile(): void {
+  if (!guideResolvedPath.value) return
+  void fileViewer.open(guideResolvedPath.value)
+}
+async function discussGuide(): Promise<void> {
+  if (!guideResolvedPath.value) return
+  const path = guideResolvedPath.value
+  // Reuse the generic file-discuss flow (creates a chat and pins the guide).
+  await discussFileInChat(path, `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?`)
+}
+async function discussFileInChat(path: string, prompt?: string): Promise<void> {
+  const ws = store.activeWorkspace
+  const general = store.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
+  if (!general) { store.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
+  const title = `Discuss ${path.split('/').pop() || path}`
+  const seed = prompt || `Let's discuss the file \`${path}\`.`
+  try {
+    const chat = await store.createChat(general.project_id, title, seed)
+    // Pin the file so the new chat opens split-view with it visible.
+    store.pinFile(chat.chat_id, path)
+  } catch (e) { store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e)) }
+}
+// Expose for template's generic file discuss (also used by FileViewerModal/PinnedFilePanel via a shared helper fallback)
+// and for the guide card's "Discuss" button.
 const route = useRoute()
 const router = useRouter()
 
@@ -3129,6 +3315,113 @@ async function confirmDeleteChat(chatId: string) {
 
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
+
+/* Workspace guide card (CLAUDE.md / AGENTS.md) — bounded memory health, always visible */
+.guide-card {
+  margin-top: var(--space-3);
+  padding: 10px 10px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.guide-card--over { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+.guide-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.guide-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg2);
+  font-family: var(--font-mono);
+}
+.guide-card-icon { color: var(--accent); font-size: 10px; }
+.guide-card-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg3);
+  background: var(--bg3);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+}
+.guide-card-badge--warn { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+.guide-card-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.guide-card-btn {
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--fg2);
+  cursor: pointer;
+  font-family: var(--font);
+  /* Touch-safe hit area: the visible 3px/8px padding is too small to tap
+     reliably on the mobile sidebar, so guarantee a 44px minimum target. */
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.guide-card-btn:disabled { opacity: 0.5; cursor: default; }
+.guide-card-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
+.guide-card-btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.guide-card-btn--primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.guide-card-error { color: var(--warning); font-size: var(--text-xs); }
+.guide-card-hint { color: var(--fg3); font-size: var(--text-xs); }
+.guide-card-regions { display: flex; flex-direction: column; gap: 10px; }
+.guide-region-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.guide-region-name { font-weight: 600; color: var(--fg2); flex: 1; }
+.guide-region-count { color: var(--fg3); font-variant-numeric: tabular-nums; }
+.guide-region-count--warn { color: var(--warning); font-weight: 600; }
+.guide-region-tokens { color: var(--fg3); font-family: var(--font-mono); font-size: 11px; }
+.guide-region-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg3);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.guide-region-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 200ms;
+}
+.guide-region-bar--high > span { background: #d6a600; }
+.guide-region-bar--warn > span { background: var(--warning); }
+.guide-region-meta { font-size: 11px; color: var(--fg3); margin-top: 3px; }
+.guide-region-meta--warn { color: var(--warning); }
+.guide-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
+.guide-card-foot-info { font-variant-numeric: tabular-nums; }
 
 .mm-chip-row { display: flex; flex-direction: column; gap: 2px; }
 .mm-chip {
