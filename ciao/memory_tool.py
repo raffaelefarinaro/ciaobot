@@ -612,6 +612,55 @@ def ensure_regions(guide: Path) -> list[str]:
     return added
 
 
+FORMER_MEMORY_CHAR_LIMIT = 2200
+"""The shipped ``ciao:memory`` default before it became
+``DEFAULT_MEMORY_CHAR_LIMIT``. Guides stamped with exactly this value are
+restamped by :func:`migrate_region_caps`; any other stamp is an intentional
+custom cap and is never touched."""
+
+_FORMER_CAPS: dict[MemoryRegion, int] = {"memory": FORMER_MEMORY_CHAR_LIMIT}
+
+
+def migrate_region_caps(guide: Path) -> list[str]:
+    """Restamp region markers still carrying a former shipped default cap.
+
+    ``ensure_regions`` never rewrites existing markers, so a guide installed
+    before a default-cap change would advertise the old number to every agent
+    and operator while the runtime enforces the new one. Only markers whose
+    cap equals the recorded former default are rewritten. Idempotent; returns
+    the list of regions restamped. Never creates the guide or any region.
+    """
+    if not guide.exists():
+        return []
+    try:
+        text = guide.read_text(encoding="utf-8")
+    except OSError:
+        logger.exception("memory: failed to read %s for cap migration", guide)
+        return []
+
+    updated = text
+    restamped: list[str] = []
+    for region, former in _FORMER_CAPS.items():
+        current = _REGION_FACTS[region][1]
+        if former == current:
+            continue
+        pattern = re.compile(
+            rf"(<!--\s*ciao:{region}:start\s+cap=){former}(\s*-->)"
+        )
+        new_text, count = pattern.subn(rf"\g<1>{current}\g<2>", updated)
+        if count:
+            updated = new_text
+            restamped.append(region)
+
+    if restamped and updated != text:
+        try:
+            _write_text_atomically(guide, updated)
+        except OSError:
+            logger.exception("memory: failed to write %s for cap migration", guide)
+            return []
+    return restamped
+
+
 def load_legacy_entries(path: Path) -> list[str]:
     """Read entries from a legacy ``memory.md`` / ``user.md`` file."""
     try:

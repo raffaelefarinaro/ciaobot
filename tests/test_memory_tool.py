@@ -69,6 +69,72 @@ def test_ensure_regions_creates_missing_guide(tmp_path: Path) -> None:
     assert guide.is_file()
 
 
+def test_migrate_region_caps_restamps_former_default(tmp_path: Path) -> None:
+    """A guide stamped by a pre-3000 release must advertise the new default.
+
+    ``ensure_regions`` never rewrites existing markers, so without this
+    migration an upgraded install loads a guide that says cap=2200 while the
+    runtime enforces 3000 — two different answers to the same question.
+    """
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "a durable fact\n"
+        "<!-- ciao:memory:end -->\n\n"
+        "<!-- ciao:profile:start cap=1375 -->\n"
+        "<!-- ciao:profile:end -->\n",
+        encoding="utf-8",
+    )
+
+    assert mt.migrate_region_caps(guide) == ["memory"]
+
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=3000 -->" in text
+    assert "cap=2200" not in text
+    # The profile region is untouched: its default never changed.
+    assert "<!-- ciao:profile:start cap=1375 -->" in text
+    # Entries survive byte-identical.
+    entries, diags = mt.read_region(guide, "memory")
+    assert diags == []
+    assert entries == ["a durable fact"]
+
+
+def test_migrate_region_caps_preserves_custom_caps(tmp_path: Path) -> None:
+    """Any stamp other than the former default is an intentional custom cap."""
+    guide = tmp_path / "CLAUDE.md"
+    original = (
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=5000 -->\n"
+        "<!-- ciao:memory:end -->\n\n"
+        "<!-- ciao:profile:start cap=800 -->\n"
+        "<!-- ciao:profile:end -->\n"
+    )
+    guide.write_text(original, encoding="utf-8")
+
+    assert mt.migrate_region_caps(guide) == []
+    assert guide.read_text(encoding="utf-8") == original
+
+
+def test_migrate_region_caps_is_idempotent_and_tolerates_absence(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n<!-- ciao:memory:start cap=2200 -->\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+
+    assert mt.migrate_region_caps(guide) == ["memory"]
+    # Second run: nothing left to restamp.
+    assert mt.migrate_region_caps(guide) == []
+
+    # A missing guide is not created and reports nothing.
+    absent = tmp_path / "nested" / "CLAUDE.md"
+    assert mt.migrate_region_caps(absent) == []
+    assert not absent.exists()
+
+
 def test_read_and_write_region(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     mt.write_region(guide, "memory", ["alpha", "beta"])

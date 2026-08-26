@@ -1063,7 +1063,12 @@ def sync_workspace_skills(
     _ensure_linked_workspace_guides(root)
     try:
         from ciao import job_runs
-        from ciao.memory_tool import default_memory_dir, ensure_regions, migrate_legacy_files
+        from ciao.memory_tool import (
+            default_memory_dir,
+            ensure_regions,
+            migrate_legacy_files,
+            migrate_region_caps,
+        )
 
         guide = root / "CLAUDE.md"
         # The legacy fold-in can only ever succeed once, so only pay for it
@@ -1080,6 +1085,15 @@ def sync_workspace_skills(
                     run.skip("no legacy memory files to migrate")
         else:
             ensure_regions(guide)
+        # Restamp markers still carrying a former shipped default so the
+        # guide every session loads advertises the cap the runtime enforces.
+        restamped = migrate_region_caps(guide)
+        if restamped:
+            logger.info(
+                "memory: restamped region caps to current defaults in %s: %s",
+                guide,
+                ", ".join(restamped),
+            )
     except Exception:  # noqa: BLE001 — never block skill sync on memory regions
         logger.exception(
             "memory region ensure/migrate failed for %s; continuing skill sync",
