@@ -2200,7 +2200,24 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise ValueError("invalid desktop drop grant")
     age = datetime.now(UTC).timestamp() - float(created_at)
     if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
-        raise ValueError("desktop drop grant expired")
+        # The two failure modes are different bugs and must not be reported
+        # identically. Log the grant id, timestamp, age and reason so a 400
+        # leaves evidence even though the grant file is already consumed.
+        reason = (
+            "grant timestamp is in the future"
+            if age < -30
+            else "grant is too old"
+        )
+        logger.warning(
+            "Rejecting desktop drop grant %s: %s "
+            "(created_at=%s, age=%.1fs, ttl=%ds)",
+            grant_id,
+            reason,
+            created_at,
+            age,
+            _DESKTOP_DROP_GRANT_TTL_SECONDS,
+        )
+        raise ValueError(f"desktop drop grant expired: {reason}")
     if (
         not isinstance(raw_paths, list)
         or not raw_paths
