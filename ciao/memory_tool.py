@@ -639,24 +639,32 @@ def _explicit_memory_char_limit() -> int | None:
         return None
 
 
-def migrate_region_caps(guide: Path) -> list[str]:
+def migrate_region_caps(
+    guide: Path,
+    *,
+    char_limit: int | None = None,
+) -> list[str]:
     """Restamp region markers still carrying a former shipped default cap.
 
     ``ensure_regions`` never rewrites existing markers, so a guide installed
     before a default-cap change would advertise the old number to every agent
     and operator while the runtime enforces the new one. Only markers whose
     cap equals the recorded former default are rewritten; they are restamped
-    to the EFFECTIVE limit — the shipped default, unless the operator set an
-    explicit ``CIAO_MEMORY_CHAR_LIMIT``, in which case stamping anything else
-    would recreate the very disagreement this migration removes. Any other
-    marker value is an intentional custom cap and is never touched.
-    Idempotent; returns the list of regions restamped. Never creates the
-    guide or any region, and holds the guide lock across read-modify-write so
-    it cannot discard a concurrent ``memory_update``/``write_region``.
+    to the EFFECTIVE limit so the guide advertises what the runtime actually
+    enforces: ``char_limit`` when the caller resolved configuration (including
+    a workspace ``.env``, which this module cannot see), else an explicit
+    ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
+    default. Any other marker value is an intentional custom cap and is never
+    touched. Idempotent; returns the list of regions restamped. Never creates
+    the guide or any region, and holds the guide lock across
+    read-modify-write so it cannot discard a concurrent
+    ``memory_update``/``write_region``.
     """
     if not guide.exists():
         return []
-    override = _explicit_memory_char_limit()
+    override = char_limit if char_limit is not None else (
+        _explicit_memory_char_limit()
+    )
     lock = _guide_lock(guide)
     try:
         try:

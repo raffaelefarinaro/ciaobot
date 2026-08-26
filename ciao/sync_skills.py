@@ -1047,6 +1047,39 @@ def _resolve_vault_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
+def _configured_memory_char_limit(workspace: Path) -> int | None:
+    """The effective ``CIAO_MEMORY_CHAR_LIMIT`` for cap-marker migration.
+
+    Resolution order mirrors what the server does at start (dotenv loads
+    without overriding exported variables): the process environment wins,
+    then this workspace's ``.env``, then ``None`` meaning "use memory_tool's
+    shipped default". Reading the dotenv here (instead of building a
+    ``CiaoConfig``, whose constructor mutates shared env state mid-sync) is
+    what keeps a standalone ``ciao sync-skills --workspace <root>`` from
+    restamping a marker that a later server start would enforce differently.
+    Unparseable values are ignored, like in :mod:`ciao.config`.
+    """
+    sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
+    try:
+        dotenv = workspace / ".env"
+        if dotenv.exists():
+            for line in dotenv.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("CIAO_MEMORY_CHAR_LIMIT"):
+                    _, _, value = line.partition("=")
+                    sources.append(value.strip().strip("'\""))
+                    break
+    except OSError:
+        logger.debug("memory: could not read %s/.env", workspace, exc_info=True)
+    for raw in sources:
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+    return None
+
+
 def _resolve_runtime_root(workspace: Path) -> Path:
     raw = os.environ.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
     root = Path(raw).expanduser()
@@ -1087,7 +1120,13 @@ def sync_workspace_skills(
             ensure_regions(guide)
         # Restamp markers still carrying a former shipped default so the
         # guide every session loads advertises the cap the runtime enforces.
-        restamped = migrate_region_caps(guide)
+        # The effective limit is resolved here, not inside memory_tool: a
+        # standalone `ciao sync-skills` never loads <root>/.env, and an
+        # override that lives only there must beat the stamp like it beats
+        # the runtime default after a server start.
+        restamped = migrate_region_caps(
+            guide, char_limit=_configured_memory_char_limit(root)
+        )
         if restamped:
             logger.info(
                 "memory: restamped region caps to current defaults in %s: %s",

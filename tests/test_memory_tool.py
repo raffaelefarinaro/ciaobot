@@ -202,6 +202,31 @@ def test_migrate_region_caps_ignores_nonnumeric_override(
     )
 
 
+def test_migrate_region_caps_caller_limit_beats_env(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A caller-resolved limit (e.g. workspace .env) wins over the process env.
+
+    The standalone `ciao sync-skills` path resolves the workspace dotenv
+    itself because memory_tool cannot see it; the parameter must dominate so
+    the stamp matches what a server start will enforce.
+    """
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
+
+    assert mt.migrate_region_caps(guide, char_limit=5000) == ["memory"]
+    assert "<!-- ciao:memory:start cap=5000 -->" in guide.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_read_and_write_region(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     mt.write_region(guide, "memory", ["alpha", "beta"])
