@@ -1150,49 +1150,52 @@ def _config_for_root(root: Path):
     right registry. A post-re-root agent root is a child of the install root;
     a pre-re-root root IS the install root. The config is only accepted when
     it actually names ``root`` among its agent roots, so an unrelated install
-    is never matched. When both spellings match, the one that names ``root``
-    as a real (non-empty) workspace wins — that is the re-rooted layout.
+    is never matched.
+
+    The owning install is found with the side-effect-free ``agent_roots_for``
+    probe first: ``CiaoConfig.from_env`` writes a session secret when
+    ``PWA_AUTH_TOKEN`` is absent, so constructing it for a candidate that does
+    not own ``root`` would create stray ``.runtime/session-secret`` files under
+    both candidate roots before either is shown to be the owner. Only the
+    confirmed owner gets a config built.
     """
-    from ciao.config import CiaoConfig  # noqa: PLC0415
+    from ciao.config import agent_roots_for  # noqa: PLC0415
 
     candidates = [root.parent, root] if root.parent != root else [root]
-    best: tuple[int, object] | None = None
+    owner: Path | None = None
     for candidate in candidates:
-        # `from_env` only loads <root>/.env when its argument is None, but this
-        # caller runs from an arbitrary cwd and must see the target install's
-        # env (CIAO_RUNTIME_ROOT, CIAO_WORKSPACES, GWS_PROFILE, …), so read it
-        # into an isolated mapping exactly the way from_env's None path does.
-        env: dict[str, str] = {k: v for k, v in os.environ.items()}
-        env["CIAO_WORKSPACE"] = str(candidate)
-        dotenv_path = Path(candidate) / ".env"
-        if dotenv_path.is_file():
-            try:
-                from dotenv import dotenv_values
-                for key, value in (dotenv_values(dotenv_path) or {}).items():
-                    if value is not None and key not in env:
-                        env[key] = value
-            except Exception:  # noqa: BLE001 — env loading must not block sync
-                logger.debug("sync: could not load %s", dotenv_path, exc_info=True)
-        try:
-            config = CiaoConfig.from_env(env)
-        except Exception:
+        runtime = candidate / ".runtime"
+        if not runtime.is_dir():
             continue
         try:
-            targets = config.agent_root_targets()
+            targets = agent_roots_for(candidate, runtime)
         except Exception:
             continue
-        matched = [
-            name
-            for r, name in targets
-            if Path(r).resolve() == root.resolve()
-        ]
-        if not matched:
-            continue
-        # Prefer a named match (re-rooted) over an unnamed single-root match.
-        score = 1 if any(name for name in matched) else 0
-        if best is None or score > best[0]:
-            best = (score, config)
-    return best[1] if best is not None else None
+        if any(Path(r).resolve() == root.resolve() for r, _ in targets):
+            # Prefer the re-rooted owner (root.parent) over the single-root
+            # owner (root itself) when both name it.
+            owner = candidate
+            break
+    if owner is None:
+        return None
+
+    env: dict[str, str] = {k: v for k, v in os.environ.items()}
+    env["CIAO_WORKSPACE"] = str(owner)
+    dotenv_path = owner / ".env"
+    if dotenv_path.is_file():
+        try:
+            from dotenv import dotenv_values
+            for key, value in (dotenv_values(dotenv_path) or {}).items():
+                if value is not None and key not in env:
+                    env[key] = value
+        except Exception:  # noqa: BLE001 — env loading must not block sync
+            logger.debug("sync: could not load %s", dotenv_path, exc_info=True)
+    from ciao.config import CiaoConfig  # noqa: PLC0415
+
+    try:
+        return CiaoConfig.from_env(env)
+    except Exception:
+        return None
 
 
 def resolve_workspace_skills_gws_gate(config, root: Path, workspace_name: str) -> str | None:

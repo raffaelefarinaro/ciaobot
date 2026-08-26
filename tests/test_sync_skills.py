@@ -373,6 +373,47 @@ def test_shared_root_gate_gates_when_none_linked(tmp_path) -> None:
     assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") == ""
 
 
+def test_config_for_root_writes_no_side_effect_files_for_unowned_root(tmp_path) -> None:
+    """Probing an unowned root must not create .runtime (a CiaoConfig side effect)."""
+    sub = tmp_path / "not-an-install"
+    sub.mkdir(parents=True)
+
+    cfg = sync_skills._config_for_root(sub)
+
+    assert cfg is None
+    assert not (sub / ".runtime").exists()
+    assert not (tmp_path / ".runtime").exists()
+
+
+def test_config_for_root_finds_re_rooted_owner(tmp_path, monkeypatch) -> None:
+    """A post-re-root agent root resolves config via its install root."""
+    install = tmp_path / "install"
+    root = install / "work"
+    (install / ".runtime").mkdir(parents=True)
+    root.mkdir(parents=True)
+    (install / ".runtime" / "migration").mkdir(parents=True)
+    (install / ".runtime" / "migration" / "workspace-reroot.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    (install / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "work", "vault_root": "work/memory-vault"}]),
+        encoding="utf-8",
+    )
+    captured: list[Path] = []
+
+    def fake_agent_roots(ws, runtime):
+        captured.append(Path(ws))
+        return [(install / "work", "work")]
+
+    monkeypatch.setattr("ciao.config.agent_roots_for", fake_agent_roots)
+
+    cfg = sync_skills._config_for_root(root)
+    # Building a real CiaoConfig would need a full env; the point is the probe
+    # ran against the install root, not that config construction succeeded.
+    assert captured, "the probe ran"
+    assert captured[-1] == install  # the re-rooted install root was probed
+
+
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")
