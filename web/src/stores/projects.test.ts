@@ -437,9 +437,13 @@ describe('unacknowledged send recovery', () => {
     store.activeChatId = chatId
     apiGet.mockImplementation((path: string) => {
       if (path.includes('/messages')) {
-        // Current servers answer with the paginated envelope; an empty one
-        // adopts-wholesale over the optimistic timeline, wiping the bubble
-        // exactly like the production reload does.
+        // Current servers answer with the paginated envelope. The reload no
+        // longer wipes the optimistic bubble on an empty window (see
+        // 'optimistic user bubble reconciliation' above), so this exercises
+        // the resend path on its own terms: the send is simply never
+        // acknowledged (no user_echo, no server-indexed row), so the
+        // unacked-send timer fires and resends it regardless of what the
+        // history reload rendered in the meantime.
         return Promise.resolve({
           items: [],
           total: 0,
@@ -1986,6 +1990,27 @@ describe('optimistic user bubble reconciliation', () => {
     )
     expect(userMsgs.length).toBe(1)
     expect(userMsgs[0].turn_index).toBe(1)
+  })
+
+  test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
+    // Regression for "first message can vanish on new chats": a background
+    // reload (the 15s poll, say) landing before the first turn persisted
+    // server-side used to wholesale-adopt the still-empty envelope, wiping
+    // the just-sent optimistic bubble until the next reload.
+    const store = useProjectStore()
+    const chatId = 'chat-new-empty-window'
+    store.messages[chatId] = [
+      { role: 'user', content: 'first message', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [], total: 0, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId, { background: true })
+
+    expect(
+      store.messages[chatId].some(m => m.role === 'user' && m.content === 'first message'),
+    ).toBe(true)
   })
 
   test('loadMessages discards trailing optimistic user bubbles when server has settled without them', async () => {
