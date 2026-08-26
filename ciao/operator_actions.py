@@ -731,6 +731,31 @@ def _schedule_display_name(entry: Any) -> str:
     return str(getattr(entry, "schedule_id", ""))
 
 
+def _once_target_datetime(entry: Any) -> datetime | None:
+    """The aware fire time of a ``once`` schedule, or ``None`` if malformed.
+
+    A one-time reminder fires at ``daily_time_utc`` on ``run_at_date`` in
+    ``timezone_name`` — the same target ``schedules.compute_next_run`` builds
+    for ``once`` entries. Treating midnight of ``run_at_date`` as the target
+    would mark a reminder due later today as already missed and let "Fire now"
+    dispatch (and delete) it early.
+    """
+    run_at_date = str(getattr(entry, "run_at_date", "") or "").strip()
+    if not run_at_date:
+        return None
+    try:
+        tz = ZoneInfo(entry.timezone_name or "UTC")
+        target_date = datetime.fromisoformat(run_at_date).date()
+        hh, mm = str(getattr(entry, "daily_time_utc", "") or "00:00").split(":", 1)
+        target_h, target_m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    return datetime(
+        target_date.year, target_date.month, target_date.day,
+        target_h, target_m, tzinfo=tz,
+    )
+
+
 def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     """One collapsed tile for every missed one-time schedule.
 
@@ -757,10 +782,8 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now >= target:
             missed.append(entry)
@@ -1339,10 +1362,8 @@ async def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, An
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now < target:
             continue

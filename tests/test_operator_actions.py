@@ -69,6 +69,8 @@ class _Entry:
         self.timezone_name = kw.get("timezone_name", "UTC")
         self.schedule_id = kw.get("schedule_id", "sched-1")
         self.title = kw.get("title", "")
+        self.prompt = kw.get("prompt", "")
+        self.daily_time_utc = kw.get("daily_time_utc", "00:00")
 
 
 class _Store:
@@ -336,6 +338,55 @@ def test_missed_schedules_fires_collapsed_tile(tmp_path: Path) -> None:
     )
     tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
     assert tiles == []
+
+
+def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
+    """A once reminder due later today is not missed, and not fired early.
+
+    The target is ``daily_time_utc`` on ``run_at_date`` in the entry's
+    timezone, not midnight of ``run_at_date``. At 09:00 a reminder due at
+    23:00 today must stay out of the strip (and out of "Fire now"), or it
+    would be dispatched — and deleted — hours early.
+    """
+    now = datetime(2026, 1, 20, 9, 0, tzinfo=UTC)
+    store = _Store(
+        [
+            _Entry(
+                frequency="once",
+                run_at_date="2026-01-20",
+                daily_time_utc="23:00",
+                schedule_id="sched-later-today",
+            ),
+        ]
+    )
+    context = DetectionContext(
+        config=_FakeConfig(tmp_path, workspaces=("personal",)),
+        runtime_dir=_runtime(tmp_path),
+        schedule_store=store,
+        now=now,
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
+    assert tiles == []
+
+    # The same reminder is missed once its fire time has passed.
+    store = _Store(
+        [
+            _Entry(
+                frequency="once",
+                run_at_date="2026-01-20",
+                daily_time_utc="23:00",
+                schedule_id="sched-later-today",
+            ),
+        ]
+    )
+    context = DetectionContext(
+        config=_FakeConfig(tmp_path, workspaces=("personal",)),
+        runtime_dir=_runtime(tmp_path),
+        schedule_store=store,
+        now=datetime(2026, 1, 20, 23, 30, tzinfo=UTC),
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
+    assert len(tiles) == 1
 
 
 def test_review_queue_depth_counts_skill_proposal_files(tmp_path: Path) -> None:
