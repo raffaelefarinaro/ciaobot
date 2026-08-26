@@ -818,6 +818,14 @@ async fn try_apply_pending_navigation(app: AppHandle) {
                 Ok(destination) => destination,
                 Err(_) => return,
             };
+            // Navigating is only meaningful once the engine is up: on a cold
+            // start the main window shows the bundled recovery page, so
+            // confirming the WebKit navigation would clear the intent before
+            // the PWA is reachable. Keep it pending until the engine answers so
+            // the runtime watcher retries and lands on the route.
+            if !engine_reachable(&runtime) {
+                return;
+            }
             main.navigate(destination).is_ok()
         }
         NavigationIntent::Notifications => {
@@ -825,6 +833,9 @@ async fn try_apply_pending_navigation(app: AppHandle) {
                 Ok(destination) => destination,
                 Err(_) => return,
             };
+            if !engine_reachable(&runtime) {
+                return;
+            }
             main.navigate(destination).is_ok()
         }
     };

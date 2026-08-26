@@ -3046,6 +3046,7 @@ async function confirmDeleteChat(chatId: string) {
 .settings-nav-item {
   display: flex;
   align-items: center;
+  min-height: 44px;
   padding: 8px 12px;
   border-radius: var(--radius-sm);
   text-decoration: none;
