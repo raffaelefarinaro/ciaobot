@@ -25,6 +25,16 @@ from ciao import provider_registry
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
 _CLAUDE_DISCOVERY_TTL_SECONDS = 300.0
+# An empty discovery is usually a timeout or a transient health-check failure,
+# not a real "nothing connected" answer. Serve it only briefly so the
+# stale-while-revalidate retry lands within seconds instead of showing "(0)"
+# for the full success TTL.
+_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS = 15.0
+# ``claude mcp list`` health-checks every configured connector before printing.
+# With ~30 claude.ai connectors a healthy run measures ~11-12s, and under load
+# it blows past 12s — at which point the old timeout swallowed the error and
+# cached the empty list for five minutes. Give the health pass real headroom.
+_CLAUDE_MCP_LIST_TIMEOUT_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
 _claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
@@ -176,7 +186,7 @@ def _cli_version(binary: str) -> str:
 
 
 def discover_claude_system_skills() -> list[str]:
-    """Discover enabled Claude Code plugins via CLI, falling back to installed_plugins.json."""
+    """Discover enabled Claude Code plugins plus standalone ~/.claude/skills."""
     global _claude_skills_cache
     now = time.monotonic()
     if (
@@ -190,7 +200,13 @@ def discover_claude_system_skills() -> list[str]:
     return skills
 
 
+def _claude_standalone_skills_dir() -> Path:
+    """Directory of standalone (non-plugin) Claude skills, injectable for tests."""
+    return Path.home() / ".claude" / "skills"
+
+
 def _discover_claude_system_skills_uncached() -> list[str]:
+    skills: set[str] = set()
     binary = claude_cli_path()
     if binary:
         try:
@@ -202,7 +218,6 @@ def _discover_claude_system_skills_uncached() -> list[str]:
             # Claude Code uses a multi-line block format:
             #   ❯ plugin-name@source
             #     Status: ✔ enabled  (or ✘ disabled)
-            skills: set[str] = set()
             current_name: str | None = None
             for line in output.splitlines():
                 stripped = line.strip()
@@ -212,27 +227,27 @@ def _discover_claude_system_skills_uncached() -> list[str]:
                     if "enabled" in stripped and "disabled" not in stripped:
                         skills.add(current_name)
                     current_name = None
-            if skills:
-                return sorted(skills)
         except Exception:
             pass
-    # Fallback: read installed_plugins.json (all installed regardless of enabled state)
-    skills_fb: set[str] = set()
-    installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-    if installed_json.is_file():
-        try:
-            data = json.loads(installed_json.read_text(encoding="utf-8"))
-            plugins = data.get("plugins", {})
-            for key in plugins.keys():
-                skills_fb.add(str(key).split("@")[0])
-        except Exception:
-            pass
-    skills_dir = Path.home() / ".claude" / "skills"
+    # Standalone skills under ~/.claude/skills never appear in `claude plugin
+    # list`, so merge them in whether or not the CLI reported plugins.
+    skills_dir = _claude_standalone_skills_dir()
     if skills_dir.is_dir():
-        for f in skills_dir.glob("*"):
-            if f.is_dir() or f.name.endswith(".md"):
-                skills_fb.add(f.stem)
-    return sorted(skills_fb)
+        for entry in skills_dir.glob("*"):
+            if entry.is_dir() or entry.name.endswith(".md"):
+                skills.add(entry.stem)
+    if not skills:
+        # Nothing enabled and no standalone skills: fall back to listing every
+        # installed plugin so the page still shows something actionable.
+        installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+        if installed_json.is_file():
+            try:
+                data = json.loads(installed_json.read_text(encoding="utf-8"))
+                for key in (data.get("plugins") or {}).keys():
+                    skills.add(str(key).split("@")[0])
+            except Exception:
+                pass
+    return sorted(skills)
 
 
 def discover_claude_mcps(
@@ -246,19 +261,26 @@ def discover_claude_mcps(
     in the per-project ``/mcp`` panel. Those disables live in
     ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
 
-    Served stale-while-revalidate: ``claude mcp list`` measures ~12s on a real
-    install, and it is on the Settings -> Providers load path, so a plain TTL
-    made every visit after the window pay the full cost. An expired entry is
-    returned immediately and refreshed on a background thread, so only the first
-    call after startup ever waits.
+    Served stale-while-revalidate: ``claude mcp list`` health-checks every
+    connector and measures ~12s on a real install, and discovery is on the
+    Settings -> Providers load path, so a plain TTL made every visit after the
+    window pay the full cost. An expired entry is returned immediately and
+    refreshed on a background thread, so only the first call after startup ever
+    waits. Empty results expire fast (see ``_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS``)
+    because they usually mean the probe timed out, not that nothing is connected.
     """
     global _claude_mcps_cache
     now = time.monotonic()
     ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
     cached = _claude_mcps_cache
+    ttl = (
+        _CLAUDE_DISCOVERY_TTL_SECONDS
+        if cached is not None and cached[2]
+        else _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS
+    )
     fresh = (
         cached is not None
-        and now - cached[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+        and now - cached[0] < ttl
         and cached[1] == ws_key
     )
     if cached is not None and cached[1] == ws_key:
@@ -272,6 +294,25 @@ def discover_claude_mcps(
     )
     _claude_mcps_cache = (now, ws_key, tuple(connected))
     return connected
+
+
+def warm_claude_discovery_cache(workspace_root: Path | str | None = None) -> None:
+    """Pre-populate the Claude MCP/skill caches off the request path.
+
+    ``claude mcp list`` health-checks every connector (~12s on a real install),
+    so run it at app startup instead of letting the first Settings -> Providers
+    visit block on it. Fire-and-forget: a failure just leaves the cache cold
+    and the first request pays the cost as before.
+    """
+
+    def run() -> None:
+        try:
+            discover_claude_mcps(workspace_root)
+            discover_claude_system_skills()
+        except Exception:  # noqa: BLE001 - warm-up must never break startup
+            logger.debug("Claude discovery warm-up failed", exc_info=True)
+
+    threading.Thread(target=run, name="claude-discovery-warmup", daemon=True).start()
 
 
 def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
@@ -395,7 +436,7 @@ def _discover_claude_mcps_uncached(
             [binary, "mcp", "list"],
             capture_output=True,
             text=True,
-            timeout=12.0,
+            timeout=_CLAUDE_MCP_LIST_TIMEOUT_SECONDS,
             check=False,
         )
         output = (res.stdout or "") + "\n" + (res.stderr or "")

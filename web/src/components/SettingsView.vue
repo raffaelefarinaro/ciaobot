@@ -809,51 +809,6 @@
               >opencode permissions docs ↗</a>.
             </p>
 
-            <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">{{ meta.label }}</span>
-                  <p class="hint hint--compact">{{ meta.description }}</p>
-                </div>
-                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
-                  {{ meta.configured ? 'Configured' : 'Unconfigured' }}
-                </span>
-              </div>
-              <input
-                type="password"
-                class="routine-input"
-                v-model="providerKeyInputs[key]"
-                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
-                :disabled="providerKeysSaving"
-              />
-            </div>
-
-            <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">{{ meta.label }}</span>
-                  <p class="hint hint--compact">{{ meta.description }}</p>
-                </div>
-                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
-                  {{ meta.configured ? (meta.auth_method === 'oauth' ? 'OAuth' : 'Configured') : 'Unconfigured' }}
-                </span>
-              </div>
-              <input
-                type="password"
-                class="routine-input"
-                v-model="providerKeyInputs[key]"
-                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
-                :disabled="providerKeysSaving"
-              />
-            </div>
-
-
-            <div class="action-row settings-actions">
-              <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
-                {{ providerKeysSaving ? 'Saving...' : 'Save Keys' }}
-              </button>
-            </div>
-            <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
            </div>
          </template>
       </template>
@@ -2968,13 +2923,10 @@ function routineModelSummary(key: RoutineModelKey): string {
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
-const providerKeysSaving = ref(false)
-const providerKeysResult = ref('')
 const mcpStatus = ref<McpStatus | null>(null)
 const mcpUsage = ref<McpUsage | null>(null)
 const mcpUsageLoaded = ref(false)
 const mcpUsageError = ref('')
-const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
 const autoUpdateGithubSkills = ref(false)
@@ -3379,12 +3331,6 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
-    for (const key in res.keys) {
-      providerKeyInputs.value[key] = ''
-    }
-    for (const key in res.service_keys || {}) {
-      providerKeyInputs.value[key] = ''
-    }
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
@@ -3450,60 +3396,6 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     providerConnectionPending.value = ''
   }
 }
-
-async function saveProviderKeys() {
-  if (!providerKeys.value) return
-  providerKeysSaving.value = true
-  providerKeysResult.value = ''
-  
-  const patchKeys: Record<string, string> = {}
-  for (const key in providerKeys.value.keys) {
-    const val = providerKeyInputs.value[key]
-    if (val !== '') {
-      patchKeys[key] = val
-    }
-  }
-  for (const key in providerKeys.value.service_keys || {}) {
-    const val = providerKeyInputs.value[key]
-    if (val !== '') {
-      patchKeys[key] = val
-    }
-  }
-  
-  if (!Object.keys(patchKeys).length) {
-    providerKeysResult.value = 'No changes to save.'
-    providerKeysSaving.value = false
-    setTimeout(() => { providerKeysResult.value = '' }, 2000)
-    return
-  }
-  
-  try {
-    const res = await api.patch<ProviderConfigSettings>(
-      '/api/settings/providers',
-      { keys: patchKeys },
-    )
-    providerKeys.value = res
-    for (const key in res.keys) {
-      providerKeyInputs.value[key] = ''
-    }
-    for (const key in res.service_keys || {}) {
-      providerKeyInputs.value[key] = ''
-    }
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
-    providerKeysResult.value = ''
-    // A service key only reaches the process env on startup, so a change here
-    // always needs a restart. There is nothing else this save can change.
-    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-  } catch (e) {
-    providerKeysResult.value = `Error: ${errorMessage(e)}`
-  } finally {
-    providerKeysSaving.value = false
-  }
-}
-
-
 
 async function fetchSkills() {
   try {

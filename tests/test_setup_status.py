@@ -1003,7 +1003,9 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     assert calls == {"clear": 1, "payload": 2}
 
 
-def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -> None:
+def test_discover_claude_system_skills_filters_enabled_and_caches(
+    monkeypatch, tmp_path
+) -> None:
     from ciao import setup_status
 
     setup_status.clear_claude_discovery_cache()
@@ -1024,10 +1026,70 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -
 
     monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
     monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: tmp_path / "absent"
+    )
 
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert setup_status.discover_claude_system_skills() == ["skill-creator"]
     assert calls["n"] == 1
+
+
+def test_discover_claude_system_skills_merges_standalone_skills(
+    monkeypatch, tmp_path
+) -> None:
+    """Standalone ~/.claude/skills entries show up alongside enabled plugins.
+
+    `claude plugin list` only knows about plugins, so a user with a hand-installed
+    skill directory would otherwise never see it on the Providers tab.
+    """
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    class FakeResult:
+        stdout = "❯ skill-creator@claude-plugins-official\n  Status: ✔ enabled\n"
+        stderr = ""
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(
+        setup_status.subprocess, "run", lambda *_a, **_k: FakeResult()
+    )
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "ego-browser").mkdir(parents=True)
+    (skills_dir / "note-taking.md").write_text("---\n---\n", encoding="utf-8")
+    (skills_dir / "ignored.txt").write_text("not a skill", encoding="utf-8")
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+
+    assert setup_status.discover_claude_system_skills() == [
+        "ego-browser",
+        "note-taking",
+        "skill-creator",
+    ]
+
+
+def test_discover_claude_system_skills_falls_back_to_installed_plugins(
+    monkeypatch, tmp_path
+) -> None:
+    """With no CLI and no standalone skills, installed plugins still surface."""
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: tmp_path / "absent"
+    )
+
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"legacy-plugin@source": {}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert setup_status.discover_claude_system_skills() == ["legacy-plugin"]
 
 
 # ── Claude MCP discovery cache ──────────────────────────────────────────
@@ -1088,3 +1150,94 @@ def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
     ss.discover_claude_mcps(None)
     ss.discover_claude_mcps(None)
     assert len(calls) == 1, "a fresh entry must not spawn a discovery"
+
+
+# An empty discovery usually means the health pass timed out, not that nothing
+# is connected, so it must expire fast instead of poisoning the tab for the
+# full five-minute success TTL.
+
+
+def test_a_fresh_empty_mcp_cache_serves_without_refresh(monkeypatch):
+    from ciao import setup_status as ss
+
+    calls = []
+    monkeypatch.setattr(
+        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or []
+    )
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    assert ss.discover_claude_mcps(None) == []
+    assert ss.discover_claude_mcps(None) == []
+    assert len(calls) == 1, "a fresh (empty) entry must not spawn a discovery"
+
+
+def test_an_empty_mcp_cache_expires_fast_and_recovers(monkeypatch):
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    done = threading.Event()
+
+    def discovery(**kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            done.set()
+        return [] if len(calls) == 1 else ["recovered"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", discovery)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+
+    assert ss.discover_claude_mcps(None) == []
+    assert calls == [1]
+
+    # Age the entry past the empty TTL but well short of the success TTL: the
+    # stale empty list still serves instantly, but a refresh must kick off.
+    stamp, ws_key, value = ss._claude_mcps_cache
+    assert value == ()
+    aged = stamp - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", (aged, ws_key, value))
+
+    assert ss.discover_claude_mcps(None) == []
+    assert done.wait(timeout=5), "empty cache must re-discover in the background"
+    deadline = _time.monotonic() + 5
+    while ss._claude_mcps_cache[2] != ("recovered",) and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert ss._claude_mcps_cache[2] == ("recovered",)
+
+
+def test_warm_claude_discovery_cache_populates_both_caches(monkeypatch, tmp_path):
+    import time
+
+    from ciao import setup_status as ss
+
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_skills_cache", None)
+    seen = []
+
+    def fake_mcps(workspace_root=None, **kwargs):
+        seen.append(("mcps", workspace_root))
+        return ["Airtable"]
+
+    def fake_skills():
+        seen.append(("skills", None))
+        return ["skill-creator"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", fake_mcps)
+    monkeypatch.setattr(ss, "_discover_claude_system_skills_uncached", fake_skills)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    deadline = time.monotonic() + 5
+    while len(seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ("mcps", tmp_path) in seen
+    assert ("skills", None) in seen
+    assert ss._claude_mcps_cache is not None
+    assert ss._claude_mcps_cache[2] == ("Airtable",)
+    assert ss._claude_skills_cache is not None
+    assert ss._claude_skills_cache[1] == ("skill-creator",)
