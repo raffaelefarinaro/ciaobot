@@ -1248,9 +1248,9 @@ def test_gws_status_reports_unlinked_workspace(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     data = result["data"]
-    # No workspace link, so the operator-level default profile applies; it has
-    # no credentials yet, so nothing is connected.
-    assert data["profile"] == "personal"
+    # No workspace link, and the operator-level default "personal" does not name
+    # a real account on a fresh install, so nothing is reported as connected.
+    assert data["profile"] == ""
     assert data["configured"] is False
     assert data["connected"] is False
 
@@ -1362,6 +1362,48 @@ def test_gws_status_reports_needs_relogin(tmp_path: Path) -> None:
     assert data["connected"] is False
     assert data["needs_relogin"] is True
     assert data["token_error"] == "invalid_grant"
+
+
+def test_gws_status_reports_unknown_health_as_not_connected(tmp_path: Path) -> None:
+    from ciao import gws_auth
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal", vault_root="memory-vault/personal", gws_profile="personal"
+            )
+        },
+    )
+    config_dir = gws_auth.profile_config_dir(config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    # No gws_health.json: the monitor has not produced a reading yet.
+    pcm = SimpleNamespace(
+        refresh_workspaces=lambda: [],
+        active_chat_ids=lambda: [],
+    )
+    plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+
+    result = plane.gws_status(_chat_create_principal())
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["profile"] == "personal"
+    assert data["configured"] is True
+    assert data["token_valid"] is None
+    # Without a confirmed valid reading, the connection is unknown, not assumed.
+    assert data["connected"] is False
+    assert data["needs_relogin"] is False
 
 
 def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:

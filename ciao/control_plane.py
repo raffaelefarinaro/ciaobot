@@ -399,8 +399,9 @@ class CiaoControlPlane:
     def gws_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report Google Workspace connection status for the active workspace.
 
-        Resolves the workspace's linked ``gws_profile`` (falling back to the
-        operator-level default), then reports whether credentials are present and
+        Resolves the workspace's linked ``gws_profile`` the same way the runtime
+        does (the operator-level default only counts when it names an account
+        that actually exists), then reports whether credentials are present and
         whether the periodic health monitor's last reading says the token is
         valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
         the agent can answer "is Google connected?" without a subprocess.
@@ -412,7 +413,8 @@ class CiaoControlPlane:
             getattr(self.config.workspace(workspace), "gws_profile", "") or ""
         ).strip()
         if not profile:
-            profile = str(getattr(self.config, "gws_default_profile", "") or "").strip()
+            default = str(getattr(self.config, "gws_default_profile", "") or "").strip()
+            profile = default if default in gws_auth.known_profiles(self.config) else ""
         if not profile:
             return _ok(
                 {
@@ -434,11 +436,16 @@ class CiaoControlPlane:
         token_valid = (
             bool(health.get("token_valid")) if "token_valid" in health else None
         )
+        # Only a confirmed valid reading establishes a connection. When the
+        # health monitor has not produced a reading yet (startup delay, checks
+        # disabled, or an unavailable probe), the connection is unknown rather
+        # than assumed good.
+        connected = bool(credentials_present and token_valid is True)
         return _ok(
             {
                 "profile": profile,
                 "configured": credentials_present,
-                "connected": bool(credentials_present and token_valid is not False),
+                "connected": connected,
                 "token_valid": token_valid,
                 "needs_relogin": bool(credentials_present and token_valid is False),
                 "token_error": str(health.get("token_error") or ""),
