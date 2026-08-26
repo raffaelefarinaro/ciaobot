@@ -1426,14 +1426,40 @@ def _print_link_migration_skip(summary: dict) -> int:
     return 1
 
 
+def _enclosing_vault_root(vault_root: Path) -> Path | None:
+    """The configured vault, when ``vault_root`` is a directory *inside* it.
+
+    A workspace subtree looks enough like a vault to run on — it has notes and
+    folders — but it is not one, and the migration has no way to notice. Refs
+    resolve against a filename index built from the root it is handed, so
+    pointing it at `memory-vault/work` makes every link into the vault's shared
+    `People/` and root notes unresolvable. Those get converted anyway, to a
+    destination relative to a root that does not contain them, and reported as
+    links that were already dead — so the run both corrupts working links and
+    describes the corruption as pre-existing.
+    """
+    configured = _resolve_vault_root(None)
+    if not configured.is_dir() or vault_root == configured:
+        return None
+    return configured if configured in vault_root.parents else None
+
+
 def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     """Convert a vault's `[[wikilinks]]` to relative markdown links.
 
     Dry-run by default, like ``vault-migrate``: this rewrites the prose of the
-    user's own notes, so applying is opt-in. Two extra rails, because unlike a
+    user's own notes, so applying is opt-in. Three extra rails, because unlike a
     frontmatter type swap this touches every line — it refuses on an existing
-    receipt (whose reverse map a second pass would overwrite) and on a vault with
-    uncommitted changes (so `git checkout` stays a working undo).
+    receipt (whose reverse map a second pass would overwrite), on a vault with
+    uncommitted changes (so `git checkout` stays a working undo), and on a root
+    nested inside the configured vault.
+
+    The nesting rail gates the *preview* too, unlike the other two. They protect
+    a write, so gating the dry run would have meant reaching for `--force` just
+    to look. This one is different: a too-narrow root does not make the write
+    unsafe and the preview fine, it makes the preview itself wrong — working
+    links are listed as dead — so a report nobody should act on is not worth
+    printing.
     """
     from ciao.vault_migrate_links import migrate_links
 
@@ -1441,6 +1467,21 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if not vault_root.is_dir():
         print(
             f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    enclosing = _enclosing_vault_root(vault_root)
+    if enclosing is not None and not args.force:
+        print(
+            f"`{vault_root}` is a directory inside the vault at `{enclosing}`, "
+            "not a vault of its own. Refs resolve against the root passed here, "
+            "so every link to a note outside it would be reported as dead and "
+            "rewritten to a path that resolves nowhere.\n"
+            "Re-run without `--vault-root` to convert the whole vault. The "
+            "receipt is per install, so a partial run would also mark the vault "
+            "migrated and stop the app from offering the rest.\n"
+            "Pass `--force` if you really mean this root.",
             file=sys.stderr,
         )
         return 1
@@ -1482,9 +1523,16 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
 
     if summary["unresolved"]:
+        # Deliberately not "these were already dead wikilinks". Nothing here
+        # establishes that: unresolved means the ref matched no note *under the
+        # root this run was given*, which is also what a perfectly good link
+        # looks like when the root is too narrow. Asserting pre-existing rot let
+        # the tool label its own broken output as damage it had found.
         print(
-            "\nConverted but pointing at nothing — these were already dead "
-            "wikilinks and now report as broken markdown links:"
+            f"\nConverted but resolving to nothing — no note under `{vault_root}` "
+            "matches these refs, so they now report as broken markdown links. "
+            "A link that works in Obsidian and appears here means the root is "
+            "too narrow, not that the link was dead:"
         )
         for item in summary["unresolved"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}]]")
@@ -1553,9 +1601,20 @@ def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
         print("Nothing to restore.")
 
     if summary["failed"]:
-        print("\nLeft untouched (changed since the migration):", file=sys.stderr)
+        # Not "changed since the migration" unconditionally: a wrong root fails
+        # every file with a read error, and naming a cause we have not
+        # established sent the reader looking for edits nobody made.
+        print("\nLeft untouched:", file=sys.stderr)
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+        recorded = summary.get("receipt_vault_root", "")
+        if recorded and recorded != str(vault_root) and not summary["restored"]:
+            print(
+                f"\nNothing was restored, and the migration ran against "
+                f"`{recorded}`. The receipt's paths are relative to that root — "
+                f"re-run with `--vault-root {recorded}`.",
+                file=sys.stderr,
+            )
 
     if not args.apply and summary["restored"]:
         print("\nRe-run with --apply to write these changes.")
