@@ -3106,8 +3106,15 @@ async function installGws() {
       gwsInstallResult.value = gwsInstallOutput.value ? `${base}: ${gwsInstallOutput.value.slice(0, 500)}` : base
     }
   } catch (e) {
+    // A failed `npm install` returns HTTP 500 carrying the diagnostic stream
+    // in `payload.output`; the api wrapper throws an ApiError for that status,
+    // so the `res.ok === false` branch above is unreachable here. Surface the
+    // output so Fix in Chat gets the real reason (e.g. EACCES), not just the
+    // exit code.
+    const payload = errorPayload(e)
+    const output = typeof payload?.output === 'string' ? payload.output : ''
     gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
-    gwsInstallOutput.value = errorMessage(e)
+    gwsInstallOutput.value = output || errorMessage(e)
   } finally {
     gwsInstalling.value = false
   }
