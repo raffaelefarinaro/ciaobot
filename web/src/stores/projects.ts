@@ -2284,13 +2284,6 @@ export const useProjectStore = defineStore('projects', () => {
         activeChatId.value = null
         persistState()
       }
-      // Snapshot where the user was when this close began. Enumerating
-      // "routes that retain activeChatId" here to decide whether to force a
-      // `/` navigation kept missing pages outside ChatLayout entirely (e.g.
-      // /device) - checking whether the route has moved AT ALL covers every
-      // page, present and future, without a list to maintain.
-      const { router } = await import('../router')
-      const pathBeforeDelete = router.currentRoute.value.path
       // onlyIfEmpty: the server re-checks with the full rule and declines if
       // this is not actually a discardable draft. Closing a chat must never
       // be able to destroy one.
@@ -2301,17 +2294,30 @@ export const useProjectStore = defineStore('projects', () => {
         // The view is already cleared. A failed DELETE must not also strand
         // the router on /chat/<id> with no active chat behind it. But the
         // user may have moved on while the DELETE was in flight:
-        //   - a different chat is now active: leave it alone.
+        //   - a different chat is now active: leave it alone entirely.
         //   - this chat was reopened and the delete succeeded: it is gone
-        //     server-side, so still navigate home rather than strand the
-        //     view on a chat that no longer exists.
+        //     server-side, so the dangling activeChatId must be cleared -
+        //     regardless of where the user has since navigated.
         //   - this chat was reopened and the delete was declined (no longer
-        //     empty): it is a real chat again, leave it alone too.
-        //   - nothing reopened it, but the route has moved since: wherever
-        //     the user went, forcing them back to `/` would eject them.
-        const stillOnStartingRoute = router.currentRoute.value.path === pathBeforeDelete
-        await leaveChatView(wasActive && ((activeChatId.value === null && stillOnStartingRoute)
-          || (deleted && activeChatId.value === chatId)))
+        //     empty): it is a real chat again, leave it alone entirely.
+        const shouldClear = wasActive && (activeChatId.value === null
+          || (deleted && activeChatId.value === chatId))
+        if (shouldClear) {
+          activeChatId.value = null
+          persistState()
+          // Only force the `/` navigation while still in the chat area
+          // itself (home, or any open chat). Settings/Schedules/Memory/
+          // Proposals/a project retain activeChatId across navigation by
+          // design, and pages like /device sit outside ChatLayout entirely
+          // - forcing a `/` push onto any of them would eject the user from
+          // wherever they've gone, even though the stale id above still
+          // needed clearing.
+          const { router } = await import('../router')
+          const path = router.currentRoute.value.path
+          if (path === '/' || path === '/chat' || path.startsWith('/chat/')) {
+            await router.push('/')
+          }
+        }
       }
       return
     }

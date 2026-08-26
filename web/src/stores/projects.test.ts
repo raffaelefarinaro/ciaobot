@@ -1454,6 +1454,37 @@ describe('chat closing and re-entry orientation', () => {
     expect(routerPush).toHaveBeenCalledWith('/')
   })
 
+  test('clears the reopened draft without ejecting the user from Settings', async () => {
+    // The user reopens the same draft, then leaves for Settings (which
+    // retains activeChatId, so reopening plus that navigation leaves it
+    // still equal to draftId). Once the delete lands the dangling id must
+    // still be cleared, but the user must not be yanked out of Settings.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    store.activeChatId = draftId
+    router.currentRoute.value.path = '/settings'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
   test('does not force navigation home when the user left for Settings mid-delete', async () => {
     // activeChatId is null here too (Settings retains it, but this draft
     // close already cleared it before the DELETE started) - the stale
