@@ -1338,3 +1338,68 @@ def test_requests_wait_for_an_in_flight_warmup(monkeypatch, tmp_path):
     waiter.join(timeout=5)
     assert results == [["Airtable"]]
     assert len(calls) == 1, "request must reuse the warm-up probe"
+
+
+def test_waiter_reacquires_ownership_when_warmup_targets_another_root(
+    monkeypatch, tmp_path
+):
+    """A waiter never starts a probe while another is in flight.
+
+    If the in-flight warm-up finishes without a usable entry for the waiter's
+    workspace root (here: a different root), the waiter loops and reacquires
+    ownership instead of running a duplicate probe alongside it.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    other_root = tmp_path.parent / "other-ws-root"
+    other_root.mkdir()
+
+    calls: list[object] = []
+    order: list[str] = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def probe(workspace_root=None, **kwargs):
+        calls.append(workspace_root)
+        if workspace_root == other_root:
+            order.append("request-start")
+            return ["Other"]
+        order.append("warmup-start")
+        release.wait(timeout=5)
+        order.append("warmup-end")
+        return ["Warm"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert order == ["warmup-start"], "warm-up probe never started"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(other_root))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert calls == [tmp_path], "waiter must not probe while warm-up owns"
+
+    release.set()
+    assert request_done.wait(timeout=5), "waiter never reacquired ownership"
+    waiter.join(timeout=5)
+    assert results == [["Other"]]
+    assert order == ["warmup-start", "warmup-end", "request-start"], (
+        "request probe must start only after the warm-up finished"
+    )
+    assert calls == [tmp_path, other_root]

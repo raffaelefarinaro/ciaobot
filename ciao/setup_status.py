@@ -301,23 +301,28 @@ def discover_claude_mcps(
         return list(cached[2])
 
     # Single-flight: the startup warm-up (or another request thread) may
-    # already be paying for the probe. Wait for it instead of stacking a
-    # second ``claude mcp list`` that would block this request for another
-    # full health pass.
-    with _claude_mcps_lock:
-        inflight = _claude_mcps_inflight
-        if inflight is None:
-            _claude_mcps_inflight = inflight = threading.Event()
-            owner = True
-        else:
-            owner = False
-    if not owner:
-        inflight.wait(timeout=_CLAUDE_MCP_LIST_TIMEOUT_SECONDS + 5.0)
+    # already be paying for the probe. Wait for it to finish instead of
+    # stacking a second ``claude mcp list``; only become a runner once no
+    # other probe is in flight. The wait is unbounded on purpose: the owner's
+    # ``finally`` always fires and the probe itself is bounded by the
+    # subprocess timeout, so the event cannot stay unset forever. A waiter
+    # whose owner finished without a usable entry for this root (failed probe
+    # or different workspace root) loops and reacquires ownership — it never
+    # times out into running a duplicate probe alongside the in-flight one.
+    while True:
+        with _claude_mcps_lock:
+            inflight = _claude_mcps_inflight
+            if inflight is None:
+                _claude_mcps_inflight = inflight = threading.Event()
+                owner = True
+            else:
+                owner = False
+        if owner:
+            break
+        inflight.wait()
         cached = _claude_mcps_cache
         if cached is not None and cached[1] == ws_key:
             return list(cached[2])
-        # The in-flight probe failed or targeted another workspace root;
-        # fall through and pay for our own discovery.
 
     try:
         connected = _discover_claude_mcps_uncached(
