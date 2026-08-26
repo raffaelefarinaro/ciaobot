@@ -465,8 +465,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # stale `.agents/skills` links, reporting 17 tracked deletions for
             # mirrors nothing reads any more.
             targets = config.agent_root_targets()
-            for root, _name in targets:
-                update_skills(str(root))
+            for root, name in targets:
+                update_skills(str(root), workspace_name=name)
             tracker.done("update_skills")
         except Exception:
             tracker.fail("update_skills", "skill install failed")

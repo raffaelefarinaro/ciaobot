@@ -1182,6 +1182,37 @@ def test_creating_a_workspace_seeds_its_agent_root(tmp_path, monkeypatch):
     assert seeded == [(Path(config.agent_root("client-b")), False)]
 
 
+def test_updating_gws_profile_resyncs_the_agent_root(tmp_path, monkeypatch):
+    """Linking/unlinking a workspace's account re-syncs its gws-* skills.
+
+    Skill sync otherwise runs only at startup or explicit repair, so changing a
+    workspace's Google account would leave the GWS skills absent (first link) or
+    installed (unlink) until a restart. The update must resync that root. This
+    fixture is a pre-re-root install (one shared root), so the gate aggregates
+    all workspaces: once `personal` links a profile, the shared catalog is kept
+    (gate None).
+    """
+    client, config, _pcm = _client(tmp_path)
+    seeded: list[tuple[Path, str | None]] = []
+
+    def fake_sync(workspace, *, gws_profile=None, **_kw):
+        seeded.append((Path(workspace), gws_profile))
+        return None
+
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", fake_sync)
+
+    # personal exists in the bootstrap registry; flip its profile.
+    patched = client.patch(
+        "/api/workspaces/personal",
+        json={"gws_profile": "acme"},
+    )
+    assert patched.status_code == 200
+    assert config.workspace("personal").gws_profile == "acme"
+    # No real `acme` account exists in this fixture, so the effective profile is
+    # "" and the shared-root gate skips the gws-* skills.
+    assert seeded == [(Path(config.agent_root("personal")), "")]
+
+
 def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypatch):
     """Creation already succeeded, so a sync failure is reported, not unwound."""
     client, config, _pcm = _client(tmp_path)
@@ -1260,12 +1291,44 @@ def test_a_shared_vault_delete_moves_no_notes(tmp_path):
     note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
 
     deleted = client.delete("/api/workspaces/client-e")
-
     assert deleted.status_code == 200, deleted.json()
     migrated = deleted.json()["migrated"]
     assert migrated["notes"] == 0 and migrated["refused"] == []
     assert note.is_file(), "a shared-vault note must not be moved"
     assert pcm.reassigned == [("client-e", config.primary_workspace())]
+
+
+def test_deleting_a_workspace_does_not_resync_the_retired_install_root(
+    tmp_path, monkeypatch
+):
+    """After re-rooting, a delete must not repopulate the retired install root.
+
+    The shared-catalog resync on delete is only meaningful in the pre-re-root
+    layout. On a re-rooted install the active catalogs live under each
+    <install>/<workspace> root and the install root is retired, so syncing it
+    would recreate CLAUDE.md/.claude/skills there — the resync must be skipped.
+    """
+    _reroot(tmp_path)
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-g", "vault_root": "client-g"})
+    vault = Path(config.workspace_vault_root("client-g"))
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / "Ada.md").write_text(
+        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
+    )
+
+    synced: list[Path] = []
+
+    def fake_sync(workspace, **_kw):
+        synced.append(Path(workspace))
+        return None
+
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", fake_sync)
+
+    deleted = client.delete("/api/workspaces/client-g")
+    assert deleted.status_code == 200, deleted.json()
+    # No sync against the retired install root.
+    assert synced == []
 
 
 def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):

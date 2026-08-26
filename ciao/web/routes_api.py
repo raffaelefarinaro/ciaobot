@@ -884,12 +884,46 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     created = workspace.name not in config.workspaces
+    profile_changed = (
+        not created
+        and existing is not None
+        and str(getattr(existing, "gws_profile", "") or "")
+        != str(getattr(workspace, "gws_profile", "") or "")
+    )
     config.workspaces[workspace.name] = workspace
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
     payload = _workspaces_payload(config)
     if created:
         payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+    elif profile_changed:
+        # Linking a workspace to its first account (or unlinking it) changes
+        # which `gws-*` stock skills it should get, and skill sync only runs at
+        # startup/repair. Resync now so the catalog matches the new linkage
+        # instead of waiting for a restart. On a pre-re-root install the target
+        # root is shared by every workspace, so the gate aggregates all of them
+        # (unlinking one must not prune the shared catalog while another still
+        # links an account).
+        from ciao.sync_skills import (  # noqa: PLC0415
+            resolve_workspace_skills_gws_gate,
+            sync_workspace_skills,
+        )
+
+        try:
+            root = Path(config.agent_root(workspace.name))
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=resolve_workspace_skills_gws_gate(
+                    config, root, workspace.name
+                ),
+            )
+        except Exception:  # noqa: BLE001 - the update already succeeded
+            logger.exception(
+                "Could not resync skills for workspace %s after profile change",
+                workspace.name,
+            )
     return JSONResponse(payload, status_code=201 if created else 200)
 
 
@@ -917,7 +951,14 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     try:
         # `refresh_upstream=False`: this is a local seeding on a user-facing
         # request, not the periodic upstream regeneration.
-        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        await asyncio.to_thread(
+            sync_workspace_skills,
+            root,
+            refresh_upstream=False,
+            gws_profile=workspace_gws_profile(config, name),
+        )
     except Exception:  # noqa: BLE001 - creation already succeeded
         logger.exception("Could not seed agent root for new workspace %s", name)
         return False
@@ -972,6 +1013,31 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
         "notes": len(vault["moved"]),
         "refused": vault["refused"],
     }
+    # On a pre-re-root install the shared catalog serves every workspace, so
+    # deleting the only one with a GWS profile must prune the now-unusable
+    # gws-* skills (and deleting an unlinked workspace is a no-op). Resync the
+    # shared root through the aggregate gate. After re-rooting the active
+    # catalogs live under each <install>/<workspace> root and the install root
+    # is retired, so syncing it would recreate CLAUDE.md/.claude/skills there —
+    # skip the resync entirely in that layout.
+    if not getattr(config, "_rerooted", lambda: False)():
+        try:
+            from ciao.sync_skills import (  # noqa: PLC0415
+                resolve_workspace_skills_gws_gate,
+                sync_workspace_skills,
+            )
+
+            root = Path(config.workspace_root)
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
+            )
+        except Exception:  # noqa: BLE001 - the delete already succeeded
+            logger.exception(
+                "Could not resync shared skills after deleting workspace %s", name
+            )
     return JSONResponse(payload)
 
 

@@ -4836,22 +4836,17 @@ class ProjectChatManager:
     def _workspace_gws_profile(self, workspace: str | None) -> str:
         """The Google account this workspace uses, or "" when none is linked.
 
-        The operator-level default only counts when it names an account that
-        actually exists: pointing a chat at a credential directory nobody ever
-        created just produces confusing auth errors mid-task.
+        Resolved through ``gws_auth.workspace_gws_profile`` so skill sync and
+        the chat runtime agree on the same effective profile: an explicit link
+        or operator default only counts when it names an account that actually
+        exists (a bootstrap-synthetic or stale link points at a credential
+        directory nobody created, which just produces auth errors mid-task).
         """
-        workspace_config = self._config.workspace(workspace)
-        if workspace_config and workspace_config.gws_profile:
-            return workspace_config.gws_profile
-        default = self._config.gws_default_profile
-        if not default:
-            return ""
         try:
-            from ciao import gws_auth
-
-            return default if default in gws_auth.known_profiles(self._config) else ""
+            from ciao.gws_auth import workspace_gws_profile
         except Exception:
-            return default
+            return ""
+        return workspace_gws_profile(self._config, workspace)
 
     def _model_for_provider(self, model: str, provider: str) -> str:
         """A chat's model, resolved for the provider that will actually run it.
