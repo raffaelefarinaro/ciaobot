@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
 import type {
+  HousekeepingDismissResponse,
   HousekeepingResponse,
   HousekeepingRunResponse,
   OperatorAction,
@@ -52,6 +53,19 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     }
   }
 
+  async function dismiss(id: string): Promise<{ ok: boolean; summary: string }> {
+    try {
+      const data = await api.post<HousekeepingDismissResponse>(`/api/housekeeping/${id}/dismiss`)
+      actions.value = data.actions ?? []
+      return { ok: !!data.ok, summary: data.summary || '' }
+    } catch (e) {
+      // Best-effort like refresh: re-fetch so the strip reflects whatever the
+      // server actually did even if the dismiss response itself was lost.
+      await refresh()
+      return { ok: false, summary: e instanceof Error ? e.message : 'Dismiss failed' }
+    }
+  }
+
   function init() {
     if (initialized) return
     initialized = true
@@ -62,5 +76,5 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     }
   }
 
-  return { actions, loading, runningIds, refresh, run, init }
+  return { actions, loading, runningIds, refresh, run, dismiss, init }
 })

@@ -386,6 +386,7 @@ export type EventsWsMessage =
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
+  | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
@@ -419,6 +420,10 @@ export interface InAppToast {
   fixRoute?: string
   // Button label for the Fix action when fixRoute is set.
   fixLabel?: string
+  // An external link shown as a small action on an info toast (e.g. "What's
+  // new" on the update-available toast). Opens in a new tab.
+  linkUrl?: string
+  linkLabel?: string
   // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
   // draft in `projectId` (falling back to General if that project is gone)
   // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
@@ -1056,6 +1061,8 @@ export interface PackageStatus {
   update_available?: boolean
   mode?: string
   error?: string
+  /** Public URL that redirects to the latest release page. */
+  source?: string
 }
 
 /** One home-screen operator action (see `ciao/operator_actions.py`). */
@@ -1073,6 +1080,12 @@ export interface OperatorAction {
   /** A purpose-built surface for this action, when one already exists. */
   view_label: string
   view_route: string
+  /** An external page this action links to (release notes, the repository).
+   *  Rendered like a run button but opens a new tab. */
+  link_label?: string
+  link_url?: string
+  /** A "not now" button for ask-style actions; records a suppression receipt. */
+  dismiss_label?: string
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean
@@ -1083,6 +1096,15 @@ export interface HousekeepingResponse {
 }
 
 export interface HousekeepingRunResponse {
+  ok: boolean
+  action_id: string
+  error?: string
+  summary: string
+  result?: Record<string, unknown>
+  actions: OperatorAction[]
+}
+
+export interface HousekeepingDismissResponse {
   ok: boolean
   action_id: string
   error?: string

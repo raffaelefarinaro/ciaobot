@@ -67,7 +67,30 @@ function hasActions(): boolean {
 }
 
 async function runAction(action: OperatorAction): Promise<void> {
-  await housekeeping.run(action.id)
+  const { ok } = await housekeeping.run(action.id)
+  // The star nudge's run records the star; the tile then disappears, so the
+  // only feedback is this toast.
+  if (ok && action.id === 'github-star') {
+    projectStore.pushToast({
+      chat_id: '',
+      title: '★ Starred — thank you!',
+      body: 'It genuinely helps other developers discover Ciaobot.',
+    })
+  }
+}
+
+// A tile's external link opens in a new tab. Only the GitHub-star nudge
+// records the run too (so the tile clears after starring). Other links —
+// e.g. release notes on the update tile — must NOT run the action, or
+// clicking "Release notes" would start an update the user never asked for.
+async function onLinkClick(action: OperatorAction): Promise<void> {
+  if (action.id === 'github-star') {
+    await runAction(action)
+  }
+}
+
+async function dismissAction(action: OperatorAction): Promise<void> {
+  await housekeeping.dismiss(action.id)
 }
 
 async function openView(action: OperatorAction): Promise<void> {
@@ -131,6 +154,14 @@ async function openChat(action: OperatorAction): Promise<void> {
         >
           {{ housekeeping.runningIds.has(action.id) ? 'Running…' : action.run_label }}
         </button>
+        <a
+          v-if="action.link_url"
+          class="btn-small btn-primary housekeeping-link"
+          :href="action.link_url"
+          target="_blank"
+          rel="noopener noreferrer"
+          @click="onLinkClick(action)"
+        >{{ action.link_label || 'Open' }}</a>
         <button
           v-if="action.view_route"
           type="button"
@@ -148,6 +179,12 @@ async function openChat(action: OperatorAction): Promise<void> {
         >
           {{ action.chat_label || 'Discuss in chat' }}
         </button>
+        <button
+          v-if="action.dismiss_label"
+          type="button"
+          class="btn-small btn-chip"
+          @click="dismissAction(action)"
+        >{{ action.dismiss_label }}</button>
         </div>
       </article>
     </template>
@@ -253,5 +290,17 @@ async function openChat(action: OperatorAction): Promise<void> {
 
 .housekeeping-actions .btn-small {
   width: 100%;
+}
+
+/* The link variant is an <a> styled like the run button: same size, centered
+   text, no underline. It inherits .btn-small/.btn-primary from the global
+   button tokens; only the anchor-specific resets are needed here. */
+.housekeeping-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none;
+  box-sizing: border-box;
 }
 </style>

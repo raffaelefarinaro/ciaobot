@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- feat(chat): mark a chat unread on purpose ("come back to this") from the sidebar menu; clears the read stamp on every device via `POST /api/chats/{id}/unread` and a `chat_unread` event
+- feat(settings): dedicated `/settings/notifications` tab so push notifications can be enabled from a deep link, not only the home card
+- feat(desktop): "Notification Settings…" tray item opens the notifications page in the macOS app window
+- feat(home): GitHub-star nudge as a housekeeping tile after setup completes, with a "Later" snooze and a "Starred — thank you!" toast
+- feat(update): link release notes from the update tile, the update-available toast, and the Settings update panel
+
 ## v0.10.0 - 2026-08-24
 
 ### Added

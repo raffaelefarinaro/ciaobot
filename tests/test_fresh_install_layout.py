@@ -60,6 +60,12 @@ def test_a_fresh_setup_needs_no_migration_and_shows_no_tile(tmp_path: Path) -> N
     config = _fresh(tmp_path)
 
     assert migrate_if_needed(config)["status"] == "already_migrated"
+    # A fresh install is a configured install, so the GitHub-star nudge would
+    # legitimately surface; it is not migration UX, so silence it here.
+    (tmp_path / ".runtime" / "star-receipt.json").write_text(
+        json.dumps({"status": "starred", "at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
     kinds = {a.kind for a in detect_actions(
         DetectionContext(config=config, runtime_dir=tmp_path / ".runtime")
     )}

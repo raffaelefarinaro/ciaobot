@@ -4,7 +4,7 @@
 
     <ProposalReviewPanel v-if="mm.view === 'review'" />
 
-    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode }">
+    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
       <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
         <div class="mm-brain-skeleton" aria-hidden="true">
           <svg viewBox="0 0 200 140" class="mm-brain-svg">
@@ -162,6 +162,12 @@
       </div>
 
       <aside v-if="mm.selectedNode" class="mm-detail">
+        <div
+          class="mm-detail-resizer"
+          @mousedown="startDetailDrag"
+          title="Drag to resize"
+          aria-hidden="true"
+        ></div>
         <button
           type="button"
           class="mm-detail-close"
@@ -175,7 +181,6 @@
           <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
         </div>
         <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
-        <div v-if="mm.selectedNode.description" class="mm-detail-desc">{{ mm.selectedNode.description }}</div>
         <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
 
         <div class="mm-detail-section mm-detail-preview">
@@ -260,6 +265,76 @@ const emit = defineEmits<{ 'open-sidebar': [] }>()
 const store = useProjectStore()
 const mm = useMemoryMapStore()
 const fileViewer = useFileViewerStore()
+
+// ---------- detail panel resizer ----------
+// Mirrors ChatLayout's sidebar resizer: draggable, persisted, snaps to default.
+const DETAIL_DEFAULT_WIDTH = 320
+const DETAIL_MIN_WIDTH = 220
+const DETAIL_MAX_WIDTH = 560
+const DETAIL_SNAP_THRESHOLD = 12
+function safeGetDetailWidth(): number {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('ciao:mm-detail-width') : null
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) ? n : DETAIL_DEFAULT_WIDTH
+  } catch {
+    return DETAIL_DEFAULT_WIDTH
+  }
+}
+function safeSetDetailWidth(v: number) {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem('ciao:mm-detail-width', String(v))
+  } catch {}
+}
+const detailWidth = ref(safeGetDetailWidth())
+const isDraggingDetail = ref(false)
+// The inline grid-template-columns would otherwise outrank the
+// `@media (max-width: 900px)` rule that restores a single full-width column
+// (and hides the panel). Only apply the persisted width above the desktop
+// breakpoint so a phone never reserves a 220-560px column for a hidden panel.
+const isNarrow = ref(window.innerWidth <= 900)
+function onResizeNarrow() { isNarrow.value = window.innerWidth <= 900 }
+if (typeof window !== 'undefined') window.addEventListener('resize', onResizeNarrow)
+const detailBodyStyle = computed(() => {
+  if (!mm.selectedNode || isNarrow.value) return undefined
+  return { gridTemplateColumns: `1fr ${detailWidth.value}px` } as Record<string, string>
+})
+let detailDragStartX = 0
+let detailDragStartWidth = 0
+function startDetailDrag(e: MouseEvent) {
+  e.preventDefault()
+  isDraggingDetail.value = true
+  detailDragStartX = e.clientX
+  detailDragStartWidth = detailWidth.value
+  window.addEventListener('mousemove', handleDetailDrag)
+  window.addEventListener('mouseup', stopDetailDrag)
+  document.body.classList.add('is-dragging-layout')
+}
+function handleDetailDrag(e: MouseEvent) {
+  if (!isDraggingDetail.value) return
+  // Dragging the left edge: moving left (negative delta) grows the panel.
+  const delta = detailDragStartX - e.clientX
+  let next = detailDragStartWidth + delta
+  if (Math.abs(next - DETAIL_DEFAULT_WIDTH) < DETAIL_SNAP_THRESHOLD) next = DETAIL_DEFAULT_WIDTH
+  next = Math.max(DETAIL_MIN_WIDTH, Math.min(DETAIL_MAX_WIDTH, next))
+  detailWidth.value = next
+  // Keep the canvas backing store in sync while dragging, not only on release —
+  // otherwise the canvas stays stretched at the old W/H until mouseup.
+  resizeCanvas()
+  requestRedraw()
+}
+function stopDetailDrag() {
+  if (!isDraggingDetail.value) return
+  isDraggingDetail.value = false
+  safeSetDetailWidth(detailWidth.value)
+  window.removeEventListener('mousemove', handleDetailDrag)
+  window.removeEventListener('mouseup', stopDetailDrag)
+  document.body.classList.remove('is-dragging-layout')
+  // Resizing the panel changes the canvasWrap width; re-measure the canvas and
+  // re-draw at the new size so it doesn't stay stretched or clipped.
+  resizeCanvas()
+  requestRedraw()
+}
 
 // The canvas paints with literal colours while the rest of the app switches
 // theme through CSS custom properties, so it has to read the resolved values
@@ -1237,8 +1312,19 @@ function onMouseUp() {
 }
 function onWheel(e: WheelEvent) {
   cancelCameraTween()
+  if (!canvasEl.value || !W || !H) return
+  const rect = canvasEl.value.getBoundingClientRect()
+  // Cursor in device pixels, same coordinate space as W/H and worldToScreen.
+  const sx = (e.clientX - rect.left) * dpr
+  const sy = (e.clientY - rect.top) * dpr
+  const [wx, wy] = screenToWorld(sx, sy)
   const delta = -e.deltaY * 0.0012
-  camera.scale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
+  const newScale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
+  if (newScale === camera.scale) return
+  // Keep the world point under the cursor fixed while the scale changes.
+  camera.scale = newScale
+  camera.x = sx - W / 2 - wx * newScale
+  camera.y = sy - H / 2 - wy * newScale
   requestRedraw()
 }
 
@@ -1321,6 +1407,10 @@ onBeforeUnmount(() => {
   ro?.disconnect()
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
+  window.removeEventListener('mousemove', handleDetailDrag)
+  window.removeEventListener('mouseup', stopDetailDrag)
+  window.removeEventListener('resize', onResizeNarrow)
+  document.body.classList.remove('is-dragging-layout')
 })
 </script>
 
@@ -1340,11 +1430,18 @@ onBeforeUnmount(() => {
   grid-template-columns: 1fr;
 }
 .mm-body.mm-body--detail-open {
-  grid-template-columns: 1fr 280px;
+  grid-template-columns: 1fr 320px;
+}
+.mm-body--dragging-detail {
+  user-select: none;
+}
+.mm-body--dragging-detail .mm-detail {
+  transition: none;
 }
 @media (max-width: 900px) {
   .mm-body.mm-body--detail-open { grid-template-columns: 1fr; }
   .mm-detail { display: none; }
+  .mm-detail-resizer { display: none; }
 }
 
 .mm-detail {
@@ -1364,6 +1461,31 @@ onBeforeUnmount(() => {
 }
 @media (prefers-reduced-motion: reduce) {
   .mm-detail { animation: none; }
+}
+.mm-detail-resizer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.mm-detail-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms;
+}
+.mm-detail-resizer:hover::after,
+.mm-body--dragging-detail .mm-detail-resizer::after {
+  background: var(--accent);
 }
 .mm-detail-close {
   position: absolute;
@@ -1560,7 +1682,6 @@ onBeforeUnmount(() => {
 
 .mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
 .mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
-.mm-detail-desc { color: var(--fg2); font-size: var(--text-sm); margin-bottom: var(--space-3); }
 /* Age is a warning state, not a category, so it uses the app's warning token
    rather than any type hue. */
 .stale-badge {

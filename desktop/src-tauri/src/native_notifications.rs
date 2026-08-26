@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub enum NavigationIntent {
     Chat(String),
     Workspaces,
+    Notifications,
 }
 
 impl NavigationIntent {
@@ -21,6 +22,7 @@ impl NavigationIntent {
         match self {
             Self::Chat(chat_id) => format!("ciaobot:chat:{chat_id}:{}", Uuid::new_v4()),
             Self::Workspaces => format!("ciaobot:workspaces:{}", Uuid::new_v4()),
+            Self::Notifications => format!("ciaobot:notifications:{}", Uuid::new_v4()),
         }
     }
 
@@ -29,9 +31,12 @@ impl NavigationIntent {
             let (chat_id, _) = value.rsplit_once(':')?;
             return (!chat_id.is_empty()).then(|| Self::Chat(chat_id.to_string()));
         }
+        if identifier.starts_with("ciaobot:workspaces:") {
+            return Some(Self::Workspaces);
+        }
         identifier
-            .starts_with("ciaobot:workspaces:")
-            .then_some(Self::Workspaces)
+            .starts_with("ciaobot:notifications:")
+            .then_some(Self::Notifications)
     }
 }
 
@@ -276,6 +281,7 @@ mod tests {
         for intent in [
             NavigationIntent::Chat("chat:with:colons".into()),
             NavigationIntent::Workspaces,
+            NavigationIntent::Notifications,
         ] {
             let identifier = intent.notification_id();
             assert_eq!(

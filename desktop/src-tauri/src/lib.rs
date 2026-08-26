@@ -818,6 +818,24 @@ async fn try_apply_pending_navigation(app: AppHandle) {
                 Ok(destination) => destination,
                 Err(_) => return,
             };
+            // Navigating is only meaningful once the engine is up: on a cold
+            // start the main window shows the bundled recovery page, so
+            // confirming the WebKit navigation would clear the intent before
+            // the PWA is reachable. Keep it pending until the engine answers so
+            // the runtime watcher retries and lands on the route.
+            if !engine_reachable(&runtime) {
+                return;
+            }
+            main.navigate(destination).is_ok()
+        }
+        NavigationIntent::Notifications => {
+            let destination = match url_with_segments(&runtime, &["settings", "notifications"]) {
+                Ok(destination) => destination,
+                Err(_) => return,
+            };
+            if !engine_reachable(&runtime) {
+                return;
+            }
             main.navigate(destination).is_ok()
         }
     };
@@ -1337,6 +1355,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     // prompt, so turning the toggle on has to ask for it now.
                     maybe_request_notification_permission(app, enabled);
                     let _ = refresh_tray(app);
+                }
+                "notification-settings" => {
+                    queue_navigation(app, NavigationIntent::Notifications);
                 }
                 "hide-dock-icon" => {
                     let model = app.state::<DesktopModel>();
