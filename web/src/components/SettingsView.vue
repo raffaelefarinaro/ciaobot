@@ -1159,6 +1159,9 @@
                   </button>
                 </div>
                 <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
+                <div v-if="isGwsInstallError" class="action-row">
+                  <button class="btn-primary btn-small" @click="fixGwsInstallErrorInChat">Fix in Chat</button>
+                </div>
               </div>
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
@@ -3082,10 +3085,12 @@ async function removeGwsProfile(profile: GwsProfile) {
 
 const gwsInstalling = ref(false)
 const gwsInstallResult = ref('')
+const gwsInstallOutput = ref('')
 
 async function installGws() {
   gwsInstalling.value = true
   gwsInstallResult.value = 'Installing @googleworkspace/cli via npm…'
+  gwsInstallOutput.value = ''
   try {
     const res = await api.post<{ ok: boolean; output?: string; error?: string; integration?: GwsIntegrationSettings }>(
       '/api/integrations/gws/install',
@@ -3094,13 +3099,40 @@ async function installGws() {
     if (res.ok) {
       if (res.integration) gwsIntegration.value = res.integration
       gwsInstallResult.value = 'gws installed successfully.'
+      gwsInstallOutput.value = res.output || ''
     } else {
-      gwsInstallResult.value = res.error || 'Installation failed.'
+      gwsInstallOutput.value = res.output || ''
+      const base = res.error || 'Installation failed.'
+      gwsInstallResult.value = gwsInstallOutput.value ? `${base}: ${gwsInstallOutput.value.slice(0, 500)}` : base
     }
   } catch (e) {
     gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
+    gwsInstallOutput.value = errorMessage(e)
   } finally {
     gwsInstalling.value = false
+  }
+}
+
+const isGwsInstallError = computed(() => {
+  const t = gwsInstallResult.value
+  if (!t) return false
+  if (t === 'gws installed successfully.' || t === 'Installing @googleworkspace/cli via npm…') return false
+  return /error|failed|failure/i.test(t)
+})
+
+async function fixGwsInstallErrorInChat() {
+  const parts = [gwsInstallResult.value || 'gws install failed']
+  if (gwsInstallOutput.value && !parts[0].includes(gwsInstallOutput.value.slice(0, 80))) {
+    parts.push('', 'npm output:', gwsInstallOutput.value.slice(0, 4000))
+  }
+  const errorText = parts.join('\n')
+  try {
+    await projectStore.fixError({
+      errorText,
+      context: 'Installing @googleworkspace/cli from Settings → Google Workspace → Install gws. The install failed (npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install).',
+    })
+  } catch (e) {
+    notifyFailed('Could not open fix chat', errorMessage(e))
   }
 }
 
