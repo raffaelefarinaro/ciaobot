@@ -396,6 +396,55 @@ class CiaoControlPlane:
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
 
+    def gws_status(self, principal: McpPrincipal) -> dict[str, Any]:
+        """Report Google Workspace connection status for the active workspace.
+
+        Resolves the workspace's linked ``gws_profile`` (falling back to the
+        operator-level default), then reports whether credentials are present and
+        whether the periodic health monitor's last reading says the token is
+        valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
+        the agent can answer "is Google connected?" without a subprocess.
+        """
+        workspace = self._workspace(principal)
+        from ciao import gws_auth
+
+        profile = str(
+            getattr(self.config.workspace(workspace), "gws_profile", "") or ""
+        ).strip()
+        if not profile:
+            profile = str(getattr(self.config, "gws_default_profile", "") or "").strip()
+        if not profile:
+            return _ok(
+                {
+                    "profile": "",
+                    "configured": False,
+                    "connected": False,
+                    "needs_relogin": False,
+                }
+            )
+
+        config_dir = gws_auth.profile_config_dir(self.config, profile)
+        credentials_present = bool(config_dir) and any(
+            (config_dir / name).is_file()
+            for name in ("credentials.json", "credentials.enc")
+        )
+        health = gws_auth.read_health_cache(
+            Path(self.config.state_path).parent
+        ).get(profile, {})
+        token_valid = (
+            bool(health.get("token_valid")) if "token_valid" in health else None
+        )
+        return _ok(
+            {
+                "profile": profile,
+                "configured": credentials_present,
+                "connected": bool(credentials_present and token_valid is not False),
+                "token_valid": token_valid,
+                "needs_relogin": bool(credentials_present and token_valid is False),
+                "token_error": str(health.get("token_error") or ""),
+            }
+        )
+
     def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
         workspace = self._workspace(principal)
