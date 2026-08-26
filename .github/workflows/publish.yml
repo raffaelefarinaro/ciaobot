@@ -87,16 +87,16 @@ jobs:
           chmod 755 install.sh
           signature_value="$(cat "${updater_name}.sig")"
           download="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/${updater_name}"
+          # arm64 only. A true Intel Mac (or an x86_64 slice under Rosetta)
+          # selects darwin-x86_64 at compile time and must not be handed the
+          # arm64 artifact it cannot run; such installs simply get no in-app
+          # update and can reinstall through the arm64 installer.
           jq -n \
             --arg version "$version" \
             --arg notes "Ciaobot v${version}" \
             --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg url "$download" \
             --arg signature "$signature_value" \
-            # arm64 only. A true Intel Mac (or an x86_64 slice under Rosetta)
-            # selects darwin-x86_64 at compile time and must not be handed the
-            # arm64 artifact it cannot run; such installs simply get no in-app
-            # update and can reinstall through the arm64 installer.
             '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
             > latest.json
       - name: Attach release assets
