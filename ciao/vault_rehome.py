@@ -111,6 +111,7 @@ from ciao.vault_index import (
 from ciao.vault_lint import _is_escaped
 from ciao.vault_migrate_links import (
     WIKILINK_RE,
+    _alias_separator,
     _is_skipped,
     _parse_wikilink,
     _run_git,
@@ -912,7 +913,14 @@ def _wikilink_edits(
         new_ref = moved_by_repo.get(target.as_posix())
         if not new_ref or _new_ref(ref) == new_ref:
             continue
-        rendered = new_ref + (f"#{anchor}" if anchor else "") + (f"|{alias}" if alias else "")
+        # `_alias_separator`, not a bare `|`: a wikilink in a table cell spells
+        # its alias pipe `\|`, and re-emitting it unescaped closes the cell.
+        separator = _alias_separator(match.group(0))
+        rendered = (
+            new_ref
+            + (f"#{anchor}" if anchor else "")
+            + (f"{separator}{alias}" if alias else "")
+        )
         edits.append(
             _Edit(
                 start=body_start + start,
@@ -1062,7 +1070,14 @@ def _frontmatter_edits(
         new_ref = moved_by_repo.get(target.as_posix())
         if not new_ref or _new_ref(ref) == new_ref:
             continue
-        rendered = new_ref + (f"#{anchor}" if anchor else "") + (f"|{alias}" if alias else "")
+        # `_alias_separator`, not a bare `|`: a wikilink in a table cell spells
+        # its alias pipe `\|`, and re-emitting it unescaped closes the cell.
+        separator = _alias_separator(link.group(0))
+        rendered = (
+            new_ref
+            + (f"#{anchor}" if anchor else "")
+            + (f"{separator}{alias}" if alias else "")
+        )
         edits.append(
             _Edit(
                 start=base + link.start(),

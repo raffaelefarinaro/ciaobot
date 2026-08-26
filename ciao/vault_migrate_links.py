@@ -107,7 +107,14 @@ _SKIP_DIRS = EXCLUDED_TOP_DIRS | EXCLUDE_DIRS
 # ref (anchor and alias excluded), group 2 the alias. `[[#Heading]]` cannot match
 # — group 1 needs a non-`#` character — which is why a pure in-page anchor is
 # left alone for free.
-WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]")
+#
+# `[` is excluded from the ref for the same reason `]` is: it is a bracket this
+# pattern is responsible for balancing, not a character a note name has. Letting
+# it in made `people: [[[People/Mo]]]` — a wikilink inside a flow sequence —
+# match from the outer bracket with the ref `[People/Mo`, so the conversion ate
+# the sequence's opening bracket and left `people: Mo]` behind. Excluded, the
+# match starts one character later and the bracket survives.
+WIKILINK_RE = re.compile(r"\[\[([^\[\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]")
 
 
 # ---- receipt ---------------------------------------------------------------
@@ -392,15 +399,40 @@ def _parse_wikilink(matched: str) -> tuple[str, str, str]:
     non-capturing group, and the anchor is exactly what the receipt has to keep.
     Parsing the already-matched text avoids a second wikilink pattern that could
     disagree with the first about what a wikilink even is.
+
+    The alias pipe is spelled `\\|` inside a markdown table, where a bare `|`
+    would close the cell instead — correct GFM, correct Obsidian, and the only
+    way to write a roster table of people notes. The backslash belongs to the
+    *delimiter*, so it is dropped here rather than left to trail into the ref:
+    `[[People/Mo\\|Mo]]` used to parse as the ref `People/Mo\\`, which resolves to
+    nothing, and the migration then emitted `./People/Mo\\.md` — a path with a
+    stray backslash in it — and reported the link as one that was *already*
+    dead. Every wikilink in a table cell hit this.
     """
     inner = matched[2:-2]
     alias = ""
     if "|" in inner:
         inner, alias = inner.split("|", 1)
+        if inner.endswith("\\"):
+            inner = inner[:-1]
     anchor = ""
     if "#" in inner:
         inner, anchor = inner.split("#", 1)
     return inner.strip(), anchor.strip(), alias.strip()
+
+
+def _alias_separator(matched: str) -> str:
+    """How ``matched`` spelled its alias pipe, `\\|` or `|`.
+
+    For callers that re-emit a wikilink rather than replace it (`vault_rehome`
+    repoints a moved target and keeps the dialect). Re-rendering a table cell's
+    `\\|` as a bare `|` would close the cell early and break the row, which is
+    exactly what `_parse_wikilink` dropping the backslash would otherwise cause.
+    """
+    head, separator, _ = matched[2:-2].partition("|")
+    if not separator:
+        return "|"
+    return "\\|" if head.endswith("\\") else "|"
 
 
 def _resolved_destination(source_dir: str, target: Path) -> str:
@@ -531,16 +563,43 @@ def _frontmatter_edits(text: str, match: re.Match[str]) -> list[_Edit]:
     return edits
 
 
-def _is_whole_frontmatter_value(line: str, link: re.Match[str]) -> bool:
-    """Whether ``link`` is the entire value on this frontmatter line.
+_KEY_OR_DASH_RE = re.compile(r"^\s*(?:-\s*|[A-Za-z0-9_.-]+:\s*)")
+# Where one item of an inline flow sequence begins and ends: an opening bracket
+# or a comma from the item before it, and a comma or the closing bracket after.
+# Quotes are optional on either side, and only the item's own delimiters count.
+_FLOW_ITEM_OPENS_RE = re.compile(r"""(?:^|[\[,])\s*["']?\s*$""")
+_FLOW_ITEM_CLOSES_RE = re.compile(r"""^\s*["']?\s*[,\]]""")
 
-    True for `key: [[ref]]`, `key: "[[ref]]"` and `- "[[ref]]"`; false when the
-    wikilink sits inside a sentence. Everything except the link, the key or list
-    marker, and optional quotes has to be whitespace.
+
+def _is_whole_frontmatter_value(line: str, link: re.Match[str]) -> bool:
+    """Whether ``link`` is an entire value on this frontmatter line.
+
+    True for `key: [[ref]]`, `key: "[[ref]]"`, `- "[[ref]]"` and for each item
+    of an inline flow sequence, `related: ["[[a]]", "[[b]]"]`; false when the
+    wikilink sits inside a sentence.
+
+    The flow sequence is the case this used to get wrong, and it lost data
+    rather than merely mis-classifying: a flow item read as *prose* is replaced
+    by its display text, so `related: ["[[work/products/slc]]"]` became
+    `related: ["slc"]` — the path thrown away, which is exactly what the
+    reference branch exists to prevent. Two refs sharing a stem collapsed into
+    the same ambiguous value, and since the rewrite resolved fine it was
+    reported as a clean conversion with nothing unresolved.
+
+    A flow sequence is recognised by what precedes the link rather than by what
+    follows it: the text between the key and the link starts with `[`. Reading
+    it off the *trailing* comma instead would swallow ordinary prose — the comma
+    in `description: asked [[People/Mo|Mo]], then left` says nothing about
+    whether the value is a reference, and treating it as a delimiter turned that
+    sentence into a path. The link's own `[[` is never part of that text, so
+    there is nothing to disambiguate against.
     """
-    before = line[: link.start()]
+    before = _KEY_OR_DASH_RE.sub("", line[: link.start()], count=1)
     after = line[link.end() :]
-    before = re.sub(r"^\s*(?:-\s*|[A-Za-z0-9_.-]+:\s*)", "", before, count=1)
+    if before.lstrip().startswith("["):
+        return bool(
+            _FLOW_ITEM_OPENS_RE.search(before) and _FLOW_ITEM_CLOSES_RE.match(after)
+        )
     return before.strip().strip("\"'") == "" and after.strip().strip("\"'") == ""
 
 
@@ -740,6 +799,14 @@ def unmigrate_vault_links(
     root = Path(vault_root)
     summary: dict[str, Any] = {
         "vault_root": str(root),
+        # The root the migration actually ran against, carried through so the
+        # caller can tell "the note changed since the migration" (a mismatch at
+        # a known offset) apart from "this is the wrong root" (every file
+        # missing). The receipt's paths are root-relative, so reversing from a
+        # different root reads nothing and restores nothing.
+        "receipt_vault_root": str(receipt.get("vault_root", ""))
+        if isinstance(receipt, dict)
+        else "",
         "applied": bool(apply),
         "files_restored": 0,
         "restored": [],
