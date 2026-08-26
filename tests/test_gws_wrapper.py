@@ -57,16 +57,44 @@ def test_gws_environment_sets_config_dir_and_unsets_credentials(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "base64blob")
-    cfg = _config(tmp_path)
-    env = gws_wrapper._gws_environment(cfg, "personal")
+    env = gws_wrapper._gws_environment(tmp_path, "personal")
     assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(tmp_path / "secrets" / "gws-personal")
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
 
 
 def test_gws_environment_invalid_profile(tmp_path) -> None:
-    cfg = _config(tmp_path)
     with pytest.raises(ValueError):
-        gws_wrapper._gws_environment(cfg, "!!!")
+        gws_wrapper._gws_environment(tmp_path, "!!!")
+
+
+# ── configured workspace root ───────────────────────────────────────────────
+
+
+def test_configured_workspace_root_trusts_explicit(tmp_path) -> None:
+    cfg = SimpleNamespace(workspace_root=str(tmp_path))
+    assert gws_wrapper._configured_workspace_root(cfg) == tmp_path.resolve()
+
+
+def test_configured_workspace_root_from_plist_fallback(tmp_path, monkeypatch) -> None:
+    real_root = tmp_path / "real-workspace"
+    real_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(fake_home))
+    bootstrap = fake_home / ".ciao" / "bootstrap"
+    # config lands on bootstrap (no CIAO_WORKSPACE in a plain terminal)
+    cfg = SimpleNamespace(workspace_root=str(bootstrap))
+    launch_agents = fake_home / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True)
+    plist = launch_agents / "com.ciao.server.plist"
+    plist.write_bytes(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>EnvironmentVariables</key><dict>
+<key>CIAO_WORKSPACE</key><string>{real_root}</string>
+</dict>
+</dict></plist>""".encode()
+    )
+    assert gws_wrapper._configured_workspace_root(cfg) == real_root.resolve()
 
 
 # ── gws_auth_helper reuses gws_auth ─────────────────────────────────────────

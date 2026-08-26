@@ -18,13 +18,46 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
 from ciao.tool_path import login_shell_path, resolve_tool
 
 
-def _gws_environment(config, profile: str) -> dict[str, str]:
+def _configured_workspace_root(config) -> Path:
+    """Resolve the real workspace root when ``CiaoConfig.from_env`` cannot.
+
+    When ``ciao gws`` is run from a plain terminal (no ``CIAO_WORKSPACE`` in the
+    environment), ``CiaoConfig.from_env`` falls back to the bootstrap workspace
+    rather than the configured install root. Recover the actual root from the
+    LaunchAgent plist so the credential directory points at the workspace the
+    Settings → Workspaces card shows, not ``~/.ciao/bootstrap``.
+    """
+    configured = str(getattr(config, "workspace_root", "") or "")
+    if not configured:
+        return None
+    resolved = Path(configured).expanduser().resolve()
+    home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
+    bootstrap = home / ".ciao" / "bootstrap"
+    if resolved != bootstrap:
+        # Real (server-spawned) or explicitly configured workspace: trust it.
+        return resolved
+    try:
+        import plistlib
+
+        plist = home / "Library" / "LaunchAgents" / "com.ciao.server.plist"
+        with plist.open("rb") as handle:
+            data = plistlib.load(handle)
+        workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+        if workspace:
+            return Path(str(workspace)).expanduser().resolve()
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _gws_environment(workspace_root: Path, profile: str) -> dict[str, str]:
     """Environment for a profile-aware ``gws`` invocation.
 
     Sets ``GOOGLE_WORKSPACE_CLI_CONFIG_DIR`` to the profile's credential dir and
@@ -32,6 +65,9 @@ def _gws_environment(config, profile: str) -> dict[str, str]:
     as a base64 string meant for the BigQuery runner; ``gws`` expects a file
     path and must use its own OAuth token cache, not a service account).
     """
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(workspace_root=str(workspace_root))
     config_dir = profile_config_dir(config, profile)
     if config_dir is None:
         raise ValueError(f"'{profile}' is not a usable profile name")
@@ -83,8 +119,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    workspace_root = _configured_workspace_root(config) or Path(
+        config.workspace_root
+    )
+
     try:
-        env = _gws_environment(config, profile)
+        env = _gws_environment(workspace_root, profile)
     except ValueError as exc:
         print(f"ciao gws: {exc}", file=sys.stderr)
         return 2
