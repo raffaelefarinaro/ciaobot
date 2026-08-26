@@ -40,7 +40,8 @@ vi.mock('../router', () => ({
     push: routerPush,
     currentRoute: {
       value: {
-        params: {}
+        params: {},
+        path: '/',
       }
     }
   }
@@ -1447,6 +1448,34 @@ describe('chat closing and re-entry orientation', () => {
     expect(store.chats).toHaveLength(0)
     expect(store.activeChatId).toBeNull()
     expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  test('does not force navigation home when the user left for Settings mid-delete', async () => {
+    // activeChatId is null here too (Settings retains it, but this draft
+    // close already cleared it before the DELETE started) - the stale
+    // cleanup must not use that to yank the user back to `/`.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    // The user navigates to Settings before the DELETE resolves.
+    router.currentRoute.value.path = '/settings'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
   })
 
   test('starts the summary when a completed chat closes and reuses it on reopen', async () => {

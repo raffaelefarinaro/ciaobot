@@ -2271,6 +2271,17 @@ export const useProjectStore = defineStore('projects', () => {
     return !loaded.some(message => message.role === 'user')
   }
 
+  // Mirrors ChatLayout's viewMode: routes here deliberately retain
+  // activeChatId underneath them (Settings/Schedules/Memory/Proposals), or
+  // are a different screen entirely (a project). Forcing a stray `/` push
+  // onto one of these mid-navigation would eject the user from wherever
+  // they went next.
+  function retainsChatAcrossNavigation(path: string): boolean {
+    return path.startsWith('/settings') || path.startsWith('/schedules')
+      || path.startsWith('/memory') || path.startsWith('/proposals')
+      || path.startsWith('/project/')
+  }
+
   async function closeChat(chatId = activeChatId.value): Promise<void> {
     if (!chatId) return
     const emptyDraft = isEmptyDraft(chatId)
@@ -2293,15 +2304,21 @@ export const useProjectStore = defineStore('projects', () => {
       } finally {
         // The view is already cleared. A failed DELETE must not also strand
         // the router on /chat/<id> with no active chat behind it. But the
-        // user may have reopened *this same* chat, or a different one,
-        // while the DELETE was in flight:
+        // user may have moved on while the DELETE was in flight:
         //   - a different chat is now active: leave it alone.
         //   - this chat was reopened and the delete succeeded: it is gone
         //     server-side, so still navigate home rather than strand the
         //     view on a chat that no longer exists.
         //   - this chat was reopened and the delete was declined (no longer
         //     empty): it is a real chat again, leave it alone too.
-        await leaveChatView(wasActive && (activeChatId.value === null
+        //   - nothing reopened it, but the user navigated to Settings,
+        //     Schedules, Memory, or a project: those retain activeChatId
+        //     by design, so a null activeChatId here does not mean "still
+        //     on the view this close started from" - do not force them
+        //     back to `/`.
+        const { router } = await import('../router')
+        const stillOnChatView = !retainsChatAcrossNavigation(router.currentRoute.value.path)
+        await leaveChatView(wasActive && ((activeChatId.value === null && stillOnChatView)
           || (deleted && activeChatId.value === chatId)))
       }
       return
