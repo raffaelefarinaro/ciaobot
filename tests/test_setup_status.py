@@ -1019,6 +1019,7 @@ def test_discover_claude_system_skills_filters_enabled_and_caches(
             "  Status: ✘ disabled\n"
         )
         stderr = ""
+        returncode = 0
 
     def fake_run(*_args, **_kwargs):
         calls["n"] += 1
@@ -1050,6 +1051,7 @@ def test_discover_claude_system_skills_merges_standalone_skills(
     class FakeResult:
         stdout = "❯ skill-creator@claude-plugins-official\n  Status: ✔ enabled\n"
         stderr = ""
+        returncode = 0
 
     monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
     monkeypatch.setattr(
@@ -1092,6 +1094,44 @@ def test_discover_claude_system_skills_falls_back_to_installed_plugins(
     assert setup_status.discover_claude_system_skills() == ["legacy-plugin"]
 
 
+def test_discover_claude_system_skills_falls_back_when_cli_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """A failed `claude plugin list` must not hide installed plugins.
+
+    Fallback eligibility tracks CLI success, not the merged result: otherwise
+    one standalone skill would suppress the installed_plugins recovery whenever
+    the CLI transiently fails or times out.
+    """
+    import subprocess as _subprocess
+
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    def boom(*_args, **_kwargs):
+        raise _subprocess.TimeoutExpired(cmd="claude plugin list", timeout=8)
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", boom)
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "ego-browser").mkdir(parents=True)
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"legacy-plugin@source": {}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert setup_status.discover_claude_system_skills() == [
+        "ego-browser",
+        "legacy-plugin",
+    ]
+
+
 # ── Claude MCP discovery cache ──────────────────────────────────────────
 # `claude mcp list` measures ~12s on a real install and sits on the
 # Settings -> Providers load path, so the cache decides whether that tab is
@@ -1116,6 +1156,7 @@ def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch)
     monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_discovery)
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     # First call has nothing to serve, so it waits.
     assert ss.discover_claude_mcps(None) == ["mcp-1"]
@@ -1146,6 +1187,7 @@ def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
     )
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     ss.discover_claude_mcps(None)
     ss.discover_claude_mcps(None)
@@ -1166,6 +1208,7 @@ def test_a_fresh_empty_mcp_cache_serves_without_refresh(monkeypatch):
     )
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     assert ss.discover_claude_mcps(None) == []
     assert ss.discover_claude_mcps(None) == []
@@ -1190,6 +1233,7 @@ def test_an_empty_mcp_cache_expires_fast_and_recovers(monkeypatch):
     monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", discovery)
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
 
     assert ss.discover_claude_mcps(None) == []
     assert calls == [1]
@@ -1216,6 +1260,7 @@ def test_warm_claude_discovery_cache_populates_both_caches(monkeypatch, tmp_path
 
     monkeypatch.setattr(ss, "_claude_mcps_cache", None)
     monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
     monkeypatch.setattr(ss, "_claude_skills_cache", None)
     seen = []
 
@@ -1241,3 +1286,55 @@ def test_warm_claude_discovery_cache_populates_both_caches(monkeypatch, tmp_path
     assert ss._claude_mcps_cache[2] == ("Airtable",)
     assert ss._claude_skills_cache is not None
     assert ss._claude_skills_cache[1] == ("skill-creator",)
+
+
+def test_requests_wait_for_an_in_flight_warmup(monkeypatch, tmp_path):
+    """A request arriving mid-warm-up reuses the probe instead of stacking one.
+
+    The warm-up thread and the request path must share a single
+    `claude mcp list` run: otherwise a Providers visit right after startup
+    blocks for another full health pass and pays for a duplicate probe.
+    """
+    import threading
+    import time as _time
+
+    from ciao import setup_status as ss
+
+    calls = []
+    release = threading.Event()
+    request_done = threading.Event()
+
+    def slow_probe(**kwargs):
+        calls.append(1)
+        release.wait(timeout=5)
+        return ["Airtable"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ss.warm_claude_discovery_cache(tmp_path)
+
+    # Wait until the warm-up thread owns the in-flight probe.
+    deadline = _time.monotonic() + 5
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls == [1], "warm-up probe never started"
+
+    results: list[list[str]] = []
+
+    def request() -> None:
+        results.append(ss.discover_claude_mcps(tmp_path))
+        request_done.set()
+
+    waiter = threading.Thread(target=request)
+    waiter.start()
+    _time.sleep(0.05)
+    assert len(calls) == 1, "a second probe must not start mid-warm-up"
+
+    release.set()
+    assert request_done.wait(timeout=5), "request never served"
+    waiter.join(timeout=5)
+    assert results == [["Airtable"]]
+    assert len(calls) == 1, "request must reuse the warm-up probe"
