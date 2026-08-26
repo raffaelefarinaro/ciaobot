@@ -11,6 +11,13 @@ import sys
 
 
 def main() -> int:
+    # Preserve the checkout root when invoked from a dev checkout, so
+    # `ciao gws-auth-helper` resolves the credential directory there on hosts
+    # without a macOS LaunchAgent plist. Only sets it when unset, mirroring the
+    # bash shim and the old __file__-anchored lookup.
+    if not os.environ.get("CIAO_WORKSPACE"):
+        checkout = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        os.environ["CIAO_WORKSPACE"] = checkout
     from ciao.gws_auth_helper import main_entry
 
     return main_entry(sys.argv[1:])
