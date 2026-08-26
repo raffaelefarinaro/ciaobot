@@ -1341,7 +1341,6 @@ async function fetchGuide(): Promise<void> {
   guideLoading.value = false
 }
 watch(() => store.activeWorkspace, () => { void fetchGuide() }, { immediate: true })
-onMounted(() => { void fetchGuide() })
 function openGuideFile(): void {
   if (!guideResolvedPath.value) return
   void fileViewer.open(guideResolvedPath.value)
@@ -3383,8 +3382,8 @@ async function confirmDeleteChat(chatId: string) {
   font-family: var(--font);
   /* Touch-safe hit area: the visible 3px/8px padding is too small to tap
      reliably on the mobile sidebar, so guarantee a 44px minimum target. */
-  min-width: 44px;
-  min-height: 44px;
+  min-width: var(--touch);
+  min-height: var(--touch);
   display: inline-flex;
   align-items: center;
   justify-content: center;
