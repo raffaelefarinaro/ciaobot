@@ -1590,3 +1590,90 @@ def test_waiter_reacquires_ownership_when_warmup_targets_another_root(
         "request probe must start only after the warm-up finished"
     )
     assert calls == [tmp_path, other_root]
+
+
+def test_verify_reprobes_when_the_preclear_probe_already_landed(monkeypatch, tmp_path):
+    """A pre-clear result that lands before Verify's payload is still stale.
+
+    The waiter path already discards a generation-stale result, but the
+    warm-up can just as easily finish in the gap between Verify's cache bust
+    and the payload it builds next. Serving that cached answer (and only
+    refreshing in the background) would report the configuration the user just
+    changed, so the request must re-probe synchronously instead.
+    """
+    import time
+
+    from ciao import setup_status as ss
+
+    calls: list[int] = []
+
+    def probe(**kwargs):
+        calls.append(1)
+        return ["Fresh"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    # Verify busts the cache while a probe is running...
+    ss.clear_claude_discovery_cache()
+    # ...and that probe lands (with its pre-clear generation) before the
+    # payload request arrives.
+    ws_key = str(ss._resolve_root(tmp_path))
+    monkeypatch.setattr(
+        ss,
+        "_claude_mcps_cache",
+        (time.monotonic(), ws_key, ("Stale",), ss._claude_mcps_generation - 1),
+    )
+
+    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
+    assert calls == [1], "the pre-clear result must not be served"
+    # The fresh result carries the current generation and serves from cache.
+    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
+    assert calls == [1]
+
+
+def test_winning_ownership_after_a_probe_lands_serves_its_result(monkeypatch, tmp_path):
+    """Taking single-flight ownership re-checks the cache before probing.
+
+    A request that fails to acquire ownership, then wins it on the next loop
+    because the owner finished in between, must serve the result the owner
+    just cached instead of paying for a duplicate `claude mcp list`.
+    """
+    import time
+
+    from ciao import setup_status as ss
+
+    calls: list[int] = []
+
+    def probe(**kwargs):
+        calls.append(1)
+        return ["Duplicate"]
+
+    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
+    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
+    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
+    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
+
+    ws_key = str(ss._resolve_root(tmp_path))
+    real_acquire = ss._acquire_mcps_probe
+
+    def acquire_after_owner_lands():
+        event = real_acquire()
+        if event is not None and ss._claude_mcps_cache is None:
+            # The previous owner finished between the cache read and this
+            # acquire, stamping its result as current.
+            ss._claude_mcps_cache = (
+                time.monotonic(),
+                ws_key,
+                ("Airtable",),
+                ss._claude_mcps_generation,
+            )
+        return event
+
+    monkeypatch.setattr(ss, "_acquire_mcps_probe", acquire_after_owner_lands)
+
+    assert ss.discover_claude_mcps(tmp_path) == ["Airtable"]
+    assert calls == [], "the landed result must be served instead of re-probed"
+    assert ss._claude_mcps_inflight is None, "ownership must be handed back"
