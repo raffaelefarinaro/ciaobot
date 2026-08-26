@@ -181,11 +181,11 @@ def test_github_star_resurfaces_after_snooze_expires(tmp_path: Path) -> None:
     assert "github-star" in [a.id for a in detect_actions(context)]
 
 
-def test_github_star_run_records_starred(tmp_path: Path) -> None:
+async def test_github_star_run_records_starred(tmp_path: Path) -> None:
     from ciao.operator_actions import run_action
 
     context = _context(tmp_path)
-    result, _summary = run_action("github-star", context)
+    result, _summary = await run_action("github-star", context)
     assert result["status"] == "starred"
     assert "github-star" not in [a.id for a in detect_actions(context)]
 
@@ -547,9 +547,9 @@ def test_scan_vault_is_never_touched(tmp_path: Path) -> None:
     spy.assert_not_called()
 
 
-def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
+async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
+        await run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
 
 
 def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
