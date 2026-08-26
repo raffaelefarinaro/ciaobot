@@ -1159,7 +1159,6 @@ def _provider_config_payload(config) -> dict:
     return {
         "keys": key_payload(_PROVIDER_KEY_META),
         "service_keys": key_payload(_SERVICE_KEY_META),
-        "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
         # Each row carries its own labels so the Settings card does not have to
@@ -1287,10 +1286,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 status_code=400,
             )
         updates.update(key_updates)
-    if "auto_update_github_skills" in body:
-        val = bool(body["auto_update_github_skills"])
-        updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
-        config.auto_update_github_skills = val
 
     _write_env_values(_env_path(config), updates)
     provider_key_changes = {
@@ -6657,55 +6652,130 @@ async def admin_skills(request: Request) -> JSONResponse:
 
 
 async def admin_add_skill(request: Request) -> JSONResponse:
-    """Add an upstream skill from GitHub."""
+    """Deprecated: GitHub skill install removed.
+
+    Kept as a 410 for old clients that still POST to this route.
+    """
+    return JSONResponse(
+        {"ok": False, "error": "GitHub skill install removed. Add a local folder under skills/<name>/ or upload a zip via POST /api/skills/import."},
+        status_code=410,
+    )
+
+
+async def skill_import(request: Request) -> JSONResponse:
+    """Import a skill from a validated zip archive.
+
+    Accepts multipart/form-data with a ``file`` field containing the zip.
+    Validates zip-slip, exactly one top-level folder with SKILL.md,
+    frontmatter name/description, size ≤ 15KB, and name equals folder.
+    On success extracts to ``skills/<name>/`` and syncs the catalog.
+    """
     config = request.app.state.config
+    # Resolve destination skills root: per-root installs keep skills per workspace.
     try:
-        body = await request.json()
-        source = body.get("source", "").strip()
-        skill = body.get("skill", "").strip() or None
-        agent = body.get("agent", "claude-code").strip() or "claude-code"
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"Invalid request body: {e}"}, status_code=400)
+        from ciao.config import CiaoConfig
 
-    if not source:
-        return JSONResponse({"ok": False, "error": "GitHub URL or owner/repo is required"}, status_code=400)
-
+        _ = CiaoConfig  # keep import for mypy
+    except Exception:
+        pass
+    dest_skills: Path
     try:
-        import sys
-        
-        script_path = Path(config.workspace_root) / "scripts" / "skills_add.py"
-        if not script_path.exists():
-            return JSONResponse({"ok": False, "error": f"Script {script_path} does not exist"}, status_code=500)
+        if getattr(config, "_rerooted", lambda: False)() if callable(getattr(config, "_rerooted", None)) else bool(getattr(config, "_rerooted", False)):
+            # Use primary workspace's agent root when re-rooted
+            try:
+                primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else ""
+                if primary:
+                    dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
+                else:
+                    dest_skills = Path(config.workspace_root) / "skills"
+            except Exception:
+                dest_skills = Path(config.workspace_root) / "skills"
+        else:
+            # Shared layout: workspace_root holds skills/
+            # Also check if agent_root_targets exists and is per-root
+            targets = getattr(config, "agent_root_targets", None)
+            if callable(targets):
+                try:
+                    roots = list(targets())  # type: ignore[no-untyped-call]
+                    if len(roots) == 1:
+                        # Single root (shared) – that root is the skills holder
+                        dest_skills = Path(roots[0][0]) / "skills"
+                    elif roots:
+                        # Multiple roots (re-rooted) – use primary
+                        primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else roots[0][1]
+                        try:
+                            dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
+                        except Exception:
+                            dest_skills = Path(roots[0][0]) / "skills"
+                    else:
+                        dest_skills = Path(config.workspace_root) / "skills"
+                except Exception:
+                    dest_skills = Path(config.workspace_root) / "skills"
+            else:
+                dest_skills = Path(config.workspace_root) / "skills"
+    except Exception:
+        dest_skills = Path(getattr(config, "workspace_root", ".")) / "skills"
 
-        cmd = [sys.executable, str(script_path), source]
-        if skill:
-            cmd.extend(["--skill", skill])
-        cmd.extend(["--agent", agent])
+    # Parse multipart
+    try:
+        form = await request.form()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"Invalid form: {exc}"}, status_code=400)
+    upload = form.get("file")
+    # Fallback: allow any file field
+    if upload is None:
+        for key in form:
+            val = form[key]
+            if hasattr(val, "read"):
+                upload = val
+                break
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"ok": False, "error": "Missing file field 'file' (multipart zip upload required)."}, status_code=400)
+    # Optional force flag
+    force_raw = form.get("force")
+    force = str(force_raw).strip().lower() in {"1", "true", "yes"} if force_raw is not None else False
+    # Also check query param
+    if not force and request.query_params.get("force", "").lower() in {"1", "true", "yes"}:
+        force = True
 
-        # Run script to add the skill to skills-lock.json
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
+    # Read upload with size limit (zip + slack). Allow up to 5MB, but validator will enforce 15KB SKILL.md
+    max_zip_bytes = 10 * 1024 * 1024
+    try:
+        data = await _read_upload_limited(upload, max_zip_bytes)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Zip too large (max 10 MB)."}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"Failed to read upload: {exc}"}, status_code=400)
+
+    # Basic content-type check (accept zip or octet-stream)
+    filename = getattr(upload, "filename", "") or ""
+    if filename and not filename.lower().endswith(".zip"):
+        # Still allow; some clients may send octet-stream without .zip, but warn if clearly not zip
+        if filename.lower().endswith((".tar.gz", ".tgz", ".tar")):
+            return JSONResponse({"ok": False, "error": "Only .zip is supported (zip only for v1)."}, status_code=400)
+
+    from ciao.skill_import import extract_skill_zip
+
+    dest_skills.mkdir(parents=True, exist_ok=True)
+    name, errors = await asyncio.to_thread(extract_skill_zip, data, dest_skills, overwrite=force)
+    if errors:
+        return JSONResponse({"ok": False, "error": "; ".join(errors)}, status_code=400)
+    assert name is not None
+    # Sync catalog
+    try:
+        from ciao.sync_skills import sync_workspace_skills
+
+        # Sync the root that owns the skills folder
+        # If dest_skills is under an agent root, sync that root; otherwise sync workspace_root
+        sync_root = dest_skills.parent
+        await asyncio.to_thread(sync_workspace_skills, sync_root)
+    except Exception as exc:  # noqa: BLE001 — sync failure should not hide successful import
+        logger.warning("skill import sync failed for %s: %s", dest_skills, exc)
+        return JSONResponse(
+            {"ok": True, "name": name, "message": f"Skill '{name}' imported (sync warning: {exc})."},
+            status_code=200,
         )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-            return JSONResponse({"ok": False, "error": err}, status_code=500)
-        
-        # Run sync-skills immediately so it mirrors custom/locked skills to the local Claude catalog
-        sync_result = await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "ciao.cli", "sync-skills", "--workspace", str(config.workspace_root)],
-            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
-        )
-        if sync_result.returncode != 0:
-            err = sync_result.stderr.strip() or sync_result.stdout.strip() or f"sync exit code {sync_result.returncode}"
-            return JSONResponse({"ok": False, "error": f"Skill added but sync failed: {err}"}, status_code=500)
-
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-    return JSONResponse({"ok": True, "message": "Skill added and synchronized successfully."})
+    return JSONResponse({"ok": True, "name": name, "message": f"Skill '{name}' added — available to all operators after next sync."})
 
 
 

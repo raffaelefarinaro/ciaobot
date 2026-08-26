@@ -133,10 +133,10 @@ def install_custom_skills(cwd: str) -> int:
 
 
 def update_skills(cwd: str) -> str | None:
-    """Install the curated skill set from ``skills-lock.json`` + ``skills/``.
+    """Install the curated skill set from ``skills/``.
 
-    The package command performs upstream refresh when possible, then mirrors
-    skills, commands, and agents into the Claude catalog.
+    The package command mirrors skills, commands, and agents into the Claude
+    catalog. Skills are local folders under ``skills/<name>/SKILL.md``.
     """
     n_custom = install_custom_skills(cwd)
     if n_custom:

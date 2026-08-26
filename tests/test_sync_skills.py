@@ -13,22 +13,11 @@ def _write(path: Path, text: str = "content\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def test_update_upstream_skills_passes_timeout(tmp_path: Path) -> None:
-    calls: list[dict] = []
-
-    def runner(args, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(returncode=0)
-
-    assert sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
-    assert calls[0]["timeout"] == sync_skills.SKILLS_NPX_TIMEOUT
-
-
-def test_update_upstream_skills_survives_timeout(tmp_path: Path) -> None:
-    def runner(args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
-
-    assert not sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
+def test_upstream_skills_removed(tmp_path: Path) -> None:
+    # GitHub/upstream sync surface has been removed per the simplification plan.
+    assert not hasattr(sync_skills, "_update_upstream_skills")
+    assert not hasattr(sync_skills, "_refresh_upstream_skills")
+    assert not hasattr(sync_skills, "SKILLS_NPX_TIMEOUT")
 
 
 def test_sync_links_agents_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
@@ -286,10 +275,8 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     assert result.stock_pruned == 1
 
 
-def test_disabled_auto_update_restores_missing_locked_skill(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
+    # skills-lock.json is now inert; sync must not touch .agents/skills for lock entries
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "skills-lock.json").write_text(
@@ -307,74 +294,13 @@ def test_disabled_auto_update_restores_missing_locked_skill(
         ),
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
-
-    def runner(args, **kwargs):
-        calls.append(args)
-        canonical = workspace / ".agents" / "skills" / "upstream"
-        _write(canonical / "SKILL.md", "# Restored\n")
-        claude_link = workspace / ".claude" / "skills" / "upstream"
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-
-    result = sync_skills._refresh_upstream_skills(workspace, runner=runner)
-
-    assert result == (1, 0)
-    assert calls == [[
-        "npx", "-y", "skills", "add", "owner/repo", "--skill", "upstream",
-        "--agent", "claude-code", "-y",
-    ]]
-    assert (workspace / ".agents" / "skills" / "upstream" / "SKILL.md").is_file()
-
-
-def test_upstream_refresh_prunes_only_previous_locked_packages(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {"kept": {"source": "owner/kept", "sourceType": "github"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    cache = workspace / ".runtime" / "skills-sync-cache.json"
-    cache.parent.mkdir(parents=True)
-    cache.write_text(
-        json.dumps({
-            "heads": {"owner/kept": "same"},
-            "skills": {"kept": "owner/kept", "removed": "owner/removed", "stock": "owner/old-stock"},
-        }),
-        encoding="utf-8",
-    )
-    for name in ("kept", "removed"):
-        canonical = workspace / ".agents" / "skills" / name
-        _write(canonical / "SKILL.md", f"# {name}\n")
-        claude_link = workspace / ".claude" / "skills" / name
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-    stock = workspace / ".claude" / "skills" / "stock"
-    _write(stock / "SKILL.md", "# Stock\n")
-    (stock / sync_skills.STOCK_SKILL_MARKER).touch()
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(sync_skills.skills_sync, "remote_heads", lambda _repos: {"owner/kept": "same"})
-
-    result = sync_skills._refresh_upstream_skills(workspace)
-
-    assert result == (0, 1)
-    assert not (workspace / ".agents" / "skills" / "removed").exists()
-    assert not (workspace / ".claude" / "skills" / "removed").exists()
-    assert (stock / "SKILL.md").is_file()
+    canonical = workspace / ".agents" / "skills" / "upstream"
+    _write(canonical / "SKILL.md", "# Upstream\n")
+    result = sync_skills.sync_workspace_skills(workspace)
+    # Upstream still present (not auto-pruned via lock), but no npx called
+    assert (canonical / "SKILL.md").is_file()
+    assert result.upstream_updated == 0
+    assert result.upstream_pruned == 0
 
 
 def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:

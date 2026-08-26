@@ -125,7 +125,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update provider/service key status and the GitHub-skill refresh setting; credentials are redacted |
+| GET, PATCH | `/api/settings/providers` | Read or update provider/service key status; credentials are redacted |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -158,8 +158,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |
-| GET | `/api/admin/skills` | List skills labelled as custom or GitHub/package |
-| POST | `/api/admin/skills/add` | Add an upstream skill from GitHub and synchronize it |
+| GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
+| POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
+| POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter, ≤15KB) |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
 | WS | `/ws/events` | Global event socket |
 

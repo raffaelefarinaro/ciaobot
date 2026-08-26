@@ -28,30 +28,13 @@ def _write_raw_skill(root: Path, name: str, frontmatter: str) -> None:
     )
 
 
-def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) -> None:
+def test_build_skill_inventory_labels_custom_and_stock_sources(tmp_path: Path) -> None:
     _write_skill(tmp_path / "skills", "airtable-projects", "Create Airtable projects")
     _write_skill(tmp_path / ".claude" / "skills", "airtable-projects", "Installed custom")
-    _write_skill(tmp_path / ".claude" / "skills", "brainstorming", "Installed GitHub")
-
-    tmp_path.joinpath("skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {
-                    "brainstorming": {
-                        "source": "example-org/skill-pack",
-                        "sourceType": "github",
-                        "skillPath": "skills/brainstorming/SKILL.md",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
 
     inventory = build_skill_inventory(tmp_path)
 
-    assert inventory["counts"] == {"custom": 1, "github": 1, "stock": 0}
+    assert inventory["counts"] == {"custom": 1, "stock": 0}
     assert inventory["skills"] == [
         {
             "name": "airtable-projects",
@@ -61,16 +44,6 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "description": "Create Airtable projects",
             "path": "skills/airtable-projects/SKILL.md",
             "content": "---\nname: airtable-projects\ndescription: Create Airtable projects\n---\n\n# airtable-projects\n",
-            "installed_targets": ["claude", "opencode"],
-        },
-        {
-            "name": "brainstorming",
-            "label": "github",
-            "source": "example-org/skill-pack",
-            "source_type": "github",
-            "description": "Installed GitHub",
-            "path": ".claude/skills/brainstorming/SKILL.md",
-            "content": "---\nname: brainstorming\ndescription: Installed GitHub\n---\n\n# brainstorming\n",
             "installed_targets": ["claude", "opencode"],
         },
     ]
@@ -110,8 +83,8 @@ def test_build_skill_inventory_can_omit_skill_content(tmp_path: Path) -> None:
     assert "content" not in inventory["skills"][0]
 
 
-def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Path) -> None:
-    _write_skill(tmp_path / ".agents" / "skills", "brainstorming", "Installed for opencode")
+def test_build_skill_inventory_ignores_lock_file(tmp_path: Path) -> None:
+    # skills-lock.json is inert after simplification; inventory must not list github skills
     tmp_path.joinpath("skills-lock.json").write_text(
         json.dumps(
             {
@@ -126,32 +99,14 @@ def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Pat
         ),
         encoding="utf-8",
     )
-
     inventory = build_skill_inventory(tmp_path)
-
-    skill = inventory["skills"][0]
-    assert skill["description"] == "Installed for opencode"
-    assert "# brainstorming" in skill["content"]
-    # opencode discovers .agents/skills natively, so it needs no projection.
-    assert skill["installed_targets"] == ["opencode"]
+    assert inventory["counts"] == {"custom": 0, "stock": 0}
+    assert inventory["skills"] == []
 
 
-def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) -> None:
+def test_build_skill_inventory_reports_custom_over_stock(tmp_path: Path) -> None:
     _write_skill(tmp_path / "skills", "humanizer", "Local override")
-    tmp_path.joinpath("skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {
-                    "humanizer": {"source": "blader/humanizer", "sourceType": "github"}
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
     inventory = build_skill_inventory(tmp_path)
-
-    assert inventory["counts"] == {"custom": 1, "github": 0, "stock": 0}
+    assert inventory["counts"] == {"custom": 1, "stock": 0}
     assert inventory["skills"][0]["label"] == "custom"
     assert inventory["skills"][0]["source"] == "skills/"

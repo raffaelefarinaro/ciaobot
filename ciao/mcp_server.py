@@ -1772,7 +1772,7 @@ class CiaoMcpService:
         # method remains for the CLI skill path.
 
         # agent_context_get / workspace_health_* -> `ciao health get|fix`;
-        # skills_list -> `ciao skills list`; skills_sync -> `ciao skills-sync`.
+        # skills_list -> `ciao skills list`; sync_skills -> `ciao sync-skills`.
         # local_session_* (status/preflight/handback/resync) are dropped: shell
         # agents commit/push with git directly, and the PWA "Sync to Remote"
         # feature drives the control plane through its own REST route.

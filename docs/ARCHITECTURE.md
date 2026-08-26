@@ -79,9 +79,9 @@ ciao/                          Python backend (Starlette).
   subagent_loader.py           Subagent package loader supporting .md and folder-based packages.
   skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.
   dependency_updates.py        Deterministic PyPI/npm manifest and registry helpers used by release preparation. The weekly dependency-changelog review is workspace-owned and is not shipped as public app code.
-  skills_inventory.py          Build the Settings skill inventory from workspace skills and skills-lock.json, with installed Claude badges.
-    sync_skills.py               Install packaged stock skills and mirror workspace assets into provider-native catalogs. CLI: `ciao sync-skills`.
-  skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
+   skills_inventory.py          Build the Settings skill inventory from workspace skills (custom) and packaged stock skills, with installed Claude badges.
+     sync_skills.py               Install packaged stock skills and mirror workspace assets into provider-native catalogs. CLI: `ciao sync-skills`.
+   skill_import.py              Validated skill import from zip archives (zip-slip, single SKILL.md, frontmatter, ≤15KB). Powers POST /api/skills/import.
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
   label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in the `ciao-support` skill and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule or loop.
   core_prompt.py                Loads the compact Ciaobot core for provider system prompts; native provider guide loaders remain the sole source of bounded memory.
@@ -150,9 +150,7 @@ scripts/
   ensure-deps.sh               Dependency verification and venv repair (macOS libexpat and SSL workarounds). Sourced by run-ciao.sh and dev.sh.
   gws-profile.sh               Back-compat shim: forwards to `ciao gws` (route gws to a Google account's credential dir). Uses exec, do NOT source.
   gws-auth-helper.py           Back-compat shim: forwards to `ciao gws-auth-helper` (interactive headless OAuth re-auth).
-  install-custom-skills.sh     Compatibility wrapper for `ciao sync-skills`.
-  skills_add.py                Add an upstream skill repo to skills-lock.json.
-  skills_sync.py               Compatibility wrapper for `ciao skills-sync`.
+   install-custom-skills.sh     Compatibility wrapper for `ciao sync-skills`.
   vault_index.py               Compatibility wrapper for `ciao vault-index`.
   vault-search.py              Compatibility wrapper for `ciao vault-search`.
   vault-lint.py                Compatibility wrapper for `ciao vault-lint`.

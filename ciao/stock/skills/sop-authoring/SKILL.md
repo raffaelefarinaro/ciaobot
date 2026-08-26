@@ -7,6 +7,8 @@ description: Guide for authoring clean, modular agent SOPs (Standard Operating P
 
 Use this skill when drafting new agent SOPs, custom skills, or operational instructions for Ciaobot background routines.
 
+> Skills are local folders: place `skills/<name>/SKILL.md` (or validated zip) then `ciao sync-skills`; workspace git sync propagates to other devices. No GitHub fetch.
+
 ## Core AI OS Principles
 
 1. **Partition Expertise vs. Situational Context**:

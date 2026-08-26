@@ -1476,39 +1476,75 @@
             <div>
               <p class="section-title">skills</p>
               <p class="hint">
-                Manage Ciaobot's stock skills, custom skills, and locked GitHub/package skills.
+                Skills are local folders: place <code>skills/&lt;name&gt;/SKILL.md</code> (or upload a validated zip) then <code>ciao sync-skills</code>. Workspace git sync propagates to other operators. No GitHub fetch.
               </p>
             </div>
             <div class="settings-card-header-actions">
               <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
-              <button class="btn-small" @click="toggleAddGithubSkill">
-                {{ showAddGithubSkill ? 'Cancel' : '+ Add from GitHub' }}
+              <button class="btn-primary btn-small" @click="toggleAddSkill">
+                {{ showAddSkill ? 'Cancel' : '+ Add skill' }}
               </button>
             </div>
           </div>
 
           <p class="hint hint--info skill-scope-note">
-             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
+             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
-          <!-- Add Github Skill Form -->
-          <div
-            v-if="showAddGithubSkill"
-            class="settings-form-panel"
-          >
-            <label class="settings-field"><span class="ws-label">GitHub URL / owner/repo</span>
-              <input class="routine-input" v-model="githubSource" :disabled="addingGithubSkill" placeholder="e.g. owner/repo or github URL" />
-            </label>
-            <label class="settings-field"><span class="ws-label">Skill name (optional)</span>
-              <input class="routine-input" v-model="githubSkillName" :disabled="addingGithubSkill" placeholder="(inferred from URL if omitted)" />
-            </label>
+          <!-- Add Skill Form: folder note + zip upload -->
+          <div v-if="showAddSkill" class="settings-form-panel">
+            <div class="gws-account-add" style="margin-bottom: 12px;">
+              <p class="ws-label">Add a skill</p>
+              <p class="hint hint--compact">
+                Place a folder <code>skills/&lt;name&gt;/SKILL.md</code> in the workspace, then run <code>ciao sync-skills</code>. Or upload a zip containing exactly one top-level folder with <code>SKILL.md</code>. Validated before extract.
+              </p>
+            </div>
+            <div class="settings-field-grid">
+              <div class="settings-field settings-field--wide">
+                <span class="ws-label">Upload zip</span>
+                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Max 15 KB SKILL.md, frontmatter <code>name</code> must match folder.</p>
+                <input
+                  ref="skillZipInput"
+                  type="file"
+                  accept=".zip"
+                  style="display: none;"
+                  @change="onSkillZipSelected"
+                  :disabled="addingSkill"
+                />
+                <button class="btn-small" @click="triggerSkillZipPicker" :disabled="addingSkill">
+                  {{ addingSkill ? 'Uploading…' : 'Choose zip' }}
+                </button>
+                <span v-if="skillZipFileName" class="hint hint--compact" style="margin-left: 8px;">{{ skillZipFileName }}</span>
+              </div>
+              <div class="settings-field settings-field--wide">
+                <span class="ws-label">Choose folder (optional)</span>
+                <p class="hint hint--compact">Pick a local skill folder. The folder must contain <code>SKILL.md</code> at its root. Workspace git sync will carry it to other devices.</p>
+                <input
+                  ref="skillFolderInput"
+                  type="file"
+                  webkitdirectory
+                  style="display: none;"
+                  @change="onSkillFolderSelected"
+                  :disabled="addingSkill"
+                />
+                <button class="btn-small" @click="triggerSkillFolderPicker" :disabled="addingSkill">
+                  Choose folder
+                </button>
+                <span v-if="skillFolderName" class="hint hint--compact" style="margin-left: 8px;">{{ skillFolderName }}</span>
+              </div>
+            </div>
             <div class="action-row settings-actions">
-              <button class="btn-primary" @click="addGithubSkill" :disabled="addingGithubSkill || !githubSource.trim()">
-                {{ addingGithubSkill ? 'Adding...' : 'Add skill' }}
+              <button class="btn-primary" @click="uploadSkillZip" :disabled="addingSkill || !skillZipFile">
+                {{ addingSkill ? 'Uploading…' : 'Upload zip' }}
               </button>
             </div>
-            <div v-if="addGithubSkillResult" class="action-result" :class="{ '--error': addGithubSkillError }">{{ addGithubSkillResult }}</div>
+            <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--muted);">
+              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code>, ≤15 KB</li>
+              <li>Discoverable immediately: <code>.claude/skills</code> + <code>.agents/skills</code> symlink</li>
+              <li>Sync between operators = workspace git (no npx)</li>
+            </ul>
+            <div v-if="addSkillResult" class="action-result" :class="{ '--error': addSkillError }" role="alert">{{ addSkillResult }}</div>
           </div>
 
           <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
@@ -1516,40 +1552,10 @@
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
-            <!-- Stock Skills Section -->
-            <div class="skill-section">
-              <p class="subsection-title subsection-title--spaced">stock skills</p>
-              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
-              <div v-else class="skill-list skill-list--section">
-                <div
-                  v-for="skill in stockSkills"
-                  :key="skill.name"
-                  class="skill-row"
-                  :class="{ expanded: isSkillExpanded(skill.name) }"
-                  @click="toggleSkill(skill.name)"
-                >
-                  <div class="skill-main">
-                    <div class="skill-title-row">
-                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
-                      <span class="skill-name">{{ skill.name }}</span>
-                    </div>
-                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
-                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
-                      <p v-if="skill.path" class="skill-meta">
-                        <span class="skill-meta-label">Path</span>
-                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
-                      </p>
-                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
             <!-- Custom Skills Section -->
-            <div class="skill-section skill-section--spaced">
+            <div class="skill-section">
               <p class="subsection-title subsection-title--spaced">custom skills</p>
-              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
+              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills yet. Add a folder <code>skills/&lt;name&gt;/SKILL.md</code> or upload a zip.</p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in customSkills"
@@ -1576,34 +1582,13 @@
               </div>
             </div>
 
-            <!-- Auto-update GitHub skills -->
-            <div class="setting-row setting-row--inline setting-row--toggle">
-              <div class="routine-info">
-                <span class="routine-name">Auto-update GitHub skills</span>
-                <p class="hint hint--compact">
-                  If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
-                </p>
-              </div>
-              <label class="settings-checkbox-hit">
-                <input
-                  type="checkbox"
-                  class="settings-checkbox"
-                  v-model="autoUpdateGithubSkills"
-                  :disabled="autoUpdateSaving"
-                  aria-label="Auto-update GitHub skills"
-                  @change="saveAutoUpdateGithubSkills"
-                />
-              </label>
-            </div>
-            <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
-
-            <!-- GitHub Skills Section -->
+            <!-- Stock Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">github / package skills</p>
-              <p v-if="!githubSkills.length" class="hint hint--section-empty">No GitHub/package skills installed yet.</p>
-              <div v-else class="skill-list">
+              <p class="subsection-title subsection-title--spaced">stock skills</p>
+              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <div v-else class="skill-list skill-list--section">
                 <div
-                  v-for="skill in githubSkills"
+                  v-for="skill in stockSkills"
                   :key="skill.name"
                   class="skill-row"
                   :class="{ expanded: isSkillExpanded(skill.name) }"
@@ -1612,16 +1597,7 @@
                   <div class="skill-main">
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
-                      <a
-                        v-if="skill.source && skill.source !== 'skills-lock.json'"
-                        :href="'https://github.com/' + skill.source"
-                        target="_blank"
-                        class="skill-name skill-link"
-                        @click.stop
-                      >
-                        {{ skill.name }}
-                      </a>
-                      <span v-else class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-name">{{ skill.name }}</span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -2995,9 +2971,6 @@ const mcpUsageLoaded = ref(false)
 const mcpUsageError = ref('')
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
-const autoUpdateGithubSkills = ref(false)
-const autoUpdateSaving = ref(false)
-const autoUpdateResult = ref('')
 const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
 const gwsIntegrationLoaded = ref(false)
 const gwsIntegrationError = ref('')
@@ -3389,35 +3362,10 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
   }
 }
 
-async function saveAutoUpdateGithubSkills() {
-  autoUpdateSaving.value = true
-  autoUpdateResult.value = ''
-  try {
-    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', {
-      auto_update_github_skills: autoUpdateGithubSkills.value,
-    })
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
-    if (providerKeys.value) {
-      providerKeys.value = res
-    }
-    notifySaved('Saved.')
-  } catch (e) {
-    autoUpdateResult.value = `Error: ${errorMessage(e)}`
-    autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
-  } finally {
-    autoUpdateSaving.value = false
-  }
-}
-
 async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
   } catch (e) {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
@@ -3539,10 +3487,6 @@ const stockSkills = computed(() => {
 
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
-})
-
-const githubSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
 /** Shared origin labels: Ciaobot-shipped vs user-authored. */
@@ -3842,47 +3786,83 @@ async function deleteCommand(command: CommandAsset) {
   }
 }
 
-const showAddGithubSkill = ref(false)
-const githubSource = ref('')
-const githubSkillName = ref('')
-const addingGithubSkill = ref(false)
-const addGithubSkillResult = ref('')
-const addGithubSkillError = ref(false)
+const showAddSkill = ref(false)
+const addingSkill = ref(false)
+const addSkillResult = ref('')
+const addSkillError = ref(false)
+const skillZipFile = ref<File | null>(null)
+const skillZipFileName = ref('')
+const skillFolderName = ref('')
+const skillZipInput = ref<HTMLInputElement | null>(null)
+const skillFolderInput = ref<HTMLInputElement | null>(null)
 
-function toggleAddGithubSkill() {
-  showAddGithubSkill.value = !showAddGithubSkill.value
-  githubSource.value = ''
-  githubSkillName.value = ''
-  addGithubSkillResult.value = ''
-  addGithubSkillError.value = false
+function toggleAddSkill() {
+  showAddSkill.value = !showAddSkill.value
+  addSkillResult.value = ''
+  addSkillError.value = false
+  skillZipFile.value = null
+  skillZipFileName.value = ''
+  skillFolderName.value = ''
 }
 
-async function addGithubSkill() {
-  if (!githubSource.value.trim()) return
-  addingGithubSkill.value = true
-  addGithubSkillResult.value = 'Adding skill...'
-  addGithubSkillError.value = false
+function triggerSkillZipPicker() {
+  skillZipInput.value?.click()
+}
+
+function triggerSkillFolderPicker() {
+  skillFolderInput.value?.click()
+}
+
+function onSkillZipSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] || null
+  skillZipFile.value = file
+  skillZipFileName.value = file ? file.name : ''
+  addSkillResult.value = ''
+  addSkillError.value = false
+}
+
+function onSkillFolderSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files
+  if (!files || !files.length) {
+    skillFolderName.value = ''
+    return
+  }
+  // webkitdirectory gives all files with relative path
+  const first = files[0].webkitRelativePath || files[0].name
+  const folder = first.split('/')[0] || ''
+  skillFolderName.value = folder
+  addSkillResult.value = 'Folder selected: place it at skills/' + folder + '/SKILL.md then run ciao sync-skills. Or zip it and use Upload zip.'
+  addSkillError.value = false
+}
+
+async function uploadSkillZip() {
+  if (!skillZipFile.value) return
+  addingSkill.value = true
+  addSkillResult.value = 'Uploading...'
+  addSkillError.value = false
   try {
-    const res = await api.post<{ ok: boolean; message?: string; error?: string }>('/api/admin/skills/add', {
-      source: githubSource.value.trim(),
-      skill: githubSkillName.value.trim() || undefined,
-    })
+    const form = new FormData()
+    form.append('file', skillZipFile.value)
+    const res = await api.postForm<{ ok: boolean; name?: string; message?: string; error?: string }>('/api/skills/import', form)
     if (res.ok) {
-      addGithubSkillResult.value = ''
-      notifySaved(res.message || 'Skill added successfully.', 'Skills')
-      githubSource.value = ''
-      githubSkillName.value = ''
-      showAddGithubSkill.value = false
+      addSkillResult.value = ''
+      notifySaved(res.message || `Skill ${res.name} added — available to all operators after next sync.`, 'Skills')
+      skillZipFile.value = null
+      skillZipFileName.value = ''
+      if (skillZipInput.value) skillZipInput.value.value = ''
+      showAddSkill.value = false
       await fetchSkills()
     } else {
-      addGithubSkillError.value = true
-      addGithubSkillResult.value = res.error || 'Failed to add skill.'
+      addSkillError.value = true
+      addSkillResult.value = res.error || 'Failed to add skill.'
     }
   } catch (e) {
-    addGithubSkillError.value = true
-    addGithubSkillResult.value = `Error: ${errorMessage(e)}`
+    addSkillError.value = true
+    addSkillResult.value = `Error: ${errorMessage(e)}`
   } finally {
-    addingGithubSkill.value = false
+    addingSkill.value = false
   }
 }
 

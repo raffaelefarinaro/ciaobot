@@ -67,7 +67,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Stock skills** ship with the app and are synced into both `.claude/skills/` and `.agents/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
 - **Visual plans**: ask for a plan, design direction, architecture review, UI flow, or approval artifact and Ciaobot writes a local Markdown plan with an optional self-contained HTML companion, including diagrams drawn as inline SVG. Markdown is the canonical, commentable, editable, restorable plan; HTML is an optional companion that answers a specific review question. Only one file is pinned at a time. Plan mode cannot produce a plan file — the skill explains that and offers an in-chat proposal instead. Routine working docs (notes, analyses) stay with the `workspace-authoring` skill.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
-- **GitHub-sourced skills** can be installed and are refreshed automatically on restart when upstream changes.
+- **Adding a skill**: place a folder `skills/<name>/SKILL.md` (or validated zip containing one top-level folder with `SKILL.md`) then run `ciao sync-skills`. Workspace git sync carries it to other operators. No GitHub fetch.
 - **Skill evolution**: a background loop analyzes usage and proposes skill improvements — as reviewable proposals, never silent edits.
 
 ### 6. Models and providers
