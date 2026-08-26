@@ -21,7 +21,7 @@ from typing import cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, package_smoke, public_release, release
+from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 
@@ -3978,6 +3978,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["gws"]:
+        # Passthrough: forward everything (including leading gws options such as
+        # `--version`) untouched, keeping argparse out of the way.
+        return gws_wrapper.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):
