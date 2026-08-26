@@ -1291,12 +1291,44 @@ def test_a_shared_vault_delete_moves_no_notes(tmp_path):
     note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
 
     deleted = client.delete("/api/workspaces/client-e")
-
     assert deleted.status_code == 200, deleted.json()
     migrated = deleted.json()["migrated"]
     assert migrated["notes"] == 0 and migrated["refused"] == []
     assert note.is_file(), "a shared-vault note must not be moved"
     assert pcm.reassigned == [("client-e", config.primary_workspace())]
+
+
+def test_deleting_a_workspace_does_not_resync_the_retired_install_root(
+    tmp_path, monkeypatch
+):
+    """After re-rooting, a delete must not repopulate the retired install root.
+
+    The shared-catalog resync on delete is only meaningful in the pre-re-root
+    layout. On a re-rooted install the active catalogs live under each
+    <install>/<workspace> root and the install root is retired, so syncing it
+    would recreate CLAUDE.md/.claude/skills there — the resync must be skipped.
+    """
+    _reroot(tmp_path)
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-g", "vault_root": "client-g"})
+    vault = Path(config.workspace_vault_root("client-g"))
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / "Ada.md").write_text(
+        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
+    )
+
+    synced: list[Path] = []
+
+    def fake_sync(workspace, **_kw):
+        synced.append(Path(workspace))
+        return None
+
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", fake_sync)
+
+    deleted = client.delete("/api/workspaces/client-g")
+    assert deleted.status_code == 200, deleted.json()
+    # No sync against the retired install root.
+    assert synced == []
 
 
 def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):

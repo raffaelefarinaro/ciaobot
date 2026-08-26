@@ -1016,24 +1016,28 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
     # On a pre-re-root install the shared catalog serves every workspace, so
     # deleting the only one with a GWS profile must prune the now-unusable
     # gws-* skills (and deleting an unlinked workspace is a no-op). Resync the
-    # shared root through the aggregate gate.
-    try:
-        from ciao.sync_skills import (  # noqa: PLC0415
-            resolve_workspace_skills_gws_gate,
-            sync_workspace_skills,
-        )
+    # shared root through the aggregate gate. After re-rooting the active
+    # catalogs live under each <install>/<workspace> root and the install root
+    # is retired, so syncing it would recreate CLAUDE.md/.claude/skills there —
+    # skip the resync entirely in that layout.
+    if not getattr(config, "_rerooted", lambda: False)():
+        try:
+            from ciao.sync_skills import (  # noqa: PLC0415
+                resolve_workspace_skills_gws_gate,
+                sync_workspace_skills,
+            )
 
-        root = Path(config.workspace_root)
-        await asyncio.to_thread(
-            sync_workspace_skills,
-            root,
-            refresh_upstream=False,
-            gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
-        )
-    except Exception:  # noqa: BLE001 - the delete already succeeded
-        logger.exception(
-            "Could not resync shared skills after deleting workspace %s", name
-        )
+            root = Path(config.workspace_root)
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
+            )
+        except Exception:  # noqa: BLE001 - the delete already succeeded
+            logger.exception(
+                "Could not resync shared skills after deleting workspace %s", name
+            )
     return JSONResponse(payload)
 
 
