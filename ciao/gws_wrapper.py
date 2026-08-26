@@ -34,19 +34,20 @@ def _configured_workspace_root(config) -> Path | None:
     LaunchAgent plist so the credential directory points at the workspace the
     Settings → Workspaces card shows, not ``~/.ciao/bootstrap``.
     """
+    from ciao.config import _bootstrap_workspace
+    from ciao.macos_service import default_launch_agents_dir
+
     configured = str(getattr(config, "workspace_root", "") or "")
     if not configured:
         return None
     resolved = Path(configured).expanduser().resolve()
-    home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
-    bootstrap = home / ".ciao" / "bootstrap"
-    if resolved != bootstrap:
+    if resolved != _bootstrap_workspace(os.environ):
         # Real (server-spawned) or explicitly configured workspace: trust it.
         return resolved
     try:
         import plistlib
 
-        plist = home / "Library" / "LaunchAgents" / "com.ciao.server.plist"
+        plist = default_launch_agents_dir() / "com.ciao.server.plist"
         with plist.open("rb") as handle:
             data = plistlib.load(handle)
         workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
