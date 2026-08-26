@@ -884,12 +884,39 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     created = workspace.name not in config.workspaces
+    profile_changed = (
+        not created
+        and existing is not None
+        and str(getattr(existing, "gws_profile", "") or "")
+        != str(getattr(workspace, "gws_profile", "") or "")
+    )
     config.workspaces[workspace.name] = workspace
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
     payload = _workspaces_payload(config)
     if created:
         payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+    elif profile_changed:
+        # Linking a workspace to its first account (or unlinking it) changes
+        # which `gws-*` stock skills it should get, and skill sync only runs at
+        # startup/repair. Resync now so the catalog matches the new linkage
+        # instead of waiting for a restart.
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+        from ciao.sync_skills import sync_workspace_skills  # noqa: PLC0415
+
+        try:
+            root = Path(config.agent_root(workspace.name))
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=workspace_gws_profile(config, workspace.name),
+            )
+        except Exception:  # noqa: BLE001 - the update already succeeded
+            logger.exception(
+                "Could not resync skills for workspace %s after profile change",
+                workspace.name,
+            )
     return JSONResponse(payload, status_code=201 if created else 200)
 
 

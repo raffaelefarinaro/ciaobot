@@ -294,6 +294,56 @@ def test_gws_stock_skills_unconditional_by_default(tmp_path: Path) -> None:
     assert result[0] >= 1
 
 
+def _gws_aware_config(tmp_path: Path, workspaces: dict[str, str]) -> object:
+    """A minimal config whose workspaces map names to gws_profiles."""
+    from types import SimpleNamespace
+
+    ws = {
+        name: SimpleNamespace(name=name, gws_profile=profile)
+        for name, profile in workspaces.items()
+    }
+    return SimpleNamespace(
+        workspaces=ws,
+        gws_default_profile="",
+        workspace=lambda name: ws.get(name),
+        workspace_names=lambda: list(ws.keys()),
+    )
+
+
+def test_any_workspace_has_gws_profile_false_when_none_linked(tmp_path: Path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    assert sync_skills._any_workspace_has_gws_profile(config) is False
+
+
+def test_any_workspace_has_gws_profile_true_when_any_linked(tmp_path: Path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    assert sync_skills._any_workspace_has_gws_profile(config) is True
+
+
+def test_shared_root_resolves_to_none_when_any_workspace_has_gws(tmp_path, monkeypatch) -> None:
+    """The pre-re-root shared catalog stays gated only when NO workspace links one.
+
+    An empty workspace name means the shared root serves every workspace, so a
+    single linked account must keep the GWS skills installed there.
+    """
+    from ciao import config as config_module
+
+    fake = type("Cfg", (), {"from_env": staticmethod(lambda: _gws_aware_config(tmp_path, {"personal": "", "work": "acme"}))})
+    monkeypatch.setattr(config_module, "CiaoConfig", fake)
+
+    # Any workspace has a profile -> no gate (None) -> GWS skills installed.
+    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) is None
+
+
+def test_shared_root_gates_when_no_workspace_has_gws(tmp_path, monkeypatch) -> None:
+    from ciao import config as config_module
+
+    fake = type("Cfg", (), {"from_env": staticmethod(lambda: _gws_aware_config(tmp_path, {"personal": "", "work": ""}))})
+    monkeypatch.setattr(config_module, "CiaoConfig", fake)
+
+    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) == ""
+
+
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")

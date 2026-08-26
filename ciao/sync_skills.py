@@ -1122,13 +1122,33 @@ def _resolve_runtime_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
+def _any_workspace_has_gws_profile(config) -> bool:
+    """Whether any registered workspace has a usable Google account.
+
+    Used for the shared pre-re-root catalog, which one set of ``gws-*`` skills
+    serves for every workspace. That catalog must stay populated if any
+    workspace has a profile (the chats there set the linked ``GWS_PROFILE``),
+    and only be gated off when none do.
+    """
+    try:
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        return any(
+            workspace_gws_profile(config, name) != ""
+            for name in config.workspace_names()
+        )
+    except Exception:
+        return True
+
+
 def _resolve_workspace_gws_profile(
     root: Path, workspace_name: str | None, gws_profile: str | None
 ) -> str | None:
     """The GWS profile to gate ``gws-*`` stock skills on, or ``None``.
 
     ``None`` means "no gate" (the caller predates the profile check, or this
-    root cannot be tied to a registered workspace), ``""`` means "no profile
+    root cannot be tied to a registered workspace, or it is the shared
+    pre-re-root catalog that any workspace may use), ``""`` means "no profile
     connected, skip GWS skills", and a non-empty slug installs them. Callers
     with a ``CiaoConfig`` pass ``workspace_name``/``gws_profile`` explicitly;
     the fallback here loads the config so CLI/startup sync still applies the
@@ -1138,8 +1158,18 @@ def _resolve_workspace_gws_profile(
         return gws_profile
     if workspace_name is None:
         workspace_name = _resolve_root_workspace(root)
-    if workspace_name is None:
-        return None
+    if not workspace_name:
+        # An empty name is the pre-re-root SHARED catalog, one skill set served
+        # to every workspace. Gating it on a single (empty) name would prune the
+        # gws-* skills even though a linked workspace relies on them, so the
+        # whole catalog is kept unless no registered workspace has a profile.
+        try:
+            from ciao.config import CiaoConfig  # noqa: PLC0415
+
+            config = CiaoConfig.from_env()
+            return "" if not _any_workspace_has_gws_profile(config) else None
+        except Exception:
+            return None
     try:
         from ciao.config import CiaoConfig  # noqa: PLC0415
         from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
