@@ -867,6 +867,71 @@ def test_add_command_flattens_a_multiline_fact_file(tmp_path: Path) -> None:
     assert len(mp.list_proposals(queue)) == 1
 
 
+def test_add_command_flattens_source_and_payload(tmp_path: Path) -> None:
+    """Provenance fields cannot split a bullet or spawn a phantom proposal.
+
+    ``--source`` carries a chat identifier and ``--payload`` a person name, but
+    both are free text on the way in. A newline in either splits the written
+    line, so the queue parses a truncated first bullet plus whatever the
+    continuation looks like — and the real text never appears as one parsed
+    bullet, so re-filing it dodges dedupe.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(
+            tmp_path,
+            text="Release trains freeze on Tuesdays.",
+            kind="people",
+            payload="Mo Salah\n- [memory] phantom payload row",
+            source="chat-1\n- [memory] phantom source row",
+        )
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    # One bullet in, one bullet out: no truncation, no injected extra rows.
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Release trains freeze on Tuesdays."
+    assert rows[0]["kind"] == "people"
+
+    # The single written line still parses, so dedupe recognises a re-file.
+    again = _memory_proposal_add_command(
+        _add_args(
+            tmp_path,
+            text="Release trains freeze on Tuesdays.",
+            kind="people",
+            payload="Mo Salah",
+            source="chat-1",
+        )
+    )
+    assert again == 0
+    assert len(mp.list_proposals(queue)) == 1
+
+
+def test_bullet_keeps_its_delimiters_out_of_free_text_fields() -> None:
+    """A `]` in the payload or a `)` in the source must not end its own slot.
+
+    ``as_bullet`` owns the queue's line grammar: the destination head closes on
+    the first `]` and the provenance tail on the first `)`, so an unescaped one
+    inside either field makes the whole bullet unparseable — the row then
+    exists in the file but is invisible to the review UI and to dedupe.
+    """
+    proposal = mp.MemoryProposal(
+        target="people",
+        text="Prefers async standups.",
+        source_section="chat-1 (imported)",
+        payload="Alex] Rivera",
+    )
+
+    bullet = proposal.as_bullet()
+
+    assert bullet.count("]") == 1
+    assert bullet.count(")") == 1
+    assert mp._existing_proposal_texts(bullet) == {"Prefers async standups."}
+
+
 def test_dismissed_facts_are_not_refiled_by_the_next_run(tmp_path: Path) -> None:
     """A dismissal outlives its row: dedupe consults the decision history.
 
