@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 # normal ``= None`` default loses information before the control plane sees
 # it.
 _UNSET = object()
+
+# A GWS health reading older than this is treated as stale: the monitor
+# preserves prior state when probes are unavailable or checks are disabled, so
+# a cached "valid" reading can outlive the token it described. Mirrors the
+# default CIAO_GWS_HEALTH_INTERVAL (900s) plus a small grace period.
+_GWS_HEALTH_STALE_AFTER = 1200.0
 
 @dataclass(frozen=True, slots=True)
 class McpPrincipal:
@@ -436,11 +443,17 @@ class CiaoControlPlane:
         token_valid = (
             bool(health.get("token_valid")) if "token_valid" in health else None
         )
-        # Only a confirmed valid reading establishes a connection. When the
-        # health monitor has not produced a reading yet (startup delay, checks
-        # disabled, or an unavailable probe), the connection is unknown rather
-        # than assumed good.
-        connected = bool(credentials_present and token_valid is True)
+        # The health monitor preserves prior state when a probe is unavailable or
+        # checks are disabled (CIAO_GWS_HEALTH_INTERVAL=0), so a cached reading
+        # can outlive the token it described. Only a fresh, confirmed valid
+        # reading establishes a connection; a stale one is reported as unknown
+        # rather than assumed good.
+        checked_at = health.get("checked_at")
+        fresh = (
+            isinstance(checked_at, (int, float))
+            and (time.time() - float(checked_at)) <= _GWS_HEALTH_STALE_AFTER
+        )
+        connected = bool(credentials_present and token_valid is True and fresh)
         # The health monitor debounces a single invalid reading (notify_threshold
         # consecutive invalid runs) before treating a login as dead. Mirror that:
         # only a confirmed invalid state (notified_invalid) surfaces as
@@ -459,6 +472,8 @@ class CiaoControlPlane:
                 "token_valid": token_valid,
                 "needs_relogin": needs_relogin,
                 "token_error": str(health.get("token_error") or ""),
+                "checked_at": checked_at,
+                "stale": bool(credentials_present and not fresh),
             }
         )
 
