@@ -353,6 +353,10 @@ def discover_claude_mcps(
             break
         with _claude_mcps_lock:
             running = _claude_mcps_inflight
+        if running is None:
+            # The owner finished between our failed acquire and this read;
+            # loop to serve its freshly stamped cache or take over.
+            continue
         running.wait()
         cached = _claude_mcps_cache
         if (
