@@ -100,6 +100,68 @@ describe('HousekeepingStrip', () => {
     expect(wrapper.find('.housekeeping').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('renders an external link and a dismiss button for ask-style actions', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'github-star',
+      link_label: 'Star on GitHub',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot',
+      dismiss_label: 'Later',
+    })]
+    const dismissSpy = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    const link = wrapper.find('a.housekeeping-link')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.text()).toBe('Star on GitHub')
+
+    const later = wrapper.findAll('button').find((b) => b.text() === 'Later')
+    expect(later).toBeTruthy()
+    await later!.trigger('click')
+    expect(dismissSpy).toHaveBeenCalledWith('github-star')
+    wrapper.unmount()
+  })
+
+  it('shows a thank-you toast when the star nudge run succeeds', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'github-star',
+      link_label: 'Star on GitHub',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot',
+    })]
+    vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: 'Thank you!' })
+    const { useProjectStore } = await import('../../stores/projects')
+    const projectStore = useProjectStore()
+    const toastSpy = vi.spyOn(projectStore, 'pushToast').mockImplementation(() => ({ id: 1 }) as never)
+
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await wrapper.find('a.housekeeping-link').trigger('click')
+    expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ title: '★ Starred — thank you!' }))
+    wrapper.unmount()
+  })
+
+  it('does not run the action when a non-star link is clicked', async () => {
+    // The update tile's "Release notes" link must open the notes WITHOUT
+    // starting an update the user never asked for.
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'package-update',
+      link_label: 'Release notes',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
+      run_label: 'Update',
+    })]
+    const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await wrapper.find('a.housekeeping-link').trigger('click')
+    expect(runSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })
 
 describe('a tile that names an existing surface', () => {

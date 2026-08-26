@@ -4422,3 +4422,49 @@ describe('older history pages', () => {
     expect(store.canLoadOlder(chatId)).toBe(false)
   })
 })
+
+describe('mark unread', () => {
+  test('markUnread clears the read stamp locally and posts to the server', async () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Read',
+      archived: false,
+      local: true,
+      created_at: '2026-07-31T00:00:00Z',
+      last_activity_at: '2026-07-31T01:00:00Z',
+      last_read_at: '2026-07-31T01:00:00Z',
+    }] as unknown as ChatInfo[]
+
+    await store.markUnread('c1')
+
+    expect(store.chats[0].last_read_at).toBe('')
+    expect(store.chatUnread('c1')).toBe(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/unread', {})
+  })
+
+  test('a chat_unread event from another device raises the dot here', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Read',
+      archived: false,
+      local: true,
+      created_at: '2026-07-31T00:00:00Z',
+      last_activity_at: '2026-07-31T01:00:00Z',
+      last_read_at: '2026-07-31T01:00:00Z',
+    }] as unknown as ChatInfo[]
+    store.activeChatId = 'other'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'chat_unread', chat_id: 'c1', last_read_at: '' }),
+    })
+
+    expect(store.chats[0].last_read_at).toBe('')
+    expect(store.chatUnread('c1')).toBe(1)
+  })
+})

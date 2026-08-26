@@ -1007,6 +1007,8 @@ export const useProjectStore = defineStore('projects', () => {
             chat_id: '',
             title: 'Update available',
             body: `Ciaobot ${status.latest_version} is ready to install — see Settings.`,
+            linkUrl: status.source || undefined,
+            linkLabel: 'What\u2019s new',
           })
           if (typeof localStorage !== 'undefined') {
             localStorage.setItem(UPDATE_TOAST_SEEN_KEY, status.latest_version)
@@ -1597,6 +1599,19 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       await api.post('/api/chats/read-all', {})
     } catch { /* ignore; will reconcile on next fetchAll */ }
+  }
+
+  // Deliberate "come back to this": clears the server-side read stamp so the
+  // chat re-enters the unread state on every device, and locally so the dot
+  // appears without waiting for the WS echo. Opening the chat marks it read
+  // again through the normal path.
+  async function markUnread(chatId: string) {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat) return
+    chat.last_read_at = ''
+    try {
+      await api.post(`/api/chats/${chatId}/unread`, {})
+    } catch { /* fire-and-forget; next fetchAll will reconcile */ }
   }
 
   // ── Data fetching ───────────────────────────────────────────────────
@@ -3761,6 +3776,14 @@ export const useProjectStore = defineStore('projects', () => {
         postServiceWorkerMessage({ type: 'chat-focused', chat_id: msg.chat_id })
         break
       }
+      case 'chat_unread': {
+        // Another tab/device marked this chat unread on purpose ("come back
+        // to this"): raise the dot and badge here too. No overlay write — the
+        // server field is the state and the getter derives unread from it.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat) chat.last_read_at = msg.last_read_at
+        break
+      }
       case 'chat_created': {
         // A new chat (fresh or fork) was created on this instance. Other
         // tabs/devices have no other real-time signal for this: create/fork
@@ -5481,7 +5504,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
-    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,

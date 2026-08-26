@@ -16,7 +16,11 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
-from ciao.web.routes_api import list_housekeeping, run_housekeeping_action
+from ciao.web.routes_api import (
+    dismiss_housekeeping_action,
+    list_housekeeping,
+    run_housekeeping_action,
+)
 
 
 class _Config(CiaoConfig):
@@ -78,6 +82,11 @@ def _client(config: _Config) -> TestClient:
                 run_housekeeping_action,
                 methods=["POST"],
             ),
+            Route(
+                "/api/housekeeping/{action_id}/dismiss",
+                dismiss_housekeeping_action,
+                methods=["POST"],
+            ),
         ]
     )
     app.state.config = config
@@ -94,6 +103,15 @@ def _seed_vocabulary_unresolved(tmp_path: Path) -> _Config:
         encoding="utf-8",
     )
     return config
+
+
+def _starred(tmp_path: Path) -> None:
+    """Silence the GitHub-star nudge so exact action lists stay deterministic."""
+    runtime = _runtime(tmp_path)
+    (runtime / "star-receipt.json").write_text(
+        json.dumps({"status": "starred", "at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
 
 
 def test_get_returns_actions_payload(tmp_path: Path) -> None:
@@ -154,6 +172,7 @@ def test_run_clears_tile_when_condition_resolved(tmp_path: Path) -> None:
     app.state.schedule_manager = store
     client = TestClient(app)
 
+    _starred(tmp_path)
     before = client.get("/api/housekeeping").json()["actions"]
     assert [a["id"] for a in before] == ["missed-schedules"]
 
@@ -171,6 +190,32 @@ def test_run_unknown_action_returns_404(tmp_path: Path) -> None:
     assert resp.status_code == 404
 
 
+def test_dismiss_snoozes_the_star_nudge(tmp_path: Path) -> None:
+    """"Later" on the star ask writes a receipt and clears the tile."""
+    config = _config(tmp_path)
+    client = _client(config)
+    before = client.get("/api/housekeeping").json()["actions"]
+    assert "github-star" in [a["id"] for a in before]
+
+    resp = client.post("/api/housekeeping/github-star/dismiss")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["action_id"] == "github-star"
+    assert "github-star" not in [a["id"] for a in data["actions"]]
+    # The receipt is on disk so the snooze survives a restart.
+    receipt = json.loads(
+        (tmp_path / ".runtime" / "star-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "later"
+
+
+def test_dismiss_unknown_action_returns_404(tmp_path: Path) -> None:
+    client = _client(_config(tmp_path))
+    resp = client.post("/api/housekeeping/not-a-real-action/dismiss")
+    assert resp.status_code == 404
+
+
 def test_failed_run_keeps_same_id_with_failure_detail(tmp_path: Path) -> None:
     # A run whose condition persists returns the same id with its detail
     # replaced by the failure text — never silently re-offered as a fresh tile.
@@ -179,6 +224,7 @@ def test_failed_run_keeps_same_id_with_failure_detail(tmp_path: Path) -> None:
     # The run migrates an existing vault. Force a failure by making the vault
     # root a file, so the migration raises.
     config.vault_root.write_text("not a directory", encoding="utf-8")
+    _starred(tmp_path)
     before = client.get("/api/housekeeping").json()["actions"]
     assert [a["id"] for a in before] == ["vault-vocabulary"]
 
@@ -201,5 +247,9 @@ def test_real_app_registers_housekeeping_routes() -> None:
     assert 'Route("/api/housekeeping", list_housekeeping, methods=["GET"])' in app_source
     assert (
         'Route("/api/housekeeping/{action_id}/run", run_housekeeping_action, methods=["POST"])'
+        in app_source
+    )
+    assert (
+        'Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"])'
         in app_source
     )

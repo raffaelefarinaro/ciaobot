@@ -375,6 +375,13 @@
         >
           automations
         </router-link>
+        <router-link
+          to="/settings/notifications"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/notifications' }"
+        >
+          notifications
+        </router-link>
       </div>
     </template>
 
@@ -1061,6 +1068,7 @@
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
                       <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
+                      <button v-if="chatMenuChat && !chatMenuChat.archived" @click="doMarkUnread(chatMenu!)">Mark unread</button>
                       <button @click="doArchiveChat(chatMenu!)">
                         {{ archiveMenuLabel(chatMenu!) }}
                       </button>
@@ -1882,6 +1890,11 @@ async function copyChatId(chatId: string) {
   } catch (e) {
     store.pushErrorToast('Could not copy chat ID', `${errorMessage(e)}`)
   }
+}
+
+async function doMarkUnread(chatId: string) {
+  chatMenu.value = null
+  await store.markUnread(chatId)
 }
 
 async function doArchiveChat(chatId: string) {
@@ -3219,6 +3232,7 @@ async function confirmDeleteChat(chatId: string) {
 .settings-nav-item {
   display: flex;
   align-items: center;
+  min-height: 44px;
   padding: 8px 12px;
   border-radius: var(--radius-sm);
   text-decoration: none;

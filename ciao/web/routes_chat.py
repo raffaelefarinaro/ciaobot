@@ -333,6 +333,8 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_streaming_done`     {chat_id, project_id, is_error}
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
+    - `chat_read`               {chat_id, last_read_at}
+    - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_title`              {chat_id, title}
     - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
     - `server_restarting`       {message}  (restart drain began; show overlay)

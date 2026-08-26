@@ -20,6 +20,14 @@
         class="toast-fix"
         @click.stop="onFix(t)"
       >{{ t.restoreDraft ? 'Restore draft' : (t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error') }}</button>
+      <a
+        v-else-if="t.linkUrl"
+        class="toast-link"
+        :href="t.linkUrl"
+        target="_blank"
+        rel="noopener noreferrer"
+        @click.stop
+      >{{ t.linkLabel || 'Open' }}</a>
       <button
         class="toast-close"
         @click.stop="onDismiss(t)"
@@ -57,10 +65,11 @@ const swipeStyle = computed(() => ({
 function onPointerDown(toast: InAppToast, e: PointerEvent) {
   if (e.pointerType === 'mouse' && e.button !== 0) return
   // Capturing the pointer on the toast div also redirects the compatibility
-  // `click` event to it, so a press starting on a button (Fix/Close) would
-  // never reach the button's own handler. Skip swipe tracking entirely when
-  // the gesture starts on a button and let the click behave normally.
-  if ((e.target as HTMLElement | null)?.closest('button')) return
+  // `click` event to it, so a press starting on a button or the link action
+  // (Fix/Close / "What's new") would never reach that element's own handler.
+  // Skip swipe tracking entirely when the gesture starts on either and let the
+  // click behave normally.
+  if ((e.target as HTMLElement | null)?.closest('button, a.toast-link')) return
   swipeId.value = toast.id
   swipeStartX.value = e.clientX
   swipeDX.value = 0
@@ -194,6 +203,29 @@ async function onFix(toast: InAppToast) {
   cursor: pointer;
 }
 .toast-fix:hover { background: var(--error); color: var(--bg); }
+
+/* Info-toast external link (e.g. "What's new" on the update toast): a quiet
+   accent action, distinct from the error Fix button. The 44px minimum height
+   keeps the tap target comfortably above the 44×44px touch guideline even
+   though the visual is compact. */
+.toast-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.toast-link:hover { background: var(--accent); color: var(--bg); }
 
 .toast-title {
   font-size: var(--text-base);
