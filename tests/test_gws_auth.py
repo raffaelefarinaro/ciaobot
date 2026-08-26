@@ -216,10 +216,8 @@ def test_exchange_and_store_errors_without_refresh_token(tmp_path: Path, monkeyp
 # ── auth_status ─────────────────────────────────────────────────────────────
 
 
-def _install_wrapper(tmp_path: Path, monkeypatch) -> None:
-    scripts = tmp_path / "scripts"
-    scripts.mkdir(exist_ok=True)
-    (scripts / "gws-profile.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+def _install_gws(monkeypatch) -> None:
+    """Make ``gws`` resolvable and the login-shell PATH known to the probe."""
     from ciao import tool_path
 
     monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "/usr/bin/gws")
@@ -228,7 +226,7 @@ def _install_wrapper(tmp_path: Path, monkeypatch) -> None:
 
 def test_auth_status_parses_valid(tmp_path: Path, monkeypatch) -> None:
     cfg = _config(tmp_path)
-    _install_wrapper(tmp_path, monkeypatch)
+    _install_gws(monkeypatch)
 
     def runner(*args, **kwargs):
         out = (
@@ -248,7 +246,7 @@ def test_auth_status_parses_valid(tmp_path: Path, monkeypatch) -> None:
 
 def test_auth_status_parses_revoked(tmp_path: Path, monkeypatch) -> None:
     cfg = _config(tmp_path)
-    _install_wrapper(tmp_path, monkeypatch)
+    _install_gws(monkeypatch)
 
     def runner(*args, **kwargs):
         out = '{"token_valid": false, "token_error": "Token has been expired or revoked.", "has_refresh_token": true}'
@@ -260,10 +258,13 @@ def test_auth_status_parses_revoked(tmp_path: Path, monkeypatch) -> None:
     assert "revoked" in status["token_error"]
 
 
-def test_auth_status_unavailable_when_wrapper_missing(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)  # no scripts/gws-profile.sh
+def test_auth_status_unavailable_when_gws_missing(tmp_path: Path, monkeypatch) -> None:
+    from ciao import tool_path
+
+    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "")
+    cfg = _config(tmp_path)
     status = gws_auth.auth_status(cfg, "personal")
-    assert status["available"] is False
+    assert status == {"available": False, "reason": "gws CLI not installed"}
 
 
 # ── GwsHealthMonitor ─────────────────────────────────────────────────────────

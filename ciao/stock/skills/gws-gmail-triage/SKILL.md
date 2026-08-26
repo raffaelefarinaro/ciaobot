@@ -14,7 +14,7 @@ Show unread inbox summary (sender, subject, date)
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage
+ciao gws "$GWS_PROFILE" gmail +triage
 ```
 
 ## Flags
@@ -28,10 +28,10 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage --max 5 --query 'from:boss'
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage --format json | jq '.[].subject'
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +triage --labels
+ciao gws "$GWS_PROFILE" gmail +triage
+ciao gws "$GWS_PROFILE" gmail +triage --max 5 --query 'from:boss'
+ciao gws "$GWS_PROFILE" gmail +triage --format json | jq '.[].subject'
+ciao gws "$GWS_PROFILE" gmail +triage --labels
 ```
 
 ## Tips

@@ -14,7 +14,7 @@ Show upcoming events across all calendars
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda
+ciao gws "$GWS_PROFILE" calendar +agenda
 ```
 
 ## Flags
@@ -31,11 +31,11 @@ scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda --today
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda --week --format table
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda --days 3 --calendar 'Work'
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +agenda --today --timezone America/New_York
+ciao gws "$GWS_PROFILE" calendar +agenda
+ciao gws "$GWS_PROFILE" calendar +agenda --today
+ciao gws "$GWS_PROFILE" calendar +agenda --week --format table
+ciao gws "$GWS_PROFILE" calendar +agenda --days 3 --calendar 'Work'
+ciao gws "$GWS_PROFILE" calendar +agenda --today --timezone America/New_York
 ```
 
 ## Tips

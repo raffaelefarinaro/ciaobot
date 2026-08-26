@@ -14,7 +14,7 @@ Read values from a spreadsheet
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <RANGE>
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <RANGE>
 ```
 
 ## Flags
@@ -27,8 +27,8 @@ scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <R
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range Sheet1
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet ID --range Sheet1
 ```
 
 ## Tips

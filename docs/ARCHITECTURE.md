@@ -92,6 +92,8 @@ ciao/                          Python backend (Starlette).
   release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, and package-lock.json; report dependency updates; regenerate the packaged gws-* stock skills from the installed gws CLI on `--apply`. CLI: `python -m ciao.release <version>`.
   gws_skills.py                Regenerate the curated gws-* stock skills from `gws generate-skills` and apply Ciaobot curation (profile-wrapper examples, auth notes, strip upstream openclaw metadata and See Also boilerplate). Used by `ciao/release.py`.
   gws_auth.py                  Google Workspace OAuth helpers, token-health monitoring, and the server-managed re-login flow.
+  gws_wrapper.py               `ciao gws` profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).
+  gws_auth_helper.py           `ciao gws-auth-helper` interactive headless OAuth re-auth (replaces scripts/gws-auth-helper.py).
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the GitHub releases API for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Package smoke target: build web, install the project in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
   desktop_build.py             Dev-mode rebuild/reinstall of the macOS Tauri desktop shell (CIAO_DEV_MODE deploy step).
@@ -146,8 +148,8 @@ scripts/
   dev.sh                       Compatibility wrapper for `ciao dev`.
   create-chat.py               Compatibility wrapper for `ciao create-chat`.
   ensure-deps.sh               Dependency verification and venv repair (macOS libexpat and SSL workarounds). Sourced by run-ciao.sh and dev.sh.
-  gws-profile.sh               Route gws to a Google account's credential dir (any profile name). Uses exec, do NOT source.
-  gws-auth-helper.py           Interactive headless OAuth re-auth for gws (any profile name).
+  gws-profile.sh               Back-compat shim: forwards to `ciao gws` (route gws to a Google account's credential dir). Uses exec, do NOT source.
+  gws-auth-helper.py           Back-compat shim: forwards to `ciao gws-auth-helper` (interactive headless OAuth re-auth).
   install-custom-skills.sh     Compatibility wrapper for `ciao sync-skills`.
   skills_add.py                Add an upstream skill repo to skills-lock.json.
   skills_sync.py               Compatibility wrapper for `ciao skills-sync`.

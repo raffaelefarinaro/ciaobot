@@ -648,8 +648,6 @@ export interface GwsIntegrationProfile {
   workspaces: string[]
   setup_command: string
   headless_auth_command: string
-  wrapper_available: boolean
-  helper_available: boolean
   email: string
   // Cached token-health snapshot from the periodic monitor (issue #145).
   // `token_valid` is null when no health check has run yet for this profile.
@@ -666,8 +664,7 @@ export interface GwsIntegrationSettings {
   installed: boolean
   binary_path: string
   default_profile: string
-  wrapper_path: string
-  headless_helper_path: string
+  cli_available: boolean
   profiles: GwsIntegrationProfile[]
 }
 

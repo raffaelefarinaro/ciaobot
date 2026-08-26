@@ -157,6 +157,28 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
     assert str(called[0].vault_root) == "/tmp/vault"
 
 
+def test_cli_gws_dispatches_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_gws_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["gws", "--profile", "work", "calendar", "list"]) == 0
+    assert called[0].profile == "work"
+    assert list(called[0].args) == ["calendar", "list"]
+
+
+def test_cli_gws_auth_helper_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_gws_auth_helper_command", lambda args: called.append(args) or 0
+    )
+
+    assert cli.main(["gws-auth-helper", "work", "--redirect-url", "http://x"]) == 0
+    assert called[0].profile == "work"
+    assert called[0].redirect_url == "http://x"
+
+
 def test_cli_workspace_census_dispatches_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

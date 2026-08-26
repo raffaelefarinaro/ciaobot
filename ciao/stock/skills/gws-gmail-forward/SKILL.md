@@ -14,7 +14,7 @@ Forward a message to new recipients
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id <ID> --to <EMAILS>
+ciao gws "$GWS_PROFILE" gmail +forward --message-id <ID> --to <EMAILS>
 ```
 
 ## Flags
@@ -36,13 +36,13 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id <ID> --to <EMA
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --body 'FYI see below'
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --cc eve@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --body '<p>FYI</p>' --html
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com -a notes.pdf
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --no-original-attachments
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --draft
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --body 'FYI see below'
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --cc eve@example.com
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --body '<p>FYI</p>' --html
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com -a notes.pdf
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --no-original-attachments
+ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --draft
 ```
 
 ## Tips

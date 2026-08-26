@@ -1401,12 +1401,10 @@ def _gws_profile_payload(
     config_dir = _gws_profile_config_dir(config, profile)
     credentials_present = _gws_file_present(config_dir, _GWS_AUTH_FILES)
     client_secret_present = _gws_file_present(config_dir, ("client_secret.json",))
-    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
-    # The wrapper and helper take the profile name, so every account — not just
-    # the two legacy ones — gets a working terminal alternative.
-    setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
-    headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
+    # These go through the `ciao` CLI that ships inside the installed app, so
+    # the same commands work on a dev checkout and on an installed Ciaobot.app.
+    setup_command = f"ciao gws {profile} auth login --full"
+    headless_auth_command = f"ciao gws-auth-helper {profile}"
 
     from ciao import gws_auth
 
@@ -1458,8 +1456,6 @@ def _gws_profile_payload(
         "workspaces": usage.get(profile, []),
         "setup_command": setup_command,
         "headless_auth_command": headless_auth_command,
-        "wrapper_available": wrapper_path.is_file(),
-        "helper_available": helper_path.is_file(),
         "email": email,
         "token_valid": token_valid,
         "token_error": token_error,
@@ -1473,8 +1469,6 @@ def _gws_integration_payload(config) -> dict:
 
     usage = _gws_profile_usage(config)
     binary_path = resolve_tool("gws") or ""
-    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
     try:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
@@ -1494,8 +1488,7 @@ def _gws_integration_payload(config) -> dict:
         "installed": bool(binary_path),
         "binary_path": binary_path,
         "default_profile": default_profile,
-        "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
-        "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
+        "cli_available": bool(binary_path),
         "profiles": [
             _gws_profile_payload(config, profile, usage, health.get(profile), labels)
             for profile in names
