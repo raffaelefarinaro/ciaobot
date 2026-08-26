@@ -2212,8 +2212,16 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         for finding in report["over_cap"]:
             where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
             print(
-                f"  {where}{finding['region']} over cap: "
+                f"  {where}ciao:{finding['region']} over cap: "
                 f"{finding['used']}/{finding['limit']} chars"
+            )
+        if report["over_cap"]:
+            print(
+                "  Fix: open a chat in that workspace and ask the agent to "
+                'consolidate the region (e.g. "consolidate my ciao:memory '
+                'region under its cap"), or raise CIAO_MEMORY_CHAR_LIMIT / '
+                "CIAO_USER_CHAR_LIMIT in .env and restart Ciaobot if every "
+                "entry is high-signal."
             )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:

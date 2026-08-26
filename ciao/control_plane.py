@@ -402,7 +402,7 @@ class CiaoControlPlane:
         guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         return _ok(memory_status_payload(
             guide,
-            memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
+            memory_char_limit=int(getattr(self.config, "memory_char_limit", 3000)),
             user_char_limit=int(getattr(self.config, "user_char_limit", 1375)),
         ))
 
@@ -421,7 +421,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
         limit = (
-            int(getattr(self.config, "memory_char_limit", 2200))
+            int(getattr(self.config, "memory_char_limit", 3000))
             if canonical == "memory"
             else int(getattr(self.config, "user_char_limit", 1375))
         )
