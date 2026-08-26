@@ -45,3 +45,29 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
         "docs/ARCHITECTURE.md (add one line each): "
         f"{missing}"
     )
+
+
+# PR #328 made per-workspace memory curation consolidate bounded regions.
+# The bounded-memory section of the doc kept the pre-#328 contract ("a region
+# write the unattended nightly curator never performs"), contradicting both
+# the schedules section and ciao/stock/schedules.json's own prompt. Readers
+# reach for the bounded-memory section first, so pin the corrected contract
+# and the guardrails that make the unattended write safe.
+def test_architecture_doc_states_the_consolidation_contract() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    doc = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+
+    assert "the unattended nightly curator never performs" not in doc, (
+        "docs/ARCHITECTURE.md still claims memory curation never writes the "
+        "bounded regions; consolidation is exactly that write."
+    )
+    for fragment in (
+        "~85% of the cap",  # the threshold that gates consolidation
+        "Workspace/Memory-Consolidations.md",  # the undo log
+        "the queue itself cannot apply a drop",  # the [review] escape hatch
+        "Promoting NEW facts into a region stays user-reviewed",
+    ):
+        assert fragment in doc, (
+            "docs/ARCHITECTURE.md no longer documents the memory-consolidation "
+            f"guardrail: {fragment!r}"
+        )

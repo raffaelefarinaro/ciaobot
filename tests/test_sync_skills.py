@@ -441,3 +441,29 @@ def test_subagent_shadows_stock_agent(tmp_path: Path) -> None:
     assert link.is_symlink()
     assert link.resolve() == custom.resolve()
     assert custom.read_text(encoding="utf-8") == "# Custom memory\n"
+
+
+def test_configured_cap_requires_the_exact_key_and_handles_comments(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The dotenv read must match CIAO_MEMORY_CHAR_LIMIT exactly.
+
+    A hand-rolled prefix match treats CIAO_MEMORY_CHAR_LIMIT_BACKUP as the
+    real setting and trips over an inline comment, either of which restamps
+    a guide with a cap the server never enforces. python-dotenv parses both
+    the way the server's own load_dotenv does.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+
+    (workspace / ".env").write_text(
+        "CIAO_MEMORY_CHAR_LIMIT_BACKUP=9999\n", encoding="utf-8"
+    )
+    assert sync_skills._configured_memory_char_limit(workspace) is None
+
+    (workspace / ".env").write_text(
+        "CIAO_MEMORY_CHAR_LIMIT=2200  # keep the old budget\n", encoding="utf-8"
+    )
+    assert sync_skills._configured_memory_char_limit(workspace) == 2200
