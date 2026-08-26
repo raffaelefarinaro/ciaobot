@@ -60,6 +60,48 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
 
 
+def test_stock_curation_prompt_makes_over_cap_reports_actionable() -> None:
+    """Over-cap must be reported as user actions, not a vague hand-off.
+
+    The curator may not edit regions, so its report is the only surface the
+    user gets; "needs a human consolidation pass" with no how-to left people
+    stuck. The prompt has to pin the exact remediation steps.
+    """
+    stock = resources.files("ciao.stock")
+    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
+    prompt = next(
+        entry["prompt"]
+        for entry in schedules["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    assert "never a vague" in prompt
+    assert 'Consolidate my ciao:memory region under its cap' in prompt
+    assert "CIAO_MEMORY_CHAR_LIMIT" in prompt
+    assert "ciao memory-proposals" in prompt
+
+
+def test_stock_curation_prompt_files_discovered_bounded_facts() -> None:
+    """A bounded-region fact found by reading transcripts must enter the queue.
+
+    Chats without a session-insights section never ran archive-time routing,
+    so the curator is the first to see their facts. Naming them only in the
+    nightly reply left them with no review path: nothing to promote or
+    dismiss, re-derived from scratch every run.
+    """
+    stock = resources.files("ciao.stock")
+    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
+    prompt = next(
+        entry["prompt"]
+        for entry in schedules["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    assert "ciao memory-proposal-add --kind memory --source <chat title>" in prompt
+    assert "no review path" in prompt
+    assert "dedupes" in prompt
+
+
 def test_stock_schedules_are_read_only_system_entries() -> None:
     stock = resources.files("ciao.stock")
     schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))

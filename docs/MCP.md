@@ -144,7 +144,7 @@ skill surface (admin or redundant with native tools).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
+| Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |

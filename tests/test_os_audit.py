@@ -253,6 +253,33 @@ def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
     assert "paths checked" in markdown
 
 
+def test_format_audit_markdown_over_cap_names_the_fix(tmp_path: Path) -> None:
+    """An over-cap line must arrive with the actions that shrink the region.
+
+    The nightly curator is forbidden from editing regions, so its report used
+    to dead-end at "needs a human consolidation pass". The rendered audit has
+    to carry the fix instead of assuming the reader knows the ritual.
+    """
+    (tmp_path / "memory-vault").mkdir()
+    _seed_guide(
+        tmp_path / "CLAUDE.md",
+        memory=[
+            f"Durable lesson {index}: " + "x" * 380 for index in range(6)
+        ],
+        profile=["Raffa prefers plain, factual notes."],
+    )
+
+    report = run_os_audit(workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault")
+    markdown = format_audit_markdown(report)
+
+    over_cap = report["memory_hygiene"]["over_cap"]
+    assert [finding["region"] for finding in over_cap] == ["memory"]
+    assert "Regions over cap: 1" in markdown
+    assert "ciao:memory over cap: " in markdown
+    assert "consolidate the region" in markdown
+    assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in markdown
+
+
 def test_audit_memory_reports_unclosed_expiration_tag(tmp_path: Path) -> None:
     guide = _seed_guide(
         tmp_path / "CLAUDE.md",

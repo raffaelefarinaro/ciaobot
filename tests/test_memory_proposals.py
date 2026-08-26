@@ -653,3 +653,80 @@ def test_queue_bullet_round_trips_payload() -> None:
     assert bullet is not None
     assert bullet.kind == "people"
     assert bullet.target == "Alba"
+
+
+# --- CLI: memory-proposal-add -----------------------------------------------
+
+
+def _add_args(tmp_path: Path, **overrides):
+    import argparse
+
+    defaults = {
+        "workspace": tmp_path,
+        "vault_root": tmp_path / "memory-vault",
+        "text": "A workstream invisible to the vault scores zero everywhere.",
+        "kind": "memory",
+        "payload": "",
+        "source": "chat-824cd4ec",
+        "json": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_add_command_queues_a_reviewable_fact(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """A curator-discovered fact lands in the machine queue, not just prose.
+
+    Archive-time routing only sees chats that grew a session-insights
+    section; facts the nightly curation run finds by reading a transcript in
+    full must get the same review path (list, promote, dismiss).
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path))
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "memory"
+    assert "scores zero everywhere" in rows[0]["text"]
+    assert rows[0]["source"] == "chat-824cd4ec"
+    out = capsys.readouterr().out
+    assert "Queued [memory] proposal" in out
+
+
+def test_add_command_dedupes_identical_text(tmp_path: Path) -> None:
+    """Re-filing what an earlier run queued is a no-op, not a duplicate.
+
+    The nightly run re-reads the same transcripts until the user promotes or
+    dismisses; a queue that grows one copy per night stops being readable.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    first = _memory_proposal_add_command(_add_args(tmp_path))
+    second = _memory_proposal_add_command(_add_args(tmp_path))
+
+    assert first == second == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    assert len(mp.list_proposals(queue)) == 1
+
+
+def test_add_command_rejects_an_unknown_kind(tmp_path: Path) -> None:
+    """A kind outside DESTINATIONS is refused, not written through.
+
+    ``MemoryProposal.as_bullet`` is deliberately total for archive batches —
+    one odd proposal must not fail a whole archive — but the CLI is an agent
+    command where a typo'd kind would queue an unroutable bullet.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path, kind="memories"))
+
+    assert exit_code == 2
+    assert not (
+        tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    ).exists()

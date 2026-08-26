@@ -2212,8 +2212,16 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         for finding in report["over_cap"]:
             where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
             print(
-                f"  {where}{finding['region']} over cap: "
+                f"  {where}ciao:{finding['region']} over cap: "
                 f"{finding['used']}/{finding['limit']} chars"
+            )
+        if report["over_cap"]:
+            print(
+                "  Fix: open a chat in that workspace and ask the agent to "
+                'consolidate the region (e.g. "consolidate my ciao:memory '
+                'region under its cap"), or raise CIAO_MEMORY_CHAR_LIMIT / '
+                "CIAO_USER_CHAR_LIMIT in .env and restart Ciaobot if every "
+                "entry is high-signal."
             )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
@@ -2283,6 +2291,58 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
         for row in rows:
             tag = f" [{row['source']}]" if row["source"] else ""
             print(f"- [{row['kind']}] {row['text']}{tag}")
+    return 0
+
+
+def _memory_proposal_add_command(args: argparse.Namespace) -> int:
+    """File a fact into a workspace's memory-proposal review queue.
+
+    The nightly curator discovers durable facts by reading archived chats that
+    never grew a ``## Session insights`` section, so archive-time routing never
+    saw them. Filing here puts the fact in the machine queue (``ciao
+    memory-proposals``, the PWA review panel) where it can be promoted or
+    dismissed like any queued item, instead of surviving only as prose in one
+    nightly report. Re-filing an identical fact is a no-op; the queue dedupes
+    by text.
+    """
+    from ciao.memory_proposals import DESTINATIONS, MemoryProposal, append_proposals
+
+    _, vault = _resolve_workspace_and_vault(args)
+    text = args.text.strip()
+    if not text:
+        print("a proposal text is required", file=sys.stderr)
+        return 2
+    kind = args.kind.strip().lower()
+    if kind not in DESTINATIONS:
+        print(
+            f"unknown kind {kind!r}; expected one of: {', '.join(DESTINATIONS)}",
+            file=sys.stderr,
+        )
+        return 2
+    proposal = MemoryProposal(
+        target=kind,
+        text=text,
+        source_section=args.source.strip() or "curation",
+        payload=args.payload.strip(),
+    )
+    path = append_proposals([proposal], vault)
+    if args.json:
+        json.dump(
+            {
+                "queued": path is not None,
+                "duplicate": path is None,
+                "path": str(path) if path else None,
+                "text": text,
+                "workspace": args.workspace or "",
+            },
+            sys.stdout,
+            ensure_ascii=False,
+        )
+        sys.stdout.write("\n")
+    elif path is None:
+        print(f"Already in the queue; nothing added for {text!r}.")
+    else:
+        print(f"Queued [{kind}] proposal in {path}.")
     return 0
 
 
@@ -3414,6 +3474,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the structured rows as JSON instead of text.",
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
+
+    memory_proposal_add_parser = subparsers.add_parser(
+        "memory-proposal-add",
+        help="File a fact into a workspace's memory-proposal review queue.",
+        description=(
+            "Appends one destination-addressed fact to a workspace's "
+            "`Workspace/Memory-Proposals.md`. This is how the nightly curator "
+            "queues a durable fact it discovered by reading a chat that never "
+            "grew a session-insights section, so the fact becomes reviewable "
+            "and promotable like any archive-time proposal. Re-filing "
+            "identical text is a no-op."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "text",
+        help="The durable fact to queue.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--kind",
+        default="memory",
+        help=(
+            "Destination kind: memory, profile, project, people, learnings, "
+            "review. Defaults to memory."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--payload",
+        default="",
+        help="Kind payload: person name for people, doc path for project.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--source",
+        default="curation",
+        help="Provenance label recorded on the bullet. Defaults to curation.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
     memory_proposal_dismiss_parser = subparsers.add_parser(
         "memory-proposal-dismiss",
