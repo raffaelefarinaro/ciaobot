@@ -1336,6 +1336,7 @@ def test_gws_status_reports_needs_relogin(tmp_path: Path) -> None:
                     "personal": {
                         "token_valid": False,
                         "token_error": "invalid_grant",
+                        "notified_invalid": True,
                     }
                 }
             }
@@ -1362,6 +1363,64 @@ def test_gws_status_reports_needs_relogin(tmp_path: Path) -> None:
     assert data["connected"] is False
     assert data["needs_relogin"] is True
     assert data["token_error"] == "invalid_grant"
+
+
+def test_gws_status_suppresses_debounced_invalid_reading(tmp_path: Path) -> None:
+    from ciao import gws_auth
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal", vault_root="memory-vault/personal", gws_profile="personal"
+            )
+        },
+    )
+    config_dir = gws_auth.profile_config_dir(config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    # A single invalid reading with notified_invalid=false is the monitor's
+    # debounce window: it may be a transient failure, so it must not surface as
+    # needs_relogin.
+    (runtime / "gws_health.json").write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "personal": {
+                        "token_valid": False,
+                        "token_error": "invalid_grant",
+                        "notified_invalid": False,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pcm = SimpleNamespace(
+        refresh_workspaces=lambda: [],
+        active_chat_ids=lambda: [],
+    )
+    plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+
+    result = plane.gws_status(_chat_create_principal())
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["profile"] == "personal"
+    assert data["configured"] is True
+    assert data["connected"] is False
+    assert data["needs_relogin"] is False
 
 
 def test_gws_status_reports_unknown_health_as_not_connected(tmp_path: Path) -> None:

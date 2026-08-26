@@ -441,13 +441,23 @@ class CiaoControlPlane:
         # disabled, or an unavailable probe), the connection is unknown rather
         # than assumed good.
         connected = bool(credentials_present and token_valid is True)
+        # The health monitor debounces a single invalid reading (notify_threshold
+        # consecutive invalid runs) before treating a login as dead. Mirror that:
+        # only a confirmed invalid state (notified_invalid) surfaces as
+        # needs_relogin, so a transient reading does not trigger a false
+        # re-authentication prompt.
+        needs_relogin = bool(
+            credentials_present
+            and token_valid is False
+            and health.get("notified_invalid")
+        )
         return _ok(
             {
                 "profile": profile,
                 "configured": credentials_present,
                 "connected": connected,
                 "token_valid": token_valid,
-                "needs_relogin": bool(credentials_present and token_valid is False),
+                "needs_relogin": needs_relogin,
                 "token_error": str(health.get("token_error") or ""),
             }
         )
