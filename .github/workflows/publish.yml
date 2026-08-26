@@ -93,7 +93,11 @@ jobs:
             --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg url "$download" \
             --arg signature "$signature_value" \
-            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}, "darwin-x86_64": {signature: $signature, url: $url}}}' \
+            # arm64 only. A true Intel Mac (or an x86_64 slice under Rosetta)
+            # selects darwin-x86_64 at compile time and must not be handed the
+            # arm64 artifact it cannot run; such installs simply get no in-app
+            # update and can reinstall through the arm64 installer.
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
             > latest.json
       - name: Attach release assets
         env:
