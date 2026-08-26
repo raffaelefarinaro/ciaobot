@@ -2758,13 +2758,20 @@ export const useProjectStore = defineStore('projects', () => {
         }
         if (
           !local.length ||
-          typeof firstIndex !== 'number' ||
-          env.total <= firstIndex ||
+          // A local cache holding only un-indexed rows (the optimistic user
+          // bubble on a brand-new chat's first turn, say) has no firstIndex
+          // to merge by - but only adopt the window wholesale once the
+          // server actually has rows to offer. An empty window here just
+          // means the turn hasn't persisted yet (still "Thinking..."), and
+          // wholesale-adopting it would wipe the pending optimistic bubble
+          // until the next reload repopulates it.
+          (typeof firstIndex !== 'number' && windowRows.length > 0) ||
+          (typeof firstIndex === 'number' && env.total <= firstIndex) ||
           // The server assembled FEWER rows than we hold - a pruned or
           // unreadable session segment. Merging by index would refresh the
           // prefix and leave the stale tail untouched, showing messages that
           // are no longer part of the chat, so the window wins outright.
-          env.total < cachedEnd
+          (typeof firstIndex === 'number' && env.total < cachedEnd)
         ) {
           // Empty cache, cache from a pre-envelope server, or the session
           // reset/shrank: adopt the window wholesale.

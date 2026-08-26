@@ -655,6 +655,9 @@ def _normalize_tier(model: str) -> str:
     return canonical_tier(model) if is_tier(model) else model
 
 
+_INJECTED_CONTEXT_MARKER = "[CIAO_CONTEXT_BEGIN]"
+
+
 def _real_title(title: str) -> str | None:
     """Return *title* if it is a real provider title, else None.
 
@@ -662,9 +665,17 @@ def _real_title(title: str) -> str | None:
     ``New session - <timestamp>``) and only later write the generated title.
     Treating the placeholder as a real title would let the auto-title poll
     stop early and leave the sidebar stuck on it, so it is filtered out here.
+
+    Also rejected: a provider whose own summarizer degrades and echoes the
+    literal first session message back as the "title". That message carries
+    our injected context capsule (see `_build_prompt_prefix`), which is meant
+    to stay invisible to the user - accepting it verbatim both leaked
+    internal state into the sidebar and skipped the 6-word
+    `_fallback_title` truncation, which only runs when no native title is
+    accepted.
     """
     title = (title or "").strip()
-    if not title or _PLACEHOLDER_TITLE_RE.match(title):
+    if not title or _PLACEHOLDER_TITLE_RE.match(title) or _INJECTED_CONTEXT_MARKER in title:
         return None
     return title
 
