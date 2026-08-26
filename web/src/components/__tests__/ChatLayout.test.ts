@@ -360,6 +360,73 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  // From /settings (which deliberately retains activeChatId), chatId is
+  // undefined both before and after landing on `/` via the "chats" nav tab,
+  // so the chatId watcher does not fire - intentionally. That mirrors Esc's
+  // retention (see "leaves a retained hidden chat alone when escaping
+  // Settings" below): the nav tab, like Esc, should resurface the chat you
+  // left rather than force an empty home screen.
+  it('leaves a retained chat alone when navigating home from Settings via the nav tab', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+      ],
+    })
+    await router.push('/settings')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    // Settings deliberately retains the chat underneath it.
+    expect(store.activeChatId).toBe('chat-1')
+
+    // Simulates clicking the sidebar's "chats" nav-item from Settings:
+    // route.params.chatId stays undefined the whole way through.
+    await router.push('/')
+    await flushPromises()
+
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
   it('switches to the workspace matching the displayed number', async () => {
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,

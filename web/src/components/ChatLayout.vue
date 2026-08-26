@@ -712,7 +712,10 @@ watch(
       // activeChatId - and the ChatPanel/keyboard-shortcut logic keyed off
       // it - stayed on the chat the user left. Only bare chat routes mean
       // "go home": project/settings/schedules routes deliberately leave
-      // activeChatId populated underneath them (see the Esc handler above).
+      // activeChatId populated underneath them (see the Esc handler above),
+      // so this only fires when chatId itself changed away from a real id -
+      // not on a settings/schedules -> `/` transition, where chatId was
+      // already undefined and the retained chat is meant to resurface.
       if (viewMode.value === 'chat' && store.activeChatId) void store.closeChat()
       return
     }
