@@ -1440,7 +1440,9 @@ def run_os_audit(
         try:
             from ciao.vocabulary_proposals import audit_vocabulary_proposals
 
-            vocabulary_result = audit_vocabulary_proposals(notes, workspace_name)
+            vocabulary_result = audit_vocabulary_proposals(
+                notes, workspace_name, config=config
+            )
         except Exception as exc:  # noqa: BLE001 — advisory section
             vocabulary_result = {
                 "threshold": 5,

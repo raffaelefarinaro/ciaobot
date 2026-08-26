@@ -53,6 +53,27 @@ def test_is_near_duplicate_edit_distance():
     assert is_near_duplicate("unrelated", "banana") is False
 
 
+def test_is_near_duplicate_short_tags_need_tighter_distance():
+    # `ai` and `hr` are distance 2 apart, but both are short and unrelated;
+    # an unconditional distance-2 test would propose aliasing every pair of
+    # distinct two-character tags. Short tags get a stricter edit-distance cap.
+    assert is_near_duplicate("ai", "hr") is False
+    # A genuinely longer near-miss still matches: distance 1 on 5+ chars.
+    assert is_near_duplicate("brain", "brsin") is True
+
+
+def test_is_near_duplicate_short_tags_integration(tmp_path: Path):
+    # An established `ai` and a singleton `hr` must NOT produce a merge.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "Hr.md", _note_body(tags=["hr"], title="Hr"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert not any(m["tag"] == "hr" for m in proposals["tag_merges"])
+
+
 def test_is_near_duplicate_identical_is_not_duplicate():
     assert is_near_duplicate("ai", "ai") is False
     assert is_near_duplicate("project", "project") is False
@@ -318,3 +339,49 @@ def test_os_audit_vocabulary_scope_workspace_vs_global(tmp_path: Path):
     assert "vocabulary_proposals" in ws_report
     gl_report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime", scope="global")
     assert "vocabulary_proposals" not in gl_report
+
+
+def test_audit_vocabulary_proposals_aggregates_across_workspace_vaults(tmp_path: Path, monkeypatch):
+    """Usage must be counted globally, so a non-canonical type split across
+    two workspace vaults reaches the threshold when summed, and the proposal
+    carries both workspaces."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    personal = tmp_path / "personal" / "memory-vault"
+    work = tmp_path / "work" / "memory-vault"
+    for root in (personal, work):
+        root.mkdir(parents=True)
+    # 3 uses in personal, 3 in work = 6 total, above the default 5 threshold.
+    for i in range(3):
+        _write(personal / f"P{i}.md", _note_body(type_="brainstorm", title=f"P{i}"))
+    for i in range(3):
+        _write(work / f"W{i}.md", _note_body(type_="brainstorm", title=f"W{i}"))
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            return [
+                (personal, "personal", Path("personal") / "memory-vault"),
+                (work, "work", Path("work") / "memory-vault"),
+            ]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    promos = result["type_promotions"]
+    assert len(promos) == 1
+    assert promos[0]["type"] == "brainstorm"
+    assert promos[0]["count"] == 6
+    assert set(promos[0]["workspaces"]) == {"personal", "work"}
+    assert result["errors"] == []
+
+
+def test_audit_vocabulary_proposals_without_config_scans_one_root(tmp_path: Path):
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="brainstorm", title=f"Note{i}"))
+    result = audit_vocabulary_proposals(vault, "personal")
+    assert len(result["type_promotions"]) == 1
+    assert result["type_promotions"][0]["count"] == 6
+    assert result["errors"] == []

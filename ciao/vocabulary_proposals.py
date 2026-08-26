@@ -22,6 +22,12 @@ is configurable via ``VOCAB_PROMOTION_THRESHOLD`` env for tests/installs
 that want a different bar, but the default is the deliberate number from the
 plan's open question.
 
+Types are a single global canonical set, so usage is counted across EVERY
+workspace vault via ``config.vault_scan_targets()`` when a registry is
+available: a non-canonical type split across two workspaces reaches the
+threshold only when summed, and the workspace attribution on each proposal
+reflects all the roots that use it.
+
 Where proposals surface is the plan's second open question. This module
 chooses **inline in the hygiene audit output** over a new
 ``Vocabulary-Proposals.md`` file: the proposals are derived from the current
@@ -94,7 +100,11 @@ def is_near_duplicate(a: str, b: str) -> bool:
     * Shared prefix before a namespace/prefix separator (``/``, ``-``, ``_``)
       — e.g. ``ai`` vs ``ai-analysis``, ``ai-adoption`` vs ``ai-practice``
       all share the ``ai`` stem. This is the common case the plan calls out.
-    * Edit distance ≤2 on the raw lowercased forms (typo/near-miss).
+    * Edit distance, scaled to the shorter tag's length: a two-character
+      difference only counts as a near-miss once the tags are long enough to
+      carry that many edits without coincidence (``ai`` vs ``hr`` is distance
+      2 but must NOT merge), while a single-character difference still counts
+      for longer tags.
     * Normalized forms (separators removed) matching within edit distance 1
       or one being a prefix of the other.
     """
@@ -103,6 +113,14 @@ def is_near_duplicate(a: str, b: str) -> bool:
     la, lb = a.lower(), b.lower()
     if la == lb:
         return False
+    # Edit distance is only meaningful relative to length: nearly every pair of
+    # distinct short tags is within distance 2 (`ai` vs `hr`), so an
+    # unconditional distance-2 test would propose merging unrelated tags. Scale
+    # the allowance so a single-character difference matters more for short
+    # tags — two letters apart only counts as near-duplicate once the tags have
+    # enough characters to carry that many edits without being coincidence.
+    shorter = min(len(la), len(lb))
+    max_edit = 1 if shorter < 4 else 2
     # Shared prefix before a separator: the plan's canonical example is
     # ai-analysis / ai-adoption / ai-practice alongside ai.
     for sep in ("/", "-", "_"):
@@ -119,7 +137,7 @@ def is_near_duplicate(a: str, b: str) -> bool:
                 # coincidence like "a-b" vs "a-c".
                 return True
     # Edit distance on raw forms.
-    if _edit_distance(la, lb, max_dist=2) <= 2:
+    if _edit_distance(la, lb, max_dist=max_edit) <= max_edit:
         return True
     # Normalized forms: handles ai-analysis vs aianalysis, etc.
     na, nb = _normalized_tag(a), _normalized_tag(b)
@@ -132,7 +150,7 @@ def is_near_duplicate(a: str, b: str) -> bool:
         short, long = (na, nb) if len(na) < len(nb) else (nb, na)
         if len(short) >= 2 and len(long) - len(short) <= 6:
             return True
-    if _edit_distance(na, nb, max_dist=1) <= 1:
+    if _edit_distance(na, nb, max_dist=max_edit) <= max_edit:
         return True
     return False
 
@@ -247,35 +265,61 @@ def generate_vocabulary_proposals(
 def audit_vocabulary_proposals(
     vault_root: Path,
     workspace_name: str = "",
+    *,
+    config: Any | None = None,
 ) -> dict[str, Any]:
-    """Scan one vault root and return its vocabulary proposals.
+    """Scan the install's vaults and return their vocabulary proposals.
 
-    ``workspace_name`` is accepted for API parity with the other per-workspace
-    audit helpers but is currently unused: types are a single global set and
-    tags carry their own workspace attribution per proposal. The vault root is
-    the workspace's own vault, so scoping already happened at the caller.
+    ``vault_root`` is the fallback/active vault root. When ``config`` exposes a
+    workspace registry, ``config.vault_scan_targets()`` supplies EVERY vault in
+    the install so a type or established tag that crosses the threshold only
+    when summed across workspaces still reaches it — types are a single global
+    canonical set, so usage must be counted globally, not per workspace. The
+    workspace attribution on each proposal reflects all the roots that use it.
+    Without a registry the caller's own vault root is scanned, stamped
+    ``workspace_name``.
 
     Failures degrade to an empty proposal set with a scan error, never to
     "checked and clean".
     """
-    from ciao.vault_index import scan_vault
+    from ciao.vault_index import scan_targets
 
-    if not vault_root.is_dir():
-        return {
-            "threshold": promotion_threshold(),
-            "type_promotions": [],
-            "tag_promotions": [],
-            "tag_merges": [],
-            "errors": [],
-        }
+    empty = {
+        "threshold": promotion_threshold(),
+        "type_promotions": [],
+        "tag_promotions": [],
+        "tag_merges": [],
+        "errors": [],
+    }
+    targets: list[tuple[Path, str, Path]]
+    if config is not None and callable(getattr(config, "vault_scan_targets", None)):
+        try:
+            targets = config.vault_scan_targets()
+        except Exception as exc:  # noqa: BLE001 — advisory section
+            return {
+                **empty,
+                "errors": [
+                    {
+                        "type": "vocabulary_proposal_scan_failed",
+                        "path": str(vault_root),
+                        "message": f"vault discovery failed: {exc}",
+                    }
+                ],
+            }
+    elif vault_root.is_dir():
+        targets = [(str(vault_root), workspace_name or "personal", "memory-vault")]
+    else:
+        return empty
     try:
-        entries = scan_vault(vault_root, workspace=workspace_name or "personal")
+        entries, _abs = scan_targets(
+            [
+                (Path(root), workspace or "personal", Path(prefix))
+                for root, workspace, prefix in targets
+            ]
+        )
     except Exception as exc:  # noqa: BLE001 — advisory section
         return {
-            "threshold": promotion_threshold(),
-            "type_promotions": [],
-            "tag_promotions": [],
-            "tag_merges": [],
+            **empty,
             "errors": [
                 {
                     "type": "vocabulary_proposal_scan_failed",
