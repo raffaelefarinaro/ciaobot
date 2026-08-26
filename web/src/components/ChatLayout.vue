@@ -716,7 +716,11 @@ watch(
       // so this only fires when chatId itself changed away from a real id -
       // not on a settings/schedules -> `/` transition, where chatId was
       // already undefined and the retained chat is meant to resurface.
-      if (viewMode.value === 'chat' && store.activeChatId) void store.closeChat()
+      // Route through the local closeChat() wrapper, not store.closeChat()
+      // directly, so a failed close (e.g. the DELETE request itself erroring
+      // out) surfaces the same toast the close button and Esc already show,
+      // instead of an unhandled rejection with no explanation.
+      if (viewMode.value === 'chat' && store.activeChatId) closeChat()
       return
     }
     if (!store.chats.find(c => c.chat_id === id)) return
