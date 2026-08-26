@@ -233,9 +233,10 @@ def _read_star_receipt(context: DetectionContext) -> dict[str, Any]:
     if path is None:
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _write_star_receipt(context: DetectionContext, status: str) -> None:
