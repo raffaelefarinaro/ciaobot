@@ -2287,15 +2287,22 @@ export const useProjectStore = defineStore('projects', () => {
       // onlyIfEmpty: the server re-checks with the full rule and declines if
       // this is not actually a discardable draft. Closing a chat must never
       // be able to destroy one.
+      let deleted = false
       try {
-        await deleteChat(chatId, { selectNext: false, onlyIfEmpty: true })
+        deleted = await deleteChat(chatId, { selectNext: false, onlyIfEmpty: true })
       } finally {
         // The view is already cleared. A failed DELETE must not also strand
         // the router on /chat/<id> with no active chat behind it. But the
-        // user may have opened a different chat while the DELETE was in
-        // flight - only navigate home if nothing has claimed activeChatId
-        // since, or this would clobber that newly opened chat back to null.
-        await leaveChatView(wasActive && activeChatId.value === null)
+        // user may have reopened *this same* chat, or a different one,
+        // while the DELETE was in flight:
+        //   - a different chat is now active: leave it alone.
+        //   - this chat was reopened and the delete succeeded: it is gone
+        //     server-side, so still navigate home rather than strand the
+        //     view on a chat that no longer exists.
+        //   - this chat was reopened and the delete was declined (no longer
+        //     empty): it is a real chat again, leave it alone too.
+        await leaveChatView(wasActive && (activeChatId.value === null
+          || (deleted && activeChatId.value === chatId)))
       }
       return
     }

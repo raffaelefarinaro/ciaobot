@@ -1392,6 +1392,63 @@ describe('chat closing and re-entry orientation', () => {
     expect(routerPush).toHaveBeenCalledWith('/')
   })
 
+  test('does not clobber a different chat opened while the draft delete is in flight', async () => {
+    // closeChat() clears activeChatId synchronously so the close gesture
+    // feels immediate, then awaits the DELETE. If the user opens a different
+    // chat during that window, the delayed cleanup must leave it alone.
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    const otherId = 'chat-other'
+    store.chats = [
+      {
+        chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+        provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+      },
+      {
+        chat_id: otherId, project_id: 'p1', title: 'Another chat', model: 'sonnet',
+        provider: 'claude', mode: 'auto', session_id: 'session-1', created_at: '', archived: false,
+      },
+    ] as unknown as typeof store.chats
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    // The user opens a different chat before the DELETE resolves.
+    store.activeChatId = otherId
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.activeChatId).toBe(otherId)
+  })
+
+  test('clears the reopened draft once its own delete succeeds', async () => {
+    // Same race, but the user reopens the *same* draft. Once the delete
+    // lands it is gone server-side, so the view must not stay pointed at it.
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    store.activeChatId = draftId
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
   test('starts the summary when a completed chat closes and reuses it on reopen', async () => {
     const store = useProjectStore()
     const chatId = 'chat-reentry'
