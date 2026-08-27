@@ -13,22 +13,11 @@ def _write(path: Path, text: str = "content\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def test_update_upstream_skills_passes_timeout(tmp_path: Path) -> None:
-    calls: list[dict] = []
-
-    def runner(args, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(returncode=0)
-
-    assert sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
-    assert calls[0]["timeout"] == sync_skills.SKILLS_NPX_TIMEOUT
-
-
-def test_update_upstream_skills_survives_timeout(tmp_path: Path) -> None:
-    def runner(args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
-
-    assert not sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
+def test_upstream_skills_removed(tmp_path: Path) -> None:
+    # GitHub/upstream sync surface has been removed per the simplification plan.
+    assert not hasattr(sync_skills, "_update_upstream_skills")
+    assert not hasattr(sync_skills, "_refresh_upstream_skills")
+    assert not hasattr(sync_skills, "SKILLS_NPX_TIMEOUT")
 
 
 def test_sync_links_agents_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
@@ -260,160 +249,6 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
     assert result.stock_installed >= 3
 
 
-def test_gws_stock_skills_skipped_without_a_profile(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    result = sync_skills._install_stock_skills(workspace, gws_profile="")
-
-    assert not (workspace / ".claude" / "skills" / "gws-gmail").exists()
-    assert (
-        workspace / ".claude" / "skills" / "ciao-capabilities" / "SKILL.md"
-    ).is_file()
-    assert result[0] >= 1  # generic skills still installed
-
-
-def test_gws_stock_skills_installed_with_a_profile(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    result = sync_skills._install_stock_skills(workspace, gws_profile="personal")
-
-    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
-    assert result[0] >= 1
-
-
-def test_gws_stock_skills_unconditional_by_default(tmp_path: Path) -> None:
-    """Callers that predate the profile check still install GWS skills."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    result = sync_skills._install_stock_skills(workspace)
-
-    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
-    assert result[0] >= 1
-
-
-def _gws_aware_config(tmp_path: Path, workspaces: dict[str, str]) -> object:
-    """A minimal config whose workspaces map names to gws_profiles.
-
-    Linked (non-empty) profiles get a credential directory under
-    ``secrets/gws-<profile>`` so ``known_profiles`` treats them as real accounts
-    (mirroring ``gws_auth.profile_config_dir``'s mapping), and a workspace whose
-    profile does not actually exist resolves to "" the way the gate expects.
-    """
-    from types import SimpleNamespace
-
-    ws = {
-        name: SimpleNamespace(name=name, gws_profile=profile)
-        for name, profile in workspaces.items()
-    }
-    for profile in set(workspaces.values()):
-        if profile:
-            (tmp_path / "secrets" / f"gws-{profile}").mkdir(parents=True, exist_ok=True)
-            (tmp_path / "secrets" / f"gws-{profile}" / "credentials.json").write_text(
-                "{}", encoding="utf-8"
-            )
-    return SimpleNamespace(
-        workspaces=ws,
-        gws_default_profile="",
-        workspace=lambda name: ws.get(name),
-        workspace_names=lambda: list(ws.keys()),
-        workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime" / "state.json",
-        agent_root=lambda name: tmp_path / name,
-    )
-
-
-def test_any_workspace_has_gws_profile_false_when_none_linked(tmp_path: Path) -> None:
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
-    assert sync_skills._any_workspace_has_gws_profile(config) is False
-
-
-def test_any_workspace_has_gws_profile_true_when_any_linked(tmp_path: Path) -> None:
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
-    assert sync_skills._any_workspace_has_gws_profile(config) is True
-
-
-def test_shared_root_resolves_to_none_when_any_workspace_has_gws(tmp_path, monkeypatch) -> None:
-    """The pre-re-root shared catalog stays gated only when NO workspace links one.
-
-    An empty workspace name means the shared root serves every workspace, so a
-    single linked account must keep the GWS skills installed there.
-    """
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
-    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
-
-    # Any workspace has a profile -> no gate (None) -> GWS skills installed.
-    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) is None
-
-
-def test_shared_root_gates_when_no_workspace_has_gws(tmp_path, monkeypatch) -> None:
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
-    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
-
-    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) == ""
-
-
-def test_shared_root_gate_aggregates_all_workspaces(tmp_path) -> None:
-    """Unlinking one workspace must not prune the shared catalog while another links one."""
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
-    # Pre-re-root: every workspace's agent_root is the shared install root.
-    config.agent_root = lambda _name: tmp_path
-    config.workspace_root = tmp_path
-
-    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") is None
-
-
-def test_shared_root_gate_gates_when_none_linked(tmp_path) -> None:
-    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
-    config.agent_root = lambda _name: tmp_path
-    config.workspace_root = tmp_path
-
-    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") == ""
-
-
-def test_config_for_root_writes_no_side_effect_files_for_unowned_root(tmp_path) -> None:
-    """Probing an unowned root must not create .runtime (a CiaoConfig side effect)."""
-    sub = tmp_path / "not-an-install"
-    sub.mkdir(parents=True)
-
-    cfg = sync_skills._config_for_root(sub)
-
-    assert cfg is None
-    assert not (sub / ".runtime").exists()
-    assert not (tmp_path / ".runtime").exists()
-
-
-def test_config_for_root_finds_re_rooted_owner(tmp_path, monkeypatch) -> None:
-    """A post-re-root agent root resolves config via its install root."""
-    install = tmp_path / "install"
-    root = install / "work"
-    (install / ".runtime").mkdir(parents=True)
-    root.mkdir(parents=True)
-    (install / ".runtime" / "migration").mkdir(parents=True)
-    (install / ".runtime" / "migration" / "workspace-reroot.json").write_text(
-        json.dumps({"status": "migrated"}), encoding="utf-8"
-    )
-    (install / ".runtime" / "workspaces.json").write_text(
-        json.dumps([{"name": "work", "vault_root": "work/memory-vault"}]),
-        encoding="utf-8",
-    )
-    captured: list[Path] = []
-
-    def fake_agent_roots(ws, runtime):
-        captured.append(Path(ws))
-        return [(install / "work", "work")]
-
-    monkeypatch.setattr("ciao.config.agent_roots_for", fake_agent_roots)
-
-    cfg = sync_skills._config_for_root(root)
-    # Building a real CiaoConfig would need a full env; the point is the probe
-    # ran against the install root, not that config construction succeeded.
-    assert captured, "the probe ran"
-    assert captured[-1] == install  # the re-rooted install root was probed
-
-
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")
@@ -440,10 +275,8 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     assert result.stock_pruned == 1
 
 
-def test_disabled_auto_update_restores_missing_locked_skill(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
+    # skills-lock.json is now inert; sync must not touch .agents/skills for lock entries
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "skills-lock.json").write_text(
@@ -461,74 +294,13 @@ def test_disabled_auto_update_restores_missing_locked_skill(
         ),
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
-
-    def runner(args, **kwargs):
-        calls.append(args)
-        canonical = workspace / ".agents" / "skills" / "upstream"
-        _write(canonical / "SKILL.md", "# Restored\n")
-        claude_link = workspace / ".claude" / "skills" / "upstream"
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-
-    result = sync_skills._refresh_upstream_skills(workspace, runner=runner)
-
-    assert result == (1, 0)
-    assert calls == [[
-        "npx", "-y", "skills", "add", "owner/repo", "--skill", "upstream",
-        "--agent", "claude-code", "-y",
-    ]]
-    assert (workspace / ".agents" / "skills" / "upstream" / "SKILL.md").is_file()
-
-
-def test_upstream_refresh_prunes_only_previous_locked_packages(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {"kept": {"source": "owner/kept", "sourceType": "github"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    cache = workspace / ".runtime" / "skills-sync-cache.json"
-    cache.parent.mkdir(parents=True)
-    cache.write_text(
-        json.dumps({
-            "heads": {"owner/kept": "same"},
-            "skills": {"kept": "owner/kept", "removed": "owner/removed", "stock": "owner/old-stock"},
-        }),
-        encoding="utf-8",
-    )
-    for name in ("kept", "removed"):
-        canonical = workspace / ".agents" / "skills" / name
-        _write(canonical / "SKILL.md", f"# {name}\n")
-        claude_link = workspace / ".claude" / "skills" / name
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-    stock = workspace / ".claude" / "skills" / "stock"
-    _write(stock / "SKILL.md", "# Stock\n")
-    (stock / sync_skills.STOCK_SKILL_MARKER).touch()
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(sync_skills.skills_sync, "remote_heads", lambda _repos: {"owner/kept": "same"})
-
-    result = sync_skills._refresh_upstream_skills(workspace)
-
-    assert result == (0, 1)
-    assert not (workspace / ".agents" / "skills" / "removed").exists()
-    assert not (workspace / ".claude" / "skills" / "removed").exists()
-    assert (stock / "SKILL.md").is_file()
+    canonical = workspace / ".agents" / "skills" / "upstream"
+    _write(canonical / "SKILL.md", "# Upstream\n")
+    result = sync_skills.sync_workspace_skills(workspace)
+    # Upstream still present (not auto-pruned via lock), but no npx called
+    assert (canonical / "SKILL.md").is_file()
+    assert result.upstream_updated == 0
+    assert result.upstream_pruned == 0
 
 
 def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:

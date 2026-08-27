@@ -48,6 +48,7 @@ from ciao.web.routes_api import (
     admin_snapshot,
     admin_skills,
     admin_status,
+    skill_import,
     chat_archive,
     chat_continue,
     chat_detail,
@@ -397,6 +398,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/status", admin_status, methods=["GET"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
+        Route("/api/skills/import", skill_import, methods=["POST"]),
         # WebSocket
         WebSocketRoute("/ws/chat/{chat_id}", ws_chat),
         WebSocketRoute("/ws/events", ws_events),

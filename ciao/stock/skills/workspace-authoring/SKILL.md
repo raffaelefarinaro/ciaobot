@@ -7,6 +7,8 @@ description: Create and maintain persistent working docs under memory-vault/Work
 
 Use this skill for draft/plan/analysis documents in `memory-vault/Workspace`.
 
+> Skills are local folders: place `skills/<name>/SKILL.md` (or validated zip) then `ciao sync-skills`; workspace git sync propagates to other devices. No GitHub fetch.
+
 ## Document rules
 
 - Prefer updating an existing related document over creating a duplicate.

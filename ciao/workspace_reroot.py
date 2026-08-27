@@ -1783,7 +1783,6 @@ def rebuild_search_index(
 # all. Measured on the reference install: 21 skill entries and 3 commands.
 _CATALOG_PATHS: tuple[str, ...] = (
     "skills",
-    "skills-lock.json",
     "commands",
     "subagents",
 )
@@ -1854,17 +1853,8 @@ class SkillsTriage:
 def plan_skills_triage(install_root: Path, primary: str) -> SkillsTriage:
     """What the skill catalog does at migration time. Never writes.
 
-    Two things move, and both go to the primary root:
-
     ``skills/`` is the custom catalog, mirrored into ``.claude/skills`` by
     ``sync_skills._rebuild_custom_skill_links`` from whichever root it sits in.
-
-    ``skills-lock.json`` is the other half of the same non-stock catalog.
-    ``_refresh_upstream_skills`` reads it from the root it is syncing, so leaving
-    it at the install root would strand every upstream skill at a path no root
-    ever reads. Moving it is also self-healing: the upstream copies live under
-    the old ``.claude/skills`` and are not moved, so the primary's next sync sees
-    them as missing and refetches them from the lock.
     """
     install_root = Path(install_root).resolve()
     triage = SkillsTriage(primary=primary)
@@ -1957,7 +1947,7 @@ def _skill_triage_entries(install_root: Path) -> list[SkillTriageEntry]:
         entries.append(
             SkillTriageEntry(
                 name=name,
-                origin=str(skill.get("source") or "skills-lock.json"),
+                origin=str(skill.get("source") or "skills/"),
                 description=str(skill.get("description") or ""),
                 note="",
             )
@@ -2018,10 +2008,8 @@ def format_skill_triage(triage: SkillsTriage, workspaces: list[str]) -> str:
             "editing."
         ),
         (
-            "4. Upstream rows (anything not sourced from `skills/`) are pinned in "
-            "`skills-lock.json`, which moved with the catalog. Move the lock "
-            "entry, not the directory: the copy under `.claude/skills` is "
-            "refetched."
+            "4. Custom skills live in <code>skills/</code>. Move the folder, then "
+            "run <code>ciao sync-skills</code> for both roots."
         ),
         "",
         "## Catalog",

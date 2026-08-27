@@ -1037,6 +1037,70 @@ def _detect_workspace_assets_stale(context: DetectionContext) -> list[OperatorAc
     return actions
 
 
+def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAction]:
+    """GitHub skills that were only represented by ``skills-lock.json``.
+
+    The GitHub install surface was removed: ``sync_workspace_skills`` no longer
+    restores missing cached copies, and the inventory no longer lists them. A
+    workspace that still carries a ``skills-lock.json`` therefore has skills
+    that are silently invisible — the operator has no recovery path unless the
+    cached copy is copied into ``skills/<name>/``. This detector surfaces that
+    so the operator can recover before the cache is gone.
+    """
+    config = context.config
+    install = getattr(config, "workspace_root", None)
+    if install is None:
+        return []
+    roots = [Path(install)]
+    for _name, root in _rerooted_targets(context):
+        if root not in roots:
+            roots.append(root)
+    locked: list[str] = []
+    for root in roots:
+        lockfile = root / "skills-lock.json"
+        if not lockfile.is_file():
+            continue
+        try:
+            data = json.loads(lockfile.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        skills = data.get("skills")
+        if not isinstance(skills, dict):
+            continue
+        for name in skills:
+            if name and not (root / "skills" / name / "SKILL.md").is_file():
+                locked.append(name)
+    if not locked:
+        return []
+    shown = ", ".join(sorted(locked)[:5])
+    more = f" and {len(locked) - 5} more" if len(locked) > 5 else ""
+    return [
+        OperatorAction(
+            id="locked-skills-orphaned",
+            kind="locked-skills-orphaned",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(locked)} GitHub skill(s) are no longer installed",
+            detail=(
+                f"These skills were installed from GitHub and are only recorded "
+                f"in skills-lock.json, which is no longer restored: {shown}{more}. "
+                "Copy each cached copy into skills/<name>/ to keep it."
+            ),
+            glyph="⚿",
+            workspace="",
+            chat_label="Recover them",
+            chat_prompt=(
+                f"These skills were installed from GitHub and are only recorded "
+                f"in skills-lock.json, which is no longer restored: {shown}{more}. "
+                "For each one, look for a cached copy under `.claude/skills/<name>/` "
+                "or `.agents/skills/<name>/` and copy it into `skills/<name>/` so it "
+                "stays installed, then run `ciao sync-skills` for that root. If no "
+                "cached copy exists, the skill is gone and I can help you re-add it "
+                "from its source or a zip."
+            ),
+        )
+    ]
+
+
 def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorAction]:
     """Skills the migration could not attribute to one workspace.
 
@@ -1213,6 +1277,7 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_root_missing,
     _detect_workspace_assets_stale,
     _detect_skill_triage_pending,
+    _detect_locked_skills_orphaned,
     _detect_legacy_env_ignored,
     _detect_mcp_uncomposed,
     _detect_github_star,

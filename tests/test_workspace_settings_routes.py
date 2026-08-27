@@ -488,7 +488,7 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
     # the only entry, and nothing in the app reads it any more.
     assert data["service_keys"] == {}
-    assert data["auto_update_github_skills"] is False
+    assert "auto_update_github_skills" not in data
     assert "sk-anthropic" not in json.dumps(data)
     # The connection rows survive: they are how a provider is signed in.
     assert set(data["connections"]) == {"claude", "opencode"}
@@ -501,11 +501,9 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
 
     resp = client.patch(
         "/api/settings/providers",
-        json={"auto_update_github_skills": False},
+        json={},
     )
     assert resp.status_code == 200
-    assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_path.read_text(encoding="utf-8")
-    assert resp.json()["auto_update_github_skills"] is False
 
 
 def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch):

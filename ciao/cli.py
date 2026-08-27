@@ -2810,12 +2810,6 @@ def _health_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _skills_sync_command(args: argparse.Namespace) -> int:
-    from ciao import skills_sync
-
-    return skills_sync.main(args.args)
-
-
 def _sync_skills_command(args: argparse.Namespace) -> int:
     from ciao import sync_skills
 
@@ -3989,13 +3983,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     label_hygiene_parser.set_defaults(func=_label_hygiene_command)
 
-    skills_sync_parser = subparsers.add_parser(
-        "skills-sync",
-        help="Plan or write the upstream skill update cache.",
-    )
-    skills_sync_parser.add_argument("args", nargs=argparse.REMAINDER)
-    skills_sync_parser.set_defaults(func=_skills_sync_command)
-
     skills_parser = subparsers.add_parser(
         "skills",
         help="Inspect skills (stock, custom, installed) with provider availability.",
@@ -4039,7 +4026,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_skills_parser.add_argument(
         "--skip-upstream",
         action="store_true",
-        help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
+        help="Deprecated: no-op. Skills are local folders under skills/.",
     )
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)

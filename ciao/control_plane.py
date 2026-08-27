@@ -1654,13 +1654,12 @@ class CiaoControlPlane:
 
     # ---- adversarial review ---------------------------------------------
 
-    async def skills_sync(self, principal: McpPrincipal, refresh_upstream: bool = False) -> dict[str, Any]:
+    async def sync_skills(self, principal: McpPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         from ciao.sync_skills import sync_workspace_skills
 
         result = await asyncio.to_thread(
             sync_workspace_skills,
             self.config.workspace_root,
-            refresh_upstream=refresh_upstream,
         )
         return _ok(asdict(result))

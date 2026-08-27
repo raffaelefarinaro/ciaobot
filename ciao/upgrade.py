@@ -133,12 +133,12 @@ def install_custom_skills(cwd: str, workspace_name: str | None = None) -> int:
 
 
 def update_skills(cwd: str, workspace_name: str | None = None) -> str | None:
-    """Install the curated skill set from ``skills-lock.json`` + ``skills/``.
+    """Install the curated skill set from ``skills/``.
 
-    The package command performs upstream refresh when possible, then mirrors
-    skills, commands, and agents into the Claude catalog. ``workspace_name``
-    lets the caller tie a root to its registered workspace so the ``gws-*``
-    stock skills are gated on that workspace's Google account.
+    The package command mirrors skills, commands, and agents into the Claude
+    catalog. Skills are local folders under ``skills/<name>/SKILL.md``.
+    ``workspace_name`` lets the caller tie a root to its registered workspace so
+    the ``gws-*`` stock skills are gated on that workspace's Google account.
     """
     n_custom = install_custom_skills(cwd, workspace_name=workspace_name)
     if n_custom:

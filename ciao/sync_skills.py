@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from ciao.jsonio import read_json_dict
 import os
 import re
 import shutil
@@ -14,8 +13,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-
-from ciao import skills_sync
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +42,6 @@ class SyncSkillsResult:
     opencode_mcps_pruned: int = 0
 
 
-# Bound the upstream `npx skills ...` calls. `npx -y` cold-downloads the
-# `skills` package and then does network git fetches; with no timeout a stall
-# (cold cache, slow/blocked network, an interactive prompt) hangs the
-# `update_skills` startup phase forever, which pins the boot overlay on
-# "booting" (overall_ready never flips). Bounded so the phase always ends.
-SKILLS_NPX_TIMEOUT = 180.0
 # Marker dropped into skills copied from ciao.stock so stale copies can be
 # pruned when the packaged set changes or a workspace skill overrides them.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
@@ -85,14 +76,6 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
     "pr-test-analyzer",
     "silent-failure-hunter",
 })
-
-
-def _load_json(path: Path) -> dict:
-    try:
-        data = read_json_dict(path)
-        return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
 
 
 def _remove_path(path: Path) -> None:
@@ -137,223 +120,6 @@ def _iter_entries(path: Path) -> list[Path]:
     if not path.is_dir():
         return []
     return sorted(path.iterdir(), key=lambda entry: entry.name)
-
-
-def _active_upstream_lock(workspace: Path, lock: dict) -> dict:
-    """Exclude locked packages shadowed by a workspace-owned skill."""
-    skills = lock.get("skills")
-    if not isinstance(skills, dict):
-        return {**lock, "skills": {}}
-    active = {
-        name: entry
-        for name, entry in skills.items()
-        if not (workspace / "skills" / name / "SKILL.md").is_file()
-    }
-    return {**lock, "skills": active}
-
-
-def _installed_upstream_names(workspace: Path, candidates: set[str]) -> set[str]:
-    """Return locked-package names present in either provider catalog.
-
-    The upstream ``skills`` CLI stores canonical package directories under
-    ``.agents/skills`` and links provider-specific catalogs back to them.
-    Older installs may instead have a canonical ``.claude/skills`` directory,
-    so both layouts remain supported.
-    """
-    installed: set[str] = set()
-    catalogs = (workspace / ".claude" / "skills", workspace / ".agents" / "skills")
-    for name in candidates:
-        if (workspace / "skills" / name / "SKILL.md").is_file():
-            continue
-        for catalog in catalogs:
-            entry = catalog / name
-            if (entry / STOCK_SKILL_MARKER).is_file():
-                continue
-            if (entry / "SKILL.md").is_file():
-                installed.add(name)
-                break
-    return installed
-
-
-def _remove_upstream_skill(workspace: Path, name: str) -> None:
-    """Remove a locked package from both projections without touching overrides."""
-    if (workspace / "skills" / name / "SKILL.md").is_file():
-        return
-    catalogs = (workspace / ".claude" / "skills", workspace / ".agents" / "skills")
-    for catalog in catalogs:
-        entry = catalog / name
-        if (entry / STOCK_SKILL_MARKER).is_file():
-            continue
-        if entry.exists() or entry.is_symlink():
-            _remove_path(entry)
-
-
-def _update_upstream_skills(
-    workspace: Path,
-    names: Sequence[str],
-    *,
-    runner=subprocess.run,
-) -> bool:
-    if not names:
-        return True
-    print("Skills: updating changed/missing -> " + " ".join(names))
-    try:
-        result = runner(
-            ["npx", "-y", "skills", "update", "-p", "-y", *names],
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=SKILLS_NPX_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        print(
-            f"WARN: skills update timed out after {SKILLS_NPX_TIMEOUT:.0f}s",
-            file=sys.stderr,
-        )
-        return False
-    except OSError as exc:
-        print(f"WARN: skills update failed: {exc}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print("WARN: skills update reported errors", file=sys.stderr)
-        return False
-    return True
-
-
-def _restore_missing_upstream_skills(
-    workspace: Path,
-    lock: dict,
-    names: Sequence[str],
-    *,
-    runner=subprocess.run,
-) -> set[str]:
-    """Re-add missing locked packages without refreshing installed ones."""
-    lock_skills = lock.get("skills")
-    if not isinstance(lock_skills, dict):
-        return set()
-
-    grouped: dict[str, list[str]] = {}
-    for name in names:
-        entry = lock_skills.get(name)
-        if not isinstance(entry, dict) or not entry.get("source"):
-            print(f"WARN: locked skill {name} has no install source", file=sys.stderr)
-            continue
-        source = str(entry["source"])
-        if entry.get("ref"):
-            source = f"{source}#{entry['ref']}"
-        grouped.setdefault(source, []).append(name)
-
-    restored: set[str] = set()
-    for source, source_names in grouped.items():
-        print("Skills: restoring missing -> " + " ".join(source_names))
-        try:
-            result = runner(
-                [
-                    "npx",
-                    "-y",
-                    "skills",
-                    "add",
-                    source,
-                    "--skill",
-                    *source_names,
-                    "--agent",
-                    "claude-code",
-                    "-y",
-                ],
-                cwd=workspace,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=SKILLS_NPX_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            print(
-                "WARN: skills restore timed out after "
-                f"{SKILLS_NPX_TIMEOUT:.0f}s for " + " ".join(source_names),
-                file=sys.stderr,
-            )
-            continue
-        except OSError as exc:
-            print(f"WARN: skills restore failed: {exc}", file=sys.stderr)
-            continue
-        if result.returncode != 0:
-            print(
-                "WARN: skills restore reported errors for " + " ".join(source_names),
-                file=sys.stderr,
-            )
-            continue
-        restored.update(source_names)
-    return restored
-
-
-def _refresh_upstream_skills(
-    workspace: Path,
-    *,
-    runner=subprocess.run,
-) -> tuple[int, int]:
-    lockfile = workspace / "skills-lock.json"
-    if not lockfile.is_file():
-        print(f"Skills: {lockfile} missing, skipping upstream refresh.")
-        return 0, 0
-
-    cache_path = workspace / ".runtime" / "skills-sync-cache.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = _active_upstream_lock(workspace, _load_json(lockfile))
-    cache = _load_json(cache_path)
-    desired = skills_sync.desired_sources(lock)
-    cached_skills = cache.get("skills")
-    cached_names = set(cached_skills) if isinstance(cached_skills, dict) else set()
-    known_names = set(desired) | cached_names
-    installed = _installed_upstream_names(workspace, known_names)
-    missing = sorted(set(desired) - installed)
-    auto_update = os.environ.get(
-        "CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false"
-    ).strip().lower() not in {"0", "false", "no", "off"}
-
-    if not auto_update:
-        if not missing:
-            print("Skills: automatic GitHub updates disabled; locked skills are installed.")
-            return 0, 0
-        if shutil.which("npx") is None or shutil.which("git") is None:
-            print(
-                "WARN: npx or git not found, cannot install missing locked skills",
-                file=sys.stderr,
-            )
-            return 0, 0
-        print("Skills: automatic GitHub updates disabled; restoring missing locked skills.")
-        restored = _restore_missing_upstream_skills(
-            workspace, lock, missing, runner=runner
-        )
-        return len(restored), 0
-
-    if shutil.which("npx") is None or shutil.which("git") is None:
-        print("WARN: npx or git not found, skipping upstream skill refresh", file=sys.stderr)
-        return 0, 0
-
-    heads = skills_sync.remote_heads(set(skills_sync.desired_sources(lock).values()))
-    plan = skills_sync.plan(lock, cache, heads, installed)
-
-    for name in plan["to_prune"]:
-        _remove_upstream_skill(workspace, name)
-
-    missing_set = set(missing)
-    changed = [name for name in plan["to_update"] if name not in missing_set]
-    restored = _restore_missing_upstream_skills(
-        workspace, lock, missing, runner=runner
-    )
-    updated = _update_upstream_skills(workspace, changed, runner=runner)
-    if not plan["to_update"]:
-        print("Skills: upstream unchanged, no fetch needed.")
-
-    complete = updated and restored == missing_set
-    if complete:
-        cache_path.write_text(
-            json.dumps(skills_sync.build_cache(lock, heads, cache), indent=2),
-            encoding="utf-8",
-        )
-    refreshed = len(restored) + (len(changed) if updated else 0)
-    return refreshed, len(plan["to_prune"])
 
 
 def _install_stock_skills(
@@ -1357,8 +1123,6 @@ def sync_workspace_skills(
 
     upstream_updated = 0
     upstream_pruned = 0
-    if refresh_upstream:
-        upstream_updated, upstream_pruned = _refresh_upstream_skills(root, runner=runner)
 
     legacy_codex_pruned = _cleanup_legacy_codex_projections(root)
     gws = _resolve_workspace_gws_profile(root, workspace_name, gws_profile)
@@ -1444,14 +1208,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--skip-upstream",
         action="store_true",
-        help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
+        help="Deprecated: no-op. Skills are local folders under skills/; no remote refresh is performed.",
     )
     parser.add_argument("--verbose", action="store_true", help="Accepted for script compatibility.")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    sync_workspace_skills(
-        args.workspace,
-        refresh_upstream=not args.skip_upstream,
-    )
+    sync_workspace_skills(args.workspace)
     return 0
 
 

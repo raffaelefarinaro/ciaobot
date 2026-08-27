@@ -383,13 +383,14 @@ def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatc
     assert called[0].apply is True
 
 
-def test_cli_skills_sync_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(cli, "_skills_sync_command", lambda args: called.append(args) or 0)
-
-    assert cli.main(["skills-sync", "write-cache", "lock.json", "heads.json", "cache.json"]) == 0
-    assert called[0].args == ["write-cache", "lock.json", "heads.json", "cache.json"]
+def test_cli_skills_sync_removed() -> None:
+    # skills-sync command has been removed per simplification plan.
+    try:
+        cli.main(["skills-sync", "write-cache", "lock.json", "heads.json", "cache.json"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        assert False, "skills-sync should exit with code 2"
 
 
 def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:

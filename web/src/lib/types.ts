@@ -635,7 +635,6 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
-  auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
 }
@@ -735,7 +734,7 @@ export interface CliStats {
 
 export interface SkillInventoryItem {
   name: string
-  label: 'custom' | 'github' | 'stock'
+  label: 'custom' | 'stock'
   source: string
   source_type: string
   description: string
@@ -747,7 +746,6 @@ export interface SkillInventoryItem {
 export interface SkillInventory {
   counts: {
     custom: number
-    github: number
     stock: number
   }
   skills: SkillInventoryItem[]

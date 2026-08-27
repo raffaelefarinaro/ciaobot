@@ -513,7 +513,7 @@ class LocalSessionManager:
                 categories["vault"].append(rel_path)
             elif rel_path.startswith("scripts/"):
                 categories["scripts"].append(rel_path)
-            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", "skills/skills-lock.json", ".gitignore") or rel_path.startswith((f"{_SECRETS_ROOT}/", "web/package", "web/tsconfig", "web/vite.config")):
+            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", ".gitignore") or rel_path.startswith((f"{_SECRETS_ROOT}/", "web/package", "web/tsconfig", "web/vite.config")):
                 categories["config"].append(rel_path)
             else:
                 categories["other"].append(rel_path)

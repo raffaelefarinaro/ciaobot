@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -14,40 +13,32 @@ def build_skill_inventory(
 ) -> dict[str, Any]:
     """Return installed/known skills labelled by source.
 
-    Source labels intentionally stay coarse for the Settings UI:
+    Source labels stay coarse for the Settings UI:
     ``custom`` means the skill is maintained under ``skills/``;
-    ``github`` means it comes from ``skills-lock.json``;
     ``stock`` means it ships with the app and is installed into ``.claude/skills``.
+    GitHub/package skills are no longer a separate surface.
     """
 
     root = Path(workspace_root)
     custom_names = _skill_names(root / "skills")
-    lock_entries = _read_lock_entries(root / "skills-lock.json")
     stock_names = _stock_skill_names(root)
-    names = sorted(custom_names | set(lock_entries) | stock_names)
+    names = sorted(custom_names | stock_names)
 
     skills: list[dict[str, Any]] = []
-    counts = {"custom": 0, "github": 0, "stock": 0}
+    counts = {"custom": 0, "stock": 0}
     for name in names:
         is_custom = name in custom_names
-        is_stock = name in stock_names
-        lock = lock_entries.get(name, {})
         if is_custom:
             label = "custom"
-        elif is_stock:
-            label = "stock"
         else:
-            label = "github"
+            label = "stock"
         counts[label] += 1
         if is_custom:
             source = "skills/"
             source_type = "custom"
-        elif is_stock:
+        else:
             source = "ciao.stock/skills"
             source_type = "stock"
-        else:
-            source = str(lock.get("source") or "skills-lock.json")
-            source_type = str(lock.get("sourceType") or "github")
         skill = {
             "name": name,
             "label": label,
@@ -92,17 +83,7 @@ def _skill_names(skills_root: Path) -> set[str]:
     }
 
 
-def _read_lock_entries(lock_path: Path) -> dict[str, dict[str, Any]]:
-    if not lock_path.exists():
-        return {}
-    try:
-        data = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    skills = data.get("skills") if isinstance(data, dict) else None
-    if not isinstance(skills, dict):
-        return {}
-    return {str(name): value for name, value in skills.items() if isinstance(value, dict)}
+
 
 
 def _skill_candidates(root: Path, name: str, *, prefer_custom: bool) -> list[Path]:
