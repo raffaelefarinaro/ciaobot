@@ -768,7 +768,7 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
             pass
 
     mock_called = False
-    def mock_urlopen(req):
+    def mock_urlopen(req, *args, **kwargs):
         nonlocal mock_called
         mock_called = True
         assert req.full_url == "https://oauth2.googleapis.com/token"
