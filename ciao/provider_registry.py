@@ -48,7 +48,7 @@ class ProviderDescriptor:
     # provider's own CLI loads (its bundled/system skills, not Ciaobot's).
     system_skills_path: str = ""
     # ``module:attr`` for the install/auth status probe. Signature is
-    # ``(env, *, config, credentials_path, config_path, workspace_root,
+    # ``(env, *, config, config_path, workspace_root,
     # **unused) -> dict``; see ``ciao/setup_status.py``. Empty means the
     # provider contributes no Settings connection row.
     status_probe_path: str = ""

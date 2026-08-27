@@ -183,6 +183,11 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     # on success. A unique name (not PID-based) keeps concurrent imports of the
     # same skill from colliding on the same directory.
     tmp_target = Path(tempfile.mkdtemp(prefix=f".{name}.tmp-", dir=dest_root))
+
+    def _fail(errors: list[str]) -> tuple[str | None, list[str]]:
+        _remove_path(tmp_target)
+        return None, errors
+
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     try:
         total_written = 0
@@ -209,7 +214,7 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
             try:
                 dest_path.relative_to(tmp_target.resolve())
             except ValueError:
-                return None, ["Zip contains path traversal."]
+                return _fail(["Zip contains path traversal."])
             if info.is_dir():
                 dest_path.mkdir(parents=True, exist_ok=True)
             else:
@@ -225,15 +230,15 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
                             break
                         written += len(chunk)
                         if written > MAX_SKILL_ASSET_BYTES:
-                            return None, [
+                            return _fail([
                                 f"Archive member '{info.filename}' exceeds "
                                 f"{MAX_SKILL_ASSET_BYTES} bytes uncompressed."
-                            ]
+                            ])
                         total_written += len(chunk)
                         if total_written > MAX_SKILL_TOTAL_BYTES:
-                            return None, [
+                            return _fail([
                                 f"Archive exceeds {MAX_SKILL_TOTAL_BYTES} bytes uncompressed."
-                            ]
+                            ])
                         out.write(chunk)
     except Exception:
         _remove_path(tmp_target)

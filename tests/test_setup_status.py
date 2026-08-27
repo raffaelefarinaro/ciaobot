@@ -232,6 +232,49 @@ def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
     assert data["providers"]["claude"]["auth"] == "missing"
 
 
+def test_setup_status_malformed_probe_never_falls_back_to_desktop_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    """Unparseable probe output fails closed even with Desktop-only metadata.
+
+    Issue #347: an `oauthAccount` block in ~/.claude.json can belong to the
+    Desktop app while the CLI credential store is signed out, so malformed
+    probe output must report missing auth rather than guess from metadata.
+    """
+    config = _config(tmp_path)
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        '{"oauthAccount":{"emailAddress":"operator@example.com",'
+        '"accountUuid":"abc","organizationName":"Example Org"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="update notice, not json", returncode=0),
+    )
+
+    data = setup_status(config, env={}, claude_config_path=config_path)
+
+    claude = data["providers"]["claude"]
+    assert claude["ok"] is False
+    assert claude["auth"] == "missing"
+
+
+def test_claude_auth_status_probe_argv_uses_auth_status_json(monkeypatch) -> None:
+    """The probe must keep invoking `claude auth status --json` (issue #347)."""
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(stdout='{"loggedIn":false}', returncode=0)
+
+    monkeypatch.setattr("ciao.setup_status.subprocess.run", fake_run)
+
+    claude_auth_status("/claude")
+
+    assert captured["cmd"] == ["/claude", "auth", "status", "--json"]
+
+
 def test_claude_auth_status_parses_logged_in_json(monkeypatch) -> None:
     monkeypatch.setattr(
         "ciao.setup_status.subprocess.run",
@@ -1067,6 +1110,39 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     request.path_params["provider"] = "opencode"
     await provider_connection_action(request)
     assert calls == {"clear": 1, "payload": 2}
+
+
+async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) -> None:
+    """Logout must derive `auth logout` from the login command, not `claude logout`.
+
+    The top-level `claude logout` subcommand no longer exists: the CLI prints a
+    "did you mean" hint and exits 0, so `[:1] + ["logout"]` returned ok without
+    signing anyone out.
+    """
+    from ciao.web import routes_api
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
+    monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
+
+    config = _config(tmp_path)
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+    )
+
+    response = await provider_connection_action(request)
+
+    assert json.loads(response.body) == {"ok": True}
+    assert captured["cmd"][1:] == ["auth", "logout"]
 
 
 def test_discover_claude_system_skills_filters_enabled_and_caches(

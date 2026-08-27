@@ -89,6 +89,18 @@ def test_extract_streams_through_caps(tmp_path: Path) -> None:
     assert not (tmp_path / "demo").exists()
 
 
+def test_extract_removes_temp_dir_on_aborted_extraction(tmp_path: Path) -> None:
+    # Cap violations and traversal rejects return from inside the extraction
+    # loop; the unique temp dir must be cleaned up on those paths too, or
+    # repeated failed imports litter skills/ with .name.tmp-* directories.
+    big = b"y" * (MAX_SKILL_ASSET_BYTES + 1)
+    name, errors = extract_skill_zip(_skill_zip(extra={"demo/asset.bin": big}), tmp_path)
+    assert name is None
+    assert errors
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".demo.tmp-")]
+    assert leftovers == []
+
+
 def test_extract_writes_valid_skill(tmp_path: Path) -> None:
     name, errors = extract_skill_zip(_skill_zip(), tmp_path)
     assert errors == []

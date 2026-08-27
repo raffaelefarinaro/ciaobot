@@ -606,14 +606,11 @@ def _discover_claude_mcps_uncached(
 def claude_status_probe(
     env: Mapping[str, str],
     *,
-    credentials_path: Path,
     config_path: Path,
     workspace_root: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
-    return _claude_status(
-        env, credentials_path, config_path, workspace_root=workspace_root
-    )
+    return _claude_status(env, config_path, workspace_root=workspace_root)
 
 
 def opencode_status_probe(
@@ -695,7 +692,6 @@ def claude_cli_path() -> str:
 
 def _claude_status(
     env: Mapping[str, str],
-    credentials_path: Path,
     config_path: Path,
     *,
     workspace_root: Path | None = None,
@@ -740,12 +736,7 @@ def _claude_status(
             mcps=claude_mcps,
             cli_path=binary,
         )
-    auth_status = claude_auth_status(
-        binary,
-        env=env,
-        credentials_path=credentials_path,
-        config_path=config_path,
-    )
+    auth_status = claude_auth_status(binary, env=env)
     if auth_status["logged_in"]:
         email = auth_status.get("email", "")
         org_name = auth_status.get("org_name", "")
@@ -766,25 +757,10 @@ def _claude_status(
             mcps=claude_mcps,
             cli_path=binary,
         )
-    # Keep compatibility with older CLI output, but only for malformed output.
-    # A timeout or process error is not evidence of authentication.
-    if auth_status["unparseable"] and _claude_credential_heuristic(
-        credentials_path, config_path
-    ):
-        account = _claude_oauth_account(config_path) or "OAuth credentials"
-        return _provider(
-            name="claude",
-            ok=True,
-            auth="oauth",
-            command="ciao auth claude",
-            detail=account,
-            version=version,
-            account=account.removeprefix("oauthAccount: "),
-            protocol="Agent SDK ready",
-            skills=claude_skills,
-            mcps=claude_mcps,
-            cli_path=binary,
-        )
+    # No fallback on unparseable probe output: a timeout or process error is
+    # not evidence of authentication, and neither is Desktop metadata — an
+    # `oauthAccount` block in ~/.claude.json can belong to the Desktop app
+    # while the CLI credential store is signed out (issue #347). Fail closed.
     app_path = claude_app_path()
     detail = (
         "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
@@ -805,17 +781,10 @@ def _claude_status(
     )
 
 
-def _claude_credential_heuristic(credentials_path: Path, config_path: Path) -> bool:
-    """Legacy compatibility check used only when the probe output is malformed."""
-    return credentials_path.is_file() or bool(_claude_oauth_account(config_path))
-
-
 def claude_auth_status(
     binary: str,
     *,
     env: Mapping[str, str] | None = None,
-    credentials_path: Path | None = None,
-    config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Probe the Claude Code credential store without making a network call."""
     result: dict[str, Any] = {
@@ -854,31 +823,6 @@ def claude_auth_status(
     return result
 
 
-def _claude_oauth_account(config_path: Path) -> str:
-    """Return legacy account metadata from ``~/.claude.json``'s ``oauthAccount``.
-
-    Returns an empty string when the file is missing, unparseable, or has no
-    usable account metadata. It is retained only as a compatibility fallback
-    when a CLI status probe returns malformed output; it does not prove login.
-    """
-    try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    account = data.get("oauthAccount")
-    if not isinstance(account, dict) or not account:
-        return ""
-    email = str(account.get("emailAddress", "")).strip()
-    if email:
-        return f"oauthAccount: {email}"
-    uuid_ = str(account.get("accountUuid", "")).strip()
-    if uuid_:
-        return f"oauthAccount: {uuid_}"
-    return "oauthAccount present"
-
-
 def _workspace_guides_linked(workspace_root: Path) -> bool:
     """True when AGENTS.md resolves to CLAUDE.md for shared guide loading."""
     claude_guide = workspace_root / "CLAUDE.md"
@@ -901,7 +845,6 @@ def setup_status(
     config: Any,
     *,
     env: Mapping[str, str] | None = None,
-    claude_credentials_path: Path | None = None,
     claude_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Return setup readiness for the wizard and expert CLI.
@@ -917,12 +860,6 @@ def setup_status(
     configured_vault = getattr(config, "vault_root", None)
     vault_root = _resolve_root(
         configured_vault if configured_vault is not None else workspace_root / "memory-vault"
-    )
-    raw_credentials_path = source.get("CLAUDE_CREDENTIALS_PATH", "").strip()
-    credentials_path = (
-        claude_credentials_path
-        or (Path(raw_credentials_path).expanduser() if raw_credentials_path else None)
-        or Path.home() / ".claude" / ".credentials.json"
     )
     config_path = claude_config_path or _claude_config_path_from_env(source)
 
@@ -978,7 +915,6 @@ def setup_status(
         descriptor.id: descriptor.status_probe(
             source,
             config=config,
-            credentials_path=credentials_path,
             config_path=config_path,
             workspace_root=workspace_root,
         )

@@ -376,6 +376,10 @@ def exchange_code(
     Blocking (uses ``urllib``); call from a worker thread. Raises
     :class:`ValueError` with a secret-free message on failure. The returned
     dict is the raw token response and MUST NOT be logged.
+
+    The socket timeout matters: the exchange runs inside the single-threaded
+    callback server's ``do_GET``, so an unbounded request would hang the
+    listener and keep ``shutdown()`` from ever returning, leaking the socket.
     """
     data = urllib.parse.urlencode(
         {
@@ -392,7 +396,7 @@ def exchange_code(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
             return payload
     except urllib.error.HTTPError as exc:
@@ -890,14 +894,22 @@ class GwsReloginManager:
     def start(self, profile: str) -> dict[str, Any]:
         """Begin a re-login: bind a loopback listener and return the consent URL.
 
-        Raises :class:`ValueError` (secret-free) if the profile is unknown or
-        has no ``client_secret.json``.
+        Raises :class:`ValueError` (secret-free) if the profile is unknown,
+        has no ``client_secret.json``, or uses a *web* OAuth client — a web
+        client requires an exact authorized redirect URI, so the random-port
+        loopback redirect would be rejected by Google. That check is enforced
+        here, not only in the UI, so direct API callers get the same gate.
         """
         if profile not in known_profiles(self._config):
             raise ValueError(f"Invalid profile: {profile}")
         config_dir = profile_config_dir(self._config, profile)
         if config_dir is None:
             raise ValueError("Could not determine config directory")
+        if not client_uses_loopback(config_dir):
+            raise ValueError(
+                "This OAuth client is a web app and does not support one-click "
+                "sign-in; use manual connect (paste the authorization code)."
+            )
         installed = load_client_secret(config_dir)
         client_id = installed.get("client_id")
         if not client_id:

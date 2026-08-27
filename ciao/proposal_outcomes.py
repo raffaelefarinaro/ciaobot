@@ -166,10 +166,21 @@ def _trim_if_large(path: Path) -> None:
         # page shows are carried in a sidecar that absorbs whatever this trim
         # drops, so tally() = sidecar + what is still in the file.
         _absorb_dropped_into_totals(dropped)
-        with path.open("w", encoding="utf-8") as f:
+        # The rewrite must not truncate the log in place: a crash or disk-full
+        # between truncation and the rewrite would strand lines in neither the
+        # sidecar (already absorbed) nor the file. Write the kept lines to a
+        # sibling temp file and atomically swap it in instead — the same
+        # pattern the sidecar write itself uses.
+        tmp = path.with_name(f".{path.name}.trim.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             f.writelines(kept)
+        os.replace(tmp, path)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to trim proposal-outcome log", exc_info=True)
+        try:
+            tmp.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
+        except Exception:  # noqa: BLE001
+            pass
 
 
 _TOTALS_NAME = "proposal_outcomes_totals.json"

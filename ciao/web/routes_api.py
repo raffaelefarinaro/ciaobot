@@ -1286,7 +1286,11 @@ async def provider_connection_action(request: Request) -> JSONResponse:
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
-            logout_command = _auth_command_for_provider(provider)[:1] + ["logout"]
+            # auth_command is `[binary, "auth", "login"]`, so dropping the last
+            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+            # would run the obsolete top-level `claude logout`, which prints a
+            # "did you mean" hint and exits 0 without signing out.
+            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
             run = await asyncio.to_thread(
                 subprocess.run,
                 logout_command,
