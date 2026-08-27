@@ -769,11 +769,9 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
-  // Tab is the section switcher: keep the existing sidebar navigation as the
-  // only UI, but let keyboard users move between its top-level destinations
-  // without opening the sidebar or activating a focused link separately.
-  // Text entry keeps the browser's normal Tab behavior for fields and editors.
-  if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
+  // Option+Arrow switches top-level sections without commandeering the
+  // browser's native Tab focus traversal.
+  if (!e.metaKey && !e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     const sections = ['/', '/schedules', '/memory', '/settings']
     const current = viewMode.value === 'chat' || viewMode.value === 'project'
@@ -783,7 +781,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
         : viewMode.value === 'memory' || viewMode.value === 'proposals'
           ? 2
           : 3
-    const next = (current + (e.shiftKey ? -1 : 1) + sections.length) % sections.length
+    const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
     e.preventDefault()
     void router.push(sections[next])
     return
