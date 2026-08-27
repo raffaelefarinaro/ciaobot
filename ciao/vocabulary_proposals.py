@@ -291,6 +291,8 @@ def generate_vocabulary_proposals(
             tag_merges.append(
                 {
                     "tag": variant,
+                    "count": tags[variant],
+                    "kind": "case_variant",
                     "workspaces": sorted(tag_workspaces.get(variant, [])),
                     "near_duplicates": [dominant],
                 }
@@ -311,6 +313,8 @@ def generate_vocabulary_proposals(
             tag_merges.append(
                 {
                     "tag": tag,
+                    "count": tags[tag],
+                    "kind": "singleton",
                     "workspaces": sorted(tag_workspaces.get(tag, [])),
                     "near_duplicates": sorted(neighbors),
                 }

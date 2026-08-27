@@ -701,3 +701,41 @@ def test_case_equivalent_unknown_types_aggregate_before_threshold(tmp_path: Path
     promo = proposals["type_promotions"][0]
     assert promo["count"] == 6
     assert promo["type"] in {"brainstorm", "Brainstorm"}
+
+
+def test_case_variant_merge_renders_without_calling_it_singleton(tmp_path: Path):
+    """A repeated case-only variant (ai 3x + AI 2x) must render in the audit
+    markdown as a case variant with its count, not as a 'Singleton tag'."""
+    from ciao import vault_index as vi_mod
+    from ciao.os_audit import format_audit_markdown, run_os_audit
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    from ciao.memory_tool import ensure_regions
+    ensure_regions(guide)
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    for i in range(3):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(2):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+
+    proposals = generate_vocabulary_proposals(vi_mod.scan_vault(vault), threshold=5)
+    merge = next(m for m in proposals["tag_merges"] if m["tag"] == "AI")
+    assert merge["kind"] == "case_variant"
+    assert merge["count"] == 2
+
+    report = run_os_audit(
+        workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime"
+    )
+    report["vocabulary_proposals"] = proposals
+    md = format_audit_markdown(report)
+    # The repeated variant is not labeled a singleton.
+    assert "Singleton tag `AI`" not in md
+    assert "case variant of `ai`" in md
+    assert "(2 uses" in md

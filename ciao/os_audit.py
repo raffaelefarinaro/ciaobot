@@ -1785,10 +1785,21 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         for merge in vocab.get("tag_merges", [])[:10]:
             ws = f" — {', '.join(merge['workspaces'])}" if merge.get("workspaces") else ""
             near = ", ".join(f"`{t}`" for t in merge.get("near_duplicates", []))
-            lines.append(
-                f"- ℹ️ Singleton tag `{merge['tag']}`{ws} near-duplicate of {near} "
-                f"— candidate for aliasing."
-            )
+            count = merge.get("count", 1)
+            kind = merge.get("kind", "singleton")
+            if kind == "case_variant":
+                # A repeated case-only variant (e.g. ai 3x + AI 2x) is not a
+                # singleton; say so with its actual count.
+                lines.append(
+                    f"- ℹ️ Tag `{merge['tag']}` ({count} uses{ws}) is a case "
+                    f"variant of {near} — candidate for merging into that "
+                    "spelling."
+                )
+            else:
+                lines.append(
+                    f"- ℹ️ Singleton tag `{merge['tag']}`{ws} near-duplicate of {near} "
+                    f"— candidate for aliasing."
+                )
         if len(vocab.get("type_promotions", [])) > 10 or len(vocab.get("tag_promotions", [])) > 10 or len(vocab.get("tag_merges", [])) > 10:
             lines.append("  - … more proposals omitted")
 
