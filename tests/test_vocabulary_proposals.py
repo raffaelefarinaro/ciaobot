@@ -39,10 +39,12 @@ def _note_body(*, type_: str = "note", tags: list[str] | None = None, title: str
 
 def test_is_near_duplicate_shared_prefix_with_separator():
     # Plan's canonical example: ai-analysis / ai-adoption / ai-practice alongside ai.
+    # A value under a bare parent is always a near-duplicate...
     assert is_near_duplicate("ai-analysis", "ai") is True
     assert is_near_duplicate("ai", "ai-analysis") is True
-    assert is_near_duplicate("ai-analysis", "ai-adoption") is True
-    assert is_near_duplicate("ai-practice", "ai-analysis") is True
+    # ...and two sibling values merge only when the bare stem is established.
+    assert is_near_duplicate("ai-analysis", "ai-adoption", known_tags={"ai"}) is True
+    assert is_near_duplicate("ai-practice", "ai-analysis", known_tags={"ai"}) is True
 
 
 def test_is_near_duplicate_edit_distance():
@@ -95,8 +97,33 @@ def test_is_near_duplicate_normalized_prefix_is_not_duplicate():
 
 
 def test_is_near_duplicate_project_namespace():
-    assert is_near_duplicate("project/active", "project/draft") is True
-    assert is_near_duplicate("product/barcode-capture", "product/barcode-scan") is True
+    # Two values in the same namespace are near-duplicates ONLY when the bare
+    # stem is itself an established tag (project exists, used > once).
+    assert is_near_duplicate("project/active", "project/draft", known_tags={"project"}) is True
+    assert is_near_duplicate("product/barcode-capture", "product/barcode-scan", known_tags={"product"}) is True
+
+
+def test_is_near_duplicate_namespace_without_established_parent():
+    # project/active vs project/draft share a stem, but if `project` is NOT an
+    # established tag, they are distinct values that coexist — no merge.
+    assert is_near_duplicate("project/active", "project/draft") is False
+    assert is_near_duplicate("project/active", "project/draft", known_tags=set()) is False
+    assert is_near_duplicate("ai-analysis", "ai-adoption") is False
+
+
+def test_namespace_values_without_established_parent_do_not_merge(tmp_path: Path):
+    # project/active and project/draft, neither with an established bare
+    # `project` tag, must NOT produce a merge proposal.
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "A.md", _note_body(tags=["project/active"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["project/draft"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["tag_merges"] == []
 
 
 # ---- Promotion: type crossing threshold produces proposal -------------------
@@ -223,10 +250,14 @@ def test_singleton_tag_without_near_duplicate_no_merge(tmp_path: Path):
 
 
 def test_singleton_near_duplicate_among_singletons(tmp_path: Path):
-    # Two singletons that are near-duplicates of each other should also
-    # produce merges (both point at each other).
+    # Two singletons sharing the bare `ai` stem merge only when `ai` is itself
+    # an ESTABLISHED tag (the plan's canonical example: ai-analysis /
+    # ai-adoption / ai-practice alongside ai). With ai established, both
+    # singleton values alias to it.
     vault = tmp_path / "vault"
     vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
     _write(vault / "A.md", _note_body(tags=["ai-analysis"], title="A"))
     _write(vault / "B.md", _note_body(tags=["ai-adoption"], title="B"))
     entries = vi.scan_vault(vault)

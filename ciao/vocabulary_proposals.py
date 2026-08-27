@@ -80,16 +80,21 @@ def _normalized_tag(tag: str) -> str:
     return tag.lower().replace("-", "").replace("_", "").replace("/", "")
 
 
-def is_near_duplicate(a: str, b: str) -> bool:
+def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> bool:
     """Whether two distinct tags look like near-duplicates of each other.
 
     Heuristics, in order of cheap to expensive:
 
     * Identical tags are not duplicates of themselves; a case-only variant
       (``ai`` vs ``AI``) IS a duplicate — the same tag spelled differently.
-    * Shared prefix before a namespace/prefix separator (``/``, ``-``, ``_``)
-      — e.g. ``ai`` vs ``ai-analysis``, ``ai-adoption`` vs ``ai-practice``
-      all share the ``ai`` stem. This is the common case the plan calls out.
+    * One tag is the other plus a separator (``ai`` vs ``ai-analysis``): the
+      namespace/value convention groups a value under a bare parent, so this is
+      the common case the plan calls out.
+    * Two tags sharing the same namespace prefix (``ai-analysis`` vs
+      ``ai-adoption``) are duplicates only when the bare stem is itself an
+      ESTABLISHED tag in the vault (``ai`` exists and is used more than once).
+      Otherwise ``project/draft`` vs ``project/active`` would merge distinct
+      values that are meant to coexist.
     * Edit distance, scaled to the shorter tag's length: a two-character
       difference only counts as a near-miss once the tags are long enough to
       carry that many edits without coincidence (``ai`` vs ``hr`` is distance
@@ -97,8 +102,7 @@ def is_near_duplicate(a: str, b: str) -> bool:
       for longer tags.
     * Normalized forms (separators removed) matching exactly or within the
       same length-scaled edit distance. Deliberately no bare-prefix match:
-      ``ai`` vs ``airline`` share a normalized prefix but are unrelated, and
-      the separator-delimited stem cases are already handled above.
+      ``ai`` vs ``airline`` share a normalized prefix but are unrelated.
     """
     if not a or not b:
         return False
@@ -117,20 +121,22 @@ def is_near_duplicate(a: str, b: str) -> bool:
     # enough characters to carry that many edits without being coincidence.
     shorter = min(len(la), len(lb))
     max_edit = 1 if shorter < 4 else 2
-    # Shared prefix before a separator: the plan's canonical example is
-    # ai-analysis / ai-adoption / ai-practice alongside ai.
+    # Shared namespace/value: the plan's canonical example is ai-analysis /
+    # ai-adoption / ai-practice alongside the bare established ai.
     for sep in ("/", "-", "_"):
-        # Case 1: one tag is a prefix of the other plus separator.
+        # One tag is the other plus a separator: ai vs ai-analysis. This is a
+        # value under a bare parent — always a near-duplicate.
         if lb.startswith(la + sep) or la.startswith(lb + sep):
             return True
-        # Case 2: both share the same prefix before the separator.
+        # Both share the same prefix before the separator (ai-analysis vs
+        # ai-adoption, project/draft vs project/active). Distinct values in a
+        # namespace are meant to coexist (project/active vs project/draft), so
+        # this only merges when the bare stem is itself an ESTABLISHED tag —
+        # ai exists, so ai-analysis and ai-adoption both alias to it.
         if sep in la and sep in lb:
             pa = la.split(sep, 1)[0]
             pb = lb.split(sep, 1)[0]
-            if pa == pb and len(pa) >= 2:
-                # Same stem (e.g. ai-analysis vs ai-adoption, project/active
-                # vs project/draft). Guard on stem length to avoid single-char
-                # coincidence like "a-b" vs "a-c".
+            if pa == pb and known_tags and pa in known_tags:
                 return True
     # Edit distance on raw forms.
     if _edit_distance(la, lb, max_dist=max_edit) <= max_edit:
@@ -230,13 +236,16 @@ def generate_vocabulary_proposals(
     # tier), not a merge proposal.
     all_tags = sorted(tags.keys())
     singletons = [t for t in all_tags if tags[t] == 1]
+    # A namespace/value stem only merges when the bare stem is itself an
+    # ESTABLISHED tag (used more than once), so pass that set in.
+    known_tags = {t for t, count in tags.items() if count > 1}
     tag_merges: list[dict[str, Any]] = []
     for tag in sorted(singletons):
         neighbors: list[str] = []
         for other in all_tags:
             if other == tag:
                 continue
-            if is_near_duplicate(tag, other):
+            if is_near_duplicate(tag, other, known_tags=known_tags):
                 neighbors.append(other)
         if neighbors:
             tag_merges.append(
