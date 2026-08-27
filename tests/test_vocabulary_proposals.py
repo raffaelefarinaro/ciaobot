@@ -670,3 +670,34 @@ def test_repeated_case_variants_produce_merge(tmp_path: Path):
     merge = next((m for m in proposals["tag_merges"] if m["tag"] == "AI"), None)
     assert merge is not None
     assert "ai" in merge["near_duplicates"]
+
+
+def test_four_char_tags_need_tighter_edit_distance():
+    # data vs java are both 4 chars and distance 2 apart, but unrelated; they
+    # must NOT merge. Distance 2 is reserved for materially longer values.
+    assert is_near_duplicate("data", "java") is False
+    # A single-character difference on a 4-char tag still merges.
+    assert is_near_duplicate("data", "dato") is True
+    # A two-edit difference on a longer tag still merges.
+    assert is_near_duplicate("brainstorm", "brinstorm") is True
+
+
+def test_case_equivalent_unknown_types_aggregate_before_threshold(tmp_path: Path):
+    """type: brainstorm (3 uses) + type: Brainstorm (3 uses) are the same
+    semantic type; their combined usage must reach the threshold and produce
+    one promotion proposal."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"L{i}.md", _note_body(type_="brainstorm", title=f"L{i}"))
+    for i in range(3):
+        _write(vault / f"U{i}.md", _note_body(type_="Brainstorm", title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert len(proposals["type_promotions"]) == 1
+    promo = proposals["type_promotions"][0]
+    assert promo["count"] == 6
+    assert promo["type"] in {"brainstorm", "Brainstorm"}

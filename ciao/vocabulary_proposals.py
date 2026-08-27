@@ -114,13 +114,13 @@ def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> 
         # the singleton is a merge candidate, not a distinct tag.
         return True
     # Edit distance is only meaningful relative to length: nearly every pair of
-    # distinct short tags is within distance 2 (`ai` vs `hr`), so an
-    # unconditional distance-2 test would propose merging unrelated tags. Scale
-    # the allowance so a single-character difference matters more for short
-    # tags — two letters apart only counts as near-duplicate once the tags have
-    # enough characters to carry that many edits without being coincidence.
+    # distinct short tags is within distance 2 (`ai` vs `hr`, `data` vs `java`),
+    # so an unconditional distance-2 test would propose merging unrelated tags.
+    # Scale the allowance so a single-character difference matters for short
+    # tags and two edits only count once the tags are materially longer — a
+    # four-character pair like data/java is distance 2 but must NOT merge.
     shorter = min(len(la), len(lb))
-    max_edit = 1 if shorter < 4 else 2
+    max_edit = 1 if shorter < 6 else 2
     # Shared namespace/value: the plan's canonical example is ai-analysis /
     # ai-adoption / ai-practice alongside the bare established ai.
     for sep in ("/", "-", "_"):
@@ -187,24 +187,53 @@ def generate_vocabulary_proposals(
     # Type promotions: non-canonical types without alias target that have
     # reached the threshold. Aliased types are handled by the existing safe
     # rename path (vault_migration / hygiene low-risk fix), not here.
+    #
+    # Case-equivalent unknown types are aggregated before thresholding: since
+    # canonical_type() treats casing as insignificant for known types, `type:
+    # brainstorm` and `type: Brainstorm` are the same semantic type, and their
+    # combined usage must reach the threshold together rather than each being
+    # counted separately and never promoted.
     type_promotions: list[dict[str, Any]] = []
-    for raw_type, record in sorted(drift.items()):
+    casefolded_drift: dict[str, dict[str, Any]] = {}
+    for raw_type, record in drift.items():
         suggested = record.get("suggested", "")
         if suggested:
             continue  # Has a rename target — low-risk fix, not a promotion.
-        paths: list[str] = record.get("paths", [])
+        key = raw_type.casefold()
+        bucket = casefolded_drift.setdefault(
+            key, {"spellings": [], "paths": [], "suggested": ""}
+        )
+        bucket["spellings"].append(raw_type)
+        bucket["paths"].extend(record.get("paths", []))
+    for key, bucket in sorted(casefolded_drift.items()):
+        paths = sorted(set(bucket["paths"]))
         count = len(paths)
         if count < threshold:
             continue
+        # Pick the most common spelling as the canonical proposal name; ties
+        # resolve to the lexicographically first.
+        spelling_counts = {s: 0 for s in bucket["spellings"]}
+        for e in entries:
+            raw = (e.type or "").strip()
+            if raw.casefold() == key and raw in spelling_counts:
+                spelling_counts[raw] += 1
+        dominant = max(
+            bucket["spellings"],
+            key=lambda s: (spelling_counts[s], -bucket["spellings"].index(s)),
+        )
         workspaces = sorted(
-            {e.workspace for e in entries if (e.type or "").strip() == raw_type}
+            {
+                e.workspace
+                for e in entries
+                if (e.type or "").strip().casefold() == key
+            }
         )
         type_promotions.append(
             {
-                "type": raw_type,
+                "type": dominant,
                 "count": count,
-                "suggested": suggested,
-                "paths": sorted(paths),
+                "suggested": "",
+                "paths": paths,
                 "workspaces": workspaces,
             }
         )
