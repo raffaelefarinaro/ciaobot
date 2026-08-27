@@ -2058,6 +2058,16 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     from ciao.config import CiaoConfig
 
     workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
+    config_source = {}
+    dotenv_path = workspace / ".env"
+    if dotenv_path.is_file():
+        from dotenv import dotenv_values
+
+        config_source.update(
+            {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
+        )
+    if args.workspace is None:
+        config_source.update(os.environ)
     # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
     # ambient-env base: an explicit --workspace must win over CIAO_WORKSPACE the
     # same way `_workspace_reroot_command` insists on, or a relative
@@ -2067,20 +2077,11 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     if args.runtime_root is not None:
         runtime = Path(args.runtime_root).expanduser()
     else:
-        env_runtime = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+        env_runtime = config_source.get("CIAO_RUNTIME_ROOT", "").strip()
         runtime = Path(env_runtime).expanduser() if env_runtime else Path(".runtime")
     if not runtime.is_absolute():
         runtime = workspace / runtime
     runtime = runtime.resolve()
-    config_source = dict(os.environ)
-    dotenv_path = workspace / ".env"
-    if dotenv_path.is_file():
-        from dotenv import dotenv_values
-
-        config_source = {
-            **{key: value for key, value in dotenv_values(dotenv_path).items() if value is not None},
-            **config_source,
-        }
     config = CiaoConfig.from_env({
         **config_source,
         "CIAO_WORKSPACE": str(workspace),

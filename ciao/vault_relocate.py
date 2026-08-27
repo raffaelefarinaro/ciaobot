@@ -540,6 +540,7 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
             "status": "refused",
             "reason": "the current workspace registry is missing, corrupt, or environment-authoritative; nothing was undone",
         }
+    registry_before_undo = json.loads(json.dumps(current_registry))
     reversed_moves: list[str] = []
     already: list[str] = []
     applied_entries = receipt.get("applied", [])
@@ -614,18 +615,28 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         try:
             _write_registry(runtime_root, current_registry)
         except OSError as exc:
+            rollback_error = None
             for entry in reversed(receipt.get("applied", [])):
                 if entry["source"] in reversed_moves:
                     (install_root / entry["destination"]).parent.mkdir(
                         parents=True, exist_ok=True
                     )
-                    _run_git(install_root, "mv", entry["source"], entry["destination"])
-            return {
+                    code, out = _run_git(install_root, "mv", entry["source"], entry["destination"])
+                    if code != 0:
+                        rollback_error = out
+            try:
+                _write_registry(runtime_root, registry_before_undo)
+            except OSError as registry_exc:
+                rollback_error = str(registry_exc)
+            result = {
                 "status": "refused",
                 "reason": f"could not restore the workspace registry: {exc}",
                 "reversed": [],
                 "already_reversed": already,
             }
+            if rollback_error:
+                result["reason"] += f"; rollback also failed: {rollback_error}"
+            return result
         workspace_config = config.workspace(workspace)
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root
