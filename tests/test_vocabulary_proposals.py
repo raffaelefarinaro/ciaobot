@@ -792,3 +792,24 @@ def test_no_reciprocal_aliases_between_singleton_tags(tmp_path: Path):
         assert "analysys" in merges["analysis"]
     else:
         assert "analysis" in merges["analysys"]
+
+
+def test_tag_repeated_in_one_note_counts_once(tmp_path: Path):
+    """A tag repeated within one note's frontmatter is one use of that tag by
+    that note, not independent usage: it must not inflate the count to a
+    promotion or stop being a singleton merge candidate."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # One note repeating 'research' five times in its tag list.
+    _write(
+        vault / "A.md",
+        "---\ntype: note\ntags: [research, research, research, research, research]\n---\n# A\n",
+    )
+    entries = vi_mod.scan_vault(vault)
+    # Counted once, so the tag is a singleton, not a five-use promotion.
+    assert vi_mod.vocabulary_report(entries)["tags"] == {"research": 1}
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["tag_promotions"] == []

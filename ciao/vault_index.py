@@ -1195,7 +1195,12 @@ def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:
                     raw, {"suggested": canonical, "paths": []}
                 )
                 record["paths"].append(str(entry.path))
-        for tag in entry.tags:
+        # A tag repeated within one note's frontmatter list is the same note
+        # using it, not independent usage: one note with
+        # `tags: [research, research, research]` must not inflate the count to
+        # three or turn a repeated typo into a non-singleton. Count each tag at
+        # most once per note.
+        for tag in dict.fromkeys(entry.tags):
             tags[tag] += 1
             tag_workspaces[tag].add(entry.workspace)
 
