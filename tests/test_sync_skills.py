@@ -260,6 +260,160 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
     assert result.stock_installed >= 3
 
 
+def test_gws_stock_skills_skipped_without_a_profile(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace, gws_profile="")
+
+    assert not (workspace / ".claude" / "skills" / "gws-gmail").exists()
+    assert (
+        workspace / ".claude" / "skills" / "ciao-capabilities" / "SKILL.md"
+    ).is_file()
+    assert result[0] >= 1  # generic skills still installed
+
+
+def test_gws_stock_skills_installed_with_a_profile(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace, gws_profile="personal")
+
+    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
+    assert result[0] >= 1
+
+
+def test_gws_stock_skills_unconditional_by_default(tmp_path: Path) -> None:
+    """Callers that predate the profile check still install GWS skills."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills._install_stock_skills(workspace)
+
+    assert (workspace / ".claude" / "skills" / "gws-gmail" / "SKILL.md").is_file()
+    assert result[0] >= 1
+
+
+def _gws_aware_config(tmp_path: Path, workspaces: dict[str, str]) -> object:
+    """A minimal config whose workspaces map names to gws_profiles.
+
+    Linked (non-empty) profiles get a credential directory under
+    ``secrets/gws-<profile>`` so ``known_profiles`` treats them as real accounts
+    (mirroring ``gws_auth.profile_config_dir``'s mapping), and a workspace whose
+    profile does not actually exist resolves to "" the way the gate expects.
+    """
+    from types import SimpleNamespace
+
+    ws = {
+        name: SimpleNamespace(name=name, gws_profile=profile)
+        for name, profile in workspaces.items()
+    }
+    for profile in set(workspaces.values()):
+        if profile:
+            (tmp_path / "secrets" / f"gws-{profile}").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "secrets" / f"gws-{profile}" / "credentials.json").write_text(
+                "{}", encoding="utf-8"
+            )
+    return SimpleNamespace(
+        workspaces=ws,
+        gws_default_profile="",
+        workspace=lambda name: ws.get(name),
+        workspace_names=lambda: list(ws.keys()),
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        agent_root=lambda name: tmp_path / name,
+    )
+
+
+def test_any_workspace_has_gws_profile_false_when_none_linked(tmp_path: Path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    assert sync_skills._any_workspace_has_gws_profile(config) is False
+
+
+def test_any_workspace_has_gws_profile_true_when_any_linked(tmp_path: Path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    assert sync_skills._any_workspace_has_gws_profile(config) is True
+
+
+def test_shared_root_resolves_to_none_when_any_workspace_has_gws(tmp_path, monkeypatch) -> None:
+    """The pre-re-root shared catalog stays gated only when NO workspace links one.
+
+    An empty workspace name means the shared root serves every workspace, so a
+    single linked account must keep the GWS skills installed there.
+    """
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
+
+    # Any workspace has a profile -> no gate (None) -> GWS skills installed.
+    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) is None
+
+
+def test_shared_root_gates_when_no_workspace_has_gws(tmp_path, monkeypatch) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    monkeypatch.setattr(sync_skills, "_config_for_root", lambda _root: config)
+
+    assert sync_skills._resolve_workspace_gws_profile(Path("/tmp/root"), "", None) == ""
+
+
+def test_shared_root_gate_aggregates_all_workspaces(tmp_path) -> None:
+    """Unlinking one workspace must not prune the shared catalog while another links one."""
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": "acme"})
+    # Pre-re-root: every workspace's agent_root is the shared install root.
+    config.agent_root = lambda _name: tmp_path
+    config.workspace_root = tmp_path
+
+    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") is None
+
+
+def test_shared_root_gate_gates_when_none_linked(tmp_path) -> None:
+    config = _gws_aware_config(tmp_path, {"personal": "", "work": ""})
+    config.agent_root = lambda _name: tmp_path
+    config.workspace_root = tmp_path
+
+    assert sync_skills.resolve_workspace_skills_gws_gate(config, tmp_path, "personal") == ""
+
+
+def test_config_for_root_writes_no_side_effect_files_for_unowned_root(tmp_path) -> None:
+    """Probing an unowned root must not create .runtime (a CiaoConfig side effect)."""
+    sub = tmp_path / "not-an-install"
+    sub.mkdir(parents=True)
+
+    cfg = sync_skills._config_for_root(sub)
+
+    assert cfg is None
+    assert not (sub / ".runtime").exists()
+    assert not (tmp_path / ".runtime").exists()
+
+
+def test_config_for_root_finds_re_rooted_owner(tmp_path, monkeypatch) -> None:
+    """A post-re-root agent root resolves config via its install root."""
+    install = tmp_path / "install"
+    root = install / "work"
+    (install / ".runtime").mkdir(parents=True)
+    root.mkdir(parents=True)
+    (install / ".runtime" / "migration").mkdir(parents=True)
+    (install / ".runtime" / "migration" / "workspace-reroot.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    (install / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "work", "vault_root": "work/memory-vault"}]),
+        encoding="utf-8",
+    )
+    captured: list[Path] = []
+
+    def fake_agent_roots(ws, runtime):
+        captured.append(Path(ws))
+        return [(install / "work", "work")]
+
+    monkeypatch.setattr("ciao.config.agent_roots_for", fake_agent_roots)
+
+    cfg = sync_skills._config_for_root(root)
+    # Building a real CiaoConfig would need a full env; the point is the probe
+    # ran against the install root, not that config construction succeeded.
+    assert captured, "the probe ran"
+    assert captured[-1] == install  # the re-rooted install root was probed
+
+
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")

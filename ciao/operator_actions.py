@@ -31,6 +31,7 @@ Contract, enforced in tests
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -716,6 +717,45 @@ def _detect_unmigrated_links(context: DetectionContext) -> list[OperatorAction]:
 # -- missed one-time schedules ----------------------------------------------
 
 
+def _schedule_display_name(entry: Any) -> str:
+    """Human label for a schedule: title > prompt snippet."""
+    title = str(getattr(entry, "title", "") or "").strip()
+    if title:
+        return title
+    raw = str(getattr(entry, "prompt", "") or "").strip()
+    if raw:
+        first = raw.splitlines()[0].strip() if raw.splitlines() else raw
+        if len(first) > 60:
+            return first[:57] + "…"
+        return first
+    return str(getattr(entry, "schedule_id", ""))
+
+
+def _once_target_datetime(entry: Any) -> datetime | None:
+    """The aware fire time of a ``once`` schedule, or ``None`` if malformed.
+
+    A one-time reminder fires at ``daily_time_utc`` on ``run_at_date`` in
+    ``timezone_name`` — the same target ``schedules.compute_next_run`` builds
+    for ``once`` entries. Treating midnight of ``run_at_date`` as the target
+    would mark a reminder due later today as already missed and let "Fire now"
+    dispatch (and delete) it early.
+    """
+    run_at_date = str(getattr(entry, "run_at_date", "") or "").strip()
+    if not run_at_date:
+        return None
+    try:
+        tz = ZoneInfo(entry.timezone_name or "UTC")
+        target_date = datetime.fromisoformat(run_at_date).date()
+        hh, mm = str(getattr(entry, "daily_time_utc", "") or "00:00").split(":", 1)
+        target_h, target_m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    return datetime(
+        target_date.year, target_date.month, target_date.day,
+        target_h, target_m, tzinfo=tz,
+    )
+
+
 def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     """One collapsed tile for every missed one-time schedule.
 
@@ -734,7 +774,7 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
         logger.exception("operator actions: schedule store read failed")
         return []
     now = context.now or datetime.now(UTC)
-    missed: list[str] = []
+    missed: list[Any] = []
     for entry in entries:
         if entry.frequency != "once" or not entry.enabled:
             continue
@@ -742,34 +782,57 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now >= target:
-            missed.append(entry.schedule_id)
+            missed.append(entry)
     if not missed:
         return []
+    # Build a detail that names each missed reminder with a link to its
+    # schedule detail (rendered as markdown in the strip). Cap the list so a
+    # burst does not blow up the tile.
+    preview = missed[:5]
+    bullet_lines: list[str] = []
+    for entry in preview:
+        label = _schedule_display_name(entry).replace("[", "\\[").replace("]", "\\]")
+        due = str(getattr(entry, "run_at_date", "") or "")
+        due_suffix = f" — due {due}" if due else ""
+        # Markdown link: [label](/schedules/schedule_id)
+        sid = str(getattr(entry, "schedule_id", ""))
+        bullet_lines.append(f"- [{label}](/schedules/{sid}){due_suffix}")
+    if len(missed) > len(preview):
+        bullet_lines.append(f"- …and {len(missed) - len(preview)} more")
+    detail_base = (
+        f"The server was down past {len(missed)} one-time reminder(s). "
+        "They were not auto-fired because they are stale by now."
+    )
+    detail = detail_base + "\n\nMissed:\n" + "\n".join(bullet_lines) if bullet_lines else detail_base
+    # Chat prompt also enumerates names so the operator can decide per item.
+    chat_lines = [
+        f"- { _schedule_display_name(e)} (/schedules/{getattr(e, 'schedule_id', '')}) — due {getattr(e, 'run_at_date', '')}"
+        for e in preview
+    ]
+    chat_prompt = (
+        f"{len(missed)} one-time reminder(s) were missed while the server "
+        "was off and were not auto-fired because they are stale. "
+        + "Missed:\n"
+        + "\n".join(chat_lines)
+        + ("\n…and more" if len(missed) > len(preview) else "")
+        + "\n\nFire the ones that are still relevant, or dismiss the rest."
+    )
     return [
         OperatorAction(
             id="missed-schedules",
             kind="missed-schedules",
             severity=10,
             title=f"{len(missed)} one-time reminder(s) were missed",
-            detail=(
-                f"The server was down past {len(missed)} one-time reminder(s). "
-                "They were not auto-fired because they are stale by now."
-            ),
+            detail=detail,
             glyph="⏰",
             workspace="",
             run_label="Fire now",
             chat_label="Review in chat",
-            chat_prompt=(
-                f"{len(missed)} one-time reminder(s) were missed while the server "
-                "was off and were not auto-fired because they are stale. Fire the "
-                "ones that are still relevant, or dismiss the rest."
-            ),
+            chat_prompt=chat_prompt,
         )
     ]
 
@@ -1151,7 +1214,7 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
 # -- run dispatch -----------------------------------------------------------
 
 
-def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
+async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
     """Perform the mechanical work for one action id.
 
     Returns ``(result, summary_text)``. Raises :class:`ValueError` for an
@@ -1166,7 +1229,7 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
     if action_id == "vault-vocabulary":
         return _run_vault_vocabulary(context)
     if action_id == "missed-schedules":
-        return _run_missed_schedules(context)
+        return await _run_missed_schedules(context)
     if action_id == "workspace-unmigrated":
         return _run_workspace_reroot(context)
     if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
@@ -1285,7 +1348,7 @@ def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], st
     return summary, f"{renamed} type(s) renamed, {failed} failed."
 
 
-def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:
+async def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:
     manager = context.schedule_store
     if manager is None or not hasattr(manager, "dispatch_now"):
         raise ValueError("no schedule manager to fire missed one-timers")
@@ -1299,15 +1362,15 @@ def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], st
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now < target:
             continue
         try:
-            manager.dispatch_now(entry.schedule_id)
+            res = manager.dispatch_now(entry.schedule_id)
+            if inspect.iscoroutine(res) or inspect.isawaitable(res):
+                await res
             fired.append(entry.schedule_id)
         except Exception as exc:  # noqa: BLE001 — one failure must not stop the rest
             errors.append(str(exc))
