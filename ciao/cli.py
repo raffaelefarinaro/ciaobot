@@ -17,7 +17,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 import urllib.error
 import urllib.request
 
@@ -2004,6 +2004,138 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _print_vault_relocate_result(payload: dict[str, Any], *, applied: bool) -> None:
+    verb = "Moved" if applied and payload.get("status") == "relocated" else "Would move"
+    print(f"{payload.get('workspace', '')}: {payload.get('source', '')} -> {payload.get('destination', '')}")
+    entries = payload.get("entries") or []
+    moves = [e for e in entries if e.get("action") == "move"]
+    skips = [e for e in entries if e.get("action") == "skip"]
+    unclassified = [e for e in entries if e.get("action") == "unclassified"]
+    if payload.get("whole_directory"):
+        print(f"{verb} the whole vault directory.")
+    elif moves:
+        print(f"{verb} {len(moves)} item(s):")
+        for entry in moves:
+            print(f"  {entry['name']}")
+    if skips:
+        print(f"Left in place ({len(skips)}):")
+        for entry in skips:
+            print(f"  {entry['name']} — {entry['reason']}")
+    if unclassified:
+        print("\nCould not classify — resolve by hand, or ask the operator only about these:")
+        for entry in unclassified:
+            print(f"  {entry['name']} — {entry['reason']}")
+    if payload.get("refusals"):
+        print("\nRefused:", file=sys.stderr)
+        for reason in payload["refusals"]:
+            print(f"  {reason}", file=sys.stderr)
+    if applied and payload.get("status") == "relocated":
+        print(f"\nReceipt: {payload.get('receipt_path', '')}")
+        print(f"Reverse it exactly with `ciao vault-relocate {payload.get('workspace', '')} --undo`.")
+        if payload.get("restart_note"):
+            print(f"\nRestart required: {payload['restart_note']}")
+    elif not applied and not payload.get("refused") and (moves or payload.get("whole_directory")):
+        print("\nRe-run with --apply to write this change.")
+
+
+def _vault_relocate_command(args: argparse.Namespace) -> int:
+    """Move one workspace's vault to its standard folder.
+
+    Dry-run by default: prints the plan and changes nothing. --apply moves the
+    vault and repoints that workspace's registry entry. --undo reverses the
+    last completed relocation from its receipt.
+
+    Distinct from `workspace-reroot`, which migrates EVERY registered
+    workspace into its own agent root in one shot. This fixes one workspace
+    whose vault sits at a non-standard path — the case the "vault is not in
+    its standard folder" housekeeping card flags — and touches only that
+    workspace. It moves this workspace's own content automatically and
+    refuses on anything it cannot classify (a symlink, most often) rather than
+    guessing, so the operator or an agent only has to resolve those, not the
+    move as a whole.
+    """
+    from ciao import vault_relocate
+    from ciao.config import CiaoConfig
+
+    workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
+    config_source = {}
+    dotenv_path = workspace / ".env"
+    if dotenv_path.is_file():
+        from dotenv import dotenv_values
+
+        config_source.update(
+            {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
+        )
+    if args.workspace is None:
+        config_source.update(os.environ)
+    # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
+    # ambient-env base: an explicit --workspace must win over CIAO_WORKSPACE the
+    # same way `_workspace_reroot_command` insists on, or a relative
+    # CIAO_RUNTIME_ROOT (or the bare ".runtime" default) would resolve against
+    # the wrong install when the two disagree. Still honors CIAO_RUNTIME_ROOT
+    # when --runtime-root is not passed, matching the CLI help text.
+    if args.runtime_root is not None:
+        runtime = Path(args.runtime_root).expanduser()
+    else:
+        env_runtime = config_source.get("CIAO_RUNTIME_ROOT", "").strip()
+        runtime = Path(env_runtime).expanduser() if env_runtime else Path(".runtime")
+    if not runtime.is_absolute():
+        runtime = workspace / runtime
+    runtime = runtime.resolve()
+    effective_source = {
+        **config_source,
+        "CIAO_WORKSPACE": str(workspace),
+        # Must match `runtime` exactly: vault_relocate reads/writes
+        # workspaces.json under `runtime`, and if CiaoConfig loaded its own
+        # `self.workspaces` from a different runtime root the two would
+        # silently disagree about what is registered.
+        "CIAO_RUNTIME_ROOT": str(runtime),
+        "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
+    }
+    config = CiaoConfig.from_env(effective_source)
+    # Whether workspaces.json is what `config` actually sourced its workspaces
+    # from, per CiaoConfig.from_env's own precedence — read off the SAME
+    # merged environment that built `config` (target .env, then ambient env
+    # only when --workspace was not explicit), not the raw process
+    # environment, which can disagree with it when CIAO_WORKSPACES is set
+    # only in the target install's .env.
+    registry_authoritative = not effective_source.get("CIAO_WORKSPACES", "").strip()
+
+    if args.name not in set(config.workspace_names()):
+        print(f"No registered workspace named '{args.name}'.", file=sys.stderr)
+        return 1
+
+    if args.undo:
+        result = vault_relocate.undo(
+            config, args.name, runtime, registry_authoritative=registry_authoritative
+        )
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    plan_result = vault_relocate.plan(config, args.name)
+
+    if args.apply:
+        result = vault_relocate.apply(
+            config,
+            args.name,
+            runtime,
+            plan_result=plan_result,
+            registry_authoritative=registry_authoritative,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            _print_vault_relocate_result(result, applied=True)
+        return 0 if result["status"] == "relocated" else 1
+
+    payload = plan_result.as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        _print_vault_relocate_result(payload, applied=False)
+    return 1 if payload["refused"] else 0
+
+
 def _workspace_reroot_command(args: argparse.Namespace) -> int:
     """Plan, rehearse, apply, or undo the per-workspace agent-root migration.
 
@@ -3509,6 +3641,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
+
+    relocate_parser = subparsers.add_parser(
+        "vault-relocate",
+        help="Move one workspace's vault to its standard folder.",
+        description=(
+            "Fix one workspace whose vault sits at a non-standard path — the "
+            "case the 'vault is not in its standard folder' housekeeping card "
+            "flags — by moving it to its standard location and repointing the "
+            "registry. Prints the plan by default and changes nothing; --apply "
+            "performs the move; --undo reverses the last completed relocation "
+            "from its receipt. Distinct from workspace-reroot, which migrates "
+            "every registered workspace into its own agent root at once — this "
+            "touches only the named workspace."
+        ),
+    )
+    relocate_parser.add_argument("name", help="The registered workspace name.")
+    relocate_parser.add_argument("--workspace", type=Path, default=None, help="Install root.")
+    relocate_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the relocation receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    relocate_parser.add_argument("--apply", action="store_true", help="Perform the move.")
+    relocate_parser.add_argument("--undo", action="store_true", help="Reverse a completed relocation.")
+    relocate_parser.add_argument("--json", action="store_true", help="Output the raw result as JSON.")
+    relocate_parser.set_defaults(func=_vault_relocate_command)
 
     census_parser = subparsers.add_parser(
         "workspace-census",

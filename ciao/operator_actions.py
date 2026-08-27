@@ -341,13 +341,21 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
                 workspace=name,
                 chat_label="Fix in chat",
                 chat_prompt=(
-                    f"The vault for workspace '{name}' lives at {actual}, but its "
-                    f"standard location is {standard}. Inspect both locations, ask "
-                    "before resolving any conflicts, identify which files are vault "
-                    "content, make a backup before moving anything, then move the "
-                    "approved content and update the active workspace registry to "
-                    f"the standard path {standard}. Verify the workspace before "
-                    "removing the backup."
+                    f"Preview the move with `ciao vault-relocate {name}`, then "
+                    f"apply it with `ciao vault-relocate {name} --apply`. It moves "
+                    "this workspace's own content into the standard folder "
+                    "automatically and updates the registry; reverse it exactly "
+                    f"with `ciao vault-relocate {name} --undo`. If the preview "
+                    "lists anything it could not classify (a symlink, most often), "
+                    "resolve only those with the operator — don't ask about the "
+                    "move itself, and don't re-derive it by hand. If it refuses "
+                    "because the vault lives outside the install's git worktree "
+                    "(an external or hand-pinned vault root), that is a real "
+                    "limitation, not something to work around — tell the operator "
+                    "rather than moving it by hand yourself. After a successful "
+                    "apply, tell the operator Ciaobot needs a restart (Settings -> "
+                    "Restart) before the new location takes effect everywhere, "
+                    "including in this chat."
                 ),
             )
         )
