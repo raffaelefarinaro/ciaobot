@@ -433,10 +433,12 @@ class CiaoControlPlane:
             )
 
         config_dir = gws_auth.profile_config_dir(self.config, profile)
-        credentials_present = bool(config_dir) and any(
-            (config_dir / name).is_file()
-            for name in ("credentials.json", "credentials.enc")
-        )
+        credentials_present = False
+        if config_dir is not None:
+            credentials_present = any(
+                (config_dir / name).is_file()
+                for name in ("credentials.json", "credentials.enc")
+            )
         health = gws_auth.read_health_cache(
             Path(self.config.state_path).parent
         ).get(profile, {})
