@@ -146,6 +146,7 @@ skill surface (admin or redundant with native tools).
 | Context | `context_get` (includes `system` status) |
 | Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
 | Vault | `vault_search` |
+| Google Workspace | `gws_status` (read-only connection/token health) |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |

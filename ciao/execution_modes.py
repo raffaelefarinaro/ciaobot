@@ -83,6 +83,7 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "memory_status",
     "memory_update",
     "vault_search",
+    "gws_status",
     "projects_list",
     "project_get",
     "project",
