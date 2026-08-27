@@ -1181,39 +1181,31 @@ def _read_env_value(path: Path, key: str) -> str:
     return ""
 
 
-def _claude_oauth_ready() -> bool:
-    """True when Claude Code OAuth credentials are present on disk."""
-    from ciao.setup_status import _claude_oauth_account
+def _provider_key_auth_method(config, key: str, providers: dict) -> str:
+    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'.
 
-    raw = os.environ.get("CLAUDE_CREDENTIALS_PATH", "").strip()
-    credentials_path = (
-        Path(raw).expanduser() if raw else Path.home() / ".claude" / ".credentials.json"
-    )
-    if credentials_path.is_file():
-        return True
-    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
-    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
-    return bool(_claude_oauth_account(config_path))
-
-
-def _provider_key_auth_method(config, key: str) -> str:
-    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'."""
+    ``providers`` is the already-computed ``setup_status()`` result for this
+    request; reusing it avoids re-running the Claude CLI credential probe a
+    second time per request.
+    """
     env_value = os.environ.get(key, "").strip()
     if env_value:
         return "api_key"
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
+    if key == "ANTHROPIC_API_KEY" and providers.get("claude", {}).get("auth") == "oauth":
         return "oauth"
     return "missing"
 
 
 def _provider_config_payload(config) -> dict:
+    providers = setup_status(config, env=os.environ).get("providers", {})
+
     def key_payload(meta_by_key: dict) -> dict:
         keys = {}
         for key, meta in meta_by_key.items():
-            auth_method = _provider_key_auth_method(config, key)
+            auth_method = _provider_key_auth_method(config, key, providers)
             keys[key] = {
                 **meta,
                 "configured": auth_method != "missing",
@@ -1221,7 +1213,6 @@ def _provider_config_payload(config) -> dict:
             }
         return keys
 
-    providers = setup_status(config, env=os.environ).get("providers", {})
     return {
         "keys": key_payload(_PROVIDER_KEY_META),
         "service_keys": key_payload(_SERVICE_KEY_META),
@@ -5948,7 +5939,7 @@ async def open_chat_endpoint(request: Request) -> JSONResponse:
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
-    return JSONResponse(setup_status(request.app.state.config))
+    return JSONResponse(await asyncio.to_thread(setup_status, request.app.state.config))
 
 
 

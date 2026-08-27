@@ -42,28 +42,17 @@ _OPENCODE_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _PROVIDER_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
 
 def is_anthropic_available() -> bool:
-    """True when Anthropic API key or Claude Code OAuth credentials are present."""
+    """True when Anthropic API key or Claude Code reports an active login."""
     if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return True
-    for p in [
-        Path.home() / ".claude-agent" / "credentials.json",
-        Path.home() / ".claude" / ".credentials.json",
-    ]:
-        try:
-            if p.is_file():
-                return True
-        except Exception:
-            pass
-    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
-    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
     try:
-        if config_path.is_file():
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("oauthAccount"):
-                return True
+        from ciao.setup_status import claude_auth_status, claude_cli_path
+
+        binary = claude_cli_path()
+        return bool(binary and claude_auth_status(binary, env=os.environ)["logged_in"])
     except Exception:
-        pass
-    return False
+        # Availability probing must never prevent critique resolution.
+        return False
 
 
 def is_opencode_available() -> bool:

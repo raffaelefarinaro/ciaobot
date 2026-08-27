@@ -1034,7 +1034,7 @@ def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
 
     assert cli.main(["auth", "claude"]) == 0
 
-    assert calls == [["/opt/ciao/claude", "login"]]
+    assert calls == [["/opt/ciao/claude", "auth", "login"]]
 
 
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
