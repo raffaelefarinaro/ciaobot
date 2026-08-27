@@ -567,3 +567,44 @@ def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
     summary = migrate_vault_vocabulary(vault, apply=False)
     assert summary["unresolved"] == {}
     assert any(c["from"] == "Note" and c["to"] == "note" for c in summary["planned"])
+
+
+def test_promotion_threshold_rejects_one(tmp_path: Path, monkeypatch):
+    """A threshold of 1 would classify every one-use tag as both candidate and
+    established and describe an impossible emerging range; it must be rejected
+    in favor of the default."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "1")
+    assert vi_mod.promotion_threshold() == vi_mod.DEFAULT_PROMOTION_THRESHOLD
+    # A threshold of 2 is accepted.
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "2")
+    assert vi_mod.promotion_threshold() == 2
+
+
+def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):
+    """On a pre-re-rooting install vault_scan_targets() returns an EMPTY
+    workspace stamp so scan_vault() infers each note's workspace from its first
+    path segment. The audit must pass that empty stamp through unchanged rather
+    than coercing it to 'personal'."""
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    shared = tmp_path / "memory-vault"
+    (shared / "work" / "People").mkdir(parents=True)
+    (shared / "personal" / "People").mkdir(parents=True)
+    # A tag used once in each workspace's subtree of the shared vault.
+    _write(shared / "work" / "People" / "A.md", _note_body(tags=["ai-analysis"], title="A"))
+    _write(shared / "personal" / "People" / "B.md", _note_body(tags=["ai"], title="B"))
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            # Empty stamp: the shared-vault layout, workspace inferred from path.
+            return [(shared, "", Path("memory-vault"))]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    # The empty stamp is preserved, so the merge proposal for ai-analysis
+    # carries the inferred workspace (work), not a coerced 'personal'.
+    assert result["errors"] == []
+    merge = next((m for m in result["tag_merges"] if m["tag"] == "ai-analysis"), None)
+    assert merge is not None
+    assert "work" in merge["workspaces"]

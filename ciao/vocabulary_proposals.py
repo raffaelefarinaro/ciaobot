@@ -313,9 +313,15 @@ def audit_vocabulary_proposals(
     else:
         return empty
     try:
+        # Preserve each target's workspace stamp exactly as the config supplied
+        # it: on a pre-re-rooting install vault_scan_targets() returns an EMPTY
+        # stamp so scan_vault() infers each note's workspace from its first path
+        # segment. Coercing that empty stamp to "personal" would mislabel every
+        # note in a shared vault that spans workspaces. Only the no-config
+        # fallback above stamps the caller's own root.
         entries, _abs = scan_targets(
             [
-                (Path(root), workspace or "personal", Path(prefix))
+                (Path(root), workspace, Path(prefix))
                 for root, workspace, prefix in targets
             ]
         )

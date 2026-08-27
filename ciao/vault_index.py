@@ -160,7 +160,10 @@ def promotion_threshold() -> int:
         return DEFAULT_PROMOTION_THRESHOLD
     try:
         value = int(raw)
-        return value if value > 0 else DEFAULT_PROMOTION_THRESHOLD
+        # A threshold of 1 would classify every one-use tag as both a candidate
+        # and established, and describe an impossible emerging range
+        # ("Two to 0 uses"). Enforce a minimum of 2 so the tiers stay disjoint.
+        return value if value >= 2 else DEFAULT_PROMOTION_THRESHOLD
     except ValueError:
         return DEFAULT_PROMOTION_THRESHOLD
 
