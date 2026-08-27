@@ -26,6 +26,104 @@ const chatBusy = ref(false)
 const confirmLeakId = ref('')
 const olderThanDays = ref(30)
 
+// Proposal → chat link: when an accept fallback or skill implement spawns a
+// chat, the row stays queued while the agent works. Remembering that chat
+// lets the row show "open chat" instead of the same accept/dismiss buttons
+// until the chat is archived/deleted or the proposal disappears, at which
+// point we revert to the normal actions.
+const PROPOSAL_CHAT_KEY = 'ciao:proposal-chat-links'
+
+function loadProposalChatLinks(): Record<string, string> {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(PROPOSAL_CHAT_KEY) : null
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string' && v) out[k] = v
+    }
+    return out
+  } catch { return {} }
+}
+
+const proposalChatLinks = ref<Record<string, string>>(loadProposalChatLinks())
+
+watch(proposalChatLinks, (value) => {
+  try { localStorage.setItem(PROPOSAL_CHAT_KEY, JSON.stringify(value)) } catch { /* ignore */ }
+}, { deep: true })
+
+function linkedChatId(rowId: string): string | undefined {
+  return proposalChatLinks.value[rowId]
+}
+
+function linkedChat(rowId: string) {
+  const id = linkedChatId(rowId)
+  if (!id) return undefined
+  return projectStore.chats.find(c => c.chat_id === id)
+}
+
+function hasActiveLink(row: ProposalRow): boolean {
+  const chat = linkedChat(row.id)
+  return !!chat && !chat.archived
+}
+
+function linkedChatTitle(row: ProposalRow): string {
+  const chat = linkedChat(row.id)
+  return chat?.title || 'chat'
+}
+
+function linkProposal(rowId: string, chatId: string) {
+  if (!chatId) return
+  proposalChatLinks.value = { ...proposalChatLinks.value, [rowId]: chatId }
+}
+
+function clearLink(rowId: string) {
+  if (!(rowId in proposalChatLinks.value)) return
+  const next = { ...proposalChatLinks.value }
+  delete next[rowId]
+  proposalChatLinks.value = next
+}
+
+async function openLinkedChat(row: ProposalRow) {
+  const chatId = linkedChatId(row.id)
+  if (!chatId) return
+  const chat = projectStore.chats.find(c => c.chat_id === chatId)
+  if (!chat || chat.archived) {
+    clearLink(row.id)
+    return
+  }
+  // Mirror InAppToast's workspace hop: the chat lives in its own workspace,
+  // which may not be the one the review list is currently scoped to.
+  const project = projectStore.projectFor(chatId)
+  if (project && project.workspace !== projectStore.activeWorkspace) {
+    await projectStore.switchWorkspace(project.workspace)
+  }
+  await projectStore.switchChat(chatId)
+}
+
+function pruneProposalChatLinks() {
+  const liveIds = new Set(store.rows.map(r => r.id))
+  const next = { ...proposalChatLinks.value }
+  let changed = false
+  for (const pid of Object.keys(next)) {
+    if (!liveIds.has(pid)) {
+      delete next[pid]
+      changed = true
+      continue
+    }
+    const chat = projectStore.chats.find(c => c.chat_id === next[pid])
+    if (!chat || chat.archived) {
+      delete next[pid]
+      changed = true
+    }
+  }
+  if (changed) proposalChatLinks.value = next
+}
+
+watch(() => store.rows.map(r => r.id).join(','), pruneProposalChatLinks)
+watch(() => projectStore.chats.map(c => `${c.chat_id}:${c.archived}`).join(','), pruneProposalChatLinks)
+
 // Filter and selection live in the store: the sidebar renders the controls, the
 // way it does for the memory map's categories, and this panel renders the list
 // they act on. See `stores/proposals.ts`.
@@ -299,6 +397,7 @@ async function mergePeopleViaChat(row: ProposalRow) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`)
     if (!chat) return
+    linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
     pushBackgroundToast(chat.chat_id, 'Merging in background', `${row.target || 'Person'} fact — click to open the chat`)
   } finally {
@@ -312,6 +411,7 @@ async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`)
     if (!chat) return
+    linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
     pushBackgroundToast(chat.chat_id, 'Merging in background', 'Project fact — click to open the chat')
   } finally {
@@ -325,6 +425,7 @@ async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`)
     if (!chat) return
+    linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
     pushBackgroundToast(chat.chat_id, 'Merging in background', 'Memory fact — click to open the chat')
   } finally {
@@ -338,6 +439,7 @@ async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`)
     if (!chat) return
+    linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
     pushBackgroundToast(chat.chat_id, 'Merging in background', 'Learning — click to open the chat')
   } finally {
@@ -490,6 +592,7 @@ async function implementSkill(row: ProposalRow) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, `Implement ${row.text}`)
     if (!chat) return
+    linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, implementPrompt(row))
     pushBackgroundToast(chat.chat_id, 'Building skill in background', `${row.text} — click to open the chat`)
   } finally {
@@ -611,7 +714,10 @@ function dismissOlder() {
   void store.dismissOlderThan(iso)
 }
 
-onMounted(() => { void store.fetch() })
+onMounted(() => {
+  pruneProposalChatLinks()
+  void store.fetch().then(pruneProposalChatLinks)
+})
 </script>
 
 <template>
@@ -703,7 +809,7 @@ onMounted(() => { void store.fetch() })
           v-for="row in group.rows"
           :key="row.id"
           class="pr-row"
-          :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id) }"
+          :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }"
         >
           <input
             class="pr-row-check"
@@ -743,6 +849,18 @@ onMounted(() => { void store.fetch() })
             <span class="pr-confirm-text">Writes into a guide every workspace loads. Sure?</span>
             <button type="button" class="btn-small btn-primary" :disabled="store.isBusy(row.id)" @click="doAccept(row)">{{ store.isBusy(row.id) ? 'working…' : 'confirm' }}</button>
             <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
+          </div>
+
+          <!-- Linked: this proposal already spawned a merge/implement chat that
+               is still active. The row stays queued while the agent works, so
+               replace the accept/dismiss buttons with a link to that chat.
+               If the chat was closed/archived without removing the row, the
+               watcher clears the link and this collapses back to the normal
+               actions. -->
+          <div v-else-if="hasActiveLink(row)" class="pr-actions pr-actions--linked">
+            <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
+            <button type="button" class="btn-small btn-primary" @click="openLinkedChat(row)">Open chat</button>
+            <button type="button" class="btn-small btn-chip" @click="clearLink(row.id)">Show actions</button>
           </div>
 
           <!-- Any rehome row that is not a plain justified accept: pick the
@@ -1039,6 +1157,26 @@ onMounted(() => { void store.fetch() })
 .pr-row--busy .pr-row-top,
 .pr-row--busy .pr-row-sub {
   opacity: 0.6;
+}
+
+.pr-row--linked {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+}
+
+.pr-actions--linked {
+  min-width: 10rem;
+}
+
+.pr-linked-label {
+  font-size: 0.78rem;
+  color: var(--fg2);
+  line-height: 1.4;
+}
+
+.pr-linked-label strong {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .pr-row-check {
