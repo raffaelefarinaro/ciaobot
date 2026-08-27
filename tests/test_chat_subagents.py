@@ -657,3 +657,11 @@ async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
     assert "Found the bug" in ready_events[0]["snippet"]
     assert len(pushes) == 1
     assert "Found the bug" in pushes[0][2]
+
+    # The snippet is persisted onto the chat (not just broadcast), so the
+    # sidebar's unread tile can show a preview after a fresh page load, before
+    # any chat_result_ready WS event replays.
+    assert chat.last_snippet == ready_events[0]["snippet"]
+    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert reloaded is not None
+    assert reloaded.last_snippet == chat.last_snippet

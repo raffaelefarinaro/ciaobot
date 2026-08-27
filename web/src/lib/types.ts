@@ -159,6 +159,10 @@ export interface ChatInfo {
   archived: boolean
   last_activity_at?: string
   last_read_at?: string
+  // Truncated text of the last assistant reply, persisted alongside
+  // `last_activity_at`. Backs the sidebar unread tile's preview on initial
+  // load, before any live `chat_result_ready` WS event has arrived.
+  last_snippet?: string
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the

@@ -433,9 +433,8 @@ class CiaoControlPlane:
             )
 
         config_dir = gws_auth.profile_config_dir(self.config, profile)
-        if config_dir is None:
-            credentials_present = False
-        else:
+        credentials_present = False
+        if config_dir is not None:
             credentials_present = any(
                 (config_dir / name).is_file()
                 for name in ("credentials.json", "credentials.enc")

@@ -55,6 +55,9 @@ secrets/
 .claude/
 .worktrees/
 
+# Orca CLI local state (dropped screenshots, worktree metadata)
+.orca/
+
 
 # Workspace runtime artifacts seeded by `ciao sync-skills` when a dev
 # instance runs with this repo as its workspace (canonical copies live
