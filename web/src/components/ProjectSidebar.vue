@@ -22,7 +22,7 @@
         <!-- The wordmark used to sit here, between the toggle and these icons.
              It is `BrandMark` in the pane header now, where it is centred and
              does not have to share the sidebar's width. -->
-        <div class="nav-links">
+        <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
             class="nav-item touch-hit"
@@ -129,7 +129,7 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
-        </div>
+        </nav>
       </template>
     </div>
 

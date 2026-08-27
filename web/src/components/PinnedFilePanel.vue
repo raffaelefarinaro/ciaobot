@@ -3,7 +3,7 @@
     <!-- No brand and no page tag: this header sits beside the main pane's in the
          split view, and a second wordmark two inches away is the duplication the
          mark was moved out of the sidebar to end. The filename is the title. -->
-    <PaneHeader :brand="false" :navigation="false" @open-sidebar="$emit('close')">
+    <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Unpin file">&times;</button>

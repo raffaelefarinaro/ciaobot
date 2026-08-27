@@ -1,7 +1,6 @@
 <template>
-  <div class="pane-header-wrap">
-    <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
-      <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
+  <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
+    <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
       <!-- 18px at stroke 2, the size and weight every other icon in this header
            and in the sidebar uses (see the .btn-icon block below). At 22px and
            stroke 2.2 it read as a heavier glyph than the actions it shares the
@@ -31,15 +30,12 @@
         <slot name="actions" />
       </div>
     </div>
-    </header>
-    <AppTabs v-if="navigation" />
-  </div>
+  </header>
 </template>
 
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
 import BrandMark from './BrandMark.vue'
-import AppTabs from './AppTabs.vue'
 
 const props = withDefaults(defineProps<{
   activeBgAgents?: number
@@ -47,9 +43,7 @@ const props = withDefaults(defineProps<{
   pageTag?: string
   /** Off only where a second mark would duplicate the main pane's (split view). */
   brand?: boolean
-  /** Hide global navigation for secondary panes such as the pinned file viewer. */
-  navigation?: boolean
-}>(), { brand: true, navigation: true })
+}>(), { brand: true })
 defineEmits<{ 'open-sidebar': [] }>()
 
 const slots = useSlots()
@@ -63,13 +57,6 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 </script>
 
 <style scoped>
-.pane-header-wrap {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  flex-shrink: 0;
-}
-
 .pane-header {
   /* Three columns, so the brand in the middle one is genuinely centred on the
      header rather than centred-by-eye with an absolute offset.
