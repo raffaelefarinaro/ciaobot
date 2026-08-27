@@ -847,6 +847,11 @@ class ChatInfo:
     # /api/chats/{id}/read). A chat is considered unread when
     # `last_activity_at > last_read_at`.
     last_read_at: str = ""
+    # Truncated text of the last assistant reply, set alongside
+    # `last_activity_at` wherever a turn finishes with real output. Mirrors
+    # `last_activity_at` so the sidebar's unread tile can show "what finished"
+    # without holding the full transcript in memory.
+    last_snippet: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -984,6 +989,7 @@ class ChatInfo:
             "archived": self.archived,
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
+            "last_snippet": self.last_snippet,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -1367,6 +1373,7 @@ class ProjectChatManager:
                     "last_read_at",
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
+                last_snippet=cd.get("last_snippet", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
@@ -1466,6 +1473,7 @@ class ProjectChatManager:
                     "archived": c.archived,
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
+                    "last_snippet": c.last_snippet,
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
@@ -6679,6 +6687,7 @@ class ProjectChatManager:
                         if chat_now.retry_status == "pending" and is_retry:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
+                        chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # Schedule the push with a small delay. If the user reads
@@ -7603,12 +7612,13 @@ class ProjectChatManager:
                         and text
                         and self._is_worth_announcing_nudge_reply(text)
                     ):
+                        snippet = self._result_snippet(text)
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
+                            chat_now.last_snippet = snippet
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
-                        snippet = self._result_snippet(text)
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
