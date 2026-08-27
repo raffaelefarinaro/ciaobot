@@ -158,7 +158,6 @@ async function openChat(action: OperatorAction): Promise<void> {
         class="housekeeping-tile"
         :class="{ 'housekeeping-tile--blocking': action.blocking }"
       >
-      <span class="housekeeping-glyph" aria-hidden="true">{{ action.glyph }}</span>
       <div class="housekeeping-body">
         <p class="housekeeping-title">{{ action.title }}</p>
         <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
@@ -244,24 +243,24 @@ async function openChat(action: OperatorAction): Promise<void> {
 
 .housekeeping-tile {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: 1fr;
   grid-template-areas:
-    'glyph body'
-    '. actions';
+    'body'
+    'actions';
   column-gap: var(--space-2);
   row-gap: var(--space-2);
   align-items: start;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-elev);
-  border-left: 3px solid var(--warning);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   min-width: 0;
 }
 
 @media (min-width: 640px) {
   .housekeeping-tile {
-    grid-template-columns: auto 1fr auto;
-    grid-template-areas: 'glyph body actions';
+    grid-template-columns: 1fr auto;
+    grid-template-areas: 'body actions';
     align-items: center;
   }
 
@@ -273,13 +272,6 @@ async function openChat(action: OperatorAction): Promise<void> {
     width: auto;
     min-width: 140px;
   }
-}
-
-.housekeeping-glyph {
-  grid-area: glyph;
-  font-size: var(--text-base);
-  color: var(--warning);
-  line-height: 1.4;
 }
 
 .housekeeping-body {

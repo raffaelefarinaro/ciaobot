@@ -3347,6 +3347,7 @@ async function confirmDeleteChat(chatId: string) {
 .guide-card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
 }
@@ -3354,6 +3355,9 @@ async function confirmDeleteChat(chatId: string) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
   font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
