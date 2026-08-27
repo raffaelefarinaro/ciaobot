@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -121,6 +120,11 @@ class RelocationPlan:
         }
 
 
+def _at_or_beneath(container: Path, other: Path) -> bool:
+    """Whether ``other`` is ``container`` itself or nested somewhere under it."""
+    return container == other or container in other.parents
+
+
 def plan(config: Any, workspace: str) -> RelocationPlan:
     """Classify the move for one workspace's vault. Read only."""
     try:
@@ -151,23 +155,68 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
         return result
 
     try:
+        install_root = Path(config.workspace_root).resolve()
+    except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
+        install_root = None
+    if source == install_root:
+        # The documented existing-folder setup (CIAO_VAULT_ROOT and the
+        # workspace's own vault_root both "."): the vault root IS the whole
+        # install, so its top level mixes vault content with install control
+        # files (CLAUDE.md, .git, .runtime). Nothing here can tell those
+        # apart safely, so this shape refuses rather than moving CLAUDE.md
+        # into a workspace folder.
+        result.refusals.append(
+            "the vault root is the install root itself (an existing-folder "
+            "setup); this shape is not safe to classify automatically — "
+            "relocate it by hand"
+        )
+        return result
+
+    try:
         vault_root = Path(config.vault_root).resolve()
     except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
         vault_root = None
 
+    try:
+        all_names = list(config.workspace_names())
+    except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
+        all_names = [workspace]
+
+    other_roots_by_name: dict[str, Path] = {}
+    for name in all_names:
+        if name == workspace:
+            continue
+        try:
+            other_roots_by_name[name] = Path(config.workspace_vault_root(name)).resolve()
+        except (ValueError, OSError):
+            continue
+    other_vault_roots = set(other_roots_by_name.values())
+
     if source != vault_root:
-        # The whole directory is this workspace's own content — nothing else
-        # can live at an arbitrary path the operator pointed this workspace at.
+        # The whole directory is this workspace's own content — UNLESS
+        # another registered workspace's vault is nested inside it (a pinned
+        # legacy root can itself contain another workspace's subfolder, the
+        # same overlap the shared-root branch below guards against). Moving
+        # it wholesale would carry that workspace's notes along while only
+        # this workspace's registry entry gets repointed, stranding the
+        # other one at a path that just vanished.
+        overlapping = sorted(
+            name for name, root in other_roots_by_name.items() if _at_or_beneath(source, root)
+        )
+        if overlapping:
+            result.refusals.append(
+                "this vault contains another registered workspace's vault "
+                f"({', '.join(overlapping)}); moving it whole would carry "
+                "that workspace's notes along while only this workspace's "
+                "registry entry gets repointed"
+            )
+            return result
         result.whole_directory = True
         return result
 
     # source IS the shared vault root: only this workspace's own content lives
     # loose at its top level, alongside other workspaces' already-nested
     # folders and vault-wide shared state.
-    try:
-        all_names = list(config.workspace_names())
-    except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
-        all_names = [workspace]
 
     # A legacy install can have MORE THAN ONE workspace pinned to the shared
     # vault root itself (CiaoConfig.legacy_entity_workspace treats this as
@@ -190,23 +239,11 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
         )
         return result
 
-    other_vault_roots = set()
-    for name in all_names:
-        if name == workspace:
-            continue
-        try:
-            other_vault_roots.add(Path(config.workspace_vault_root(name)).resolve())
-        except (ValueError, OSError):
-            continue
-
     for entry in sorted(source.iterdir(), key=lambda p: p.name):
         name = entry.name
         if entry.is_symlink():
             result.entries.append(RelocationEntry(name, "unclassified", "symlink"))
-        elif any(
-            other_root == entry.resolve() or entry.resolve() in other_root.parents
-            for other_root in other_vault_roots
-        ):
+        elif any(_at_or_beneath(entry.resolve(), other_root) for other_root in other_vault_roots):
             result.entries.append(RelocationEntry(name, "skip", "belongs to another workspace"))
         elif entry == destination:
             result.entries.append(RelocationEntry(name, "skip", "canonical destination"))
@@ -317,12 +354,21 @@ def apply(
     runtime_root: Path,
     *,
     plan_result: RelocationPlan | None = None,
+    registry_authoritative: bool = True,
 ) -> dict[str, Any]:
     """Move one workspace's vault to its standard folder, and repoint the registry.
 
     Refuses before touching anything if the plan refuses, or a tracked file
     under the source has uncommitted changes (so ``git mv`` in reverse stays a
     working undo). On a mid-run failure, rolls back every move already made.
+
+    ``registry_authoritative`` must reflect whether ``workspaces.json`` is
+    actually what ``config`` sourced its workspaces from — this module has no
+    way to know that on its own. A caller building ``config`` with
+    ``CiaoConfig.from_env`` should pass ``not effective_config_source.get(
+    "CIAO_WORKSPACES", "").strip()``, using the SAME merged environment (env
+    plus any ``.env`` override) that built ``config``, not the raw ambient
+    process environment, which can disagree with it.
     """
     result = plan_result if plan_result is not None else plan(config, workspace)
     payload = result.as_dict()
@@ -356,10 +402,10 @@ def apply(
 
     # The move is about to happen; if the result cannot be persisted, refuse
     # before touching anything rather than moving files nothing can find
-    # again. A missing or workspace-less registry most often means this
-    # install's workspaces come from CIAO_WORKSPACES (an env var, non-
-    # authoritative here) rather than workspaces.json.
-    if os.environ.get("CIAO_WORKSPACES", "").strip() or not _registry_has_workspace(runtime_root, workspace):
+    # again. A non-authoritative registry most often means this install's
+    # workspaces come from CIAO_WORKSPACES (an env var) rather than
+    # workspaces.json.
+    if not registry_authoritative or not _registry_has_workspace(runtime_root, workspace):
         payload["status"] = "refused"
         payload["refusals"] = [
             f"no entry for '{workspace}' in the workspace registry "
@@ -510,11 +556,15 @@ def apply(
     return payload
 
 
-def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
+def undo(
+    config: Any, workspace: str, runtime_root: Path, *, registry_authoritative: bool = True
+) -> dict[str, Any]:
     """Reverse the last completed relocation for one workspace, exactly.
 
     CLI only, same as ``workspace_reroot.undo``: there is no housekeeping
     button for this, only a receipt-driven reverse.
+
+    See :func:`apply` for what ``registry_authoritative`` must reflect.
     """
     path = receipt_path(runtime_root, workspace)
     if not path.is_file():
@@ -529,7 +579,7 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
     install_root = Path(config.workspace_root).resolve()
     current_registry = _read_registry(runtime_root)
     if (
-        os.environ.get("CIAO_WORKSPACES", "").strip()
+        not registry_authoritative
         or current_registry is None
         or not any(
             isinstance(entry, dict) and str(entry.get("name", "")) == workspace
@@ -628,15 +678,15 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
                 _write_registry(runtime_root, registry_before_undo)
             except OSError as registry_exc:
                 rollback_error = str(registry_exc)
-            result = {
+            reason = f"could not restore the workspace registry: {exc}"
+            if rollback_error:
+                reason += f"; rollback also failed: {rollback_error}"
+            return {
                 "status": "refused",
-                "reason": f"could not restore the workspace registry: {exc}",
+                "reason": reason,
                 "reversed": [],
                 "already_reversed": already,
             }
-            if rollback_error:
-                result["reason"] += f"; rollback also failed: {rollback_error}"
-            return result
         workspace_config = config.workspace(workspace)
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root

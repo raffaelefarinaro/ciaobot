@@ -497,3 +497,131 @@ def test_cli_honors_ciao_runtime_root_env_var(
     assert rc == 0
     assert (custom_runtime / "migration" / "vault-relocate-scandit.json").is_file()
     assert not (install / ".runtime" / "migration").exists()
+
+
+# -- install-root vault (existing-folder setup) ------------------------------
+
+
+def test_plan_refuses_when_the_vault_root_is_the_install_root(tmp_path: Path) -> None:
+    """CIAO_VAULT_ROOT and the workspace's own vault_root both "." (a
+    documented existing-folder setup): the vault root IS the whole install,
+    so its top level mixes CLAUDE.md/.git/.runtime with vault content. There
+    is no safe way to tell those apart, so this must refuse rather than
+    classify CLAUDE.md as movable workspace content.
+    """
+    install = _git_install(tmp_path)
+    (install / "People").mkdir()
+    (install / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    (install / "CLAUDE.md").write_text("# guide\n", encoding="utf-8")
+    _commit_all(install)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=install,
+        state_path=install / ".runtime" / "state.json",
+        media_root=install / ".runtime" / "media",
+        vault_root=Path("."),
+        workspaces={"scandit": WorkspaceConfig(name="scandit", vault_root=".")},
+    )
+
+    result = plan(config, "scandit")
+
+    assert result.refused
+    assert "install root itself" in result.refusals[0]
+    assert result.entries == []
+
+
+# -- nested workspace vaults inside a whole-directory move -------------------
+
+
+def test_plan_refuses_a_whole_directory_move_containing_another_workspace(
+    tmp_path: Path,
+) -> None:
+    """A pinned/legacy root can itself contain another workspace's nested
+    vault (personal -> legacy/, client -> legacy/client/). Moving `legacy`
+    whole would carry `client`'s notes along while only `personal`'s registry
+    entry gets repointed, stranding `client` at a path that just vanished.
+    """
+    install = _git_install(tmp_path)
+    legacy = install / "legacy"
+    (legacy / "client" / "Notes").mkdir(parents=True)
+    (legacy / "client" / "Notes" / "note.md").write_text("# Note\n", encoding="utf-8")
+    (legacy / "People").mkdir()
+    (legacy / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    _commit_all(install)
+    config = _config(
+        tmp_path / "install",
+        {"personal": str(legacy), "client": str(legacy / "client")},
+    )
+
+    result = plan(config, "personal")
+
+    assert result.refused
+    assert "client" in result.refusals[0]
+    assert not result.whole_directory
+
+
+# -- registry authority is passed explicitly, not read from os.environ ------
+
+
+def test_apply_refuses_when_registry_is_not_authoritative(tmp_path: Path) -> None:
+    """registry_authoritative reflects what the CALLER's merged environment
+    actually sourced workspaces from — vault_relocate has no way to know
+    this on its own, so it trusts the flag over a coincidentally-valid
+    workspaces.json.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    result = apply(config, "scandit", runtime, registry_authoritative=False)
+
+    assert result["status"] == "refused"
+    assert (install / "memory-vault" / "People").is_dir(), "moved despite non-authoritative registry"
+
+
+def test_undo_refuses_when_registry_is_not_authoritative(tmp_path: Path) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    result = undo(config, "scandit", runtime, registry_authoritative=False)
+
+    assert result["status"] == "refused"
+    assert (install / "memory-vault" / "scandit" / "People").is_dir(), "reversed despite non-authoritative registry"
+
+
+# -- CLI: an explicit --workspace ignores ambient env, uses the target's .env
+
+
+def test_cli_explicit_workspace_loads_runtime_root_from_target_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--workspace <install> must resolve CIAO_RUNTIME_ROOT from THAT
+    install's own .env, not the calling shell's ambient env — an ambient
+    value belongs to whatever install the caller's own session is for, and
+    letting it leak in means apply can move the target's vault while writing
+    the registry entry to the wrong (caller's own) runtime directory.
+    """
+    from ciao import cli
+
+    install, _ = _shared_root_install(tmp_path)
+    custom_runtime = tmp_path / "custom-runtime"
+    custom_runtime.mkdir()
+    registry = json.loads((install / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    (custom_runtime / "workspaces.json").write_text(
+        json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+    )
+    (install / ".env").write_text(f"CIAO_RUNTIME_ROOT={custom_runtime}\n", encoding="utf-8")
+
+    decoy_runtime = tmp_path / "decoy-runtime"
+    decoy_runtime.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path / "unrelated"))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(decoy_runtime))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    rc = cli.main(["vault-relocate", "scandit", "--workspace", str(install), "--apply"])
+
+    assert rc == 0
+    assert (custom_runtime / "migration" / "vault-relocate-scandit.json").is_file()
+    assert not (decoy_runtime / "migration").exists()
