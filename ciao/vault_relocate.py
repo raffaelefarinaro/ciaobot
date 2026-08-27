@@ -572,6 +572,9 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         except OSError as exc:
             for entry in reversed(receipt.get("applied", [])):
                 if entry["source"] in reversed_moves:
+                    (install_root / entry["destination"]).parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
                     _run_git(install_root, "mv", entry["source"], entry["destination"])
             return {
                 "status": "refused",

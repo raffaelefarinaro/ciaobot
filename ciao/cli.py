@@ -2072,20 +2072,6 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     if not runtime.is_absolute():
         runtime = workspace / runtime
     runtime = runtime.resolve()
-    # `vault-relocate` takes no --vault-root of its own — it operates on
-    # workspaces' REGISTERED locations, not an override — so the standard
-    # location it computes must be the install's own default, not whatever
-    # CIAO_VAULT_ROOT happens to be set to in the ambient environment (an
-    # unrelated command's leftover export, a stale shell session). Same
-    # reasoning `_os_audit_command` already applies, and the same
-    # roots-aware default: post-migration there is no vault at the install
-    # root, so the bare default would resolve to a path that does not exist.
-    from ciao.config import agent_roots_for  # noqa: PLC0415
-
-    roots = agent_roots_for(workspace, runtime)
-    default_vault = workspace / "memory-vault"
-    if roots and roots[0][1]:
-        default_vault = Path(roots[0][1]) / "memory-vault"
     config = CiaoConfig.from_env({
         **os.environ,
         "CIAO_WORKSPACE": str(workspace),
@@ -2094,7 +2080,6 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
         # `self.workspaces` from a different runtime root the two would
         # silently disagree about what is registered.
         "CIAO_RUNTIME_ROOT": str(runtime),
-        "CIAO_VAULT_ROOT": str(default_vault),
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
     })
 
