@@ -602,12 +602,15 @@ def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):
             return [(shared, "", Path("memory-vault"))]
 
     result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
-    # The empty stamp is preserved, so the merge proposal for ai-analysis
-    # carries the inferred workspace (work), not a coerced 'personal'.
+    # The empty stamp is preserved, so the merge proposal carries the inferred
+    # workspace (work), not a coerced 'personal'. With two singletons (ai in
+    # personal, ai-analysis in work) the reciprocal-alias guard emits only one
+    # direction — the lexicographically-smaller singleton (ai) points at the
+    # other (ai-analysis).
     assert result["errors"] == []
-    merge = next((m for m in result["tag_merges"] if m["tag"] == "ai-analysis"), None)
-    assert merge is not None
-    assert "work" in merge["workspaces"]
+    merges = {m["tag"]: m for m in result["tag_merges"]}
+    assert "ai" in merges, f"expected a merge for ai, got {list(merges)}"
+    assert "ai-analysis" in merges["ai"]["near_duplicates"]
 
 
 def test_namespace_parent_must_meet_threshold_to_enable_merge(tmp_path: Path, monkeypatch):
@@ -739,3 +742,53 @@ def test_case_variant_merge_renders_without_calling_it_singleton(tmp_path: Path)
     assert "Singleton tag `AI`" not in md
     assert "case variant of `ai`" in md
     assert "(2 uses" in md
+
+
+def test_case_variant_not_promoted_while_merge_eliminates_it(tmp_path: Path):
+    """When ai and AI each meet the threshold, the audit must promote only the
+    dominant spelling and propose merging the other — not both establish AND
+    eliminate the same spelling."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(5):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    promoted = [p["tag"] for p in proposals["tag_promotions"]]
+    merges = {m["tag"]: m["near_duplicates"] for m in proposals["tag_merges"]}
+    # Exactly one spelling of the case group is promoted, and the other is
+    # proposed to merge into it — never both establish AND eliminate the same
+    # spelling.
+    case_promoted = [t for t in promoted if t.casefold() == "ai"]
+    assert len(case_promoted) == 1
+    dominant = case_promoted[0]
+    variant = "AI" if dominant == "ai" else "ai"
+    assert variant not in promoted
+    assert variant in merges
+    assert dominant in merges[variant]
+
+
+def test_no_reciprocal_aliases_between_singleton_tags(tmp_path: Path):
+    """analysis vs analysys are both singletons; only one merge direction is
+    proposed, so the recommendations cannot contradict each other."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "A.md", _note_body(tags=["analysis"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["analysys"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = {m["tag"]: m["near_duplicates"] for m in proposals["tag_merges"]}
+    # Exactly one direction is emitted.
+    assert ("analysis" in merges) != ("analysys" in merges)
+    if "analysis" in merges:
+        assert "analysys" in merges["analysis"]
+    else:
+        assert "analysis" in merges["analysys"]

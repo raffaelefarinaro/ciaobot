@@ -238,12 +238,48 @@ def generate_vocabulary_proposals(
             }
         )
 
+    # Tag merges: singleton tags with a near-duplicate among any other tag,
+    # plus repeated tags that are case-only variants of a dominant spelling
+    # (their combined usage reaches the threshold but the spellings stay
+    # fragmented). A singleton with no near-duplicate is just a one-off (the
+    # Candidates tier), not a merge proposal.
+    all_tags = sorted(tags.keys())
+
+    # Case-equivalent spellings (ai / AI) are the same tag spelled differently.
+    # The dominant spelling is what gets promoted; every other spelling is a
+    # merge candidate into it. Compute the grouping up front so tag promotions
+    # do not simultaneously propose establishing a variant that the merge pass
+    # eliminates.
+    by_casefold: dict[str, list[str]] = {}
+    for t in all_tags:
+        by_casefold.setdefault(t.casefold(), []).append(t)
+    case_dominant: dict[str, str] = {}
+    non_dominant_case_variants: set[str] = set()
+    repeated_case_variants: set[str] = set()
+    for key, spellings in by_casefold.items():
+        if len(spellings) < 2:
+            continue
+        dominant = max(spellings, key=lambda s: tags[s])
+        case_dominant[key] = dominant
+        # Every spelling in a multi-spelling group is handled by the case-fold
+        # pass (dominant is promoted, the rest merge into it), so none of them
+        # should also run through the singleton/merge loop.
+        repeated_case_variants.update(spellings)
+        for variant in spellings:
+            if variant == dominant:
+                continue
+            non_dominant_case_variants.add(variant)
+
     # Tag promotions: tags that have crossed the threshold into established
     # territory. These are informational — the tag is already in use at scale,
     # and the question is whether it should be treated as a convention.
+    # Only the dominant spelling of a case group is promoted; a non-dominant
+    # variant is proposed for merging instead.
     tag_promotions: list[dict[str, Any]] = []
     for tag, count in sorted(tags.items()):
         if count < threshold:
+            continue
+        if tag in non_dominant_case_variants:
             continue
         # Only propose tags that are at the boundary or newly established?
         # The current snapshot cannot tell "just crossed" from "always there",
@@ -260,12 +296,6 @@ def generate_vocabulary_proposals(
             }
         )
 
-    # Tag merges: singleton tags with a near-duplicate among any other tag,
-    # plus repeated tags that are case-only variants of a dominant spelling
-    # (their combined usage reaches the threshold but the spellings stay
-    # fragmented). A singleton with no near-duplicate is just a one-off (the
-    # Candidates tier), not a merge proposal.
-    all_tags = sorted(tags.keys())
     # A namespace/value stem only merges when the bare stem is itself an
     # ESTABLISHED tag (at or above the promotion threshold), so pass that set
     # in — a bare tag with only two uses must not resurrect the false namespace
@@ -273,21 +303,10 @@ def generate_vocabulary_proposals(
     known_tags = {t for t, count in tags.items() if count >= threshold}
     tag_merges: list[dict[str, Any]] = []
 
-    # Repeated case-only variants: ai (3 uses) + AI (2 uses) combined reach the
-    # threshold, but neither spelling is a singleton so neither would otherwise
-    # be proposed. Fold the less-used spelling into the dominant one regardless
-    # of singleton status.
-    repeated_case_variants: set[str] = set()
-    by_casefold: dict[str, list[str]] = {}
-    for t in all_tags:
-        by_casefold.setdefault(t.casefold(), []).append(t)
-    for spellings in by_casefold.values():
-        if len(spellings) < 2:
-            continue
-        dominant = max(spellings, key=lambda s: tags[s])
-        for variant in spellings:
-            if variant == dominant or tags[variant] <= 1:
-                continue
+    # Fold every non-dominant case variant into the dominant spelling (ai 3x +
+    # AI 2x: AI merges into ai), regardless of singleton status.
+    for key, dominant in case_dominant.items():
+        for variant in sorted(s for s in by_casefold[key] if s != dominant):
             tag_merges.append(
                 {
                     "tag": variant,
@@ -297,18 +316,23 @@ def generate_vocabulary_proposals(
                     "near_duplicates": [dominant],
                 }
             )
-            repeated_case_variants.add(variant)
 
-    singletons = [t for t in all_tags if tags[t] == 1]
+    singletons = [t for t in all_tags if tags[t] == 1 and t not in repeated_case_variants]
     for tag in sorted(singletons):
-        if tag in repeated_case_variants:
-            continue
         neighbors: list[str] = []
         for other in all_tags:
             if other == tag:
                 continue
-            if is_near_duplicate(tag, other, known_tags=known_tags):
-                neighbors.append(other)
+            if not is_near_duplicate(tag, other, known_tags=known_tags):
+                continue
+            # Do not propose reciprocal aliases between two singleton tags
+            # (analysis vs analysys): both would recommend aliasing the other,
+            # which cannot both be applied and gives no evidence for a
+            # convention. Point the lexicographically-smaller singleton at the
+            # larger one, so only one direction is emitted.
+            if tags[other] == 1 and tag > other:
+                continue
+            neighbors.append(other)
         if neighbors:
             tag_merges.append(
                 {
