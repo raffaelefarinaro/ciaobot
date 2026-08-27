@@ -231,16 +231,47 @@ def generate_vocabulary_proposals(
             }
         )
 
-    # Tag merges: singleton tags with a near-duplicate among any other tag.
-    # A singleton with no near-duplicate is just a one-off (the Candidates
-    # tier), not a merge proposal.
+    # Tag merges: singleton tags with a near-duplicate among any other tag,
+    # plus repeated tags that are case-only variants of a dominant spelling
+    # (their combined usage reaches the threshold but the spellings stay
+    # fragmented). A singleton with no near-duplicate is just a one-off (the
+    # Candidates tier), not a merge proposal.
     all_tags = sorted(tags.keys())
-    singletons = [t for t in all_tags if tags[t] == 1]
     # A namespace/value stem only merges when the bare stem is itself an
-    # ESTABLISHED tag (used more than once), so pass that set in.
-    known_tags = {t for t, count in tags.items() if count > 1}
+    # ESTABLISHED tag (at or above the promotion threshold), so pass that set
+    # in — a bare tag with only two uses must not resurrect the false namespace
+    # merge when the threshold is 5.
+    known_tags = {t for t, count in tags.items() if count >= threshold}
     tag_merges: list[dict[str, Any]] = []
+
+    # Repeated case-only variants: ai (3 uses) + AI (2 uses) combined reach the
+    # threshold, but neither spelling is a singleton so neither would otherwise
+    # be proposed. Fold the less-used spelling into the dominant one regardless
+    # of singleton status.
+    repeated_case_variants: set[str] = set()
+    by_casefold: dict[str, list[str]] = {}
+    for t in all_tags:
+        by_casefold.setdefault(t.casefold(), []).append(t)
+    for spellings in by_casefold.values():
+        if len(spellings) < 2:
+            continue
+        dominant = max(spellings, key=lambda s: tags[s])
+        for variant in spellings:
+            if variant == dominant or tags[variant] <= 1:
+                continue
+            tag_merges.append(
+                {
+                    "tag": variant,
+                    "workspaces": sorted(tag_workspaces.get(variant, [])),
+                    "near_duplicates": [dominant],
+                }
+            )
+            repeated_case_variants.add(variant)
+
+    singletons = [t for t in all_tags if tags[t] == 1]
     for tag in sorted(singletons):
+        if tag in repeated_case_variants:
+            continue
         neighbors: list[str] = []
         for other in all_tags:
             if other == tag:

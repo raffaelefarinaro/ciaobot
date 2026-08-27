@@ -608,3 +608,65 @@ def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):
     merge = next((m for m in result["tag_merges"] if m["tag"] == "ai-analysis"), None)
     assert merge is not None
     assert "work" in merge["workspaces"]
+
+
+def test_namespace_parent_must_meet_threshold_to_enable_merge(tmp_path: Path, monkeypatch):
+    """A bare namespace tag with two uses must NOT enable sibling merges when
+    the promotion threshold is 5: project/active and project/draft should not
+    be reported as near-duplicates unless project is established."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(2):
+        _write(vault / f"P{i}.md", _note_body(tags=["project"], title=f"P{i}"))
+    _write(vault / "A.md", _note_body(tags=["project/active"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["project/draft"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    # project (2 uses) is below threshold 5, so sibling values must NOT merge
+    # with each other (project/active vs project/draft). A value merging to its
+    # bare parent (project/active -> project) is fine and still reported.
+    sibling_merges = [
+        m for m in proposals["tag_merges"] if "project" in m["near_duplicates"]
+        and len(m["near_duplicates"]) > 1
+    ]
+    assert all("project/draft" not in m["near_duplicates"] for m in sibling_merges)
+    assert not any(
+        m["tag"] == "project/active" and "project/draft" in m["near_duplicates"]
+        for m in proposals["tag_merges"]
+    )
+    assert not any(
+        m["tag"] == "project/draft" and "project/active" in m["near_duplicates"]
+        for m in proposals["tag_merges"]
+    )
+    # With threshold 2, project IS established, so the siblings merge into each
+    # other.
+    proposals2 = generate_vocabulary_proposals(entries, threshold=2)
+    assert any(
+        m["tag"] == "project/active" and "project/draft" in m["near_duplicates"]
+        for m in proposals2["tag_merges"]
+    )
+
+
+def test_repeated_case_variants_produce_merge(tmp_path: Path):
+    """ai (3 uses) + AI (2 uses): combined usage reaches the threshold but the
+    exact spellings stay fragmented; the less-used spelling must be proposed as
+    a merge into the dominant one."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(2):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    # Neither spelling is a singleton, but AI must still be proposed to merge
+    # into the dominant ai spelling.
+    merge = next((m for m in proposals["tag_merges"] if m["tag"] == "AI"), None)
+    assert merge is not None
+    assert "ai" in merge["near_duplicates"]
