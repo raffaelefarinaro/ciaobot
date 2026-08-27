@@ -7,7 +7,7 @@ metadata:
 
 # docs (v1)
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 ```bash
 ciao gws "$GWS_PROFILE" docs <resource> <method> [flags]
