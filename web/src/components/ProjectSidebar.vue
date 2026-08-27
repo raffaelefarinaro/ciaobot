@@ -1179,6 +1179,7 @@ import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
+import { formatFileComments } from '../lib/commentContext'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1356,7 +1357,9 @@ async function discussFileInChat(path: string, prompt?: string): Promise<void> {
   const general = store.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
   if (!general) { store.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
   const title = `Discuss ${path.split('/').pop() || path}`
-  const seed = prompt || `Let's discuss the file \`${path}\`.`
+  const base = prompt || `Let's discuss the file \`${path}\`.`
+  const pendingComments = store.fileComments[path] ?? []
+  const seed = pendingComments.length ? `${base}\n\n${formatFileComments(pendingComments)}` : base
   try {
     const chat = await store.createChat(general.project_id, title, seed)
     // Pin the file so the new chat opens split-view with it visible.

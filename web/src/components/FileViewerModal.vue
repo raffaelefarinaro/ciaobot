@@ -332,6 +332,7 @@ import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
+import { formatFileComments } from '../lib/commentContext'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
@@ -1156,7 +1157,10 @@ async function discussInChat(): Promise<void> {
   const general = projectsStore.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
   if (!general) { projectsStore.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
   const title = `Discuss ${path.split('/').pop() || path}`
-  const seed = `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
+  const pendingComments = projectsStore.fileComments[path] ?? []
+  const seed = pendingComments.length
+    ? `Let's discuss the file \`${path}\`.\n\n${formatFileComments(pendingComments)}`
+    : `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
   try {
     const chat = await projectsStore.createChat(general.project_id, title, seed)
     projectsStore.pinFile(chat.chat_id, path)
