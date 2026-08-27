@@ -4222,7 +4222,6 @@ class ProjectChatManager:
         run_insights = (
             getattr(config, "insights_enabled", False)
             and outcome.filtered_jsonl
-            and outcome.turn_count >= getattr(config, "insights_size_gate_turns", 0)
         )
         if run_insights:
             from ciao.insights import extract_and_append, resolve_insights_model
