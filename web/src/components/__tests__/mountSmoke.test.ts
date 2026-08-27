@@ -91,7 +91,7 @@ vi.mock('../../lib/api', () => {
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
-      counts: { custom: 1, github: 1, stock: 0 },
+      counts: { custom: 1, stock: 0 },
       skills: [
         {
           name: 'airtable-projects',
@@ -101,16 +101,6 @@ vi.mock('../../lib/api', () => {
           description: 'Create Airtable projects',
           path: 'skills/airtable-projects/SKILL.md',
           content: '# airtable-projects\ncustom skill content',
-          installed_targets: ['claude'],
-        },
-        {
-          name: 'brainstorming',
-          label: 'github',
-          source: 'example-org/skill-pack',
-          source_type: 'github',
-          description: 'Explore design before implementation',
-          path: '.claude/skills/brainstorming/SKILL.md',
-          content: '# brainstorming\ngithub skill content',
           installed_targets: ['claude'],
         },
       ],
@@ -449,7 +439,7 @@ describe('component mount smoke', () => {
   })
 
 
-  it('SettingsView renders skills with custom and github labels on /settings/skills', async () => {
+  it('SettingsView renders skills with custom and stock labels on /settings/skills', async () => {
     const router = makeRouter()
     await router.push('/settings/skills')
     await router.isReady()
@@ -463,8 +453,7 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
     expect(wrapper.text()).toContain('custom skills')
-    expect(wrapper.text()).toContain('brainstorming')
-    expect(wrapper.text()).toContain('github / package skills')
+    expect(wrapper.text()).toContain('stock skills')
     wrapper.unmount()
   })
 

@@ -1523,7 +1523,7 @@
                 {{ addingSkill ? 'Uploading…' : 'Upload zip' }}
               </button>
             </div>
-            <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--muted);">
+            <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--fg3);">
               <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code>, ≤15 KB</li>
               <li>Discoverable immediately: <code>.claude/skills</code> + <code>.agents/skills</code> symlink</li>
               <li>Sync between operators = workspace git (no npx)</li>
