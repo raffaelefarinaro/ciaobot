@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
-from ciao.setup_status import setup_status
+from ciao.setup_status import claude_auth_status, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
@@ -37,6 +38,15 @@ def claude_cli_present(monkeypatch):
         "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
     )
     monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {
+            "logged_in": False,
+            "unparseable": False,
+            "email": "",
+            "org_name": "",
+        },
+    )
 
 
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
@@ -170,29 +180,32 @@ def test_setup_status_marks_bootstrap_mode(tmp_path) -> None:
     assert data["configured"] is False
 
 
-def test_setup_status_detects_claude_api_key_and_credentials_file(tmp_path) -> None:
+def test_setup_status_detects_claude_api_key_and_cli_oauth(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, {"ANTHROPIC_API_KEY": "sk-anthropic"})
     data = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})
     assert data["providers"]["claude"]["ok"] is True
     assert data["providers"]["claude"]["auth"] == "api_key"
 
-    credentials = tmp_path / "claude" / ".credentials.json"
-    credentials.parent.mkdir()
-    credentials.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {
+            "logged_in": True,
+            "unparseable": False,
+            "email": "operator@example.com",
+            "org_name": "Example Org",
+        },
+    )
     data = setup_status(
         config,
         env={},
-        claude_credentials_path=credentials,
     )
     assert data["providers"]["claude"]["ok"] is True
     assert data["providers"]["claude"]["auth"] == "oauth"
+    assert "operator@example.com" in data["providers"]["claude"]["detail"]
 
 
-def test_setup_status_detects_claude_oauth_via_config_json(tmp_path) -> None:
-    """macOS Claude Code stores the OAuth token in the Keychain and writes the
-    account metadata to ~/.claude.json. The probe must treat a populated
-    ``oauthAccount`` block as a logged-in session even when no credentials
-    file exists and no API key is set."""
+def test_setup_status_does_not_treat_oauth_account_metadata_as_auth(tmp_path) -> None:
+    """Desktop metadata alone must not make setup claim Claude is connected."""
     config = _config(tmp_path)
     config_path = tmp_path / ".claude.json"
     config_path.write_text(
@@ -204,9 +217,8 @@ def test_setup_status_detects_claude_oauth_via_config_json(tmp_path) -> None:
     data = setup_status(config, env={}, claude_config_path=config_path)
 
     claude = data["providers"]["claude"]
-    assert claude["ok"] is True
-    assert claude["auth"] == "oauth"
-    assert "operator@example.com" in claude["detail"]
+    assert claude["ok"] is False
+    assert claude["auth"] == "missing"
 
 
 def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
@@ -218,6 +230,59 @@ def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
 
     assert data["providers"]["claude"]["ok"] is False
     assert data["providers"]["claude"]["auth"] == "missing"
+
+
+def test_claude_auth_status_parses_logged_in_json(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout='{"loggedIn":true,"email":"a@example.com","orgName":"Org"}',
+            returncode=0,
+        ),
+    )
+    assert claude_auth_status("/claude") == {
+        "logged_in": True,
+        "unparseable": False,
+        "email": "a@example.com",
+        "org_name": "Org",
+    }
+
+
+def test_claude_auth_status_timeout_is_not_authenticated(monkeypatch) -> None:
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 5)
+
+    monkeypatch.setattr("ciao.setup_status.subprocess.run", timeout)
+    assert claude_auth_status("/claude")["logged_in"] is False
+    assert claude_auth_status("/claude")["unparseable"] is False
+
+
+def test_claude_auth_status_malformed_json_is_marked_legacy_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="not json", returncode=0),
+    )
+    status = claude_auth_status("/claude")
+    assert status["logged_in"] is False
+    assert status["unparseable"] is True
+
+
+def test_claude_auth_status_missing_binary_is_not_authenticated(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    assert claude_auth_status("/missing")["logged_in"] is False
+
+
+def test_setup_status_explains_desktop_login_is_app_private(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "/Applications/Claude.app")
+    config = _config(tmp_path)
+    claude = setup_status(config, env={})["providers"]["claude"]
+    assert claude["ok"] is False
+    assert "app-private" in claude["detail"]
+    assert "ciao auth claude" in claude["detail"]
+    assert "no separate CLI install" in claude["detail"]
 
 
 def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(

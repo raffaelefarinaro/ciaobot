@@ -226,7 +226,7 @@ def auth_command(*, device_auth: bool = False) -> list[str]:
     binary = get_bundled_claude_path() or resolve_tool("claude")
     if not binary:
         raise FileNotFoundError("Claude CLI not found")
-    return [binary, "login"]
+    return [binary, "auth", "login"]
 
 
 # Patterns from the bundled Claude Code CLI's stderr that are harmless noise

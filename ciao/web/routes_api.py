@@ -72,7 +72,7 @@ from ciao.schedules import (
     normalize_archive_policy,
     was_dispatched_since,
 )
-from ciao.setup_status import setup_status
+from ciao.setup_status import claude_auth_status, claude_cli_path, setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
@@ -1182,18 +1182,23 @@ def _read_env_value(path: Path, key: str) -> str:
 
 
 def _claude_oauth_ready() -> bool:
-    """True when Claude Code OAuth credentials are present on disk."""
-    from ciao.setup_status import _claude_oauth_account
-
+    """True when the Claude Code CLI reports an active OAuth session."""
     raw = os.environ.get("CLAUDE_CREDENTIALS_PATH", "").strip()
     credentials_path = (
         Path(raw).expanduser() if raw else Path.home() / ".claude" / ".credentials.json"
     )
-    if credentials_path.is_file():
-        return True
     raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
     config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
-    return bool(_claude_oauth_account(config_path))
+    binary = claude_cli_path()
+    if not binary:
+        return False
+    status = claude_auth_status(
+        binary,
+        env=os.environ,
+        credentials_path=credentials_path,
+        config_path=config_path,
+    )
+    return bool(status["logged_in"])
 
 
 def _provider_key_auth_method(config, key: str) -> str:

@@ -35,6 +35,7 @@ _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS = 15.0
 # it blows past 12s — at which point the old timeout swallowed the error and
 # cached the empty list for five minutes. Give the health pass real headroom.
 _CLAUDE_MCP_LIST_TIMEOUT_SECONDS = 30.0
+_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
 _claude_mcps_cache: tuple[float, str, tuple[str, ...], int] | None = None
@@ -641,10 +642,8 @@ def claude_install_command() -> str:
 def claude_app_path() -> str:
     """Path to an installed Claude desktop app, or "".
 
-    The desktop app ships Claude Code too, but Ciaobot drives the ``claude``
-    CLI through the Agent SDK, so an app-only install still needs the CLI.
-    Detecting it lets setup say "you have the app, add the CLI" instead of the
-    blunter "not installed".
+    The desktop app ships Claude Code too. Detecting it lets setup explain that
+    its app-private login is separate from the CLI credential store.
     """
     home = Path.home()
     candidates: list[Path] = []
@@ -741,22 +740,38 @@ def _claude_status(
             mcps=claude_mcps,
             cli_path=binary,
         )
-    if credentials_path.is_file():
+    auth_status = claude_auth_status(
+        binary,
+        env=env,
+        credentials_path=credentials_path,
+        config_path=config_path,
+    )
+    if auth_status["logged_in"]:
+        email = auth_status.get("email", "")
+        org_name = auth_status.get("org_name", "")
+        account = email or org_name or "Claude OAuth"
+        detail = f"Signed in as {email}" if email else "Claude OAuth is connected."
+        if org_name and email:
+            detail += f" Organization: {org_name}."
         return _provider(
             name="claude",
             ok=True,
             auth="oauth",
             command="ciao auth claude",
-            detail=str(credentials_path),
+            detail=detail,
             version=version,
-            account="OAuth credentials",
+            account=account,
             protocol="Agent SDK ready",
             skills=claude_skills,
             mcps=claude_mcps,
             cli_path=binary,
         )
-    account = _claude_oauth_account(config_path)
-    if account:
+    # Keep compatibility with older CLI output, but only for malformed output.
+    # A timeout or process error is not evidence of authentication.
+    if auth_status["unparseable"] and _claude_credential_heuristic(
+        credentials_path, config_path
+    ):
+        account = _claude_oauth_account(config_path) or "OAuth credentials"
         return _provider(
             name="claude",
             ok=True,
@@ -770,12 +785,19 @@ def _claude_status(
             mcps=claude_mcps,
             cli_path=binary,
         )
+    app_path = claude_app_path()
+    detail = (
+        "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
+        "no separate CLI install is needed."
+        if app_path
+        else "Run Claude OAuth or set ANTHROPIC_API_KEY."
+    )
     return _provider(
         name="claude",
         ok=False,
         auth="missing",
         command="ciao auth claude",
-        detail="Run Claude OAuth or set ANTHROPIC_API_KEY.",
+        detail=detail,
         version=version,
         skills=claude_skills,
         mcps=claude_mcps,
@@ -783,13 +805,61 @@ def _claude_status(
     )
 
 
+def _claude_credential_heuristic(credentials_path: Path, config_path: Path) -> bool:
+    """Legacy compatibility check used only when the probe output is malformed."""
+    return credentials_path.is_file() or bool(_claude_oauth_account(config_path))
+
+
+def claude_auth_status(
+    binary: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    credentials_path: Path | None = None,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Probe the Claude Code credential store without making a network call."""
+    result: dict[str, Any] = {
+        "logged_in": False,
+        "unparseable": False,
+        "email": "",
+        "org_name": "",
+    }
+    process_env = os.environ.copy()
+    if env is not None:
+        process_env.update(env)
+    try:
+        completed = subprocess.run(
+            [binary, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
+            check=False,
+            env=process_env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return result
+    if completed.returncode != 0:
+        return result
+    try:
+        payload = json.loads(completed.stdout or "")
+    except (TypeError, ValueError):
+        result["unparseable"] = True
+        return result
+    if not isinstance(payload, dict):
+        result["unparseable"] = True
+        return result
+    result["logged_in"] = payload.get("loggedIn") is True
+    result["email"] = str(payload.get("email", "")).strip()
+    result["org_name"] = str(payload.get("orgName", "")).strip()
+    return result
+
+
 def _claude_oauth_account(config_path: Path) -> str:
-    """Return a short identifier from ``~/.claude.json``'s ``oauthAccount``.
+    """Return legacy account metadata from ``~/.claude.json``'s ``oauthAccount``.
 
     Returns an empty string when the file is missing, unparseable, or has no
-    usable account metadata. We deliberately avoid touching the Keychain: the
-    server process often cannot unlock it, and the account block is enough to
-    confirm a completed OAuth login.
+    usable account metadata. It is retained only as a compatibility fallback
+    when a CLI status probe returns malformed output; it does not prove login.
     """
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
