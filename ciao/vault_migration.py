@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ciao.vault_index import TYPE_ALIASES, scan_vault, vocabulary_report
+from ciao.vault_index import scan_vault, vocabulary_report
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +248,12 @@ def migrate_vault_vocabulary(
 
     drift = vocabulary_report(scan_vault(root))["type_drift"]
     for raw_type, record in sorted(drift.items()):
-        target = TYPE_ALIASES.get(raw_type, "")
+        # The report's `suggested` target is resolved case-insensitively (a
+        # case variant of a canonical or alias value maps to its target), so
+        # it is the single source of truth for the safe rename — not the
+        # case-sensitive TYPE_ALIASES lookup, which would leave `Note`/`Doc`
+        # unresolved.
+        target = record.get("suggested", "")
         if not target:
             # No canonical equivalent: a real categorisation decision, which
             # belongs to the user. Reported so `vault-lint` findings are

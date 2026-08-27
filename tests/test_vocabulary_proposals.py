@@ -479,11 +479,60 @@ def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypa
         _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
     entries = vi_mod.scan_vault(vault)
     rendered = vi_mod.format_vocabulary(entries)
-    # Six uses is below the threshold of 10: not established, not promoted.
+    # Six uses is below the threshold of 10: not established, not promoted,
+    # but still visible in the emerging tier (2..9).
     assert "Tags (established)" not in rendered
-    assert "research" not in rendered
+    assert "Tags (emerging)" in rendered
+    assert "research" in rendered
 
     from ciao.vocabulary_proposals import generate_vocabulary_proposals
 
     proposals = generate_vocabulary_proposals(entries)
     assert proposals["tag_promotions"] == []
+
+
+def test_emerging_tier_upper_bound_tracks_configured_threshold(tmp_path: Path, monkeypatch):
+    """When the threshold is raised, tags between the old 5 and the new
+    threshold must stay visible in the emerging tier, not vanish from
+    VOCABULARY.md entirely."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    rendered = vi_mod.format_vocabulary(entries)
+    # Six uses with threshold 10: still emerging (2..9), so it must appear.
+    assert "Tags (emerging)" in rendered
+    assert "research" in rendered
+    assert "Two to 9 uses" in rendered
+
+
+def test_migration_renames_case_variant_of_alias(tmp_path: Path):
+    """`type: Doc` (alias -> document) must be a planned safe rename in
+    vault-migrate, not left unresolved."""
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+    summary = migrate_vault_vocabulary(vault, apply=False)
+    assert summary["unresolved"] == {}
+    assert any(c["from"] == "Doc" and c["to"] == "document" for c in summary["planned"])
+
+
+def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
+    """`type: Note` (canonical note) must be a planned safe rename, not
+    unresolved."""
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(type_="Note", title=f"Note{i}"))
+    summary = migrate_vault_vocabulary(vault, apply=False)
+    assert summary["unresolved"] == {}
+    assert any(c["from"] == "Note" and c["to"] == "note" for c in summary["planned"])

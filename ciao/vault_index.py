@@ -1254,8 +1254,9 @@ def format_vocabulary(entries: list[Entry]) -> str:
     )
     _tier(
         "Tags (emerging)",
-        "Two to four uses. Reuse when it fits; these are becoming conventions.",
-        lambda count: 2 <= count < 5,
+        f"Two to {established - 1} uses. Reuse when it fits; these are becoming "
+        "conventions.",
+        lambda count: 2 <= count < established,
     )
     _tier(
         "Tags (candidates)",
