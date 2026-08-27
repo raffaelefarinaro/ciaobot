@@ -101,6 +101,63 @@ def test_extract_removes_temp_dir_on_aborted_extraction(tmp_path: Path) -> None:
     assert leftovers == []
 
 
+def test_import_rejects_an_unregistered_workspace(tmp_path: Path) -> None:
+    """A stale client or typo must not scaffold an orphan agent root.
+
+    ``config.agent_root`` accepts any single-segment name, so an unvalidated
+    ``workspace`` form value would create ``<install>/<name>/skills`` and the
+    following sync would scaffold an entire agent root for a workspace that
+    is not registered.
+    """
+    import io
+    import zipfile
+    from types import SimpleNamespace
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.web.routes_api import skill_import
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault"),
+        },
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("demo/SKILL.md", "---\nname: demo\ndescription: Demo\n---\n# demo\n")
+
+    async def _fake_form():
+        class Upload:
+            filename = "demo.zip"
+
+            async def read(self, *_a, **_k):
+                return b""
+
+        return {
+            "workspace": "typo-ws",
+            "file": Upload(),
+        }
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+        headers={},
+        form=_fake_form,
+        query_params={},
+    )
+
+    import asyncio
+
+    response = asyncio.run(skill_import(request))
+    assert response.status_code == 400
+    assert "Unknown workspace: typo-ws" in response.body.decode()
+    # Nothing was written outside the registered roots.
+    assert not (tmp_path / "typo-ws").exists()
+
+
 def test_extract_writes_valid_skill(tmp_path: Path) -> None:
     name, errors = extract_skill_zip(_skill_zip(), tmp_path)
     assert errors == []

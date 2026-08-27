@@ -6754,6 +6754,14 @@ async def skill_import(request: Request) -> JSONResponse:
     # workspace. The client passes the active workspace so an upload lands in
     # the workspace the operator is actually working in, not always the primary.
     workspace_name = str(form.get("workspace") or "").strip()
+    if workspace_name and workspace_name not in config.workspace_names():
+        # `config.agent_root` accepts any single-segment name, so an unvalidated
+        # form value would scaffold `<install>/<name>/skills` and a whole
+        # orphan agent root on the next sync — reachable from a stale client
+        # after a workspace was deleted, or a typo in a direct API request.
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown workspace: {workspace_name}"}, status_code=400
+        )
     dest_skills: Path
     try:
         if workspace_name:

@@ -636,10 +636,40 @@ def undo(
         source.parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
+            # Roll the earlier reversals forward again: the receipt and the
+            # registry still describe the relocated layout, so leaving those
+            # files back at their pre-relocation paths would strand them
+            # outside the configured vault — the same unwind the apply path
+            # does for partial moves.
+            fail_reason = out
+            rollback_error = None
+            for done in reversed(reversed_moves):
+                origin = next(
+                    (
+                        e
+                        for e in applied_entries
+                        if e["source"] == done
+                    ),
+                    None,
+                )
+                if origin is None:
+                    continue
+                (install_root / origin["source"]).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                code, out = _run_git(
+                    install_root, "mv", origin["source"], origin["destination"]
+                )
+                if code != 0:
+                    rollback_error = out
+                    break
+            reason = f"git mv failed reversing {entry['destination']}: {fail_reason}"
+            if rollback_error:
+                reason += f"; re-relocate also failed: {rollback_error}"
             return {
                 "status": "failed",
-                "reason": f"git mv failed reversing {entry['destination']}: {out}",
-                "reversed": reversed_moves,
+                "reason": reason,
+                "reversed": [],
                 "already_reversed": already,
             }
         reversed_moves.append(entry["source"])

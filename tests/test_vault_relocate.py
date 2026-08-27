@@ -469,6 +469,53 @@ def test_undo_preflights_all_recreated_paths_before_reversing_anything(tmp_path:
     assert (install / "memory-vault" / "scandit" / "Projects" / "roadmap.md").is_file()
 
 
+def test_undo_rolls_earlier_reversals_forward_when_a_later_one_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reverse `git mv` must not strand already-reversed files.
+
+    The receipt and registry still describe the relocated layout, so after
+    reversing two of three moves a failure in the third has to re-relocate
+    the two it already reversed — otherwise those files sit outside the
+    configured vault until the next successful undo.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    real_run_git = vault_relocate._run_git
+    # The apply path also runs git mv; only fail the SECOND reverse move
+    # (destination -> source), once one reversal has already landed.
+    state = {"reverse_calls": 0}
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:1] == ("mv",) and len(args) == 3 and state["reverse_calls"] >= 0:
+            # Distinguish reverse moves (dest -> src) from forward ones.
+            dest_arg, src_arg = args[1], args[2]
+            if dest_arg.startswith("memory-vault/scandit") and src_arg.startswith(
+                "memory-vault/"
+            ) and not src_arg.startswith("memory-vault/scandit"):
+                state["reverse_calls"] += 1
+                if state["reverse_calls"] == 2:
+                    return (128, "fatal: simulated git mv failure")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "failed"
+    assert "simulated git mv failure" in result["reason"]
+    # The earlier reversal was rolled forward: the relocated layout is intact
+    # and the receipt still describes it.
+    assert result["reversed"] == []
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "scandit" / "Projects" / "roadmap.md").is_file()
+    assert receipt_path(runtime, "scandit").is_file()
+
+
 # -- CLI: CIAO_RUNTIME_ROOT is honored ---------------------------------------
 
 
