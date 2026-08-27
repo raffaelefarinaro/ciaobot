@@ -2058,10 +2058,28 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     from ciao.config import CiaoConfig
 
     workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
-    runtime = _resolve_runtime_root(args.runtime_root) if args.runtime_root else workspace / ".runtime"
+    # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
+    # ambient-env base: an explicit --workspace must win over CIAO_WORKSPACE the
+    # same way `_workspace_reroot_command` insists on, or a relative
+    # CIAO_RUNTIME_ROOT (or the bare ".runtime" default) would resolve against
+    # the wrong install when the two disagree. Still honors CIAO_RUNTIME_ROOT
+    # when --runtime-root is not passed, matching the CLI help text.
+    if args.runtime_root is not None:
+        runtime = Path(args.runtime_root).expanduser()
+    else:
+        env_runtime = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+        runtime = Path(env_runtime).expanduser() if env_runtime else Path(".runtime")
+    if not runtime.is_absolute():
+        runtime = workspace / runtime
+    runtime = runtime.resolve()
     config = CiaoConfig.from_env({
         **os.environ,
         "CIAO_WORKSPACE": str(workspace),
+        # Must match `runtime` exactly: vault_relocate reads/writes
+        # workspaces.json under `runtime`, and if CiaoConfig loaded its own
+        # `self.workspaces` from a different runtime root the two would
+        # silently disagree about what is registered.
+        "CIAO_RUNTIME_ROOT": str(runtime),
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
     })
 

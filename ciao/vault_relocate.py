@@ -156,9 +156,32 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
     # loose at its top level, alongside other workspaces' already-nested
     # folders and vault-wide shared state.
     try:
-        other_workspaces = {name for name in config.workspace_names() if name != workspace}
+        all_names = list(config.workspace_names())
     except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
-        other_workspaces = set()
+        all_names = [workspace]
+
+    # A legacy install can have MORE THAN ONE workspace pinned to the shared
+    # vault root itself (CiaoConfig.legacy_entity_workspace treats this as
+    # ambiguous ownership too). Classifying loose entries as "this
+    # workspace's own content" would hand every one of them to whichever
+    # workspace is relocated first, stranding the other owner(s) — so this
+    # refuses rather than guessing who owns what.
+    owners = []
+    for name in all_names:
+        try:
+            if Path(config.workspace_vault_root(name)).resolve() == vault_root:
+                owners.append(name)
+        except (ValueError, OSError):
+            continue
+    if len(owners) > 1:
+        result.refusals.append(
+            "the shared vault root is claimed by more than one workspace "
+            f"({', '.join(sorted(owners))}); ownership of its loose top-level "
+            "content is ambiguous, so nothing was classified"
+        )
+        return result
+
+    other_workspaces = {name for name in all_names if name != workspace}
 
     for entry in sorted(source.iterdir(), key=lambda p: p.name):
         name = entry.name
@@ -400,13 +423,35 @@ def apply(
             return payload
         applied.append({"source": src_rel, "destination": dst_rel})
 
+    source_removed = False
     if not result.whole_directory and source.is_dir() and not any(source.iterdir()):
         try:
             source.rmdir()
+            source_removed = True
         except OSError:
             pass
 
-    registry_before, registry_after = _repoint_registry(runtime_root, workspace, config)
+    try:
+        registry_before, registry_after = _repoint_registry(runtime_root, workspace, config)
+    except OSError as exc:
+        # The registry couldn't be read at all before any move ran (see the
+        # earlier _registry_has_workspace refusal), but a write failure here
+        # (permissions, disk full) shows up only now, with the vault already
+        # moved on disk — leaving it moved with the registry unrepointed would
+        # orphan it under a path nothing resolves to anymore, so unwind.
+        for done in reversed(applied):
+            _run_git(install_root, "mv", done["destination"], done["source"])
+        if source_removed:
+            source.mkdir(parents=True, exist_ok=True)
+        if not result.whole_directory and destination.is_dir() and not any(destination.iterdir()):
+            try:
+                destination.rmdir()
+            except OSError:
+                pass
+        payload["status"] = "refused"
+        payload["refusals"] = [f"could not persist the new location in the registry: {exc}"]
+        payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+        return payload
     payload["registry_before"] = registry_before
     payload["registry_after"] = registry_after
     payload["applied"] = applied
@@ -446,13 +491,38 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
     install_root = Path(config.workspace_root).resolve()
     reversed_moves: list[str] = []
     already: list[str] = []
-    for entry in reversed(receipt.get("applied", [])):
+    applied_entries = receipt.get("applied", [])
+
+    # Validate the entire reverse before moving anything. If a later source
+    # path was recreated, reversing earlier entries first would leave a
+    # partially undone relocation and make the retry harder to reason about.
+    for entry in reversed(applied_entries):
         source = install_root / entry["source"]
         destination = install_root / entry["destination"]
         if not destination.exists() and not destination.is_symlink() and (
             source.exists() or source.is_symlink()
         ):
             already.append(entry["source"])
+            continue
+        if source.exists() or source.is_symlink():
+            return {
+                "status": "refused",
+                "reason": (
+                    f"{entry['source']} already exists — something recreated "
+                    "it since the relocation ran, so reversing would nest the "
+                    "moved content inside it instead of restoring the "
+                    "original layout; move or remove it, then retry"
+                ),
+                "reversed": reversed_moves,
+                "already_reversed": already,
+            }
+
+    for entry in reversed(applied_entries):
+        source = install_root / entry["source"]
+        destination = install_root / entry["destination"]
+        if not destination.exists() and not destination.is_symlink() and (
+            source.exists() or source.is_symlink()
+        ):
             continue
         source.parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])

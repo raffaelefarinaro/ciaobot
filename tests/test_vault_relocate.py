@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao import vault_relocate
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.vault_relocate import apply, plan, receipt_path, undo
 
@@ -347,3 +348,151 @@ def test_apply_whole_directory_into_a_preexisting_empty_destination_renames_exac
     assert result["status"] == "relocated", result.get("refusals")
     assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
     assert not (install / "memory-vault" / "personal" / "legacy-personal-notes").exists()
+
+
+# -- ambiguous shared-root ownership -----------------------------------------
+
+
+def test_plan_refuses_when_the_shared_vault_root_has_multiple_owners(tmp_path: Path) -> None:
+    """Two legacy workspaces both pinned to the vault root itself.
+
+    Classifying loose top-level entries as one workspace's own content would
+    hand every one of them to whichever workspace is relocated first,
+    stranding the other — CiaoConfig.legacy_entity_workspace treats this same
+    shape as ambiguous, and plan() must refuse it too rather than guess.
+    """
+    install = _git_install(tmp_path)
+    vault_root = install / "memory-vault"
+    (vault_root / "People").mkdir(parents=True)
+    (vault_root / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    _write_registry(
+        install,
+        [
+            {"name": "scandit", "vault_root": str(vault_root)},
+            {"name": "other", "vault_root": str(vault_root)},
+        ],
+    )
+    _commit_all(install)
+    config = _config(
+        tmp_path / "install", {"scandit": str(vault_root), "other": str(vault_root)}
+    )
+
+    result = plan(config, "scandit")
+
+    assert result.refused
+    assert "more than one workspace" in result.refusals[0]
+    assert result.entries == []
+
+
+# -- registry persistence failure --------------------------------------------
+
+
+def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write failure discovered only after the moves must unwind them.
+
+    The workspace-is-registered guard only proves the registry was READABLE
+    before anything moved; a write failure (permissions, disk full) can still
+    surface only once every git mv has already succeeded. Leaving the vault
+    moved with the registry unrepointed would orphan it under a path nothing
+    resolves to.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(vault_relocate, "_write_registry", _boom)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("registry" in r.lower() for r in result["refusals"])
+    assert (install / "memory-vault" / "People" / "Peter.md").is_file(), "move was not rolled back"
+    assert not (install / "memory-vault" / "scandit").exists()
+    entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    scandit_entry = next(e for e in entries if e["name"] == "scandit")
+    assert scandit_entry["vault_root"] == str(install / "memory-vault")
+
+
+# -- undo collision with a recreated source ----------------------------------
+
+
+def test_undo_refuses_when_the_original_path_was_recreated(tmp_path: Path) -> None:
+    """Something (e.g. a still-running server) recreated the old location.
+
+    Reversing with `git mv` would treat the recreated directory as a
+    container and nest the restored content inside it rather than merge or
+    overwrite — undo must refuse instead of guessing.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    # Something recreates the original path before the operator restarts.
+    (install / "memory-vault" / "People").mkdir()
+    (install / "memory-vault" / "People" / "new-note.md").write_text(
+        "fresh\n", encoding="utf-8"
+    )
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert "already exists" in result["reason"]
+    # Nothing was nested into it, and the relocated content is untouched.
+    assert (install / "memory-vault" / "People" / "new-note.md").is_file()
+    assert not (install / "memory-vault" / "People" / "People").exists()
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+
+
+def test_undo_preflights_all_recreated_paths_before_reversing_anything(tmp_path: Path) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    # Recreate the path for the second reverse move. A collision there must
+    # not leave the first move already reversed.
+    (install / "memory-vault" / "People").mkdir()
+    (install / "memory-vault" / "Projects").mkdir()
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert result["reversed"] == []
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "scandit" / "Projects" / "roadmap.md").is_file()
+
+
+# -- CLI: CIAO_RUNTIME_ROOT is honored ---------------------------------------
+
+
+def test_cli_honors_ciao_runtime_root_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import cli
+
+    install, _ = _shared_root_install(tmp_path)
+    custom_runtime = tmp_path / "elsewhere" / "runtime"
+    custom_runtime.mkdir(parents=True)
+    # Move the registry the fixture wrote under install/.runtime to the
+    # custom runtime root, so CiaoConfig and the CLI agree on where it lives.
+    registry = json.loads((install / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    (custom_runtime / "workspaces.json").write_text(
+        json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(custom_runtime))
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    rc = cli.main(["vault-relocate", "scandit", "--apply"])
+
+    assert rc == 0
+    assert (custom_runtime / "migration" / "vault-relocate-scandit.json").is_file()
+    assert not (install / ".runtime" / "migration").exists()
