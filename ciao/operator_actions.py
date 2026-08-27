@@ -348,7 +348,14 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
                     f"with `ciao vault-relocate {name} --undo`. If the preview "
                     "lists anything it could not classify (a symlink, most often), "
                     "resolve only those with the operator — don't ask about the "
-                    "move itself, and don't re-derive it by hand."
+                    "move itself, and don't re-derive it by hand. If it refuses "
+                    "because the vault lives outside the install's git worktree "
+                    "(an external or hand-pinned vault root), that is a real "
+                    "limitation, not something to work around — tell the operator "
+                    "rather than moving it by hand yourself. After a successful "
+                    "apply, tell the operator Ciaobot needs a restart (Settings -> "
+                    "Restart) before the new location takes effect everywhere, "
+                    "including in this chat."
                 ),
             )
         )

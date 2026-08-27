@@ -2032,6 +2032,8 @@ def _print_vault_relocate_result(payload: dict[str, Any], *, applied: bool) -> N
     if applied and payload.get("status") == "relocated":
         print(f"\nReceipt: {payload.get('receipt_path', '')}")
         print(f"Reverse it exactly with `ciao vault-relocate {payload.get('workspace', '')} --undo`.")
+        if payload.get("restart_note"):
+            print(f"\nRestart required: {payload['restart_note']}")
     elif not applied and not payload.get("refused") and (moves or payload.get("whole_directory")):
         print("\nRe-run with --apply to write this change.")
 

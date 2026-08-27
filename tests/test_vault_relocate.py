@@ -217,6 +217,80 @@ def test_undo_with_no_receipt_is_a_no_op(tmp_path: Path) -> None:
     assert result["status"] == "nothing_to_undo"
 
 
+def test_undo_preserves_registry_changes_made_after_the_relocation(tmp_path: Path) -> None:
+    """Undo's scope is one workspace, not a snapshot restore of the whole file.
+
+    A workspace added, removed, or edited after the relocation ran must
+    survive `--undo` — only the relocated workspace's vault_root reverts.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    # Something unrelated changes the registry after the relocation.
+    registry_path = runtime / "workspaces.json"
+    entries = json.loads(registry_path.read_text(encoding="utf-8"))
+    entries.append({"name": "newcomer", "vault_root": "memory-vault/newcomer"})
+    registry_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "undone", result
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+    scandit_entry = next(e for e in after if e["name"] == "scandit")
+    assert scandit_entry["vault_root"] == str(install / "memory-vault")
+    # The unrelated addition survived the undo.
+    assert any(e["name"] == "newcomer" for e in after)
+
+
+def test_apply_refuses_when_workspace_is_missing_from_the_registry(tmp_path: Path) -> None:
+    """A registry that cannot record the new location must not lose the vault.
+
+    Covers an install whose workspaces come from CIAO_WORKSPACES (an env var)
+    rather than workspaces.json, or a registry missing this workspace's entry:
+    apply must refuse before moving anything, not move it and report success.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    (runtime / "workspaces.json").unlink()
+    _commit_all(install, "drop registry")
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("registry" in r.lower() for r in result["refusals"])
+    assert (install / "memory-vault" / "People").is_dir(), "moved despite an unpersistable result"
+
+
+def test_retrying_apply_after_success_does_not_clobber_the_relocated_receipt(
+    tmp_path: Path,
+) -> None:
+    """A harmless re-run of --apply must not make undo a no-op.
+
+    After a successful relocation, `plan()` correctly refuses a second
+    `--apply` ("already at its standard location"). That refusal must not
+    overwrite the completed receipt, or the documented `--undo` stops working
+    for a relocation that is still fully in effect.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    first = apply(config, "scandit", runtime)
+    assert first["status"] == "relocated"
+
+    second = apply(config, "scandit", runtime)
+    assert second["status"] == "refused"
+    assert "already at its standard location" in second["refusals"][0]
+
+    receipt = json.loads(receipt_path(runtime, "scandit").read_text(encoding="utf-8"))
+    assert receipt["status"] == "relocated", "the successful receipt was overwritten"
+
+    result = undo(config, "scandit", runtime)
+    assert result["status"] == "undone", result
+
+
 # -- whole-directory shape: the vault lives at an unrelated path ------------
 
 
@@ -252,3 +326,24 @@ def test_apply_moves_the_whole_directory_and_repoints_the_registry(tmp_path: Pat
     assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
     entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     assert entries[0]["vault_root"] == "memory-vault/personal"
+
+
+def test_apply_whole_directory_into_a_preexisting_empty_destination_renames_exactly(
+    tmp_path: Path,
+) -> None:
+    """`git mv` nests into an existing directory instead of renaming into it.
+
+    plan() only guarantees the destination is EMPTY, not absent — an empty
+    memory-vault/personal/ can already exist. Content must land directly at
+    the destination, not at memory-vault/personal/legacy-personal-notes/...
+    """
+    install, config = _pinned_install(tmp_path)
+    (install / "memory-vault" / "personal").mkdir(parents=True)
+    _commit_all(install, "pre-create empty destination")
+    runtime = install / ".runtime"
+
+    result = apply(config, "personal", runtime)
+
+    assert result["status"] == "relocated", result.get("refusals")
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert not (install / "memory-vault" / "personal" / "legacy-personal-notes").exists()

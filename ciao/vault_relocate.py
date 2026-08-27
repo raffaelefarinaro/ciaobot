@@ -178,6 +178,18 @@ def receipt_path(runtime_root: Path, workspace: str) -> Path:
     return Path(runtime_root) / "migration" / f"vault-relocate-{workspace}.json"
 
 
+def _peek_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
+    """The receipt file whatever its status. See ``workspace_reroot.peek_receipt``."""
+    path = receipt_path(runtime_root, workspace)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) -> Path:
     """Persist a receipt atomically, keeping any earlier one beside it.
 
@@ -185,9 +197,19 @@ def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) 
     receipt: that one gates on and never downgrades a ``status: "migrated"``
     full-install migration, and writing this operation's outcome into it would
     either collide with that state or be silently dropped by its guard.
+
+    Never downgrades a completed ``status: "relocated"`` receipt with a
+    non-relocated payload: retrying ``--apply`` after a successful run
+    correctly refuses ("already at its standard location"), and writing that
+    refusal over the completed receipt would make ``ciao vault-relocate
+    <name> --undo`` a no-op for a relocation that is still fully in effect.
     """
     path = receipt_path(runtime_root, workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if payload.get("status") != "relocated":
+        existing = _peek_receipt(runtime_root, workspace)
+        if existing is not None and existing.get("status") == "relocated":
+            return path
     if path.is_file():
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
@@ -195,6 +217,24 @@ def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) 
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def _read_registry(runtime_root: Path) -> list[dict[str, Any]] | None:
+    path = registry_file(runtime_root)
+    if not path.is_file():
+        return None
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return entries if isinstance(entries, list) else None
+
+
+def _registry_has_workspace(runtime_root: Path, workspace: str) -> bool:
+    entries = _read_registry(runtime_root)
+    return entries is not None and any(
+        isinstance(entry, dict) and str(entry.get("name", "")) == workspace for entry in entries
+    )
 
 
 def _repoint_registry(
@@ -206,17 +246,12 @@ def _repoint_registry(
     ``WorkspaceConfig``, so an unknown key a future release adds survives an
     edit that only means to change one field — same reasoning as
     ``workspace_reroot._rewrite_registry``. Also updates the in-memory
-    ``WorkspaceConfig`` on ``config`` so the running process sees the new
-    location immediately, without waiting for a reload.
+    ``WorkspaceConfig`` on ``config`` so the CLI process that ran this sees the
+    new location immediately; the running server, a separate process, does
+    not — see the restart note ``apply`` attaches to its result.
     """
-    path = registry_file(runtime_root)
-    if not path.is_file():
-        return None, None
-    try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None, None
-    if not isinstance(entries, list):
+    entries = _read_registry(runtime_root)
+    if entries is None:
         return None, None
 
     before = json.loads(json.dumps(entries))
@@ -268,6 +303,23 @@ def apply(
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
 
+    # The move is about to happen; if the result cannot be persisted, refuse
+    # before touching anything rather than moving files nothing can find
+    # again. A missing or workspace-less registry most often means this
+    # install's workspaces come from CIAO_WORKSPACES (an env var, non-
+    # authoritative here) rather than workspaces.json.
+    if not _registry_has_workspace(runtime_root, workspace):
+        payload["status"] = "refused"
+        payload["refusals"] = [
+            f"no entry for '{workspace}' in the workspace registry "
+            f"({registry_file(runtime_root)}); the new location could not be "
+            "recorded, so nothing was moved. If this install configures "
+            "workspaces via CIAO_WORKSPACES, repoint it by hand after moving "
+            "the vault yourself."
+        ]
+        payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+        return payload
+
     source = Path(result.source)
     destination = Path(result.destination)
     try:
@@ -279,24 +331,31 @@ def apply(
     except ValueError:
         dest_rel = None
 
+    # An external or hand-pinned vault root (CiaoConfig explicitly supports an
+    # absolute vault_root outside the install) cannot be moved with git mv,
+    # and there is no automatic undo for a move git cannot track. Refusing is
+    # deliberate, not a gap to route around: this is the one case where a
+    # careful manual move, backed up first, is the right tool.
+    EXTERNAL_VAULT_REFUSAL = (
+        "the vault lives outside the install's git worktree (an external or "
+        "hand-pinned vault root), so it cannot be moved with git mv and there "
+        "is no automatic undo for it here; back it up, move it by hand, then "
+        "update the workspace registry and verify note counts before removing "
+        "the backup"
+    )
+
     moves_to_apply: list[tuple[str, str]] = []
     if result.whole_directory:
         if source_rel is None or dest_rel is None:
             payload["status"] = "refused"
-            payload["refusals"] = [
-                "the source or destination lies outside the install's git "
-                "worktree, so it cannot be moved with git mv; move it by hand"
-            ]
+            payload["refusals"] = [EXTERNAL_VAULT_REFUSAL]
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
         moves_to_apply.append((source_rel, dest_rel))
     else:
         if source_rel is None or dest_rel is None:
             payload["status"] = "refused"
-            payload["refusals"] = [
-                "the vault root lies outside the install's git worktree, so it "
-                "cannot be moved with git mv; move it by hand"
-            ]
+            payload["refusals"] = [EXTERNAL_VAULT_REFUSAL]
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
         for entry in result.moves:
@@ -320,6 +379,13 @@ def apply(
 
     if not result.whole_directory:
         destination.mkdir(parents=True, exist_ok=True)
+    elif destination.is_dir() and not destination.is_symlink():
+        # plan() only guaranteed EMPTY, not absent. `git mv source dest`
+        # treats an existing directory as a container and nests source
+        # inside it instead of renaming — removing the empty shell first
+        # turns this back into an exact rename, and the undo (a reverse
+        # git mv) recreates it exactly the same way.
+        destination.rmdir()
 
     applied: list[dict[str, str]] = []
     for src_rel, dst_rel in moves_to_apply:
@@ -345,6 +411,18 @@ def apply(
     payload["registry_after"] = registry_after
     payload["applied"] = applied
     payload["status"] = "relocated"
+    # This CLI run's own in-memory config sees the new path immediately, but a
+    # running Ciaobot server is a SEPARATE process holding its own CiaoConfig
+    # built once at startup (ciao/main.py) — it keeps resolving the old
+    # location, including in the very chat session that ran this command,
+    # until it restarts. Surfaced here rather than restarted automatically:
+    # the operator presses Restart, this command does not.
+    payload["restart_required"] = True
+    payload["restart_note"] = (
+        "the running Ciaobot server will keep resolving the old location "
+        "until it restarts (Settings -> Restart); tell the operator to "
+        "restart before writing more notes through this workspace"
+    )
     payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
     return payload
 
@@ -390,14 +468,27 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         if parent != install_root and parent.is_dir() and not any(parent.iterdir()):
             parent.rmdir()
 
+    # Only THIS workspace's vault_root is restored, into whatever the registry
+    # currently holds — never the whole `registry_before` snapshot. Another
+    # workspace can have been added, removed, or edited since the relocation
+    # ran, and this command's scope is one workspace; overwriting the file
+    # wholesale would silently discard those unrelated changes.
     before = receipt.get("registry_before")
-    if before is not None:
-        _write_registry(runtime_root, before)
-        workspace_config = config.workspace(workspace)
-        if workspace_config is not None:
-            for entry in before:
+    prior_entry = next(
+        (e for e in (before or []) if isinstance(e, dict) and str(e.get("name", "")) == workspace),
+        None,
+    )
+    if prior_entry is not None:
+        prior_vault_root = prior_entry.get("vault_root")
+        current = _read_registry(runtime_root)
+        if current is not None:
+            for entry in current:
                 if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
-                    workspace_config.vault_root = entry.get("vault_root", workspace_config.vault_root)
+                    entry["vault_root"] = prior_vault_root
+            _write_registry(runtime_root, current)
+        workspace_config = config.workspace(workspace)
+        if workspace_config is not None and prior_vault_root is not None:
+            workspace_config.vault_root = prior_vault_root
 
     path.unlink(missing_ok=True)
     return {"status": "undone", "reversed": reversed_moves, "already_reversed": already}
