@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import type { OperatorAction } from '../lib/types'
+import { renderMarkdown } from '../lib/safeMarkdown'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -101,6 +102,24 @@ async function openView(action: OperatorAction): Promise<void> {
   await router.push(action.view_route)
 }
 
+function renderedDetail(detail: string): string {
+  // Missed-schedule detail is markdown (bullets with [name](/schedules/id)).
+  // Other tiles are plain sentences — markdown rendering keeps them as <p>.
+  return renderMarkdown(detail)
+}
+
+async function onDetailClick(event: MouseEvent): Promise<void> {
+  const anchor = (event.target as HTMLElement)?.closest('a')
+  if (!anchor) return
+  const href = anchor.getAttribute('href') || ''
+  // Internal schedule links should route without a full reload.
+  if (href.startsWith('/schedules')) {
+    event.preventDefault()
+    const { router } = await import('../router')
+    await router.push(href)
+  }
+}
+
 async function openChat(action: OperatorAction): Promise<void> {
   if (chatBusy.value || !action.chat_prompt) return
   chatBusy.value = true
@@ -142,7 +161,8 @@ async function openChat(action: OperatorAction): Promise<void> {
       <span class="housekeeping-glyph" aria-hidden="true">{{ action.glyph }}</span>
       <div class="housekeeping-body">
         <p class="housekeeping-title">{{ action.title }}</p>
-        <p class="housekeeping-detail">{{ action.detail }}</p>
+        <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+        <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
       </div>
       <div class="housekeeping-actions">
         <button
@@ -278,6 +298,29 @@ async function openChat(action: OperatorAction): Promise<void> {
   margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
   color: var(--fg2);
+}
+
+.housekeeping-detail :deep(a) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.housekeeping-detail :deep(ul) {
+  margin: var(--space-1) 0 0;
+  padding-left: 1.1em;
+}
+
+.housekeeping-detail :deep(li) {
+  margin: 2px 0;
+}
+
+.housekeeping-detail :deep(p) {
+  margin: 0;
+}
+
+.housekeeping-detail :deep(p + ul) {
+  margin-top: var(--space-1);
 }
 
 .housekeeping-actions {

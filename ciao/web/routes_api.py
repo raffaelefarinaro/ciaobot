@@ -7998,7 +7998,7 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
     action_id = request.path_params["action_id"]
     context = _housekeeping_context(request)
     try:
-        result, summary = operator_actions.run_action(action_id, context)
+        result, summary = await operator_actions.run_action(action_id, context)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:  # noqa: BLE001 — a failed run is a tile, not a crash
