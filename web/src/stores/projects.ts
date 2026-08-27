@@ -1549,7 +1549,13 @@ export const useProjectStore = defineStore('projects', () => {
     if (!cached) return chat.last_snippet
     const cachedAt = lastResultSnippetAt.value[chatId] || ''
     const persistedAt = chat.last_activity_at || ''
-    return persistedAt && cachedAt && persistedAt > cachedAt
+    // Persisted wins on ties too: the backend truncates activity timestamps
+    // to whole seconds, so two responses finishing in the same second leave
+    // persistedAt === cachedAt — and a tie with the refreshed record means
+    // the cached snippet is the OLDER response this tab caught live while
+    // missing the newer event. The same-turn persisted snippet is equivalent
+    // to the live one, so equality can only cost the stale case.
+    return persistedAt && cachedAt && persistedAt >= cachedAt
       ? chat.last_snippet
       : cached
   }

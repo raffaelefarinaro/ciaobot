@@ -4690,9 +4690,11 @@ describe('chatLastSnippet', () => {
     // No WS event has arrived this session — falls back to the persisted value.
     expect(store.chatLastSnippet('c1')).toBe('Persisted from the last server response.')
 
-    // A live chat_result_ready snippet takes priority over the persisted one.
+    // A live chat_result_ready snippet takes priority over the persisted one:
+    // the event fired after the record was fetched, so its stamp is newer
+    // than the (stale) last_activity_at the store still holds.
     store.lastResultSnippet = { c1: 'Fresh snippet from a turn that just finished.' }
-    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:01Z' }
     expect(store.chatLastSnippet('c1')).toBe('Fresh snippet from a turn that just finished.')
 
     // No snippet in either place: no preview.
@@ -4723,27 +4725,53 @@ describe('chatLastSnippet', () => {
     expect(store.chatLastSnippet('c1')).toBe('Newer response B.')
   })
 
-  test('keeps the cached snippet when the reconciled record is not newer', () => {
+  test('keeps the cached snippet while the record still reflects the previous turn', () => {
     const store = useProjectStore()
     store.chats = [{
       chat_id: 'c1',
       project_id: 'p1',
-      title: 'Same-turn reconcile',
+      title: 'Live turn, stale record',
       archived: false,
       local: true,
       created_at: '2026-08-27T00:00:00Z',
-      last_activity_at: '2026-08-27T01:00:00Z',
+      // The record has not reconciled yet: its activity time still names the
+      // PREVIOUS turn, older than the event that just landed.
+      last_activity_at: '2026-08-27T00:30:00Z',
       last_read_at: '2026-08-27T00:00:00Z',
-      last_snippet: 'Persisted, same turn.',
+      last_snippet: 'Persisted, previous turn.',
     }] as unknown as ChatInfo[]
     store.lastResultSnippet = { c1: 'Live snippet.' }
-    // The reconciled activity time equals the stamp the event recorded —
-    // the same turn, not a newer one — so the live snippet stays.
     store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
     expect(store.chatLastSnippet('c1')).toBe('Live snippet.')
 
-    // A record with no activity time cannot claim to be newer.
+    // A record with no activity time cannot claim to be newer either.
     store.chats[0].last_activity_at = ''
     expect(store.chatLastSnippet('c1')).toBe('Live snippet.')
+  })
+
+  test('prefers the persisted snippet on a tied activity timestamp', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Two responses in one second',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      // The backend truncates to whole seconds, so the second response
+      // reconciles with the same activity time the first event recorded.
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      // Response B: newer on the server, event missed while the WS was down.
+      last_snippet: 'Newer response B.',
+    }] as unknown as ChatInfo[]
+    // Response A: caught live, stamped 01:00 before the record refreshed.
+    store.lastResultSnippet = { c1: 'Older response A.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
+
+    // Equality must defer to the persisted record: it carries the newer
+    // response, and a same-turn persisted snippet is equivalent to a live
+    // one, so the tie can only ever be the stale case.
+    expect(store.chatLastSnippet('c1')).toBe('Newer response B.')
   })
 })
