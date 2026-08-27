@@ -207,7 +207,12 @@ export const useProjectStore = defineStore('projects', () => {
   // `chat_result_ready` snippet already used for the toast body. Session-only
   // (not persisted, not backfilled from `/api/chats`): a chat that finished
   // before this tab loaded shows no preview until its next turn completes.
+  // Each entry is stamped with the chat's activity time as of the event, so
+  // chatLastSnippet can tell a live snippet from one that has since been
+  // superseded by a fresher server record (a missed event while the WS was
+  // down must not keep an old preview pinned over the newer persisted one).
   const lastResultSnippet = ref<Record<string, string>>({})
+  const lastResultSnippetAt = ref<Record<string, string>>({})
   // Per-chat "broker is running for this chat" flag, driven by /ws/events.
   // Distinct from `streaming` (which only fires for the chat whose per-chat
   // WS is open). projectStreaming is what powers sidebar dots on inactive
@@ -1533,11 +1538,20 @@ export const useProjectStore = defineStore('projects', () => {
   // value (see `lastResultSnippet` above) so a snippet that lands while this
   // tab is open always wins; falls back to the persisted `last_snippet` from
   // `/api/chats` so a chat that finished before this tab loaded still shows
-  // a preview.
+  // a preview. The persisted record wins when it is NEWER than the cached
+  // event snippet: this tab can miss a `chat_result_ready` (WS gap) and then
+  // reconcile a chat record whose `last_snippet` is the newer response — the
+  // stale session-only preview must not keep overriding it.
   function chatLastSnippet(chatId: string): string | null {
-    if (lastResultSnippet.value[chatId]) return lastResultSnippet.value[chatId]
     const chat = chats.value.find(c => c.chat_id === chatId)
-    return chat?.last_snippet || null
+    const cached = lastResultSnippet.value[chatId]
+    if (!chat?.last_snippet) return cached || null
+    if (!cached) return chat.last_snippet
+    const cachedAt = lastResultSnippetAt.value[chatId] || ''
+    const persistedAt = chat.last_activity_at || ''
+    return persistedAt && cachedAt && persistedAt > cachedAt
+      ? chat.last_snippet
+      : cached
   }
 
   function projectNeedsInput(projectId: string): number {
@@ -3766,7 +3780,14 @@ export const useProjectStore = defineStore('projects', () => {
           // Optimistic local flag: binary, hydrated by the server fetch below.
           unread.value[msg.chat_id] = 1
           persistUnread()
-          if (msg.snippet) lastResultSnippet.value[msg.chat_id] = msg.snippet
+          if (msg.snippet) {
+            lastResultSnippet.value[msg.chat_id] = msg.snippet
+            // The chat record has not reconciled yet, so its current
+            // last_activity_at IS this turn's activity time. Once the
+            // reconciled record is newer, the persisted snippet wins.
+            const activity = resultChat?.last_activity_at || new Date().toISOString()
+            lastResultSnippetAt.value[msg.chat_id] = activity
+          }
           // In-app toast for the document-visible-but-different-chat case.
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
@@ -5549,7 +5570,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
