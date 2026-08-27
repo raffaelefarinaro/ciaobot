@@ -79,6 +79,21 @@ def test_is_near_duplicate_identical_is_not_duplicate():
     assert is_near_duplicate("project", "project") is False
 
 
+def test_is_near_duplicate_case_only_variant_is_duplicate():
+    # `ai` and `AI` are the same tag spelled differently; the singleton is a
+    # merge candidate, not a distinct fragmented tag.
+    assert is_near_duplicate("ai", "AI") is True
+    assert is_near_duplicate("AI", "ai") is True
+    assert is_near_duplicate("Project", "project") is True
+
+
+def test_is_near_duplicate_normalized_prefix_is_not_duplicate():
+    # `ai` and `airline` share a normalized prefix but are unrelated; the
+    # bare-prefix branch must not propose aliasing them.
+    assert is_near_duplicate("ai", "airline") is False
+    assert is_near_duplicate("airline", "ai") is False
+
+
 def test_is_near_duplicate_project_namespace():
     assert is_near_duplicate("project/active", "project/draft") is True
     assert is_near_duplicate("product/barcode-capture", "product/barcode-scan") is True
@@ -385,3 +400,31 @@ def test_audit_vocabulary_proposals_without_config_scans_one_root(tmp_path: Path
     assert len(result["type_promotions"]) == 1
     assert result["type_promotions"][0]["count"] == 6
     assert result["errors"] == []
+
+
+def test_audit_vocabulary_proposals_reports_skipped_vaults(tmp_path: Path):
+    """A configured vault that is missing must be reported as a scan error, not
+    silently dropped from the aggregation."""
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    personal = tmp_path / "personal" / "memory-vault"
+    personal.mkdir(parents=True)
+    for i in range(6):
+        _write(personal / f"P{i}.md", _note_body(type_="brainstorm", title=f"P{i}"))
+    missing = tmp_path / "work" / "memory-vault"  # never created
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            return [
+                (personal, "personal", Path("personal") / "memory-vault"),
+                (missing, "work", Path("work") / "memory-vault"),
+            ]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    # The present vault's usage is still counted.
+    assert len(result["type_promotions"]) == 1
+    assert result["type_promotions"][0]["count"] == 6
+    # But the missing root is surfaced as a scan error, not a clean aggregation.
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["type"] == "vocabulary_proposal_scan_failed"
+    assert "work" in result["errors"][0]["message"]

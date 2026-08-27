@@ -96,7 +96,8 @@ def is_near_duplicate(a: str, b: str) -> bool:
 
     Heuristics, in order of cheap to expensive:
 
-    * Identical tags are not duplicates of themselves.
+    * Identical tags are not duplicates of themselves; a case-only variant
+      (``ai`` vs ``AI``) IS a duplicate — the same tag spelled differently.
     * Shared prefix before a namespace/prefix separator (``/``, ``-``, ``_``)
       — e.g. ``ai`` vs ``ai-analysis``, ``ai-adoption`` vs ``ai-practice``
       all share the ``ai`` stem. This is the common case the plan calls out.
@@ -105,14 +106,20 @@ def is_near_duplicate(a: str, b: str) -> bool:
       carry that many edits without coincidence (``ai`` vs ``hr`` is distance
       2 but must NOT merge), while a single-character difference still counts
       for longer tags.
-    * Normalized forms (separators removed) matching within edit distance 1
-      or one being a prefix of the other.
+    * Normalized forms (separators removed) matching exactly or within the
+      same length-scaled edit distance. Deliberately no bare-prefix match:
+      ``ai`` vs ``airline`` share a normalized prefix but are unrelated, and
+      the separator-delimited stem cases are already handled above.
     """
     if not a or not b:
         return False
+    if a == b:
+        return False
     la, lb = a.lower(), b.lower()
     if la == lb:
-        return False
+        # Case-only variant (ai vs AI): the same tag spelled differently, so
+        # the singleton is a merge candidate, not a distinct tag.
+        return True
     # Edit distance is only meaningful relative to length: nearly every pair of
     # distinct short tags is within distance 2 (`ai` vs `hr`), so an
     # unconditional distance-2 test would propose merging unrelated tags. Scale
@@ -139,17 +146,14 @@ def is_near_duplicate(a: str, b: str) -> bool:
     # Edit distance on raw forms.
     if _edit_distance(la, lb, max_dist=max_edit) <= max_edit:
         return True
-    # Normalized forms: handles ai-analysis vs aianalysis, etc.
+    # Normalized forms (separators removed): handles ai-analysis vs aianalysis.
+    # Deliberately NO bare-prefix match here — `ai` vs `airline` share a
+    # normalized prefix but are unrelated, and the separator-delimited stem
+    # cases are already handled above. Only an exact normalized equality (or a
+    # length-scaled edit) counts.
     na, nb = _normalized_tag(a), _normalized_tag(b)
     if na == nb:
         return True
-    if na.startswith(nb) or nb.startswith(na):
-        # One normalized tag is a prefix of the other (e.g. ai vs aianalysis)
-        # but only when the shorter is at least 2 chars and the longer is not
-        # trivially longer (avoids "a" matching everything).
-        short, long = (na, nb) if len(na) < len(nb) else (nb, na)
-        if len(short) >= 2 and len(long) - len(short) <= 6:
-            return True
     if _edit_distance(na, nb, max_dist=max_edit) <= max_edit:
         return True
     return False
@@ -328,6 +332,29 @@ def audit_vocabulary_proposals(
                 }
             ],
         }
+    # scan_targets silently skips a configured vault whose root is missing or
+    # unmounted. These counts are presented as aggregated across every
+    # workspace, so an omitted root can suppress a promotion that should cross
+    # the threshold and let an incomplete scan read as clean. Surface each
+    # skipped root as a scan error rather than claiming the aggregation is
+    # complete.
+    skipped = [
+        (root, workspace)
+        for root, workspace, _prefix in targets
+        if not Path(root).is_dir()
+    ]
+    errors: list[dict[str, str]] = [
+        {
+            "type": "vocabulary_proposal_scan_failed",
+            "path": str(root),
+            "message": (
+                f"configured vault for workspace {workspace or 'personal'} "
+                "is missing or not a directory; its vocabulary usage was not "
+                "counted"
+            ),
+        }
+        for root, workspace in skipped
+    ]
     result = generate_vocabulary_proposals(entries)
-    result["errors"] = []
+    result["errors"] = errors
     return result
