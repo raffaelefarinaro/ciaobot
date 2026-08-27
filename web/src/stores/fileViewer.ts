@@ -7,13 +7,10 @@ import { askConfirm } from '../lib/confirm'
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
 // (no workspace sandbox; relative paths anchor to config.workspace_root).
 //
-// The only reading tabs are:
-//   - preview: current on-disk content (default, also the editing surface)
-//   - backlinks: markdown incoming links, when the file is markdown
-// History/Diff were removed as overkill for the viewer.
+// The viewer has one reading surface: the current on-disk preview (which also
+// becomes the editing surface when editing is available).
 
 export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
-export type FileViewerTab = 'preview' | 'backlinks'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
 export type HtmlArtifactView = 'preview' | 'code'
@@ -42,10 +39,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // can then be saved back over the current file.
   let fetchSeq = 0
 
-  // `chatId` is kept for pin/open context (inline card). History/Diff were
-  // removed from the UI so no snapshot state is needed.
+  // `chatId` is kept for pin/open context (inline card).
   const chatId = ref('')
-  const tab = ref<FileViewerTab>('preview')
 
   // Edit state. When `editing` is true the modal swaps the read-only viewer
   // for a textarea pre-filled with `content`. `editBuffer` holds the in-flight
@@ -85,7 +80,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     content.value = ''
     error.value = ''
     loading.value = false
-    tab.value = 'preview'
     editing.value = false
     editBuffer.value = ''
     editError.value = ''
@@ -274,12 +268,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
-  // ── Tabs ─────────────────────────────────────────────────────────────────
-
-  async function setTab(t: FileViewerTab): Promise<void> {
-    tab.value = t
-  }
-
   // ── Edit mode ──────────────────────────────────────────────────────────
 
   function startEditing(): void {
@@ -345,7 +333,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     error,
     loadToken,
     chatId,
-    tab,
     editing,
     isDirty,
     editBuffer,
@@ -366,7 +353,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     setHtmlView,
     close,
     loadMarkdownPaths,
-    setTab,
     startEditing,
     cancelEditing,
     saveEdits,

@@ -62,8 +62,17 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
           </button>
-          <button
-            v-if="canEdit && !store.editing"
+           <button
+             v-if="memoryPath"
+             class="btn-icon"
+             title="Open in memory map"
+             aria-label="Open in memory map"
+             @click="openInMemoryMap"
+           >
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
+           </button>
+           <button
+             v-if="canEdit && !store.editing"
             class="btn-icon"
             title="Edit"
             aria-label="Edit"
@@ -85,23 +94,6 @@
           </button>
         </div>
       </header>
-
-      <!-- Tabs strip. History and Diff were removed as overkill for the viewer;
-           Preview is the only reading/editing surface, Backlinks stays for markdown notes. -->
-      <nav v-if="store.kind !== 'image' && store.kind !== 'pdf' && isMarkdown" class="fv-tabs" aria-label="View mode">
-        <button
-          class="fv-tab"
-          :class="{ active: store.tab === 'preview' }"
-          @click="store.setTab('preview')"
-          type="button"
-        >Preview</button>
-        <button
-          class="fv-tab"
-          :class="{ active: store.tab === 'backlinks' }"
-          @click="loadBacklinks"
-          type="button"
-        >Backlinks<span v-if="backlinks.length" class="fv-tab-badge">{{ backlinks.length }}</span></button>
-      </nav>
 
       <div class="fv-main">
         <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
@@ -235,24 +227,6 @@
             </template>
           </template>
 
-          <!-- Backlinks Tab -->
-          <div v-if="store.tab === 'backlinks'" class="fv-backlinks-pane">
-            <div v-if="loadingBacklinks" class="fv-loading">Loading backlinks…</div>
-            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming links found for this note</div>
-            <ul v-else class="fv-backlinks-list">
-              <li v-for="b in backlinks" :key="b.path">
-                <button
-                  type="button"
-                  class="fv-backlink-item"
-                  @click="openBacklink(b.path)"
-                >
-                  <span class="fv-backlink-title">{{ b.title }}</span>
-                  <span class="fv-backlink-path">{{ b.path }}</span>
-                </button>
-              </li>
-            </ul>
-          </div>
-
         </div>
 
         <!-- Inline comment edit popover -->
@@ -325,13 +299,15 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch }
 import { useFileViewerStore } from '../stores/fileViewer'
 import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
-import { api } from '../lib/api'
+import { router } from '../router'
+import { useMemoryMapStore } from '../stores/memoryMap'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
+import { formatFileComments } from '../lib/commentContext'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
@@ -339,6 +315,17 @@ const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactView
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
+const memoryMapStore = useMemoryMapStore()
+const memoryPath = computed(() => {
+  const path = store.path.replace(/:\d+$/, '')
+  return /\.(md|markdown)$/i.test(path) ? path : ''
+})
+
+async function openInMemoryMap(): Promise<void> {
+  if (!memoryPath.value) return
+  memoryMapStore.requestFocus(memoryPath.value)
+  if (await store.close()) await router.push('/memory')
+}
 
 // Chat transcripts archived to the vault live at
 // memory-vault/Logs/Chats/<chat_id>/<provider>/<timestamp>-<session>.md.
@@ -377,52 +364,6 @@ const canEdit = computed(() => {
   if (store.kind === 'html') return store.htmlView === 'code' && store.sourceLoaded
   return store.kind === 'text'
 })
-
-interface BacklinkItem {
-  path: string
-  title: string
-}
-const backlinks = ref<BacklinkItem[]>([])
-const loadingBacklinks = ref(false)
-let backlinksRequestId = 0
-
-async function loadBacklinks(): Promise<void> {
-  await store.setTab('backlinks')
-  if (!store.path) return
-  const requestedPath = store.path
-  const requestId = ++backlinksRequestId
-  loadingBacklinks.value = true
-  try {
-    const data = await api.get<{ backlinks: BacklinkItem[] }>(
-      `/api/vault/backlinks?path=${encodeURIComponent(requestedPath)}`,
-    )
-    if (requestId === backlinksRequestId && store.path === requestedPath) {
-      backlinks.value = data.backlinks || []
-    }
-  } catch {
-    if (requestId === backlinksRequestId && store.path === requestedPath) {
-      backlinks.value = []
-    }
-  } finally {
-    if (requestId === backlinksRequestId) {
-      loadingBacklinks.value = false
-    }
-  }
-}
-
-async function openBacklink(path: string): Promise<void> {
-  const chatId = store.chatId
-  await store.open(path, null, chatId)
-}
-
-watch(
-  () => store.loadToken,
-  () => {
-    backlinksRequestId++
-    backlinks.value = []
-    loadingBacklinks.value = false
-  },
-)
 
 // Split frontmatter off so the body renders cleanly and the metadata card
 // at the top can show key fields as pills/chips. Mirrors PinnedFilePanel.
@@ -1156,7 +1097,10 @@ async function discussInChat(): Promise<void> {
   const general = projectsStore.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
   if (!general) { projectsStore.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
   const title = `Discuss ${path.split('/').pop() || path}`
-  const seed = `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
+  const pendingComments = projectsStore.fileComments[path] ?? []
+  const seed = pendingComments.length
+    ? `Let's discuss the file \`${path}\`.\n\n${formatFileComments(pendingComments)}`
+    : `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
   try {
     const chat = await projectsStore.createChat(general.project_id, title, seed)
     projectsStore.pinFile(chat.chat_id, path)
@@ -1673,46 +1617,6 @@ if (typeof window !== 'undefined') {
   background: var(--error, #f87171);
   border-color: var(--error, #f87171);
   color: white;
-}
-
-/* Tabs strip: Preview / History / Diff */
-.fv-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 6px 18px 0;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.fv-tab {
-  font-size: 13px;
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  border-radius: 6px 6px 0 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.fv-tab:hover:not(.disabled):not(.active) { color: var(--fg); background: var(--bg2); }
-.fv-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-.fv-tab.disabled,
-.fv-tab[disabled] {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.fv-tab-badge {
-  background: var(--bg3, rgba(255, 255, 255, 0.06));
-  color: var(--fg);
-  border-radius: 8px;
-  padding: 0 6px;
-  font-size: 11px;
-  margin-left: 4px;
 }
 
 /* History list */
@@ -2293,54 +2197,4 @@ if (typeof window !== 'undefined') {
   }
 }
 
-/* Backlinks Pane */
-.fv-backlinks-pane {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.fv-empty-backlinks {
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  padding: 24px 0;
-  text-align: center;
-}
-.fv-backlinks-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.fv-backlink-item {
-  width: 100%;
-  min-height: var(--touch);
-  display: flex;
-  flex-direction: column;
-  padding: 10px 14px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background 120ms var(--ease);
-}
-.fv-backlink-item:hover {
-  background: var(--bg3);
-}
-.fv-backlink-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.fv-backlink-title {
-  font-weight: 600;
-  font-size: var(--text-base);
-  color: var(--fg);
-}
-.fv-backlink-path {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-}
 </style>

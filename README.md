@@ -6,64 +6,105 @@
 
 Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspace whose memory is a plain-markdown vault you own outright. Chats, projects, files, schedules, and memory live in one interface, backed by whichever model you choose (Claude Code, opencode, and others).
 
+## 30-second mental model
+
+**Workspace → Project → Chat.** That's the whole app.
+
+- **Workspace** — a life area (personal, work, a client). It owns its own vault (`<workspace>/memory-vault/` on a fresh install), its own projects, and its default model. Switch workspaces in the sidebar — the Home lanes swap with it.
+- **Project** — a folder + doc (`projects/active/<name>/<name>.md`) for vault-backed projects. Its frontmatter `description:` is injected as `[Project context: …]` into every turn, and the doc's body stays out of the prompt until the agent opens it. A project created from the PWA's **+ New Project** is lightweight (name + context only) until it gains a vault folder.
+- **Chat** — turns, tool calls, and file touches in one project. Fork it, delegate parallel subchats to it, or loop a prompt inside it.
+
+![Workspace → Project → Chat hierarchy](docs/diagrams/workspace-hierarchy.svg)
+
+> **PWA preview:** Home lanes + chat with a pinned doc. Wireframe placeholder until a real light-mode capture lands at `docs/screenshots/pwa-overview.png` (see `docs/screenshots/pwa-overview.svg`).
+>
+> ![Ciaobot PWA overview — wireframe placeholder](docs/screenshots/pwa-overview.svg)
+
 ## Install
 
-**macOS 13+ on Apple Silicon (M1 or newer)** — the supported end-user
-installation is:
+**macOS 13+ on Apple Silicon (M1 or newer)** — the supported end-user installation is:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The installer is per-user: it puts a self-contained `Ciaobot.app` in
-`~/Applications`, preserves an existing configured workspace, and starts the
-tray app through its per-user `Ciaobot` LaunchAgent. On a clean machine it
-starts bootstrap mode instead, so the first-run
-onboarding asks where to create or adopt a workspace and which password to set;
-it never hides a generated password in a new directory. It bundles Ciaobot's
-Python runtime and dependencies, so Python, `pip`, Homebrew, `sudo`, and a
-separate DMG are not required.
+The installer is per-user: it puts a self-contained `Ciaobot.app` in `~/Applications`, preserves an existing configured workspace, and starts the tray app through its per-user `Ciaobot` LaunchAgent. On a clean machine it starts bootstrap mode instead, so the first-run onboarding asks where to create or adopt a workspace and which password to set; it never hides a generated password in a new directory. It bundles Ciaobot's Python runtime and dependencies, so Python, `pip`, Homebrew, `sudo`, and a separate DMG are not required.
 
-The installer verifies the signed release archive before extracting it. Ciaobot
-is currently ad-hoc signed and not notarized, so macOS may still show a
-Gatekeeper warning when the app is first opened. Apple Developer credentials
-are not required; release signatures protect the artifact but do not provide
-Apple trust.
+The installer verifies the signed release archive before extracting it. Ciaobot is currently ad-hoc signed and not notarized, so macOS may still show a Gatekeeper warning when the app is first opened.
 
-Updates normally come from the app's **Update…** action, which replaces the app
-and bundled engine together. Re-running the installer is also supported for
-recovery or a pinned version:
+Updates normally come from the app's **Update…** action, which replaces the app and bundled engine together. Re-running the installer is also supported for recovery or a pinned version:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh \
   | sh -s -- --version 0.8.0
 ```
 
-For security-conscious users, download `install.sh` first, inspect it, and run
-it locally instead of piping it directly to `sh`.
-
-Existing workspace files, credentials, schedules, and runtime data stay in
-place when the installer replaces an older installation. Future updates use
-the app updater or this installer. Browser-installed PWA shortcuts are left
-alone.
+For security-conscious users, download `install.sh` first, inspect it, and run it locally instead of piping it directly to `sh`.
 
 Then open `http://localhost:8443` and follow the setup wizard:
 
-- **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
+- **Workspace folder** (default `~/ciaobot`) — your second brain: one folder per workspace, each with its own `memory-vault/`, plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
 - **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
 - **Model provider** — Claude Code, opencode, or another configured backend.
 
-The wizard writes config, initializes the workspace as a git repo (with a
-`.gitignore` for secrets and runtime state), and keeps the bundled engine
-LaunchAgent in sync.
+The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and keeps the bundled engine LaunchAgent in sync.
 
 For scripted setups: `ciao setup --workspace <dir> --auth-token <password>` (a random password is generated into `.env` when omitted; `--no-auth` opts out of protection entirely). If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
 
 Contributors running from a git checkout: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+## Workspaces & Projects — how to use
+
+Pick a workspace in the sidebar, then work inside projects. Each workspace keeps its own notes, so `personal` never pollutes `work`.
+
+1. **Pick or create a workspace** in the sidebar (personal, work, a client …). Each one gets a colour dot and owns its own vault — `<workspace>/memory-vault/` on a fresh install.
+2. **New Project** → name it (`q4-planning`). This creates a lightweight project (name + context only). To give it a vault-backed folder + doc, create the folder `projects/active/<name>/<name>.md` (or let the agent scaffold it) — auto-discovery then binds the project to it and injects its `description:` as `[Project context: …]`.
+3. **Chat** inside that project — mention a name the vault knows and the agent is quietly pointed at the right note; pin a doc beside the chat and comment on any passage (it rides with your next prompt).
+4. **Archive** the chat when done → Session insights are extracted and a follow-up queue is filed.
+5. **Review proposals** under Memory → clear the queue, or let the daily/weekly curation do its pass (see [Memory that compounds (and asks)](#memory-that-compounds-and-asks)).
+
+A vault-backed project completes with the PWA's **Complete** button (`projects/completed/<name>/`); restore it from the archive icon next to "+ New Project". Every workspace has an auto-created **General** project for ad-hoc chats. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full naming rules and frontmatter contract.
+
+![Vault layout per workspace](docs/diagrams/vault-layout.svg)
+
+Paths shown are `<workspace>/memory-vault/projects/active/<name>/`, `Workspace/Learnings.md`, and `INDEX.md` per workspace. `Logs/Chats/` stays global (a sibling of the workspaces). After the per-workspace re-rooting it promotes to `<install>/Logs/` without moving files.
+
+## Memory that compounds (and asks)
+
+Ciaobot keeps memory in layers so the agent recalls what matters without stuffing every prompt. **Settings → Context** shows what actually loads.
+
+- **Short agent memory** (fenced `ciao:memory` / `ciao:profile` in workspace `CLAUDE.md`) — a small, capped scratchpad: preferences, conventions, lessons, profile. Add `[expires: YYYY-MM-DD]` to a temporary entry; it is hidden after that date and removed on the next daily curation pass.
+- **Your vault** — durable markdown you own, one `memory-vault/` per workspace (`<workspace>/memory-vault/` on a fresh install). Browse in Obsidian or any editor; sync via GitHub/Drive/iCloud. A generated `INDEX.md` + `VOCABULARY.md` and the Memory Map graph come from `ciao vault-index`.
+- **One behavior file for the install** — `<workspace>/CLAUDE.md`, linked as `AGENTS.md` for shared runtime discovery.
+
+When a chat is archived, `ciao/insights.py` extracts `## Session insights`, then `ciao/memory_proposals.py` routes each fact to its destination and `ciao/project_doc_update.py` folds decisions into the canonical project doc. Track the background steps under **Settings → Automation**.
+
+| Auto — filed right away | Asks you — queued for review |
+|---|---|
+| Confident facts → written to their destination (bounded regions, project doc, people notes, `Workspace/Learnings.md`). | Unsure facts → `Workspace/Memory-Proposals.md` — one bullet per fact. Unclassified facts default to the `[review]` kind; routing uses `[memory]` / `[profile]` / `[user]` / `[project]` / `[people]` / `[learnings]` / `[rehome]` (`[rehome]` is the separate vault-rehoming workflow). |
+| `[expires: YYYY-MM-DD]` entries past their date are pruned before the next provider turn and removed during daily curation. | Aging notes → **Needs review** (Memory Map sidebar, `ciao memory-audit`). Project 30d / person 90d / other 180d staleness horizons; `updated:` frontmatter or mtime. |
+| Daily curation (still under review): consolidates duplicates/superseded entries at ~85% cap, copies every removal to `Workspace/Memory-Consolidations.md` for undo, and never drops a fact just to fit a cap. | Weekly hygiene: `ciao vault-index --write` + `ciao os-audit --json`. A `[review]` queue entry stays until you act — dismiss keeps it, dropping it takes an attended edit. |
+
+![Memory pipeline](docs/diagrams/memory-pipeline.svg)
+
+Self-heal without silent edits: `ciao memory-audit` is read-only — it reports event-shaped or stale-path entries in the always-loaded regions; the daily memory-curation agent then moves them to `Workspace/Learnings.md`. `os-audit` can repair low-risk link/index drift and then reports what still needs attention. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline and the consolidation guardrails.
+
+## What we change from stock Claude Code
+
+Stock Claude Code ships skills and tools for scheduling, diagnostics, and settings that clash with the PWA. Ciaobot hides the ones the PWA already owns and keeps everything you added.
+
+- We turn off the **cloud routines** skill (`schedule` — CronCreate/CronDelete/CronList) and the **interval loop** skill (`loop` — ScheduleWakeup) — the PWA's **Automations** page owns schedules (`ciao/schedules.py`) and loops (`ciao/loops.py`) instead.
+- We turn off the **settings/diagnostics** skills (`update-config`, `fewer-permission-prompts`, `doctor`) — **Settings** in the PWA is the surface for models, auth, and health (`ciao os-audit`).
+- We turn off the **design-system sync** skill (`design-sync`) — the PWA has its own `DESIGN.md` tokens; the upstream DesignSync tool is denied.
+- We turn off the **bundled run stubs** (`run`, `run-skill-generator`) — Ciaobot uses per-project `.claude/skills/` equivalents instead.
+- We turn off the **dataviz** bundled skill — Ciaobot ships its own `.claude/skills/dataviz/` for HTML artifacts.
+- In the tool layer we also deny **plan-mode, notebook, push-notification, and routine-trigger** tools (`EnterPlanMode`/`ExitPlanMode`, `NotebookEdit`, `PushNotification`, `RemoteTrigger`) — the PWA controls notifications, plan approval, and scheduling.
+
+Workspace skills, subagents, and slash commands are untouched — a same-named workspace skill still overrides a stock one. The full lists and how to probe them live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (`ciao/execution_modes.py:24`, `ciao/config.py:30`, `ciao/providers/claude.py:536`).
+
 ## Why it exists
 
-Ciaobot started from the limits of Claude Cowork. Cowork is genuinely good at *doing the work* — it runs on your own desktop, edits your own files, and follows along on your phone. But it's Claude-only, and everything it learns about *you* — your sessions, your context, your history — lives in an account you rent. It knows you no better on day 365 than on day 1: it remembers *sessions*, not *you*.
+Ciaobot started from the limits of Claude Cowork. Cowork is genuinely good at *doing the work* — it runs on your own desktop, edits your own files, and follows along on your phone. But it's Claude-only, and everything it learns about *you* — your sessions, your context, your history — lives in an account you rent. It knows you no better on day 365 than on day 1.
 
 Ciaobot is the other bet — differences that are structural, not features:
 
@@ -87,35 +128,15 @@ Ciaobot is built for **knowledge work, not software development**: brainstorming
 
 ## The idea
 
-Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [opencode](https://opencode.ai) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
+Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [opencode](https://opencode.ai) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter:
 
 1. **The context** — deciding exactly what memory, notes, and project state the agent is fed each turn.
 2. **One interface** — the same UI regardless of which project or provider you're talking to.
-3. **Incremental capabilities** — features are added only when I need them or discover a pattern worth adopting, not speculatively.
+3. **Incremental capabilities** — features are added only when needed or when a pattern is worth adopting, not speculatively.
 
-The same instinct runs through the infrastructure: rather than build and run servers, Ciaobot stands on primitives that already have millions of users hardening them — **git** for sync, versioning, and durability; **Tailscale** for private remote access; and one **PWA** shared by browsers, phones, and the thin macOS shell. Every hard problem is answered by borrowing a battle-tested tool, not maintaining a new one.
-
-What that looks like in practice:
-
-- **Workspaces and projects** — split life areas (personal, work, a client, …) into sidebar workspaces, then organize work inside projects. Ciaobot injects project notes and context into every turn.
-- **A vault you own** — durable knowledge as plain markdown with relative links and a generated `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
-- **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
-- **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
-- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app app updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the bundled engine runs as a background service.
-- **Provider choice** — Claude Code or opencode with your existing login, plus on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and opencode processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
+Rather than build and run servers, Ciaobot stands on primitives that already have millions of users hardening them — **git** for sync, versioning, and durability; **Tailscale** for private remote access; and one **PWA** shared by browsers, phones, and the thin macOS shell. Also see [What we change from stock Claude Code](#what-we-change-from-stock-claude-code) and the authenticated chat-scoped MCP surface in [docs/MCP.md](docs/MCP.md) (`ciao/mcp_server.py`).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
-
-## Memory and the vault
-
-Ciaobot keeps memory in layers so the agent can recall what matters without stuffing every prompt. **Settings → Context** shows what the agent actually loads.
-
-- **Short agent memory** (fenced `ciao:memory` / `ciao:profile` regions in workspace `CLAUDE.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons, and profile. Updated with Edit or `/remember`; a snapshot is injected at the start of each Claude or opencode chat. Add `[expires: YYYY-MM-DD]` to a temporary entry to keep it active through that date. It is hidden from later snapshots, but still uses stored character budget until daily memory curation removes it. These regions are git-tracked with the workspace.
-- **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
-- **One behavior file for the install** — `<workspace>/CLAUDE.md`, linked as `AGENTS.md` for shared runtime discovery, applies to every chat.
-
-When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages. Existing-folder onboarding also starts with an initial inventory and curation chat; it preserves the source notes, reorganizes only clear classifications, and reports ambiguous material. Confident facts are filed to their destination automatically (regions, project docs, people notes, Learnings) and unsure ones wait in the proposals queue for review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
 ## Features
 
@@ -126,33 +147,28 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
+- Delegates: a chat's agent spawns writable delegate chats (own model, own session, full tool access) to work in parallel; capped at 6 per chat, no nesting.
 
-**Voice — dictation and read-aloud**
+**Files, documents, and voice**
 
-- Speech-to-text dictation in any chat, free and on-device using macOS speech recognition (macOS 26+, nothing to download, no API key).
-- Text-to-speech read-aloud of replies uses the free on-device macOS system voice through a small helper bundled in `Ciaobot.app`. There is no cloud voice, model download, or optional package to install. For better read-aloud, [add a Premium voice](https://support.apple.com/guide/mac-help/mchlp2290/mac) in System Settings — Ciaobot refreshes the installed voice list and uses the highest-quality voice you have installed.
-
-**Files and documents**
-
-- Completed turns surface touched files as clickable `Outputs` chips below the final reply. Expand `Activity` to inspect the chronological notes, tool calls, and file cards; click a file for history, diff, and restore.
-- Pin a document beside the chat and add line-level comments on the preview, dictated or typed (attached to your next message, like chat comments).
-- Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
-- Interactive HTML artifacts: ask for a dashboard, chart, annotated diff, timeline, or audio comparison and you get one self-contained `.html` page rendered live beside the chat, with a Preview/Code toggle. It runs in a sandboxed frame with no network access, so an artifact works offline and cannot reach the app's API or your session. Audio and video must be embedded as `data:` URLs.
+- Completed turns surface touched files as `Outputs` chips below the final reply; expand `Activity` for notes, tool calls, and file cards. Click a file for history, diff, and restore.
+- Pin a document beside the chat and add line-level comments on the preview (typed or dictated, attached to your next message).
+- Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) via LibreOffice-to-PDF, and self-contained HTML artifacts (sandboxed frame, no network, `data:` media only).
 - Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.
+- Voice: on-device dictation (macOS 26+) and read-aloud (system Premium voices via `ciaobot-native` sidecar). No cloud voice or model download.
 
 **Memory, vault, and insight extraction**
 
-- Layered memory: a capped agent memory and user profile injected at chat start, plus a plain-markdown vault you own (Obsidian-compatible, syncable via GitHub/Drive/iCloud).
-- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, each durable fact is routed to its destination — bounded regions, the project's canonical doc, people notes, `Workspace/Learnings.md` — with confident facts applied automatically and unsure ones queued for review.
-- Daily and weekly curation routines keep vault pages and `Workspace/Learnings.md` current.
-- Vault-index hints: mention a name the index knows and the agent is quietly pointed at the right note.
+- Layered memory: capped agent memory + user profile injected at chat start, plus a plain-markdown vault (Obsidian-compatible, syncable via GitHub/Drive/iCloud).
+- Archiving a chat runs an extraction pipeline: insights and trajectories captured, each fact routed to bounded regions, the project's canonical doc, people notes, or `Workspace/Learnings.md` — confident facts auto-applied, unsure ones queued.
+- Daily and weekly curation keep vault pages and `Workspace/Learnings.md` current.
+- Vault-index hints: mention a name the index knows and the agent is pointed at the right note.
 
 **Automations**
 
-- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat. A schedule-triggered chat carries a banner with Run now / Manage controls, mirroring the loop banner; because a project schedule spawns a new chat each run, the chat holds a durable `schedule_id` backlink (stamped when the schedule creates it) so the banner survives later runs instead of only marking the latest chat.
-- Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations. A loop-driven chat is marked with `↻` in the sidebar and on the home grid, and carries a banner with start/stop controls; the harness's own `/schedule` and `/loop` skills are removed from the model's context and denied, so automations land in Ciaobot instead of a cloud routine it cannot see.
-- System routines ship enabled (memory curation, workspace hygiene, skill evolution); every background run is visible under **Settings → Automation**.
+- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat (with a durable `schedule_id` backlink so banners survive later runs).
+- Loops: re-run a prompt inside one chat every N minutes, keeping context between iterations. Marked `↻` in the sidebar; PWA owns them — the harness's own `/schedule` and `/loop` skills are removed and denied so automations land in Ciaobot instead of a cloud routine it cannot see.
+- System routines ship enabled (memory curation, workspace hygiene, skill evolution); every run is visible under **Settings → Automation**.
 
 **Extensibility — skills, subagents, commands**
 
@@ -161,22 +177,11 @@ When your message mentions a name that appears in the vault index, the agent get
 - Run declarative live evaluations for one skill or subagent through an isolated full chat, with deterministic output and tool assertions.
 - A weekly skill-evolution routine proposes improvements from real usage — reviewable proposals, never silent edits.
 
-**Providers and models**
+**Providers, Google Workspace, and app surface**
 
-- Claude Code or opencode with the login you already have. Anything else — Ollama, OpenRouter, a local OpenAI-compatible server — is reached by configuring it in opencode, which Ciaobot picks up automatically.
-- Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
-- Per-provider default model and thinking level for new chats (Settings → Models); execution mode is fixed at auto, so safe reads and edits run silently while destructive operations ask for approval. Background tasks (titles, insights) routable to a cheaper model per provider or to an on-device model (Apple Intelligence, no install required).
-- Image-capability pre-flight: when a turn carries images and the selected model can't see them, the chat pauses and offers same-backend vision models to switch to, instead of failing mid-turn or silently dropping the images.
-
-**Google Workspace**
-
-- Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through Google's `gws` CLI, connected with browser OAuth from Settings — no terminal required.
-
-**App surface**
-
-- Installable PWA with web-push notifications and in-app app updates.
-- macOS desktop app: one Dock window and menu-bar companion with native notifications, updates, and a launchd-managed engine.
-- A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
+- Claude Code or opencode with the login you already have — plus Ollama/OpenRouter/any OpenAI-compatible endpoint via opencode, and on-device models for lighter tasks (see [Providers](#providers)).
+- Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through Google's `gws` CLI, connected with browser OAuth from Settings.
+- Installable PWA with web-push notifications and in-app app updates; macOS desktop app with one Dock window, menu-bar companion, native notifications, updates, and a launchd-managed engine.
 
 ## What ships by default
 
@@ -208,8 +213,8 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 
 | Routine | Cadence | What it does |
 |---|---|---|
-| Memory curation | Daily | Processes uncertain or failed memory items left after archive-time auto-filing, re-checks aging vault notes, and updates vault pages and `Workspace/Learnings.md`. A note remains in Memory → Needs review until you or this routine resolves it; a failed or disabled run can leave it there. Removes bounded-memory entries after a valid `[expires: YYYY-MM-DD]` date and reports malformed expiration tags without guessing. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: entries that record a chat event instead of a current value move to `Workspace/Learnings.md`, entries citing a path that no longer exists get corrected or dropped, and a subject holding two competing values gets collapsed to the current one. |
-| Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. It can repair low-risk link and index drift, then verifies the remaining findings. |
+| Memory curation | Daily | Processes uncertain or failed memory items left after archive-time auto-filing, re-checks aging vault notes, and updates vault pages and `Workspace/Learnings.md`. Removes `[expires:]` entries after their date and reports malformed tags. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: event-shaped entries move to `Workspace/Learnings.md`, broken paths are corrected/dropped, competing values collapsed. |
+| Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. Repairs low-risk link/index drift, then verifies the rest. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 
 Your own schedules live alongside these in the workspace (`.runtime/schedules.json`), with in-chat loops in `.runtime/loops.json`; both are managed from the UI's Automations page. Packaged **skills** (Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).

@@ -370,7 +370,13 @@ def _handover_marker(
 
 def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
-    if "reached your session usage limit" in low:
+    # Claude Code uses "You've hit your session limit" in its user-facing
+    # exhaustion banner, while the API-shaped error says "reached your
+    # session usage limit". Both should arm the deferred hourly retry.
+    if (
+        "reached your session usage limit" in low
+        or "hit your session limit" in low
+    ):
         return True
     # Temporary model saturation is a capacity error rather than a 429/quota
     # error. Treat it as hourly retryable so the user does not have to keep the
@@ -847,6 +853,11 @@ class ChatInfo:
     # /api/chats/{id}/read). A chat is considered unread when
     # `last_activity_at > last_read_at`.
     last_read_at: str = ""
+    # Truncated text of the last assistant reply, set alongside
+    # `last_activity_at` wherever a turn finishes with real output. Mirrors
+    # `last_activity_at` so the sidebar's unread tile can show "what finished"
+    # without holding the full transcript in memory.
+    last_snippet: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -984,6 +995,7 @@ class ChatInfo:
             "archived": self.archived,
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
+            "last_snippet": self.last_snippet,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -1367,6 +1379,7 @@ class ProjectChatManager:
                     "last_read_at",
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
+                last_snippet=cd.get("last_snippet", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
@@ -1466,6 +1479,7 @@ class ProjectChatManager:
                     "archived": c.archived,
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
+                    "last_snippet": c.last_snippet,
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
@@ -4222,7 +4236,6 @@ class ProjectChatManager:
         run_insights = (
             getattr(config, "insights_enabled", False)
             and outcome.filtered_jsonl
-            and outcome.turn_count >= getattr(config, "insights_size_gate_turns", 0)
         )
         if run_insights:
             from ciao.insights import extract_and_append, resolve_insights_model
@@ -4836,22 +4849,17 @@ class ProjectChatManager:
     def _workspace_gws_profile(self, workspace: str | None) -> str:
         """The Google account this workspace uses, or "" when none is linked.
 
-        The operator-level default only counts when it names an account that
-        actually exists: pointing a chat at a credential directory nobody ever
-        created just produces confusing auth errors mid-task.
+        Resolved through ``gws_auth.workspace_gws_profile`` so skill sync and
+        the chat runtime agree on the same effective profile: an explicit link
+        or operator default only counts when it names an account that actually
+        exists (a bootstrap-synthetic or stale link points at a credential
+        directory nobody created, which just produces auth errors mid-task).
         """
-        workspace_config = self._config.workspace(workspace)
-        if workspace_config and workspace_config.gws_profile:
-            return workspace_config.gws_profile
-        default = self._config.gws_default_profile
-        if not default:
-            return ""
         try:
-            from ciao import gws_auth
-
-            return default if default in gws_auth.known_profiles(self._config) else ""
+            from ciao.gws_auth import workspace_gws_profile
         except Exception:
-            return default
+            return ""
+        return workspace_gws_profile(self._config, workspace)
 
     def _model_for_provider(self, model: str, provider: str) -> str:
         """A chat's model, resolved for the provider that will actually run it.
@@ -6685,6 +6693,7 @@ class ProjectChatManager:
                         if chat_now.retry_status == "pending" and is_retry:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
+                        chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # Schedule the push with a small delay. If the user reads
@@ -7609,12 +7618,13 @@ class ProjectChatManager:
                         and text
                         and self._is_worth_announcing_nudge_reply(text)
                     ):
+                        snippet = self._result_snippet(text)
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
+                            chat_now.last_snippet = snippet
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
-                        snippet = self._result_snippet(text)
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )

@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 190" role="img" aria-labelledby="title desc">
+<title id="title">Memory pipeline</title>
+<desc id="desc">Chat archived, insights extracted, routed, then auto-applied or queued, with daily curation, weekly hygiene and os-audit.</desc>
+<style>
+  .bg { fill: #f4f4fa; }
+  .step { fill: #ffffff; stroke: #d2d4e3; stroke-width: 1.2; rx: 10; }
+  .step-pink { stroke: #ff4d6d; stroke-width: 1.4; }
+  .label { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; font-size: 10.5px; fill: #1a1a2e; }
+  .label-bold { font-weight: 700; font-size: 11px; }
+  .mono { font-family: SFMono-Regular, 'SF Mono', Menlo, monospace; font-size: 9px; fill: #5f607d; }
+  .mono-dark { font-family: SFMono-Regular, 'SF Mono', Menlo, monospace; font-size: 9.5px; fill: #1a1a2e; }
+  .arrow { stroke: #b4b4c4; stroke-width: 1.5; fill: none; marker-end: url(#ah); }
+  .arrow-pink { stroke: #ff4d6d; stroke-width: 1.5; fill: none; marker-end: url(#ah-pink); }
+  .badge-auto { fill: #e8f5e9; stroke: #a5d6a7; stroke-width: 1; rx: 6; }
+  .badge-ask { fill: #fff3e0; stroke: #ffcc80; stroke-width: 1; rx: 6; }
+</style>
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b4b4c4"/></marker>
+  <marker id="ah-pink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ff4d6d"/></marker>
+</defs>
+<rect width="740" height="190" rx="12" class="bg"/>
+
+<!-- Step 1 -->
+<rect x="12" y="18" width="108" height="72" rx="10" class="step step-pink"/>
+<text x="22" y="36" class="label label-bold">1 · Archive</text>
+<text x="22" y="50" class="label">Chat archived</text>
+<text x="22" y="64" class="mono">transcript → Logs/</text>
+<text x="22" y="76" class="mono">postprocess: tidying…</text>
+
+<line x1="120" y1="54" x2="144" y2="54" class="arrow-pink"/>
+
+<!-- Step 2 -->
+<rect x="144" y="18" width="132" height="72" rx="10" class="step"/>
+<text x="154" y="36" class="label label-bold">2 · Insights</text>
+<text x="154" y="50" class="label">Fast model extracts</text>
+<text x="154" y="64" class="mono">## Session insights</text>
+<text x="154" y="76" class="mono">decisions · entities · todos</text>
+
+<line x1="276" y1="54" x2="300" y2="54" class="arrow"/>
+
+<!-- Step 3 -->
+<rect x="300" y="18" width="126" height="72" rx="10" class="step"/>
+<text x="310" y="36" class="label label-bold">3 · Route</text>
+<text x="310" y="48" class="mono-dark">[memory] → ciao:memory</text>
+<text x="310" y="60" class="mono-dark">[project] → project doc</text>
+<text x="310" y="72" class="mono-dark">[learnings] → Learnings.md</text>
+<text x="310" y="84" class="mono">[expires: YYYY-MM-DD]</text>
+
+<line x1="426" y1="54" x2="450" y2="54" class="arrow"/>
+
+<!-- Step 4 split -->
+<g>
+  <rect x="450" y="12" width="140" height="44" rx="8" class="badge-auto"/>
+  <text x="460" y="28" class="label label-bold">Auto</text>
+  <text x="460" y="40" class="label">Confident → filed</text>
+  <text x="460" y="51" class="mono">— no review needed</text>
+
+  <rect x="450" y="60" width="140" height="44" rx="8" class="badge-ask"/>
+  <text x="460" y="76" class="label label-bold">Asks you</text>
+  <text x="460" y="88" class="label">Unsure → queue</text>
+  <text x="460" y="99" class="mono">Workspace/Memory-Proposals.md</text>
+</g>
+
+<line x1="590" y1="34" x2="614" y2="34" class="arrow"/>
+<line x1="590" y1="82" x2="614" y2="82" class="arrow"/>
+
+<!-- Step 5 -->
+<rect x="614" y="18" width="114" height="88" rx="10" class="step"/>
+<text x="624" y="36" class="label label-bold">Hygiene</text>
+<text x="624" y="50" class="label">Daily curation</text>
+<text x="624" y="62" class="mono">Memory-Consolidations.md</text>
+<text x="624" y="74" class="label">Weekly</text>
+<text x="624" y="86" class="mono">os-audit · vault-index</text>
+<text x="624" y="98" class="mono">Needs review</text>
+
+<!-- Footer -->
+<text x="12" y="114" class="mono">Settings → Automation shows every run. Confident facts apply immediately; unsure ones wait for you. [review] items never auto-drop.</text>
+<text x="12" y="128" class="mono">Self-heal: [expires:] pruned before startup · audit/repair moves stale or event-shaped entries to Learnings.</text>
+<text x="12" y="178" class="mono-muted">Source: ciao/insights.py · ciao/memory_proposals.py · ciao/project_doc_update.py · ciao/memory_audit.py · ciao/execution_modes.py</text>
+</svg>

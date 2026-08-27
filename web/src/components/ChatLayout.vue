@@ -769,6 +769,24 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  // Option+Arrow switches top-level sections without commandeering the
+  // browser's native Tab focus traversal.
+  if (!e.metaKey && !e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    const sections = ['/', '/schedules', '/memory', '/settings']
+    const current = viewMode.value === 'chat' || viewMode.value === 'project'
+      ? 0
+      : viewMode.value === 'schedules'
+        ? 1
+        : viewMode.value === 'memory' || viewMode.value === 'proposals'
+          ? 2
+          : 3
+    const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
+    e.preventDefault()
+    void router.push(sections[next])
+    return
+  }
+
   const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
 
   // Workspace navigation is also useful from the automations view, where the

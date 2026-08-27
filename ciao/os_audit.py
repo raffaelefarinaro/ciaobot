@@ -1265,6 +1265,7 @@ WORKSPACE_SECTIONS: tuple[str, ...] = (
     "skill_audit",
     "rule_audit",
     "memory_hygiene",
+    "vocabulary_proposals",
 )
 AUDIT_SCOPES: tuple[str, ...] = ("all", "workspace", "global")
 
@@ -1430,6 +1431,40 @@ def run_os_audit(
         if want_global
         else {**empty_errors, "notices_found": 0, "notices": []}
     )
+    # Vocabulary proposals: informational pending actions, not defects. A
+    # non-canonical type or a singleton tag's near-duplicate needs a human
+    # decision (promote to canonical vs alias), so the hygiene routine
+    # surfaces it without rewriting frontmatter or raising the audit status —
+    # mirroring the Memory-Proposals.md promote/dismiss pattern.
+    if want_workspace:
+        try:
+            from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+            vocabulary_result = audit_vocabulary_proposals(
+                notes, workspace_name, config=config
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory section
+            vocabulary_result = {
+                "threshold": 5,
+                "type_promotions": [],
+                "tag_promotions": [],
+                "tag_merges": [],
+                "errors": [
+                    _diagnostic(
+                        "vocabulary_proposal_scan_failed",
+                        notes,
+                        f"vocabulary proposal scan failed: {exc}",
+                    )
+                ],
+            }
+    else:
+        vocabulary_result = {
+            "threshold": 5,
+            "type_promotions": [],
+            "tag_promotions": [],
+            "tag_merges": [],
+            "errors": [],
+        }
 
     collected_errors = [
         *setup_result["errors"],
@@ -1439,6 +1474,7 @@ def run_os_audit(
         *memory_result["errors"],
         *job_result["errors"],
         *upgrade_result["errors"],
+        *vocabulary_result["errors"],
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
@@ -1510,6 +1546,7 @@ def run_os_audit(
         "skill_audit": skill_result,
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
+        "vocabulary_proposals": vocabulary_result,
         "job_runs_audit": job_result,
         "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
@@ -1723,6 +1760,48 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     lines.append(f"  - … {len(stale) - 10} more")
             if unindexed:
                 lines.append(f"- ⚠️ {unindexed} transcript archive(s) unindexed")
+
+    vocab = report.get("vocabulary_proposals") or {}
+    if vocab and (vocab.get("type_promotions") or vocab.get("tag_promotions") or vocab.get("tag_merges")):
+        # Informational pending actions: promotion/merge needs a human decision
+        # (add to CANONICAL_TYPES vs alias), so it never raises the status.
+        lines.extend(["", "## 8. Vocabulary Proposals (informational)"])
+        thr = vocab.get("threshold", 5)
+        for promo in vocab.get("type_promotions", [])[:10]:
+            ws = f" — {', '.join(promo['workspaces'])}" if promo.get("workspaces") else ""
+            lines.append(
+                f"- ℹ️ Promote type `{promo['type']}` ({promo['count']} uses{ws}) "
+                f"to CANONICAL_TYPES? No alias target — human decision. "
+                f"Threshold {thr}."
+            )
+            for p in promo.get("paths", [])[:3]:
+                lines.append(f"  - {p}")
+        for promo in vocab.get("tag_promotions", [])[:10]:
+            ws = f" — {', '.join(promo['workspaces'])}" if promo.get("workspaces") else ""
+            lines.append(
+                f"- ℹ️ Tag `{promo['tag']}` ({promo['count']} uses{ws}) "
+                f"crossed threshold {thr} — candidate for established use."
+            )
+        for merge in vocab.get("tag_merges", [])[:10]:
+            ws = f" — {', '.join(merge['workspaces'])}" if merge.get("workspaces") else ""
+            near = ", ".join(f"`{t}`" for t in merge.get("near_duplicates", []))
+            count = merge.get("count", 1)
+            kind = merge.get("kind", "singleton")
+            if kind == "case_variant":
+                # A repeated case-only variant (e.g. ai 3x + AI 2x) is not a
+                # singleton; say so with its actual count.
+                lines.append(
+                    f"- ℹ️ Tag `{merge['tag']}` ({count} uses{ws}) is a case "
+                    f"variant of {near} — candidate for merging into that "
+                    "spelling."
+                )
+            else:
+                lines.append(
+                    f"- ℹ️ Singleton tag `{merge['tag']}`{ws} near-duplicate of {near} "
+                    f"— candidate for aliasing."
+                )
+        if len(vocab.get("type_promotions", [])) > 10 or len(vocab.get("tag_promotions", [])) > 10 or len(vocab.get("tag_merges", [])) > 10:
+            lines.append("  - … more proposals omitted")
 
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:

@@ -203,6 +203,11 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'status'; content: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
+  // Per-chat truncated text of the last assistant response, from the same
+  // `chat_result_ready` snippet already used for the toast body. Session-only
+  // (not persisted, not backfilled from `/api/chats`): a chat that finished
+  // before this tab loaded shows no preview until its next turn completes.
+  const lastResultSnippet = ref<Record<string, string>>({})
   // Per-chat "broker is running for this chat" flag, driven by /ws/events.
   // Distinct from `streaming` (which only fires for the chat whose per-chat
   // WS is open). projectStreaming is what powers sidebar dots on inactive
@@ -1522,6 +1527,17 @@ export const useProjectStore = defineStore('projects', () => {
       : parseQuestions(chat?.pending_question)
     const question = questions[0]?.question.trim()
     return question || null
+  }
+
+  // Preview text for an unread chat's home tile. Prefers the session-only WS
+  // value (see `lastResultSnippet` above) so a snippet that lands while this
+  // tab is open always wins; falls back to the persisted `last_snippet` from
+  // `/api/chats` so a chat that finished before this tab loaded still shows
+  // a preview.
+  function chatLastSnippet(chatId: string): string | null {
+    if (lastResultSnippet.value[chatId]) return lastResultSnippet.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    return chat?.last_snippet || null
   }
 
   function projectNeedsInput(projectId: string): number {
@@ -3750,6 +3766,7 @@ export const useProjectStore = defineStore('projects', () => {
           // Optimistic local flag: binary, hydrated by the server fetch below.
           unread.value[msg.chat_id] = 1
           persistUnread()
+          if (msg.snippet) lastResultSnippet.value[msg.chat_id] = msg.snippet
           // In-app toast for the document-visible-but-different-chat case.
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
@@ -5532,14 +5549,14 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
-    chatUnread, chatNeedsInput, chatPendingQuestion, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
+    chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,

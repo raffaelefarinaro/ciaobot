@@ -28,10 +28,15 @@ export function ageBucket(iso: string, now: Date = new Date()): 'fresh' | 'week'
  * Assign each active chat to exactly one home tier. The callbacks are kept
  * outside the helper so the store remains the source of truth for state.
  *
- * `unread` sits between working and quiet on purpose: a chat that finished
- * while you were away is worth reading but is not blocking you, and calling it
- * "quiet" was simply untrue - the tier heading contradicted the unread badge
- * the sidebar was showing for the same chat.
+ * `needsYou` outranks everything: it is the only tier where the agent is
+ * actually blocked on you. Below that, `unread` outranks `working`: an
+ * unread chat has a finished answer sitting there to read, which needs
+ * exactly as much of your attention right now as one that is still running
+ * needs none - the lane header's "N still working" summary already covers
+ * in-flight visibility, so a merely-running chat does not need to outrank
+ * one with something to read. `unread` sits ahead of `quiet` for the same
+ * reason it was pulled out of `quiet` in the first place: calling a chat
+ * with an unread badge "quiet" was simply untrue.
  */
 export function groupHomeTiers(
   chats: ChatInfo[],
@@ -48,13 +53,14 @@ export function groupHomeTiers(
   for (const chat of ordered) {
     if (isNeedsYou(chat.chat_id)) {
       tiers.needsYou.push(chat)
+    } else if (isUnread(chat.chat_id)) {
+      // Ahead of both working and the age check: an unread chat is worth
+      // surfacing even while another chat is actively running, and even if
+      // its own last activity is old, which is exactly the case a
+      // stale-but-unread chat hits.
+      tiers.unread.push(chat)
     } else if (isWorking(chat.chat_id)) {
       tiers.working.push(chat)
-    } else if (isUnread(chat.chat_id)) {
-      // Ahead of the age check: an unread chat is worth surfacing even if its
-      // last activity is old, which is exactly the case a stale-but-unread chat
-      // hits.
-      tiers.unread.push(chat)
     } else if (ageBucket(chatActivityTimestamp(chat), now) === 'older') {
       tiers.older.push(chat)
     } else {

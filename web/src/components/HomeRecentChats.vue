@@ -141,12 +141,18 @@
                   >{{ chat.title }}</span>
                   <ChatSignals
                     :chat-id="chat.chat_id"
-                    :density="entry.key === 'needsYou' || entry.key === 'working' ? 'card' : 'row'"
+                    :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
                     :hue="colorOf(chat)"
                   />
                 </span>
                 <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
                   {{ store.chatPendingQuestion(chat.chat_id) }}
+                </span>
+                <!-- Only populated for turns that completed while this tab was
+                     open (see `lastResultSnippet` in the store) - a chat that
+                     finished earlier shows no preview until its next turn. -->
+                <span v-if="entry.key === 'unread' && store.chatLastSnippet(chat.chat_id)" class="home-chat-snippet">
+                  {{ store.chatLastSnippet(chat.chat_id) }}
                 </span>
                 <span class="home-chat-meta">
                   <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">
@@ -594,12 +600,13 @@ function createChatInProject(lane: HomeLane, projectId: string): void {
 function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; chats: ChatInfo[] }> {
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
-    { key: 'working', label: 'working', chats: lane.tiers.working },
-    // A chat that finished while you were away is worth reading but is not
-    // blocking, so it sits between working and quiet rather than being called
-    // quiet - which contradicted the unread badge the sidebar showed for the
-    // very same chat.
+    // A finished-but-unread chat has something to read, which needs as much
+    // attention right now as a still-running chat needs none - so it outranks
+    // working. It sits ahead of quiet for the same reason it was pulled out
+    // of quiet in the first place: calling it quiet contradicted the unread
+    // badge the sidebar showed for the very same chat.
     { key: 'unread', label: 'unread', chats: lane.tiers.unread },
+    { key: 'working', label: 'working', chats: lane.tiers.working },
     // Older chats are listed inline with quiet rather than split behind a
     // disclosure. The age opacity ramp still dims them, so "old" stays legible
     // without a separate section and a count the user has to expand to read.
@@ -1168,12 +1175,12 @@ defineExpose({ onArrow })
   background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
 }
 
-.home-chat-item--working .home-chat-title {
-  color: var(--fg2);
-  font-weight: 400;
-}
-
-.home-chat-item--unread,
+/* Working needs zero user action right now - the lane header's "N still
+   working" summary already covers in-flight visibility - so it gets the
+   compact row treatment: title + a flashing ChatSignals dot + timestamp,
+   nothing to preview yet. Unread took over the bigger bordered-card
+   treatment below, since it has a finished answer worth the extra room. */
+.home-chat-item--working,
 .home-chat-item--quiet,
 .home-chat-item--older,
 .home-chat-item--archiving,
@@ -1191,7 +1198,7 @@ defineExpose({ onArrow })
   background: transparent;
 }
 
-.home-chat-item--unread:hover,
+.home-chat-item--working:hover,
 .home-chat-item--quiet:hover,
 .home-chat-item--older:hover,
 .home-chat-item--archiving:hover,
@@ -1210,7 +1217,7 @@ defineExpose({ onArrow })
   min-width: 0;
 }
 
-.home-chat-item--unread .home-chat-heading,
+.home-chat-item--working .home-chat-heading,
 .home-chat-item--quiet .home-chat-heading,
 .home-chat-item--older .home-chat-heading,
 .home-chat-item--archiving .home-chat-heading,
@@ -1238,7 +1245,7 @@ defineExpose({ onArrow })
   font-weight: 600;
 }
 
-.home-chat-item--unread .home-chat-title,
+.home-chat-item--working .home-chat-title,
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title,
 .home-chat-item--archiving .home-chat-title,
@@ -1264,6 +1271,18 @@ defineExpose({ onArrow })
   display: -webkit-box;
   overflow: hidden;
   color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Same clamp treatment as the pending-question preview, but muted: a finished
+   answer to read is lower urgency than a question blocking the agent. */
+.home-chat-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.45;
   -webkit-box-orient: vertical;

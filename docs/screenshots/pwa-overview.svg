@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<title id="title">Ciaobot PWA — placeholder wireframe</title>
+<desc id="desc">Wireframe placeholder for the PWA screenshot. Replace with a real light-mode capture at docs/screenshots/pwa-overview.png (~200KB) showing Home lanes, a chat with a pinned file, and workspace colours.</desc>
+<style>
+  .bg { fill: #f4f4fa; }
+  .chrome { fill: #1a1a2e; }
+  .card { fill: #ffffff; stroke: #d2d4e3; stroke-width: 1.2; rx: 10; }
+  .label { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; fill: #1a1a2e; }
+  .mono { font-family: SFMono-Regular, 'SF Mono', Menlo, monospace; font-size: 10px; fill: #5f607d; }
+  .mono-bold { font-weight: 700; fill: #1a1a2e; font-size: 11px; }
+  .pink { fill: #ff4d6d; }
+  .muted { fill: #e6e8f4; rx: 6; }
+</style>
+<rect width="1200" height="760" rx="16" class="bg"/>
+<!-- Browser chrome -->
+<rect x="0" y="0" width="1200" height="38" rx="16" class="chrome"/>
+<rect x="0" y="18" width="1200" height="20" class="chrome"/>
+<circle cx="20" cy="19" r="6" fill="#ff5f56"/><circle cx="40" cy="19" r="6" fill="#ffbd2e"/><circle cx="60" cy="19" r="6" fill="#27c93f"/>
+<text x="88" y="24" fill="#7a7a90" font-family="SFMono-Regular, monospace" font-size="11">http://localhost:8443  —  Ciaobot</text>
+<rect x="920" y="8" width="100" height="22" rx="6" fill="#2a2e54"/><text x="936" y="22" fill="#e8e8f0" font-size="10" font-family="sans-serif">light · pink</text>
+
+<!-- Sidebar -->
+<rect x="12" y="50" width="220" height="698" rx="10" class="card"/>
+<text x="26" y="74" class="mono mono-bold">Workspaces  1 2 3</text>
+<g font-size="12" font-family="sans-serif">
+  <rect x="22" y="84" width="200" height="30" rx="7" fill="#ff4d6d"/><text x="34" y="103" fill="#fff">● personal</text>
+  <rect x="22" y="118" width="200" height="28" rx="7" fill="#ffffff" stroke="#d2d4e3"/><text x="34" y="136" fill="#1a1a2e">● work</text>
+  <rect x="22" y="150" width="200" height="28" rx="7" fill="#ffffff" stroke="#d2d4e3"/><text x="34" y="168" fill="#1a1a2e">● client-acme</text>
+</g>
+<text x="26" y="204" class="mono mono-bold">Projects</text>
+<rect x="22" y="214" width="200" height="32" rx="8" fill="#e6e8f4" stroke="#ff4d6d"/><text x="32" y="234" class="label">◆ q4-planning</text>
+<rect x="22" y="252" width="200" height="32" rx="8" fill="#ffffff" stroke="#d2d4e3"/><text x="32" y="272" class="label">○ trip-2026</text>
+<rect x="22" y="290" width="200" height="32" rx="8" fill="#ffffff" stroke="#d2d4e3"/><text x="32" y="310" class="label">✦ general</text>
+<rect x="22" y="700" width="200" height="36" rx="8" class="pink"/><text x="58" y="722" fill="#fff" font-weight="700" font-family="sans-serif" font-size="13">+ New Project</text>
+
+<!-- Home lanes -->
+<rect x="244" y="50" width="420" height="698" rx="10" class="card"/>
+<text x="260" y="74" class="mono mono-bold">Home — jump back in  (personal)</text>
+<text x="260" y="92" class="mono">Needs your input · Unread · Working · Quiet</text>
+<g>
+  <rect x="260" y="104" width="388" height="70" rx="8" fill="#fff3e0" stroke="#ffcc80"/><text x="272" y="122" class="label" font-weight="700">▸ q4-planning  —  Research notes</text><text x="272" y="138" class="mono">Needs your input · approval card waiting</text><text x="272" y="156" class="mono">Updated 3m ago · 12 msgs</text>
+  <rect x="260" y="184" width="388" height="56" rx="8" fill="#ffffff" stroke="#d2d4e3"/><text x="272" y="202" class="label">▸ trip-2026 — Draft outline</text><text x="272" y="218" class="mono">Working · agent typing…</text>
+  <rect x="260" y="248" width="388" height="56" rx="8" fill="#f4f4fa" stroke="#d2d4e3"/><text x="272" y="266" class="label">▸ general — Groceries</text><text x="272" y="282" class="mono">Quiet · 2d ago</text>
+</g>
+<text x="260" y="336" class="mono mono-bold">Pinned: q4-planning.md  (Preview · History · Diff)</text>
+<rect x="260" y="344" width="388" height="120" rx="8" fill="#ffffff" stroke="#d2d4e3"/>
+<text x="272" y="364" class="mono"># q4-planning</text><text x="272" y="380" class="mono">Goal · Decisions · Open loops …</text>
+<text x="272" y="400" class="mono" fill="#ff4d6d">▸ Add comment on a line → rides with next prompt</text>
+<text x="272" y="420" class="mono">File history snapshots · one-click restore</text>
+
+<!-- Chat column -->
+<rect x="676" y="50" width="512" height="698" rx="10" class="card"/>
+<text x="692" y="74" class="mono mono-bold">Chat — q4-planning  ·  opus  ·  auto</text>
+<text x="692" y="90" class="mono">[Project context: q4-planning — Q4 roadmap …]</text>
+<rect x="692" y="100" width="480" height="54" rx="10" fill="#e6e8f4"/><text x="704" y="120" class="label">You — 10:42</text><text x="704" y="136" class="mono">Summarize the research notes and propose next steps.</text>
+<rect x="692" y="164" width="480" height="110" rx="10" fill="#ffffff" stroke="#d2d4e3"/><text x="704" y="184" class="label">Ciaobot · opus — done</text><text x="704" y="200" class="mono">Here's a draft outline with three options …</text><text x="704" y="220" class="mono">See the pinned q4-planning.md for the full doc.</text><text x="704" y="244" class="mono">Outputs:  q4-planning.md  ·  Activity ▾</text>
+<rect x="692" y="284" width="480" height="44" rx="8" fill="#fff3e0" stroke="#ffcc80"/><text x="704" y="304" class="label">⧉ Permission — Edit memory-vault/personal/… ?</text><text x="704" y="318" class="mono">[1] Allow  [2] Deny</text>
+<rect x="692" y="340" width="480" height="70" rx="10" fill="#e6e8f4"/><text x="704" y="360" class="label">You — comment on “three options”</text><text x="704" y="376" class="mono">“Prefer option 2, but keep the timeline.”</text>
+<rect x="692" y="430" width="480" height="56" rx="10" fill="#f4f4fa" stroke="#d2d4e3" stroke-dasharray="6 4"/><text x="704" y="450" class="label">Composer — dictation · image · file · send</text><text x="704" y="466" class="mono">Ask, attach, or dictate — 44px targets, keyboard first</text>
+<text x="692" y="520" class="label" font-weight="700">Placeholder — replace with real capture</text>
+<text x="692" y="538" class="mono">Capture: macOS light mode, pink accent, 1200×760, &lt;300KB PNG.</text>
+<text x="692" y="552" class="mono">Show: Home lanes + chat + pinned file. Alt text required in README.</text>
+<text x="692" y="570" class="mono">Tool: ego-browser or manual screenshot → docs/screenshots/pwa-overview.png</text>
+<rect x="692" y="586" width="480" height="44" rx="8" fill="#1a1a2e"/><text x="704" y="606" fill="#e8e8f0" font-family="monospace" font-size="11">Why wireframe? Real UI needs a running app; this keeps the PR honest.</text><text x="704" y="620" fill="#b4b4c4" font-family="monospace" font-size="10">No fake pixels — ship the real PNG when you can capture it.</text>
+</svg>

@@ -22,7 +22,7 @@
         <!-- The wordmark used to sit here, between the toggle and these icons.
              It is `BrandMark` in the pane header now, where it is centred and
              does not have to share the sidebar's width. -->
-        <div class="nav-links">
+        <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
             class="nav-item touch-hit"
@@ -129,7 +129,7 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
-        </div>
+        </nav>
       </template>
     </div>
 
@@ -1179,6 +1179,7 @@ import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
+import { formatFileComments } from '../lib/commentContext'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1356,7 +1357,9 @@ async function discussFileInChat(path: string, prompt?: string): Promise<void> {
   const general = store.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
   if (!general) { store.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
   const title = `Discuss ${path.split('/').pop() || path}`
-  const seed = prompt || `Let's discuss the file \`${path}\`.`
+  const base = prompt || `Let's discuss the file \`${path}\`.`
+  const pendingComments = store.fileComments[path] ?? []
+  const seed = pendingComments.length ? `${base}\n\n${formatFileComments(pendingComments)}` : base
   try {
     const chat = await store.createChat(general.project_id, title, seed)
     // Pin the file so the new chat opens split-view with it visible.
@@ -3344,6 +3347,7 @@ async function confirmDeleteChat(chatId: string) {
 .guide-card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
 }
@@ -3351,6 +3355,9 @@ async function confirmDeleteChat(chatId: string) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
   font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
