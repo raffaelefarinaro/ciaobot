@@ -197,6 +197,55 @@ def test_dismiss_unknown_action_is_404(tmp_path: Path) -> None:
         dismiss_action("not-a-real-action", _context(tmp_path))
 
 
+def test_locked_skills_orphaned_fires_when_lock_has_no_custom_copy(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    tmp_path.joinpath("skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "brainstorming": {"source": "owner/repo", "sourceType": "github"},
+                    "airtable-projects": {"source": "owner/repo", "sourceType": "github"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = _context(tmp_path)
+    actions = [a for a in detect_actions(context) if a.id == "locked-skills-orphaned"]
+    assert len(actions) == 1
+    assert "brainstorming" in actions[0].detail
+    assert "airtable-projects" in actions[0].detail
+    assert actions[0].chat_label == "Recover them"
+
+
+def test_locked_skills_orphaned_silent_when_custom_copy_exists(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    tmp_path.joinpath("skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "brainstorming": {"source": "owner/repo", "sourceType": "github"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "skills" / "brainstorming").mkdir(parents=True)
+    (tmp_path / "skills" / "brainstorming" / "SKILL.md").write_text(
+        "---\nname: brainstorming\ndescription: Demo\n---\n", encoding="utf-8"
+    )
+    context = _context(tmp_path)
+    assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
+
+
+def test_locked_skills_orphaned_silent_without_lock(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    context = _context(tmp_path)
+    assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
+
+
 def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
     # personal workspace vault placed outside the standard folder.
     standard = tmp_path / "memory-vault" / "personal"

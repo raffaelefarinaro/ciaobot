@@ -11,6 +11,26 @@ from ciao.skill_evolution import MAX_SKILL_BYTES
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
+# Hard caps on decompressed archive contents. The upload is bounded at 10 MB on
+# the wire, but a highly compressed member can expand far beyond that once
+# decompressed, so a small archive could otherwise exhaust server memory or
+# disk. These caps bound the memory/disk a single import may consume.
+MAX_SKILL_ASSET_BYTES = 5 * 1024 * 1024  # per non-SKILL.md member
+MAX_SKILL_TOTAL_BYTES = 20 * 1024 * 1024  # whole archive, decompressed
+
+# A skill directory name is a single, non-dot path segment. Rejecting "." and
+# ".." (and any leading-dot or separator forms) keeps extraction inside
+# ``skills/<name>/`` so the imported skill is discoverable by inventory and
+# sync, which only look under ``skills/<name>/SKILL.md``.
+def _is_valid_skill_dir_name(name: str) -> bool:
+    if not name or name in {".", ".."}:
+        return False
+    if name.startswith("."):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    return True
+
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
     m = _FRONTMATTER_RE.match(text)
@@ -32,7 +52,9 @@ def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
     Returns (skill_name, errors). If errors is non-empty the zip is invalid.
     Checks: zip integrity, zip-slip, exactly one top-level folder, SKILL.md
     exists, frontmatter name/description present, SKILL.md size ≤ MAX_SKILL_BYTES,
-    folder name matches frontmatter name.
+    folder name matches frontmatter name, folder name is a valid non-dot skill
+    directory name, and decompressed contents stay within the per-file and
+    total size caps.
     """
     errors: list[str] = []
     if not zip_bytes:
@@ -53,6 +75,23 @@ def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
             # Also reject absolute or drive-absolute entries
             if "\x00" in name:
                 return None, ["Zip contains invalid entry."]
+        # Bound decompressed contents before any member is materialized. A
+        # highly compressed member can expand far beyond the 10 MB upload cap,
+        # so validate the declared uncompressed sizes up front.
+        total_uncompressed = 0
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.file_size > MAX_SKILL_ASSET_BYTES:
+                return None, [
+                    f"Archive member '{info.filename}' exceeds "
+                    f"{MAX_SKILL_ASSET_BYTES} bytes uncompressed."
+                ]
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_SKILL_TOTAL_BYTES:
+                return None, [
+                    f"Archive exceeds {MAX_SKILL_TOTAL_BYTES} bytes uncompressed."
+                ]
         # Determine top-level folders: first segment before "/"
         top_levels: set[str] = set()
         for name in names:
@@ -75,6 +114,8 @@ def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
         if len(filtered_tops) != 1:
             return None, ["Zip must contain exactly one top-level folder."]
         skill_folder = next(iter(filtered_tops))
+        if not _is_valid_skill_dir_name(skill_folder):
+            return None, [f"Skill folder '{skill_folder}' is not a valid skill directory name."]
         # Check that there is a SKILL.md inside that folder at top level
         skill_md_path = f"{skill_folder}/SKILL.md"
         # Need to check case sensitive
@@ -129,6 +170,7 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     # Extract safely
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     try:
+        total_written = 0
         for info in zf.infolist():
             # Zip slip already checked, but also sanitize extraction path
             filename = info.filename
@@ -157,7 +199,27 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
                 dest_path.mkdir(parents=True, exist_ok=True)
             else:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                dest_path.write_bytes(zf.read(info.filename))
+                # Stream the member through the per-file and total caps so a
+                # zip that lies about its declared uncompressed size cannot
+                # exhaust memory or disk during extraction.
+                written = 0
+                with zf.open(info) as src, dest_path.open("wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > MAX_SKILL_ASSET_BYTES:
+                            return None, [
+                                f"Archive member '{info.filename}' exceeds "
+                                f"{MAX_SKILL_ASSET_BYTES} bytes uncompressed."
+                            ]
+                        total_written += len(chunk)
+                        if total_written > MAX_SKILL_TOTAL_BYTES:
+                            return None, [
+                                f"Archive exceeds {MAX_SKILL_TOTAL_BYTES} bytes uncompressed."
+                            ]
+                        out.write(chunk)
     finally:
         zf.close()
     return name, []
