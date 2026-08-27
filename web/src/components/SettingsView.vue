@@ -1517,22 +1517,6 @@
                 </button>
                 <span v-if="skillZipFileName" class="hint hint--compact" style="margin-left: 8px;">{{ skillZipFileName }}</span>
               </div>
-              <div class="settings-field settings-field--wide">
-                <span class="ws-label">Choose folder (optional)</span>
-                <p class="hint hint--compact">Pick a local skill folder. The folder must contain <code>SKILL.md</code> at its root. Workspace git sync will carry it to other devices.</p>
-                <input
-                  ref="skillFolderInput"
-                  type="file"
-                  webkitdirectory
-                  style="display: none;"
-                  @change="onSkillFolderSelected"
-                  :disabled="addingSkill"
-                />
-                <button class="btn-small" @click="triggerSkillFolderPicker" :disabled="addingSkill">
-                  Choose folder
-                </button>
-                <span v-if="skillFolderName" class="hint hint--compact" style="margin-left: 8px;">{{ skillFolderName }}</span>
-              </div>
             </div>
             <div class="action-row settings-actions">
               <button class="btn-primary" @click="uploadSkillZip" :disabled="addingSkill || !skillZipFile">
@@ -3792,9 +3776,7 @@ const addSkillResult = ref('')
 const addSkillError = ref(false)
 const skillZipFile = ref<File | null>(null)
 const skillZipFileName = ref('')
-const skillFolderName = ref('')
 const skillZipInput = ref<HTMLInputElement | null>(null)
-const skillFolderInput = ref<HTMLInputElement | null>(null)
 
 function toggleAddSkill() {
   showAddSkill.value = !showAddSkill.value
@@ -3802,15 +3784,10 @@ function toggleAddSkill() {
   addSkillError.value = false
   skillZipFile.value = null
   skillZipFileName.value = ''
-  skillFolderName.value = ''
 }
 
 function triggerSkillZipPicker() {
   skillZipInput.value?.click()
-}
-
-function triggerSkillFolderPicker() {
-  skillFolderInput.value?.click()
 }
 
 function onSkillZipSelected(event: Event) {
@@ -3822,21 +3799,6 @@ function onSkillZipSelected(event: Event) {
   addSkillError.value = false
 }
 
-function onSkillFolderSelected(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = input.files
-  if (!files || !files.length) {
-    skillFolderName.value = ''
-    return
-  }
-  // webkitdirectory gives all files with relative path
-  const first = files[0].webkitRelativePath || files[0].name
-  const folder = first.split('/')[0] || ''
-  skillFolderName.value = folder
-  addSkillResult.value = 'Folder selected: place it at skills/' + folder + '/SKILL.md then run ciao sync-skills. Or zip it and use Upload zip.'
-  addSkillError.value = false
-}
-
 async function uploadSkillZip() {
   if (!skillZipFile.value) return
   addingSkill.value = true
@@ -3845,6 +3807,7 @@ async function uploadSkillZip() {
   try {
     const form = new FormData()
     form.append('file', skillZipFile.value)
+    form.append('workspace', projectStore.activeWorkspace)
     const res = await api.postForm<{ ok: boolean; name?: string; message?: string; error?: string }>('/api/skills/import', form)
     if (res.ok) {
       addSkillResult.value = ''

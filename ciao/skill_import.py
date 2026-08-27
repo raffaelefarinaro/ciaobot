@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -30,6 +32,13 @@ def _is_valid_skill_dir_name(name: str) -> bool:
     if "/" in name or "\\" in name:
         return False
     return True
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
@@ -160,6 +169,9 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     """Validate and extract zip to skills/<name>/.
 
     Returns (skill_name, errors). On success extracts to dest_root/<name>/ .
+    Extraction is transactional: members are written to a temporary directory
+    and the target is replaced atomically only after every member succeeds, so
+    a truncated or corrupt member never leaves a partially installed skill.
     """
     name, errors = validate_skill_zip(zip_bytes)
     if errors or not name:
@@ -167,7 +179,11 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     target = dest_root / name
     if target.exists() and not overwrite:
         return None, [f"Skill '{name}' already exists. Use force to overwrite."]
-    # Extract safely
+    # Extract into a sibling temp dir, then move into place only on success.
+    tmp_target = dest_root / f".{name}.tmp-{os.getpid()}"
+    if tmp_target.exists():
+        _remove_path(tmp_target)
+    tmp_target.mkdir(parents=True, exist_ok=True)
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     try:
         total_written = 0
@@ -189,10 +205,10 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
                 continue
             if not rel:
                 continue
-            dest_path = (target / rel).resolve()
-            # Ensure dest_path is inside target
+            dest_path = (tmp_target / rel).resolve()
+            # Ensure dest_path is inside tmp_target
             try:
-                dest_path.relative_to(target.resolve())
+                dest_path.relative_to(tmp_target.resolve())
             except ValueError:
                 return None, ["Zip contains path traversal."]
             if info.is_dir():
@@ -220,6 +236,13 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
                                 f"Archive exceeds {MAX_SKILL_TOTAL_BYTES} bytes uncompressed."
                             ]
                         out.write(chunk)
+    except Exception:
+        _remove_path(tmp_target)
+        raise
     finally:
         zf.close()
+    # All members succeeded: atomically replace the target.
+    if target.exists():
+        _remove_path(target)
+    tmp_target.rename(target)
     return name, []

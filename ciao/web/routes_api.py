@@ -6671,16 +6671,20 @@ async def skill_import(request: Request) -> JSONResponse:
     On success extracts to ``skills/<name>/`` and syncs the catalog.
     """
     config = request.app.state.config
-    # Resolve destination skills root: per-root installs keep skills per workspace.
+    # Parse multipart
     try:
-        from ciao.config import CiaoConfig
-
-        _ = CiaoConfig  # keep import for mypy
-    except Exception:
-        pass
+        form = await request.form()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"Invalid form: {exc}"}, status_code=400)
+    # Resolve destination skills root: per-root installs keep skills per
+    # workspace. The client passes the active workspace so an upload lands in
+    # the workspace the operator is actually working in, not always the primary.
+    workspace_name = str(form.get("workspace") or "").strip()
     dest_skills: Path
     try:
-        if getattr(config, "_rerooted", lambda: False)() if callable(getattr(config, "_rerooted", None)) else bool(getattr(config, "_rerooted", False)):
+        if workspace_name:
+            dest_skills = Path(config.agent_root(workspace_name)) / "skills"  # type: ignore[attr-defined]
+        elif getattr(config, "_rerooted", lambda: False)() if callable(getattr(config, "_rerooted", None)) else bool(getattr(config, "_rerooted", False)):
             # Use primary workspace's agent root when re-rooted
             try:
                 primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else ""
@@ -6716,11 +6720,6 @@ async def skill_import(request: Request) -> JSONResponse:
     except Exception:
         dest_skills = Path(getattr(config, "workspace_root", ".")) / "skills"
 
-    # Parse multipart
-    try:
-        form = await request.form()
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": f"Invalid form: {exc}"}, status_code=400)
     upload = form.get("file")
     # Fallback: allow any file field
     if upload is None:
