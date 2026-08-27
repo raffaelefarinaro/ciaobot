@@ -489,6 +489,7 @@ def test_cli_honors_ciao_runtime_root_env_var(
 
     monkeypatch.setenv("CIAO_WORKSPACE", str(install))
     monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(custom_runtime))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
 
     rc = cli.main(["vault-relocate", "scandit", "--apply"])

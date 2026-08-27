@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -331,7 +332,7 @@ def apply(
     # again. A missing or workspace-less registry most often means this
     # install's workspaces come from CIAO_WORKSPACES (an env var, non-
     # authoritative here) rather than workspaces.json.
-    if not _registry_has_workspace(runtime_root, workspace):
+    if os.environ.get("CIAO_WORKSPACES", "").strip() or not _registry_has_workspace(runtime_root, workspace):
         payload["status"] = "refused"
         payload["refusals"] = [
             f"no entry for '{workspace}' in the workspace registry "
@@ -489,6 +490,19 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         return {"status": "nothing_to_undo", "reason": "last recorded run did not relocate anything"}
 
     install_root = Path(config.workspace_root).resolve()
+    current_registry = _read_registry(runtime_root)
+    if (
+        os.environ.get("CIAO_WORKSPACES", "").strip()
+        or current_registry is None
+        or not any(
+            isinstance(entry, dict) and str(entry.get("name", "")) == workspace
+            for entry in current_registry
+        )
+    ):
+        return {
+            "status": "refused",
+            "reason": "the current workspace registry is missing, corrupt, or environment-authoritative; nothing was undone",
+        }
     reversed_moves: list[str] = []
     already: list[str] = []
     applied_entries = receipt.get("applied", [])
@@ -550,15 +564,30 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
     )
     if prior_entry is not None:
         prior_vault_root = prior_entry.get("vault_root")
-        current = _read_registry(runtime_root)
-        if current is not None:
-            for entry in current:
-                if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
-                    entry["vault_root"] = prior_vault_root
-            _write_registry(runtime_root, current)
+        for entry in current_registry:
+            if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
+                entry["vault_root"] = prior_vault_root
+        try:
+            _write_registry(runtime_root, current_registry)
+        except OSError as exc:
+            for entry in reversed(receipt.get("applied", [])):
+                if entry["source"] in reversed_moves:
+                    _run_git(install_root, "mv", entry["source"], entry["destination"])
+            return {
+                "status": "refused",
+                "reason": f"could not restore the workspace registry: {exc}",
+                "reversed": [],
+                "already_reversed": already,
+            }
         workspace_config = config.workspace(workspace)
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root
 
     path.unlink(missing_ok=True)
-    return {"status": "undone", "reversed": reversed_moves, "already_reversed": already}
+    return {
+        "status": "undone",
+        "reversed": reversed_moves,
+        "already_reversed": already,
+        "restart_required": True,
+        "restart_note": "the running Ciaobot server must restart via Settings -> Restart before writing more notes",
+    }
