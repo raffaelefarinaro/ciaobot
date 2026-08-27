@@ -428,3 +428,62 @@ def test_audit_vocabulary_proposals_reports_skipped_vaults(tmp_path: Path):
     assert len(result["errors"]) == 1
     assert result["errors"][0]["type"] == "vocabulary_proposal_scan_failed"
     assert "work" in result["errors"][0]["message"]
+
+
+def test_case_variant_of_canonical_type_is_safe_rename_not_promotion(tmp_path: Path):
+    """`type: Note` with `note` canonical is a case variant -> a safe rename,
+    so it must NOT be proposed as a promotion."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="Note", title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    # Case-insensitive canonical match: Note -> note.
+    assert vi_mod.canonical_type("Note") == "note"
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["type_promotions"] == []
+
+
+def test_case_variant_of_alias_type_is_safe_rename_not_promotion(tmp_path: Path):
+    """`type: Doc` maps to the alias target `document`, so it is a safe rename,
+    not a promotion."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    assert vi_mod.canonical_type("Doc") == "document"
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["type_promotions"] == []
+
+
+def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypatch):
+    """VOCAB_PROMOTION_THRESHOLD must drive the established-tag tier in
+    VOCABULARY.md, not just the promotion proposals — one value classifies
+    both, so a six-use tag with threshold 10 is neither established in the
+    vocabulary nor a promotion candidate."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    assert vi_mod.promotion_threshold() == 10
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    rendered = vi_mod.format_vocabulary(entries)
+    # Six uses is below the threshold of 10: not established, not promoted.
+    assert "Tags (established)" not in rendered
+    assert "research" not in rendered
+
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    proposals = generate_vocabulary_proposals(entries)
+    assert proposals["tag_promotions"] == []

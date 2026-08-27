@@ -126,11 +126,43 @@ def canonical_type(raw: str) -> str:
 
     A canonical value maps to itself, a known alias to its target, and anything
     else to ``""`` — which is what ``vault_lint`` reports as ``unknown_type``.
+
+    The comparison is case-insensitive: a case variant of a canonical or alias
+    value (``Note`` beside ``note``, ``Doc`` beside ``doc``) still maps to the
+    canonical/alias target, so the lint treats it as a safe rename rather than
+    a brand-new type that needs promotion.
     """
     value = (raw or "").strip()
     if value in CANONICAL_TYPES:
         return value
-    return TYPE_ALIASES.get(value, "")
+    if value in TYPE_ALIASES:
+        return TYPE_ALIASES[value]
+    lowered = value.lower()
+    for canonical in CANONICAL_TYPES:
+        if canonical.lower() == lowered:
+            return canonical
+    for alias, target in TYPE_ALIASES.items():
+        if alias.lower() == lowered:
+            return target
+    return ""
+
+
+# Promotion threshold: a non-canonical type or an emerging tag that reaches
+# this many uses becomes a candidate for the canonical/established set. Shared
+# by the promotion/merge proposal audit (ciao.vocabulary_proposals) and the
+# established-tag tier in VOCABULARY.md, so one value classifies both.
+DEFAULT_PROMOTION_THRESHOLD = 5
+
+
+def promotion_threshold() -> int:
+    raw = os.environ.get("VOCAB_PROMOTION_THRESHOLD", "").strip()
+    if not raw:
+        return DEFAULT_PROMOTION_THRESHOLD
+    try:
+        value = int(raw)
+        return value if value > 0 else DEFAULT_PROMOTION_THRESHOLD
+    except ValueError:
+        return DEFAULT_PROMOTION_THRESHOLD
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
@@ -1189,6 +1221,7 @@ def format_vocabulary(entries: list[Entry]) -> str:
     tags: dict[str, int] = report["tags"]
     workspaces: dict[str, list[str]] = report["tag_workspaces"]
     lines: list[str] = []
+    established = promotion_threshold()
 
     lines.append("## Types (canonical — choose one of these)\n")
     for name in sorted(CANONICAL_TYPES):
@@ -1216,8 +1249,8 @@ def format_vocabulary(entries: list[Entry]) -> str:
 
     _tier(
         "Tags (established)",
-        "Five or more uses. Prefer one of these over inventing a new tag.",
-        lambda count: count >= 5,
+        f"{established} or more uses. Prefer one of these over inventing a new tag.",
+        lambda count: count >= established,
     )
     _tier(
         "Tags (emerging)",

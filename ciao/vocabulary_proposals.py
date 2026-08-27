@@ -40,26 +40,15 @@ the plan's tests or to keep the routine from auto-applying.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
-from ciao.vault_index import Entry, vocabulary_report
-
-# Promotion threshold: a non-canonical type or an emerging tag that reaches
-# this many uses becomes a candidate for the canonical/background set.
-DEFAULT_PROMOTION_THRESHOLD = 5
-
-
-def promotion_threshold() -> int:
-    raw = os.environ.get("VOCAB_PROMOTION_THRESHOLD", "").strip()
-    if not raw:
-        return DEFAULT_PROMOTION_THRESHOLD
-    try:
-        value = int(raw)
-        return value if value > 0 else DEFAULT_PROMOTION_THRESHOLD
-    except ValueError:
-        return DEFAULT_PROMOTION_THRESHOLD
+from ciao.vault_index import (
+    DEFAULT_PROMOTION_THRESHOLD,
+    Entry,
+    promotion_threshold,
+    vocabulary_report,
+)
 
 
 def _edit_distance(a: str, b: str, max_dist: int = 2) -> int:
