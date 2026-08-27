@@ -370,7 +370,13 @@ def _handover_marker(
 
 def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
-    if "reached your session usage limit" in low:
+    # Claude Code uses "You've hit your session limit" in its user-facing
+    # exhaustion banner, while the API-shaped error says "reached your
+    # session usage limit". Both should arm the deferred hourly retry.
+    if (
+        "reached your session usage limit" in low
+        or "hit your session limit" in low
+    ):
         return True
     # Temporary model saturation is a capacity error rather than a 429/quota
     # error. Treat it as hourly retryable so the user does not have to keep the
