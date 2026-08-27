@@ -307,7 +307,7 @@ def audit_vocabulary_proposals(
                 ],
             }
     elif vault_root.is_dir():
-        targets = [(str(vault_root), workspace_name or "personal", "memory-vault")]
+        targets = [(vault_root, workspace_name or "personal", Path("memory-vault"))]
     else:
         return empty
     try:
