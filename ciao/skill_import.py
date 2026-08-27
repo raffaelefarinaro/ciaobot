@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import io
-import os
 import re
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -179,11 +179,10 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     target = dest_root / name
     if target.exists() and not overwrite:
         return None, [f"Skill '{name}' already exists. Use force to overwrite."]
-    # Extract into a sibling temp dir, then move into place only on success.
-    tmp_target = dest_root / f".{name}.tmp-{os.getpid()}"
-    if tmp_target.exists():
-        _remove_path(tmp_target)
-    tmp_target.mkdir(parents=True, exist_ok=True)
+    # Extract into a uniquely named sibling temp dir, then move into place only
+    # on success. A unique name (not PID-based) keeps concurrent imports of the
+    # same skill from colliding on the same directory.
+    tmp_target = Path(tempfile.mkdtemp(prefix=f".{name}.tmp-", dir=dest_root))
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     try:
         total_written = 0
