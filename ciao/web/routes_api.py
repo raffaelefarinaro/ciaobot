@@ -7707,6 +7707,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 record_dismissal(
                     queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
                 )
+            elif action == "accept":
+                from ciao.memory_proposals import record_promotion
+
+                record_promotion(
+                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                )
             if not proposal_outcomes.is_extraction_kind(row["kind"]):
                 # Not recorded: this ledger measures the MEMORY extraction
                 # pipeline. Skill proposals come from skill evolution and
@@ -8016,6 +8022,17 @@ async def proposal_action(request: Request) -> JSONResponse:
         if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
             proposal_outcomes.record(
                 kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+            )
+        if removed_ours:
+            # Preserve the accepted row's text in the same decision history a
+            # dismissal uses: append-time dedupe consults the live queue and
+            # that sidecar — never the promoted destination — so the nightly
+            # curator would otherwise re-read the transcript and queue the
+            # already-accepted fact again.
+            from ciao.memory_proposals import record_promotion
+
+            record_promotion(
+                queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":

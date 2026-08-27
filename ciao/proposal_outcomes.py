@@ -18,8 +18,10 @@ Everything mirrors :mod:`ciao.job_runs`: an append-only, size-trimmed JSONL
 under ``.runtime``, written strictly best-effort so a recording failure can
 never break the resolution it is describing, plus a fail-open aggregator
 (:func:`tally`) that folds the log into the counts the Automation page shows.
-When the log rotates, the dropped lines are folded into a sidecar totals file
-(``proposal_outcomes_totals.json``) so lifetime counts survive trimming.
+When the log rotates, the dropped lines are archived verbatim
+(``proposal_outcomes.rotated-<ts>.jsonl``) so lifetime counts survive
+trimming; the fold de-duplicates by event content, which is what makes the
+rotation's two-step swap crash-recoverable without ever double-counting.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +132,7 @@ _LOCK_NAME = "proposal_outcomes.lock"
 def _writer_lock(exclusive: bool = True):
     """Serialize writers against each other across processes.
 
-    Every mutation (append + trim + sidecar update) runs under the exclusive
+    Every mutation (append + trim + archive write) runs under the exclusive
     lock; :func:`tally` reads under a shared one. On platforms without
     ``fcntl`` this degrades to unlocked behaviour — same-process callers were
     already serialized by the event loop.
@@ -162,15 +164,29 @@ def _trim_if_large(path: Path) -> None:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
         dropped, kept = lines[:-KEEP_LINES], lines[-KEEP_LINES:]
-        # Rotation must not rewrite history: the lifetime totals the Settings
-        # page shows are carried in a sidecar that absorbs whatever this trim
-        # drops, so tally() = sidecar + what is still in the file.
-        _absorb_dropped_into_totals(dropped)
-        # The rewrite must not truncate the log in place: a crash or disk-full
-        # between truncation and the rewrite would strand lines in neither the
-        # sidecar (already absorbed) nor the file. Write the kept lines to a
-        # sibling temp file and atomically swap it in instead — the same
-        # pattern the sidecar write itself uses.
+        # Rotation is a two-step swap whose crash windows are all recoverable
+        # because the fold (see ``tally``) de-duplicates events by content:
+        #
+        # 1. The dropped lines are archived VERBATIM in their own new file,
+        #    written via temp+rename so it appears whole or not at all.
+        # 2. The live log is atomically swapped for the kept lines.
+        #
+        # A crash between the two leaves every dropped line in BOTH files;
+        # the fold counts each event once. There is deliberately no folded
+        # totals sidecar: absorb-then-delete is a transaction that cannot be
+        # rolled back after a crash (the sidecar would already count lines
+        # the log still holds, double-counting them forever), while verbatim
+        # archives either lost nothing or duplicated something the dedupe
+        # absorbs.
+        rotated_name = (
+            "proposal_outcomes.rotated-"
+            + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            + ".jsonl"
+        )
+        tmp = path.with_name(f".{rotated_name}.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.writelines(dropped)
+        os.replace(tmp, _runtime_dir() / rotated_name)
         tmp = path.with_name(f".{path.name}.trim.tmp")
         with tmp.open("w", encoding="utf-8") as f:
             f.writelines(kept)
@@ -183,107 +199,41 @@ def _trim_if_large(path: Path) -> None:
             pass
 
 
-_TOTALS_NAME = "proposal_outcomes_totals.json"
-
-# Day-bucket keys live here so a rotation that drops events younger than
-# :data:`RECENT_DAYS` keeps contributing to ``recent_30d``; buckets older than
-# the window are pruned on write.
-_RECENT_KEEP_DAYS = RECENT_DAYS + 1
+_ARCHIVE_GLOB = "proposal_outcomes.rotated-*.jsonl"
 
 
-def _totals_path() -> Path:
-    return _runtime_dir() / _TOTALS_NAME
+def _event_key(event: dict[str, Any]) -> str:
+    """The identity of one outcome event, for crash-recovery dedupe.
 
-
-def _empty_totals() -> dict[str, Any]:
-    return {"promoted": 0, "dismissed": 0, "by_workspace": {}, "days": {}}
-
-
-def _prune_days(days: dict[str, Any], reference: datetime) -> dict[str, Any]:
-    cutoff_day = (reference - timedelta(days=_RECENT_KEEP_DAYS)).date()
-    kept: dict[str, Any] = {}
-    for day, counts in days.items():
-        try:
-            day_date = date.fromisoformat(str(day))
-        except ValueError:
-            continue
-        if day_date >= cutoff_day and isinstance(counts, dict):
-            kept[str(day)] = counts
-    return kept
-
-
-def _read_totals(reference: datetime | None = None) -> dict[str, Any]:
-    reference = reference or datetime.now(UTC)
-    try:
-        raw = _totals_path().read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception:  # noqa: BLE001 — missing/corrupt totals degrade to zeros
-        return _empty_totals()
-    if not isinstance(data, dict):
-        return _empty_totals()
-    totals = _empty_totals()
-    for action in ACTIONS:
-        value = data.get(action)
-        totals[action] = value if isinstance(value, int) and value >= 0 else 0
-    by_workspace = data.get("by_workspace")
-    if isinstance(by_workspace, dict):
-        for name, counts in by_workspace.items():
-            if not isinstance(counts, dict):
-                continue
-            bucket = totals["by_workspace"].setdefault(
-                str(name), {"promoted": 0, "dismissed": 0}
-            )
-            for action in ACTIONS:
-                value = counts.get(action)
-                bucket[action] = value if isinstance(value, int) and value >= 0 else 0
-    days = data.get("days")
-    if isinstance(days, dict):
-        totals["days"] = _prune_days(days, reference)
-    return totals
-
-
-def _event_day(raw: Any, reference: datetime) -> str | None:
-    """The UTC calendar day of an event's timestamp, for the day buckets."""
-    parsed = _parsed_ts(raw)
-    if parsed is None:
-        return None
-    return parsed.astimezone(UTC).date().isoformat()
-
-
-def _absorb_dropped_into_totals(
-    dropped_lines: list[str], reference: datetime | None = None
-) -> None:
-    """Fold the lines a rotation is about to drop into the sidecar totals.
-
-    Best-effort: it runs only inside the trim, immediately before the file is
-    rewritten without those lines, and under the same lock as every writer.
-    Lifetime counts and the recent-window day buckets are both carried, so a
-    rotation cannot make history — recent or total — disappear.
+    Rotation copies a line verbatim, so a crash between the archive step and
+    the log swap leaves the same event in both files. The full event — every
+    key and value, order-normalized — is the identity: two genuine
+    resolutions always differ somewhere (the recorder stamps microseconds),
+    while a crash duplicate is byte-identical. Anything weaker (kind+action+
+    workspace, say) would collapse two legitimate resolutions that only
+    disagree in a field this key forgot about. The fold keeps the first
+    occurrence.
     """
-    reference = reference or datetime.now(UTC)
-    totals = _read_totals(reference)
-    for line in dropped_lines:
+    return json.dumps(event, sort_keys=True, ensure_ascii=False)
+
+
+def _iter_event_lines(paths: list[Path]) -> list[str]:
+    """Read every JSONL source under one shared lock, newest file first.
+
+    The live log is read last so its line wins the dedupe (it is the file
+    the recorder appends to, and the archive only holds what a rotation
+    removed from it).
+    """
+    lines: list[str] = []
+    for path in paths:
+        if not path.exists():
+            continue
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                lines.extend(f.readlines())
+        except OSError:
             continue
-        if not isinstance(event, dict) or event.get("action") not in ACTIONS:
-            continue
-        action = event["action"]
-        workspace = str(event.get("workspace") or "")
-        totals[action] += 1  # type: ignore[literal-required]
-        bucket = totals["by_workspace"].setdefault(
-            workspace, {"promoted": 0, "dismissed": 0}
-        )
-        bucket[action] += 1  # type: ignore[literal-required]
-        day = _event_day(event.get("ts"), reference)
-        if day is not None:
-            day_bucket = totals["days"].setdefault(day, {"promoted": 0, "dismissed": 0})
-            day_bucket[action] += 1  # type: ignore[literal-required]
-    totals["days"] = _prune_days(totals["days"], reference)
-    tmp = _totals_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(totals, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(_totals_path())
+    return lines
 
 
 def tally(*, now: datetime | None = None) -> dict[str, Any]:
@@ -291,10 +241,11 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
 
     Returns ``{"promoted": n, "dismissed": m, "by_workspace": {name:
     {"promoted": n, "dismissed": m}}, "recent_30d": {"promoted": n,
-    "dismissed": m}}``. Lifetime totals are the rotation sidecar plus whatever
-    is still in the log, so trimming never makes history disappear, and
-    ``recent_30d`` adds the sidecar's per-day buckets — a rotation that drops
-    still-recent events cannot make the 30-day count fall either.
+    "dismissed": m}}``. Rotation moves dropped lines verbatim into
+    ``proposal_outcomes.rotated-<ts>.jsonl`` archives, so lifetime counts
+    survive trimming, and the fold de-duplicates events by content — a crash
+    between the archive step and the log swap leaves a line in both files,
+    and each event is still counted exactly once.
     Malformed lines are skipped, never fatal; an event
     with an unreadable timestamp still counts in the totals, just not in the
     30-day window. Never raises: a broken log degrades to zeros rather than
@@ -303,35 +254,27 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
-    cutoff_day = (reference - timedelta(days=RECENT_DAYS)).date()
+    cutoff = reference - timedelta(days=RECENT_DAYS)
 
-    totals: dict[str, Any] = _empty_totals()
     by_workspace: dict[str, dict[str, int]] = {}
     recent = {"promoted": 0, "dismissed": 0}
+    action_totals = {action: 0 for action in ACTIONS}
 
     def bucket(name: str) -> dict[str, int]:
         return by_workspace.setdefault(name, {"promoted": 0, "dismissed": 0})
 
     lines: list[str] = []
     try:
-        # Sidecar and log are read under ONE shared lock: a rotation that
-        # lands between two unlocked reads would combine the pre-rotation
-        # sidecar with the post-rotation log and silently drop every rotated
-        # event from the counts.
         with _writer_lock(exclusive=False):
-            totals = _read_totals(reference)
+            runtime = _runtime_dir()
+            rotated = sorted(runtime.glob(_ARCHIVE_GLOB)) if runtime.is_dir() else []
             path = _log_path()
-            if path.exists():
-                with path.open("r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
+            lines = _iter_event_lines(rotated + [path])
     except Exception:  # noqa: BLE001 — a broken log is zeros, not a failed page
         logger.debug("Failed to tally proposal outcomes", exc_info=True)
-        totals = _empty_totals()
         lines = []
-    by_workspace = {
-        name: dict(counts) for name, counts in totals["by_workspace"].items()
-    }
 
+    seen: set[str] = set()
     for line in lines:
         line = line.strip()
         if not line:
@@ -345,32 +288,29 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
         action = event.get("action")
         if action not in ACTIONS:
             continue
+        key = _event_key(event)
+        if key in seen:
+            # A crash mid-rotation can leave the same event in the archive
+            # and the live log; the fold counts it once.
+            continue
+        seen.add(key)
         workspace = str(event.get("workspace") or "")
-        totals[action] += 1  # type: ignore[literal-required]
-        bucket(workspace)[action] += 1  # type: ignore[literal-required]
-        # Live-file rows keep full timestamp precision; only ROTATED events
-        # fall back to day granularity (they live in undated-per-event
-        # buckets).
+        action_totals[action] += 1
+        bucket(workspace)[action] += 1
         ts = _parsed_ts(event.get("ts"))
-        if ts is not None and ts.astimezone(UTC) >= reference - timedelta(days=RECENT_DAYS):
+        if ts is not None and ts.astimezone(UTC) >= cutoff_ts(reference):
             recent[action] += 1  # type: ignore[literal-required]
 
-    # Recent events carried by the rotation sidecar count toward the window
-    # too; buckets older than the window were pruned when the sidecar was
-    # written.
-    for day, counts in totals.get("days", {}).items():
-        if date.fromisoformat(str(day)) >= cutoff_day:
-            for action in ACTIONS:
-                value = counts.get(action)
-                if isinstance(value, int) and value > 0:
-                    recent[action] += value
-
     return {
-        "promoted": totals["promoted"],
-        "dismissed": totals["dismissed"],
+        "promoted": action_totals["promoted"],
+        "dismissed": action_totals["dismissed"],
         "by_workspace": by_workspace,
         "recent_30d": recent,
     }
+
+
+def cutoff_ts(reference: datetime) -> datetime:
+    return reference - timedelta(days=RECENT_DAYS)
 
 
 def _parsed_ts(raw: Any) -> datetime | None:
