@@ -4671,3 +4671,30 @@ describe('mark unread', () => {
     expect(store.chatUnread('c1')).toBe(1)
   })
 })
+
+describe('chatLastSnippet', () => {
+  test('reads the persisted last_snippet before any WS event, and a live snippet overrides it', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'A finished chat',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      last_snippet: 'Persisted from the last server response.',
+    }] as unknown as ChatInfo[]
+
+    // No WS event has arrived this session — falls back to the persisted value.
+    expect(store.chatLastSnippet('c1')).toBe('Persisted from the last server response.')
+
+    // A live chat_result_ready snippet takes priority over the persisted one.
+    store.lastResultSnippet = { c1: 'Fresh snippet from a turn that just finished.' }
+    expect(store.chatLastSnippet('c1')).toBe('Fresh snippet from a turn that just finished.')
+
+    // No snippet in either place: no preview.
+    expect(store.chatLastSnippet('unknown-chat')).toBeNull()
+  })
+})
