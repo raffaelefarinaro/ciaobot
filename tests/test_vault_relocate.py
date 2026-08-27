@@ -316,6 +316,41 @@ def test_plan_treats_an_unrelated_path_as_the_whole_directory(tmp_path: Path) ->
     assert not result.refused
 
 
+def test_plan_refuses_a_destination_nested_inside_the_source(tmp_path: Path) -> None:
+    """The canonical destination must never be at or beneath the source.
+
+    With the global vault root nested under the pinned vault (source
+    install/legacy, canonical install/legacy/nested/personal), no
+    other-workspace overlap is found and the whole-directory move is
+    approved — but `git mv` then fails moving a directory into itself, after
+    apply() has already created the destination parents inside the source.
+    """
+    install = _git_install(tmp_path)
+    legacy = install / "legacy"
+    (legacy / "People").mkdir(parents=True)
+    (legacy / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    _write_registry(install, [{"name": "personal", "vault_root": str(legacy)}])
+    _commit_all(install)
+    # The global vault root sits INSIDE the pinned vault, so the canonical
+    # location (vault_root/personal) nests beneath the source.
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path / "install",
+        state_path=tmp_path / "install" / ".runtime" / "state.json",
+        media_root=tmp_path / "install" / ".runtime" / "media",
+        vault_root=legacy / "nested",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root=str(legacy)),
+        },
+    )
+
+    result = plan(config, "personal")
+
+    assert result.refused
+    assert any("at or beneath" in r for r in result.refusals), result.refusals
+    assert not result.whole_directory
+
+
 def test_apply_moves_the_whole_directory_and_repoints_the_registry(tmp_path: Path) -> None:
     install, config = _pinned_install(tmp_path)
     runtime = install / ".runtime"

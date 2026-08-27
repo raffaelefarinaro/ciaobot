@@ -181,3 +181,47 @@ def test_extract_is_transactional_on_corrupt_member(tmp_path: Path) -> None:
     # Nothing should be left behind from the aborted extraction.
     assert not (tmp_path / "demo").exists()
     assert not list(tmp_path.glob(".demo.tmp-*"))
+
+
+def test_concurrent_non_force_imports_of_the_same_skill_do_not_clobber(
+    tmp_path: Path,
+) -> None:
+    """Two same-name imports without force: exactly one wins.
+
+    The route dispatches extraction via asyncio.to_thread, so two imports of
+    the same previously-absent skill run in parallel; without per-name
+    serialization both passed the existence check and the second deleted the
+    first's just-installed directory despite overwrite=False.
+    """
+    import threading
+
+    zip_a = _skill_zip("demo", extra={"demo/asset.bin": b"first"})
+    zip_b = _skill_zip("demo", extra={"demo/asset.bin": b"second"})
+    results: list[tuple[str | None, list[str]]] = []
+    results_lock = threading.Lock()
+
+    def do_import(data: bytes) -> None:
+        outcome = extract_skill_zip(data, tmp_path)
+        with results_lock:
+            results.append(outcome)
+
+    threads = [
+        threading.Thread(target=do_import, args=(data,))
+        for data in (zip_a, zip_b)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    succeeded = [(name, errs) for name, errs in results if name == "demo"]
+    refused = [(name, errs) for name, errs in results if name is None]
+    # Both requests complete, but only one archive ends up installed: the
+    # loser is refused with "already exists", never a silent replacement.
+    assert len(succeeded) == 1, results
+    assert len(results) == 2
+    refused_errors = [e for _n, errs in results if _n is None for e in errs]
+    assert any("already exists" in e for e in refused_errors), refused_errors
+    # And the winner's content is intact (not half-deleted).
+    installed = (tmp_path / "demo" / "asset.bin").read_bytes()
+    assert installed in (b"first", b"second")

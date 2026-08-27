@@ -211,6 +211,21 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
                 "registry entry gets repointed"
             )
             return result
+        if _at_or_beneath(source, destination):
+            # A whole-directory move whose destination lives inside the
+            # source (a global vault root nested under the pinned vault) is
+            # not a rename at all: `git mv` necessarily fails with "cannot
+            # move a directory into itself", after the destination parents
+            # have already been created inside the source. The shared-root
+            # branch below never hits this — there the move is per-entry,
+            # and the destination is a new subfolder of the source by
+            # construction. Refuse at plan time instead.
+            result.refusals.append(
+                f"the canonical destination ({destination}) is at or beneath "
+                "the vault being moved; relocating would nest the vault "
+                "inside itself — repoint the workspace's vault_root first"
+            )
+            return result
         result.whole_directory = True
         return result
 
