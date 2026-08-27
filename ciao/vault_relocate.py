@@ -182,14 +182,23 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
         )
         return result
 
-    other_workspaces = {name for name in all_names if name != workspace}
+    other_vault_roots = set()
+    for name in all_names:
+        if name == workspace:
+            continue
+        try:
+            other_vault_roots.add(Path(config.workspace_vault_root(name)).resolve())
+        except (ValueError, OSError):
+            continue
 
     for entry in sorted(source.iterdir(), key=lambda p: p.name):
         name = entry.name
         if entry.is_symlink():
             result.entries.append(RelocationEntry(name, "unclassified", "symlink"))
-        elif name in other_workspaces:
+        elif entry.resolve() in other_vault_roots:
             result.entries.append(RelocationEntry(name, "skip", "belongs to another workspace"))
+        elif entry == destination:
+            result.entries.append(RelocationEntry(name, "skip", "canonical destination"))
         elif name in _SHARED_NAMES:
             result.entries.append(RelocationEntry(name, "skip", "shared across every workspace"))
         else:
@@ -398,6 +407,16 @@ def apply(
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
 
+    # git mv rejects directories containing only untracked files. Stage the
+    # planned sources so new notes move through the same tracked, undoable path.
+    for src_rel, _dst_rel in moves_to_apply:
+        code, out = _run_git(install_root, "add", "-A", "--", src_rel)
+        if code != 0:
+            payload["status"] = "refused"
+            payload["refusals"] = [f"could not stage {src_rel}: {out}"]
+            payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+            return payload
+
     code, head = _run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""
 
@@ -469,7 +488,17 @@ def apply(
         "until it restarts (Settings -> Restart); tell the operator to "
         "restart before writing more notes through this workspace"
     )
-    payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+    try:
+        payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+    except OSError as exc:
+        for done in reversed(applied):
+            (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
+            _run_git(install_root, "mv", done["destination"], done["source"])
+        if registry_before is not None:
+            _write_registry(runtime_root, registry_before)
+        payload["status"] = "refused"
+        payload["refusals"] = [f"could not persist the relocation receipt: {exc}"]
+        return payload
     return payload
 
 
