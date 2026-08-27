@@ -555,6 +555,13 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         ):
             already.append(entry["source"])
             continue
+        if not source.exists() and not source.is_symlink() and not destination.exists() and not destination.is_symlink():
+            return {
+                "status": "refused",
+                "reason": f"neither recorded path exists for {entry['source']}; nothing was moved",
+                "reversed": reversed_moves,
+                "already_reversed": already,
+            }
         if source.exists() or source.is_symlink():
             return {
                 "status": "refused",
@@ -600,7 +607,7 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         None,
     )
     if prior_entry is not None:
-        prior_vault_root = prior_entry.get("vault_root")
+        prior_vault_root = prior_entry.get("vault_root", workspace)
         for entry in current_registry:
             if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
                 entry["vault_root"] = prior_vault_root

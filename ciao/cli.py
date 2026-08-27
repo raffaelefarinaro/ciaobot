@@ -2072,8 +2072,17 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     if not runtime.is_absolute():
         runtime = workspace / runtime
     runtime = runtime.resolve()
+    config_source = dict(os.environ)
+    dotenv_path = workspace / ".env"
+    if dotenv_path.is_file():
+        from dotenv import dotenv_values
+
+        config_source = {
+            **{key: value for key, value in dotenv_values(dotenv_path).items() if value is not None},
+            **config_source,
+        }
     config = CiaoConfig.from_env({
-        **os.environ,
+        **config_source,
         "CIAO_WORKSPACE": str(workspace),
         # Must match `runtime` exactly: vault_relocate reads/writes
         # workspaces.json under `runtime`, and if CiaoConfig loaded its own
