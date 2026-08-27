@@ -69,6 +69,14 @@ _SHARED_NAMES: frozenset[str] = frozenset(
     }
 )
 
+EXTERNAL_VAULT_REFUSAL = (
+    "the vault lives outside the install's git worktree (an external or "
+    "hand-pinned vault root), so it cannot be moved with git mv and there "
+    "is no automatic undo for it here; back it up, move it by hand, then "
+    "update the workspace registry and verify note counts before removing "
+    "the backup"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RelocationEntry:
@@ -195,7 +203,10 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
         name = entry.name
         if entry.is_symlink():
             result.entries.append(RelocationEntry(name, "unclassified", "symlink"))
-        elif entry.resolve() in other_vault_roots:
+        elif any(
+            other_root == entry.resolve() or entry.resolve() in other_root.parents
+            for other_root in other_vault_roots
+        ):
             result.entries.append(RelocationEntry(name, "skip", "belongs to another workspace"))
         elif entry == destination:
             result.entries.append(RelocationEntry(name, "skip", "canonical destination"))
@@ -323,6 +334,13 @@ def apply(
         return payload
 
     install_root = Path(config.workspace_root).resolve()
+    source = Path(result.source)
+    destination = Path(result.destination)
+    if not source.is_relative_to(install_root) or not destination.is_relative_to(install_root):
+        payload["status"] = "refused"
+        payload["refusals"] = [EXTERNAL_VAULT_REFUSAL]
+        payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+        return payload
     history = ensure_rollback_history(install_root)
     payload["git_history"] = history
     if history["status"] in {"no_git_binary", "init_failed", "add_failed", "commit_failed"}:
@@ -353,8 +371,6 @@ def apply(
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
 
-    source = Path(result.source)
-    destination = Path(result.destination)
     try:
         source_rel = str(source.relative_to(install_root))
     except ValueError:
@@ -369,14 +385,6 @@ def apply(
     # and there is no automatic undo for a move git cannot track. Refusing is
     # deliberate, not a gap to route around: this is the one case where a
     # careful manual move, backed up first, is the right tool.
-    EXTERNAL_VAULT_REFUSAL = (
-        "the vault lives outside the install's git worktree (an external or "
-        "hand-pinned vault root), so it cannot be moved with git mv and there "
-        "is no automatic undo for it here; back it up, move it by hand, then "
-        "update the workspace registry and verify note counts before removing "
-        "the backup"
-    )
-
     moves_to_apply: list[tuple[str, str]] = []
     if result.whole_directory:
         if source_rel is None or dest_rel is None:
