@@ -1559,72 +1559,6 @@ async def gws_integration_settings(request: Request) -> JSONResponse:
 GWS_CLI_PACKAGE = "@googleworkspace/cli"
 
 
-async def gws_install(request: Request) -> JSONResponse:
-    """Install the Google Workspace CLI globally via npm.
-
-    Runs ``npm install -g @googleworkspace/cli`` so the ``gws`` binary becomes
-    available on PATH. Returns the refreshed integration payload so the UI can
-    reflect the new status without a restart (unlike the local voice engine, no
-    Python import changes, so no server restart is needed).
-    """
-    config = request.app.state.config
-
-    if resolve_tool("gws"):
-        return JSONResponse(
-            {
-                "ok": True,
-                "output": "gws is already installed.",
-                "integration": _gws_integration_payload(config),
-            }
-        )
-
-    npm = resolve_tool("npm")
-    if not npm:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": (
-                    "npm was not found on PATH. Install Node.js/npm, then run "
-                    f"'npm install -g {GWS_CLI_PACKAGE}' manually."
-                ),
-            },
-            status_code=500,
-        )
-
-    cmd = [npm, "install", "-g", GWS_CLI_PACKAGE]
-    env = dict(os.environ)
-    env["PATH"] = login_shell_path()
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
-    output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-    if result.returncode != 0:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": f"npm exited with code {result.returncode}",
-                "output": output,
-            },
-            status_code=500,
-        )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "output": output,
-            "integration": _gws_integration_payload(config),
-        }
-    )
-
 
 async def gws_save_client_secret(request: Request) -> JSONResponse:
     config = request.app.state.config
@@ -4631,18 +4565,6 @@ def _find_soffice() -> str | None:
 async def libreoffice_status_endpoint(request: Request) -> JSONResponse:
     """Whether LibreOffice (soffice) is available to render .pptx previews."""
     return JSONResponse({"available": _find_soffice() is not None})
-
-
-async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
-    """Install LibreOffice via Homebrew Cask. No server restart needed —
-    workspace_binary probes for soffice fresh on every request."""
-    from ciao.upgrade import upgrade_libreoffice
-
-    result = await upgrade_libreoffice()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
 
 
 async def workspace_binary(request: Request) -> Response:

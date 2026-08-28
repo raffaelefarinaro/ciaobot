@@ -1070,18 +1070,9 @@
                   Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
                 </p>
                 <div class="action-row">
-                  <button
-                    class="btn-primary btn-small"
-                    :disabled="gwsInstalling"
-                    @click="installGws"
-                  >
-                    {{ gwsInstalling ? 'Installing…' : 'Install gws' }}
-                  </button>
+                  <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
                 </div>
-                <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
-                <div v-if="isGwsInstallError" class="action-row">
-                  <button class="btn-primary btn-small" @click="fixGwsInstallErrorInChat">Fix in Chat</button>
-                </div>
+                <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
@@ -2957,63 +2948,17 @@ async function removeGwsProfile(profile: GwsProfile) {
   }
 }
 
-const gwsInstalling = ref(false)
-const gwsInstallResult = ref('')
-const gwsInstallOutput = ref('')
-
-async function installGws() {
-  gwsInstalling.value = true
-  gwsInstallResult.value = 'Installing @googleworkspace/cli via npm…'
-  gwsInstallOutput.value = ''
-  try {
-    const res = await api.post<{ ok: boolean; output?: string; error?: string; integration?: GwsIntegrationSettings }>(
-      '/api/integrations/gws/install',
-      {},
-    )
-    if (res.ok) {
-      if (res.integration) gwsIntegration.value = res.integration
-      gwsInstallResult.value = 'gws installed successfully.'
-      gwsInstallOutput.value = res.output || ''
-    } else {
-      gwsInstallOutput.value = res.output || ''
-      const base = res.error || 'Installation failed.'
-      gwsInstallResult.value = gwsInstallOutput.value ? `${base}: ${gwsInstallOutput.value.slice(0, 500)}` : base
-    }
-  } catch (e) {
-    // A failed `npm install` returns HTTP 500 carrying the diagnostic stream
-    // in `payload.output`; the api wrapper throws an ApiError for that status,
-    // so the `res.ok === false` branch above is unreachable here. Surface the
-    // output so Fix in Chat gets the real reason (e.g. EACCES), not just the
-    // exit code.
-    const payload = errorPayload(e)
-    const output = typeof payload?.output === 'string' ? payload.output : ''
-    gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
-    gwsInstallOutput.value = output || errorMessage(e)
-  } finally {
-    gwsInstalling.value = false
-  }
-}
-
-const isGwsInstallError = computed(() => {
-  const t = gwsInstallResult.value
-  if (!t) return false
-  if (t === 'gws installed successfully.' || t === 'Installing @googleworkspace/cli via npm…') return false
-  return /error|failed|failure/i.test(t)
-})
-
-async function fixGwsInstallErrorInChat() {
-  const parts = [gwsInstallResult.value || 'gws install failed']
-  if (gwsInstallOutput.value && !parts[0].includes(gwsInstallOutput.value.slice(0, 80))) {
-    parts.push('', 'npm output:', gwsInstallOutput.value.slice(0, 4000))
-  }
-  const errorText = parts.join('\n')
+async function installGwsInChat() {
   try {
     await projectStore.fixError({
-      errorText,
-      context: 'Installing @googleworkspace/cli from Settings → Google Workspace → Install gws. The install failed (npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install).',
+      errorText:
+        'The @googleworkspace/cli (gws) is not installed on this machine, so Google Workspace tools are unavailable.',
+      context:
+        'Installing @googleworkspace/cli from Settings → Google Workspace → Install in Chat. Run `npm install -g @googleworkspace/cli` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). Walk the operator through the install; Ciaobot never runs package installs on its own.',
+      title: 'Install gws',
     })
   } catch (e) {
-    notifyFailed('Could not open fix chat', errorMessage(e))
+    notifyFailed('Could not open install chat', errorMessage(e))
   }
 }
 

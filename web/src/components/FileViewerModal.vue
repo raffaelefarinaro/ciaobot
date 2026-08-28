@@ -140,9 +140,8 @@
               <span v-if="store.libreofficeInstallError"> {{ store.libreofficeInstallError }}</span>
               <button
                 class="btn-primary btn-small"
-                :disabled="store.libreofficeInstalling"
-                @click="store.installLibreoffice"
-              >{{ store.libreofficeInstalling ? 'Installing…' : 'Install LibreOffice' }}</button>
+                @click="store.installLibreofficeInChat"
+              >Install in Chat</button>
             </div>
             <iframe
               v-else-if="store.kind === 'pdf'"

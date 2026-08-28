@@ -996,6 +996,15 @@ class GwsReloginManager:
         session = self._sessions.pop(profile, None)
         if session is None:
             return False
+        # Invalidate BEFORE tearing the listener down, exactly as the timeout
+        # path does: `shutdown()` lets an in-flight `do_GET` run to completion,
+        # so a callback that started before this cancel would otherwise pass
+        # the pending check in `_finish` and still exchange the code + write
+        # credentials for a session the operator just cancelled.
+        if session.status == "pending":
+            session.status = "error"
+            session.error = "cancelled"
+            session._done.set()
         self._shutdown_server(session)
         return True
 
