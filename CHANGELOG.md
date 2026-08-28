@@ -30,6 +30,20 @@
 - Merge fix/restore-subagent-subchats into develop (`c504b79a`)
 
 ### Fixed
+- Restore the subagent subchat views dropped by merge `ed04d1e9`: the sidebar
+  rows, the read-only `/chat/:chatId/subagent/:agentId` transcript view, and the
+  running-subagent polling. Their backend half had shipped with no caller.
+- Chat-bound automations created from the PWA were stored without a workspace,
+  so the first archive of their chat disabled them permanently instead of
+  forking a replacement.
+- Editing an interval automation to a daily/weekly/monthly cadence could save it
+  with no time, leaving it enabled but unable to ever fire.
+- `ciao gws-auth-helper --redirect-url` always failed with `invalid_grant`: it
+  generated a fresh PKCE verifier instead of using the one that produced the
+  authorization URL.
+- The read-only subagent view re-fetched every subagent the chat ever spawned on
+  a 4s timer; it now polls only the agent being viewed.
+- Sidebar subagent rows could keep spinning after their work finished.
 - fix: require project docs for project memories (`a7c819ca`)
 - fix(web): fail closed on the GWS one-click guard when node status is unknown (`88b5cff4`)
 - fix: validate record() inputs and guard the tally cache in proposal_outcomes (`73a8ff3a`)
