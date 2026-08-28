@@ -37,6 +37,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
+import { bareAgentId } from '../lib/subagentIds'
 
 export function shouldReconnectActiveChatOnStreamingStarted(
   socket: Pick<WebSocket, 'readyState'> | undefined,
@@ -736,17 +737,39 @@ export const useProjectStore = defineStore('projects', () => {
     || Object.values(backgroundAgents.value).some(n => n > 0),
   )
 
+  // The server keeps a row "running" until the agent's transcript goes idle,
+  // which lags the parent turn by up to FINISHED_AGENT_IDLE_SECONDS (60s). So
+  // one refresh on the falling edge was not enough: whatever it still listed
+  // stayed in the sidebar with a live spinner until the next turn. Drain
+  // instead — keep polling until the rows are gone — but only for a bounded
+  // window, because a row the server can never retire (an interrupted agent
+  // whose transcript has no final record) would otherwise poll forever.
+  const RUNNING_SUBAGENT_DRAIN_MS = 90_000
+
   let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
-  watch(anyChatWorking, (working) => {
+  function stopRunningSubagentPoll(): void {
     if (runningSubagentTimer !== null) {
       clearInterval(runningSubagentTimer)
       runningSubagentTimer = null
     }
+  }
+  watch(anyChatWorking, (working) => {
+    stopRunningSubagentPoll()
     // Refresh on both edges: rising paints the rows without waiting a tick,
-    // falling is what clears the last of them once the work is over.
+    // falling starts the drain that clears the last of them.
     void refreshRunningSubagents()
-    if (!working) return
+    if (working) {
+      runningSubagentTimer = setInterval(() => {
+        void refreshRunningSubagents()
+      }, 4000)
+      return
+    }
+    const deadline = Date.now() + RUNNING_SUBAGENT_DRAIN_MS
     runningSubagentTimer = setInterval(() => {
+      if (Object.keys(runningSubagents.value).length === 0 || Date.now() > deadline) {
+        stopRunningSubagentPoll()
+        return
+      }
       void refreshRunningSubagents()
     }, 4000)
   })
@@ -3100,6 +3123,31 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       const r = await api.get<SubagentTranscript[]>(`/api/chats/${chatId}/subagents`)
       subagents.value[chatId] = Array.isArray(r) ? r : []
+    } catch {
+      // No session locally / SDK error — leave any prior data in place.
+    }
+  }
+
+  // One agent's transcript, for the read-only subagent view. That view polls
+  // while its agent works, and the unfiltered endpoint renders every subagent
+  // the chat ever spawned — so on a chat with a dozen finished agents the
+  // whole set was re-fetched every few seconds to redraw one of them. Merges
+  // into the existing list rather than replacing it, so the in-chat panel's
+  // data for the other agents survives.
+  async function loadSubagent(chatId: string, agentId: string): Promise<void> {
+    if (!agentId) return
+    try {
+      const r = await api.get<SubagentTranscript[]>(
+        `/api/chats/${chatId}/subagents?agent_id=${encodeURIComponent(agentId)}`,
+      )
+      const fetched = Array.isArray(r) ? r : []
+      const one = fetched.find(s => bareAgentId(s.agent_id) === bareAgentId(agentId))
+      if (!one) return
+      const prior = subagents.value[chatId] || []
+      const idx = prior.findIndex(s => bareAgentId(s.agent_id) === bareAgentId(agentId))
+      subagents.value[chatId] = idx === -1
+        ? [...prior, one]
+        : prior.map((s, i) => (i === idx ? one : s))
     } catch {
       // No session locally / SDK error — leave any prior data in place.
     }
@@ -5533,7 +5581,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, refreshRunningSubagents, setReentrySummaryEnabled,
+    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,

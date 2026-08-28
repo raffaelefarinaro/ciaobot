@@ -1479,6 +1479,7 @@ function missedCountFor(workspace: string): number {
 }
 
 import type { ChatInfo, ProjectInfo, RunningSubagent, Schedule } from '../lib/types'
+import { bareAgentId } from '../lib/subagentIds'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1735,13 +1736,6 @@ function toggleSubagents(chatId: string) {
   } else {
     collapsedSubagentParents.delete(chatId)
   }
-}
-
-// Claude ids arrive bare from the parent JSONL and prefixed ("agent-<id>")
-// from the local transcript fallback, so both surfaces normalise before
-// comparing or routing — otherwise the same agent reads as two.
-function bareAgentId(agentId: string): string {
-  return agentId.replace(/^agent-/, '')
 }
 
 function subagentPath(chatId: string, agentId: string): string {

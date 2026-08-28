@@ -90,6 +90,7 @@ import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import type { SubagentTranscript } from '../lib/types'
+import { bareAgentId, sameAgent } from '../lib/subagentIds'
 
 const props = defineProps<{ chatId: string; agentId: string }>()
 const emit = defineEmits<{ 'open-sidebar': [] }>()
@@ -98,15 +99,9 @@ const store = useProjectStore()
 const loading = ref(false)
 const bodyRef = ref<HTMLElement | null>(null)
 
-// SDK ids are bare ("a319…"); the local-JSONL fallback uses the file stem
-// ("agent-a319…"). Both reach this route, so compare on the bare form.
-function bare(id: string): string {
-  return id.replace(/^agent-/, '')
-}
-
 const subagent = computed<SubagentTranscript | null>(() => {
   const rows = store.subagents[props.chatId] || []
-  return rows.find(s => bare(s.agent_id) === bare(props.agentId)) || null
+  return rows.find(s => sameAgent(s.agent_id, props.agentId)) || null
 })
 
 const parentTitle = computed(
@@ -116,7 +111,7 @@ const parentTitle = computed(
 const agentLabel = computed(() => {
   const described = (subagent.value?.description || '').trim()
   if (described) return described
-  const id = bare(props.agentId)
+  const id = bareAgentId(props.agentId)
   return id.length > 12 ? `${id.slice(0, 8)}…` : id
 })
 
@@ -125,21 +120,27 @@ const agentLabel = computed(() => {
 // transcript's own status.
 const status = computed(() => {
   const live = store.runningSubagentsFor(props.chatId)
-    .some(s => bare(s.agent_id) === bare(props.agentId))
+    .some(s => sameAgent(s.agent_id, props.agentId))
   return live ? 'running' : (subagent.value?.status || '')
 })
 
 async function refresh(): Promise<void> {
   loading.value = true
   try {
-    await store.loadSubagents(props.chatId)
+    // Fetch this agent alone. Only if that turns up nothing do we pay for the
+    // whole set — which covers ids the narrow fetch cannot resolve on its own
+    // (an opencode child, or a stale link to an agent the parent never named).
+    await store.loadSubagent(props.chatId, props.agentId)
+    if (!subagent.value) await store.loadSubagents(props.chatId)
   } finally {
     loading.value = false
   }
 }
 
 // Poll while the agent is still working: its transcript file grows as it goes,
-// so this is a live feed for the same reason the in-chat panel polls.
+// so this is a live feed for the same reason the in-chat panel polls. Only
+// this agent is re-fetched — the unfiltered endpoint renders every subagent
+// the chat ever spawned, which is far too much to put on a 4s timer.
 let timer: ReturnType<typeof setInterval> | null = null
 watch(status, (value) => {
   if (timer !== null) {
@@ -147,7 +148,9 @@ watch(status, (value) => {
     timer = null
   }
   if (value !== 'running') return
-  timer = setInterval(() => { void store.loadSubagents(props.chatId) }, 4000)
+  timer = setInterval(() => {
+    void store.loadSubagent(props.chatId, props.agentId)
+  }, 4000)
 }, { immediate: true })
 
 watch(() => [props.chatId, props.agentId], () => { void refresh() })

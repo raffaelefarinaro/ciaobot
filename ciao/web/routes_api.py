@@ -3677,6 +3677,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse([])
 
+    # ``?agent_id=`` narrows the response to one agent. The read-only subagent
+    # view shows a single transcript and polls it while the agent works;
+    # without this it re-fetched and re-rendered every subagent the chat ever
+    # spawned on every tick. Narrowing skips the sibling transcript reads
+    # entirely rather than filtering after the fact.
+    wanted_agent_id = (request.query_params.get("agent_id") or "").strip()
+
     config = request.app.state.config
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
@@ -3697,6 +3704,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
             if not agent_id:
+                continue
+            if wanted_agent_id and agent_id != wanted_agent_id:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
@@ -3725,6 +3734,18 @@ async def chat_subagents(request: Request) -> JSONResponse:
     agent_root = resolver(chat_id) if resolver is not None else None
 
     def _finalize(entries: list[dict]) -> JSONResponse:
+        # Catch-all for the local-transcript fallbacks, which read the whole
+        # session directory and cannot narrow at the source. Those entries are
+        # keyed by file stem ("agent-a319…") while the SDK and the route use
+        # the bare id, so compare on the bare form or the filter drops the
+        # agent it was asked for.
+        if wanted_agent_id:
+            bare_wanted = wanted_agent_id.removeprefix("agent-")
+            entries = [
+                e
+                for e in entries
+                if str(e.get("agent_id", "")).removeprefix("agent-") == bare_wanted
+            ]
         _merge_subagent_dispatch_meta(
             entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
@@ -3739,20 +3760,25 @@ async def chat_subagents(request: Request) -> JSONResponse:
             )
         )
 
-    try:
-        agent_ids = list_subagents(chat.session_id, directory=workspace)
-    except (FileNotFoundError, ValueError):
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    if wanted_agent_id:
+        # Skip discovery: the caller already knows the id, and list_subagents
+        # only exists to enumerate the siblings we are deliberately not reading.
+        agent_ids = [wanted_agent_id]
+    else:
+        try:
+            agent_ids = list_subagents(chat.session_id, directory=workspace)
+        except (FileNotFoundError, ValueError):
+            return _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
-    except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        except Exception:  # noqa: BLE001 — defensive against SDK surprises
+            return _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
 
     result: list[dict] = []
     for agent_id in agent_ids:

@@ -4580,3 +4580,97 @@ describe('chatLastSnippet', () => {
     expect(store.lastResultSnippetNeedsRebase.has('c1')).toBe(false)
   })
 })
+
+describe('running subagent poll', () => {
+  // The server keeps a row "running" until the agent's transcript goes idle,
+  // which lags the parent turn by up to 60s. One refresh on the falling edge
+  // therefore left rows spinning in the sidebar until the next turn.
+  function mockRunning(rows: Record<string, unknown[]>): void {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows })
+      return Promise.resolve([])
+    })
+  }
+
+  test('keeps polling after work stops until the rows clear', async () => {
+    const store = useProjectStore()
+    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
+    mockRunning({ c1: row })
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.runningSubagents.c1).toHaveLength(1)
+
+      // Work stops, but the server still names the agent.
+      store.streaming = { c1: false }
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(store.runningSubagents.c1).toHaveLength(1)
+
+      // The transcript finally goes idle; the drain picks that up and the row
+      // disappears without needing another turn.
+      mockRunning({})
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(store.runningSubagents.c1).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
+    const store = useProjectStore()
+    const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
+    mockRunning({ c1: row })
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      store.streaming = { c1: false }
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(95_000)
+      const callsAtDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      const callsAfter = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+      expect(callsAfter).toBe(callsAtDeadline)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('loadSubagent', () => {
+  test('fetches one agent and merges it without dropping the others', async () => {
+    const store = useProjectStore()
+    store.subagents = {
+      c1: [
+        { agent_id: 'a1', messages: [], description: 'first' },
+        { agent_id: 'a2', messages: [], description: 'second' },
+      ],
+    } as never
+
+    apiGet.mockResolvedValue([{ agent_id: 'a2', messages: [{ role: 'assistant', content: 'fresh' }], description: 'second' }])
+
+    await store.loadSubagent('c1', 'a2')
+
+    expect(apiGet).toHaveBeenCalledWith('/api/chats/c1/subagents?agent_id=a2')
+    expect(store.subagents.c1).toHaveLength(2)
+    expect(store.subagents.c1[0].agent_id).toBe('a1')
+    expect(store.subagents.c1[1].messages).toHaveLength(1)
+  })
+
+  test('matches across the agent- prefix rather than adding a duplicate row', async () => {
+    const store = useProjectStore()
+    store.subagents = { c1: [{ agent_id: 'agent-a1', messages: [], description: 'first' }] } as never
+    apiGet.mockResolvedValue([{ agent_id: 'a1', messages: [{ role: 'assistant', content: 'fresh' }] }])
+
+    await store.loadSubagent('c1', 'a1')
+
+    expect(store.subagents.c1).toHaveLength(1)
+    expect(store.subagents.c1[0].messages).toHaveLength(1)
+  })
+})
