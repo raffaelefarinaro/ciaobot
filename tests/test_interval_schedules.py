@@ -479,6 +479,9 @@ def test_migrate_loops_imports_as_interval_schedules(tmp_path: Path) -> None:
     assert entry.frequency == INTERVAL_FREQUENCY
     assert entry.interval_minutes == 15
     assert entry.web_chat_id == "chat-x"
+    # Legacy loops reused their existing chat; the old project hint must not
+    # turn the migrated interval into a new-chat-per-run schedule.
+    assert entry.web_project_id is None
     assert entry.workspace == "work"
     assert entry.title == "PR watcher"
     assert entry.enabled is True

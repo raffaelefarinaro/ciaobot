@@ -166,7 +166,6 @@ _TOOL_GROUPS: dict[str, tuple[str, ...]] = {
         "chat_stop",
         "chat_delete",
     ),
-    "delegates": ("delegate_spawn", "delegates_list"),
     "background": (
         "background_run_start",
         "background_run_status",
@@ -1615,76 +1614,6 @@ class CiaoMcpService:
                 "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
             )
 
-        @tool(name="delegate_spawn", annotations=_WRITE, structured_output=True)
-        async def delegate_spawn(
-            prompt: str,
-            title: str = "",
-            provider: str | None = None,
-            model: str | None = None,
-            mode: str | None = None,
-            delegation_id: str = "",
-            project_id: str | None = None,
-        ) -> dict[str, Any]:
-            """Spawn a delegate chat to do real work, and get woken when it finishes.
-
-            A delegate is a normal Ciaobot chat with full tool access (edit,
-            bash, git) running on the model you pick. This call does NOT block:
-            it returns as soon as the delegate starts. End your turn after
-            spawning — say what you dispatched and that you will report back.
-            Do not poll. When the delegate finishes, Ciaobot sends you a fresh
-            turn summarizing it, and you review then.
-
-            Use this for work that takes a while and produces artifacts: fixing
-            issues, migrations, parallel investigations. For a quick second
-            opinion inside the current turn, use adversarial_review instead,
-            which returns inline.
-
-            When several delegates will touch the same repo, give each one an
-            isolated git worktree and state that path in its prompt, or they
-            will fight over the same checkout.
-
-            Args:
-                prompt: The delegate's full brief. It cannot see this chat, so
-                    include everything: goal, repo path, constraints, and what
-                    "done" means.
-                title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
-                model: Model for the delegate, e.g. a cheaper or specialized
-                    one. Must be in the configured model set for the resolved
-                    provider (Anthropic or opencode
-                    tier alias). Unknown ids are rejected with `invalid_model`
-                    and a list of valid alternatives. Omit to inherit the
-                    workspace default.
-                delegation_id: Shared tag for delegates dispatched as one
-                    batch, so their completion reports group together.
-            """
-            return await self._invoke(
-                "delegate_spawn",
-                lambda cp, p: cp.delegate_spawn(
-                    p,
-                    prompt=prompt,
-                    title=title,
-                    provider=provider,
-                    model=model,
-                    mode=mode,
-                    delegation_id=delegation_id,
-                    project_id=project_id,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="delegates_list", annotations=_READ, structured_output=True)
-        async def delegates_list(chat_id: str = "") -> dict[str, Any]:
-            """List delegates spawned by a chat and which are still running.
-
-            To read a delegate's real transcript, take its session_id from
-            chat_get and read that provider session's JSONL — chat_get itself
-            returns metadata only, never messages. Stop a runaway delegate with
-            chat_stop.
-            """
-            return await self._invoke(
-                "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
-            )
-
         # ── background command runs ──────────────────────────────────────
         # Deliberately _DESTRUCTIVE rather than _WRITE (issue #282 proposed
         # _WRITE, describing it as "Auto-mode approval required"). In this
@@ -1706,7 +1635,7 @@ class CiaoMcpService:
             when it exits.
 
             Sits between a plain `nohup` (survives the turn, but you lose track
-            of it) and delegate_spawn (a whole chat with a model loop). Use it
+            of it) and a full agent loop. Use it
             when the work is a single script that takes minutes: a fetch, a
             build, a data enrichment pass. There is no model in the loop and no
             tool access — it runs the command, nothing else.

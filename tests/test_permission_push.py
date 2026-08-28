@@ -97,35 +97,6 @@ def test_notify_permission_persists_pending_permission_on_chat(tmp_path: Path) -
     }
 
 
-def test_notify_permission_skips_delegate_chat(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    parent = pcm.create_chat(project.project_id, title="parent")
-    child = pcm.create_chat(
-        project.project_id,
-        title="internal task",
-        spawned_from_chat_id=parent.chat_id,
-    )
-
-    calls: list[tuple[str, str, str, str]] = []
-    pcm.notify_permission_cb = lambda *args: calls.append(args)
-
-    event = PermissionRequestEvent(
-        type="permission_request",
-        tool_name="Bash",
-        tool_input="{}",
-        message="Run a command?",
-        request_id="req-delegate",
-    )
-    pcm._notify_permission(child.chat_id, event)
-
-    assert calls == []
-    # A nested delegate's own turn is internal model-to-model traffic; the
-    # supervisor is the chat a human would open, so the delegate must not
-    # pick up its own attention flag either.
-    assert pcm._chats[child.chat_id].pending_permission == ""
-
-
 def test_notify_permission_is_no_op_without_callback(tmp_path: Path) -> None:
     """No callback configured (e.g. push manager not wired in tests) must not raise."""
     pcm = _make_manager(tmp_path)

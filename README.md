@@ -12,7 +12,7 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 - **Workspace** — a life area (personal, work, a client). It owns its own vault (`<workspace>/memory-vault/` on a fresh install), its own projects, and its default model. Switch workspaces in the sidebar — the Home lanes swap with it.
 - **Project** — a folder + doc (`projects/active/<name>/<name>.md`) for vault-backed projects. Its frontmatter `description:` is injected as `[Project context: …]` into every turn, and the doc's body stays out of the prompt until the agent opens it. A project created from the PWA's **+ New Project** is lightweight (name + context only) until it gains a vault folder.
-- **Chat** — turns, tool calls, and file touches in one project. Fork it, delegate parallel subchats to it, or re-run a prompt inside it on a cadence.
+- **Chat** — turns, tool calls, and file touches in one project. Fork it, watch the subagents it spawns, or re-run a prompt inside it on a cadence.
 
 ![Workspace → Project → Chat hierarchy](docs/diagrams/workspace-hierarchy.svg)
 
@@ -147,7 +147,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 - Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Delegates: a chat's agent spawns writable delegate chats (own model, own session, full tool access) to work in parallel; capped at 6 per chat, no nesting.
+- Subagents: the agents a chat dispatches for parallel work appear as rows under it in the sidebar while they run, and each one's conversation is readable in a read-only view.
 
 **Files, documents, and voice**
 

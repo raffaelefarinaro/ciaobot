@@ -47,6 +47,7 @@ from ciao.vault_index import (
     DEFAULT_PROMOTION_THRESHOLD,
     Entry,
     promotion_threshold,
+    scan_targets,
     vocabulary_report,
 )
 
@@ -99,7 +100,9 @@ def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> 
       difference only counts as a near-miss once the tags are long enough to
       carry that many edits without coincidence (``ai`` vs ``hr`` is distance
       2 but must NOT merge), while a single-character difference still counts
-      for longer tags.
+      for longer tags — but not for tags under three characters, where a
+      single edit is nearly guaranteed by chance (``jo`` vs ``mo``, ``ai`` vs
+      ``aj``) rather than evidence of a typo.
     * Normalized forms (separators removed) matching exactly or within the
       same length-scaled edit distance. Deliberately no bare-prefix match:
       ``ai`` vs ``airline`` share a normalized prefix but are unrelated.
@@ -121,6 +124,18 @@ def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> 
     # four-character pair like data/java is distance 2 but must NOT merge.
     shorter = min(len(la), len(lb))
     max_edit = 1 if shorter < 6 else 2
+    # A length floor for the edit-distance checks below (raw and normalized
+    # form alike). At two characters there are only 26*26 = 676 possible
+    # tags, so almost any real two-letter tag is one edit from another real
+    # one (`jo` vs `mo`, `ai` vs `aj`) — a distance-1 "near-miss" there is
+    # coincidence, not a typo. Three characters is already an order of
+    # magnitude roomier (26**3 = 17,576 combinations), so a distance-1 match
+    # goes back to being meaningful signal — `data` vs `dato` (4 chars) must
+    # still merge. This floor applies ONLY to the edit-distance branches
+    # below; it must NOT gate the separator/namespace-prefix branch just
+    # below, which is how a genuinely short established tag like `ai` still
+    # merges with `ai-analysis` (the plan's canonical example).
+    min_edit_len = 3
     # Shared namespace/value: the plan's canonical example is ai-analysis /
     # ai-adoption / ai-practice alongside the bare established ai.
     for sep in ("/", "-", "_"):
@@ -139,17 +154,17 @@ def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> 
             if pa == pb and known_tags and pa in known_tags:
                 return True
     # Edit distance on raw forms.
-    if _edit_distance(la, lb, max_dist=max_edit) <= max_edit:
+    if shorter >= min_edit_len and _edit_distance(la, lb, max_dist=max_edit) <= max_edit:
         return True
     # Normalized forms (separators removed): handles ai-analysis vs aianalysis.
     # Deliberately NO bare-prefix match here — `ai` vs `airline` share a
     # normalized prefix but are unrelated, and the separator-delimited stem
     # cases are already handled above. Only an exact normalized equality (or a
-    # length-scaled edit) counts.
+    # length-scaled edit, subject to the same length floor) counts.
     na, nb = _normalized_tag(a), _normalized_tag(b)
     if na == nb:
         return True
-    if _edit_distance(na, nb, max_dist=max_edit) <= max_edit:
+    if shorter >= min_edit_len and _edit_distance(na, nb, max_dist=max_edit) <= max_edit:
         return True
     return False
 
@@ -372,8 +387,6 @@ def audit_vocabulary_proposals(
     Failures degrade to an empty proposal set with a scan error, never to
     "checked and clean".
     """
-    from ciao.vault_index import scan_targets
-
     empty = {
         "threshold": promotion_threshold(),
         "type_promotions": [],
@@ -407,12 +420,7 @@ def audit_vocabulary_proposals(
         # segment. Coercing that empty stamp to "personal" would mislabel every
         # note in a shared vault that spans workspaces. Only the no-config
         # fallback above stamps the caller's own root.
-        entries, _abs = scan_targets(
-            [
-                (Path(root), workspace, Path(prefix))
-                for root, workspace, prefix in targets
-            ]
-        )
+        entries, _abs = scan_targets(targets)
     except Exception as exc:  # noqa: BLE001 — advisory section
         return {
             **empty,

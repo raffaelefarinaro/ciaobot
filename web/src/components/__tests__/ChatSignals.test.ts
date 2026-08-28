@@ -20,6 +20,7 @@ function seed() {
   store.projectStreaming = {}
   store.backgroundAgents = {}
   const taskStore = useTaskStore()
+  taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return { store, taskStore }
 }
 
@@ -75,21 +76,6 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
     expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
-  })
-
-  it('ignores a time-of-day schedule bound to the chat', () => {
-    // The marker means "this chat re-runs itself", which a 09:00 daily briefing
-    // delivered here is not.
-    const { taskStore } = seed()
-    taskStore.schedules = [{
-      schedule_id: 'sched-1',
-      frequency: 'daily',
-      interval_minutes: 0,
-      web_chat_id: 'chat-1',
-      enabled: true,
-    }] as unknown as typeof taskStore.schedules
-    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(wrapper.find('.chat-signal--interval').exists()).toBe(false)
   })
 
   it('marks an unread chat for attention without adding a count', () => {

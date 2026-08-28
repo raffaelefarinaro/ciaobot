@@ -181,7 +181,10 @@ def migrate_loops(runtime_root: Path) -> int:
                 int(item.get("interval_minutes") or DEFAULT_INTERVAL_MINUTES),
             ),
             web_chat_id=chat_id,
-            web_project_id=str(item.get("web_project_id") or "") or None,
+            # Legacy loops always reused their named chat.  Do not carry over
+            # the old project hint: on interval schedules that means a fresh
+            # chat per run and takes precedence over web_chat_id.
+            web_project_id=None,
             workspace=str(item.get("workspace") or ""),
             title=str(item.get("title") or ""),
             last_dispatched_at=str(item.get("last_run_at") or ""),

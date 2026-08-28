@@ -1,4 +1,4 @@
-"""Subprocess-only background runs: the primitive between ``nohup`` and a delegate.
+"""Subprocess-only background runs: the primitive between ``nohup`` and an agent.
 
 A background run is one command, launched with ``create_subprocess_exec`` (no
 shell, ever), whose output lands in a rotating log under
@@ -60,9 +60,8 @@ _TRUNCATION_MARKER = b"[ciaobot] ... earlier output trimmed ...\n"
 
 DEFAULT_TIMEOUT_S = 1800
 MAX_TIMEOUT_S = 24 * 60 * 60
-# Ceiling on live runs per chat. A runaway fan-out of subprocesses is cheaper
-# than a fan-out of delegates but still real, so the control plane refuses past
-# this (same reasoning as _MAX_ACTIVE_DELEGATES).
+# Ceiling on live runs per chat. A runaway fan-out of subprocesses still costs
+# real machine time, so the control plane refuses past this.
 MAX_ACTIVE_RUNS_PER_CHAT = 5
 # SIGTERM, then SIGKILL this many seconds later.
 CANCEL_GRACE_SECONDS = 5.0
