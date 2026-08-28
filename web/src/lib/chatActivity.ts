@@ -143,7 +143,7 @@ function shouldRenderAnswerBubble(
 
 /** Split one turn's buffered steps into ordered parts, EXCLUDING the final
  *  answer bubble at `finalIdx` (the caller appends that itself, with the
- *  turn's outputs/subchats attached).
+ *  turn's outputs/subagents attached).
  *
  *  Substantive assistant text renders as its own message bubble. Claude
  *  progress narration (`Now let me…`, short status lines) and

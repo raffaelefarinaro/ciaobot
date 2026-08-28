@@ -578,9 +578,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         is_node_active=node_state_manager.is_active,
     )
 
-    # Background command runs (issue #282): a subprocess-only sibling of
-    # delegates. Completions wake the chat that started the run through the
-    # same coalescing path delegates use.
+    # Background command runs (issue #282): one command, no model in the loop.
+    # Completions wake the chat that started the run after a short coalescing
+    # window, so a batch finishing together produces one turn.
     from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
 
     def _background_finished(run: BackgroundRun, tail: list[str]) -> None:

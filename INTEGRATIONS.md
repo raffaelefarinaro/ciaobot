@@ -162,7 +162,7 @@ the selected workspace's lane and any stacked rescue lanes (stale or unknown
 workspaces) use up/down to move between lanes and left/right to move between
 chats within a lane.
 
-The sidebar's project and delegate-subchat disclosure state is local UI state;
+The sidebar's project and subagent disclosure state is local UI state;
 it has no integration, environment variable, or cross-device synchronization
 setting.
 

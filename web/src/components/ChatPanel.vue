@@ -187,19 +187,19 @@
         <button
           class="archive-btn touch-hit"
           @click="doArchive"
-          :title="archiveActionLabel"
-          :aria-label="archiveActionLabel"
+          :title="ARCHIVE_ACTION_LABEL"
+          :aria-label="ARCHIVE_ACTION_LABEL"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
       </template>
     </PaneHeader>
 
-    <!-- Context bar: what this chat is attached to — a supervisor, subchats,
-         loops, schedules. These were four sibling banner blocks, each a v-for,
-         so a chat with all four opened with its first message below the fold.
-         Collapsed it is one line of counted chips; expanded it is the same
-         detail rows with the same actions. -->
+    <!-- Context bar: what this chat is attached to — loops, schedules. These
+         were sibling banner blocks, each a v-for, so a chat with all of them
+         opened with its first message below the fold. Collapsed it is one line
+         of counted chips; expanded it is the same detail rows with the same
+         actions. -->
     <div v-if="contextRelations.length" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
       <button
         type="button"
@@ -216,41 +216,9 @@
           <span v-if="rel.glyph" class="ctx-chip-glyph" :class="{ live: rel.live }" aria-hidden="true">{{ rel.glyph }}</span>
           {{ rel.label }}
         </span>
-        <span v-if="contextNeedsAttention" class="ctx-attn" title="A subchat needs you">needs you</span>
       </button>
 
       <div v-if="contextExpanded" class="ctx-detail">
-        <div v-if="delegateParent" class="loop-banner-row">
-          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-          <span class="loop-banner-text">
-            Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
-          </span>
-          <router-link
-            :to="`/chat/${delegateParent.chat_id}`"
-            class="btn-small loop-banner-manage"
-          >Open parent</router-link>
-        </div>
-
-        <div
-          v-for="child in delegateChildren"
-          :key="child.chat_id"
-          class="loop-banner-row"
-        >
-          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-          <!-- State comes from ChatSignals, not prose: this row used to spell
-               out "· working" / "· needs input", which was a fourth, divergent
-               rendering of the same facts the sidebar and home already draw. -->
-          <span class="loop-banner-text">
-            Subchat
-            <strong :class="{ 'subchat-unread': store.chatUnread(child.chat_id) > 0 }">{{ child.title || 'untitled' }}</strong>
-          </span>
-          <ChatSignals :chat-id="child.chat_id" density="row" />
-          <router-link
-            :to="`/chat/${child.chat_id}`"
-            class="btn-small loop-banner-manage"
-          >Open</router-link>
-        </div>
-
         <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
           <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
           <span class="loop-banner-text">
@@ -393,7 +361,7 @@
               </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
-            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
+            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" :chat-id="chat.chat_id" />
             <div v-if="item.outputs?.length" class="trace-files">
               <button
                 v-for="(f, fi) in item.outputs"
@@ -728,7 +696,7 @@
           </div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
-          <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
+          <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" :chat-id="chat.chat_id" />
         </div>
       </div>
 
@@ -1224,9 +1192,8 @@ import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Sche
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import ChatSignals from './ChatSignals.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
-import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../lib/archiveCopy'
+import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1613,21 +1580,8 @@ const chatSchedules = computed(() => {
   )
 })
 
-// Delegate lineage banners (same visual language as loop/schedule banners).
-// Parent link when this chat was spawned; children list when this chat is a
-// supervisor. Archived children stay out of the strip.
-const delegateParent = computed(() => {
-  const parentId = chat.value?.spawned_from_chat_id
-  if (!parentId) return null
-  return store.chats.find(c => c.chat_id === parentId) || null
-})
-const delegateChildren = computed(() => {
-  const cid = chat.value?.chat_id
-  return cid ? store.activeDelegatesFor(cid) : []
-})
-
 // ── Context bar ─────────────────────────────────────────────────────
-// One counted chip per relation, so four v-for banner blocks can never again
+// One counted chip per relation, so the v-for banner blocks can never again
 // push the transcript below the fold. Detail rows live behind the disclosure.
 const contextExpanded = ref(false)
 
@@ -1640,13 +1594,6 @@ interface ContextRelation {
 
 const contextRelations = computed<ContextRelation[]>(() => {
   const rels: ContextRelation[] = []
-  if (delegateParent.value) {
-    rels.push({ key: 'parent', label: 'delegate', glyph: '↳' })
-  }
-  if (delegateChildren.value.length) {
-    const n = delegateChildren.value.length
-    rels.push({ key: 'children', label: `${n} subchat${n === 1 ? '' : 's'}`, glyph: '↳' })
-  }
   if (chatLoops.value.length) {
     const running = chatLoops.value.some(l => l.running)
     const label = chatLoops.value.length === 1
@@ -1662,12 +1609,6 @@ const contextRelations = computed<ContextRelation[]>(() => {
   }
   return rels
 })
-
-// Surfaced on the collapsed bar so a blocked subchat is never hidden behind a
-// disclosure. Same rule as everywhere else: filled means it needs the user.
-const contextNeedsAttention = computed(() =>
-  delegateChildren.value.some(c => store.chatNeedsInput(c.chat_id)),
-)
 
 // ── Action dock ─────────────────────────────────────────────────────
 // Six independent v-if blocks used to stack between the transcript and the
@@ -1727,24 +1668,6 @@ const dockDeferred = computed<DockItem[]>(() => {
   return items
 })
 
-const activeDelegateCount = computed(() => {
-  const cid = chat.value?.chat_id
-  // store.activeDelegatesFor is the single definition; the inline copy here
-  // dropped the local !== false guard and over-counted remote subchats.
-  return cid ? store.activeDelegatesFor(cid).length : 0
-})
-// Subchats working right now. Archiving stops them rather than waiting, so the
-// confirm dialog has to name them before the user commits. Background agents
-// count as working: they outlive the turn that spawned them, so a subchat with
-// no live turn can still have real work in flight.
-const busyDelegateCount = computed(() => {
-  const cid = chat.value?.chat_id
-  if (!cid) return 0
-  return store.activeDelegatesFor(cid).filter(
-    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
-  ).length
-})
-const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -4168,8 +4091,7 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  const message = archiveConfirmMessage(activeDelegateCount.value, busyDelegateCount.value)
-  if (!await askConfirm(message, {
+  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
@@ -7462,6 +7384,5 @@ details[open] > .activity-summary::before {
 
 /* Chat-level unread is title weight everywhere; chatUnread() is binary so a
    digit could only ever read "1". */
-.loop-banner-text strong.subchat-unread { font-weight: 700; }
 .loop-banner-manage { text-decoration: none; }
 </style>

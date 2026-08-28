@@ -471,15 +471,14 @@ describe('HomeRecentChats regressions', () => {
     wrapper.unmount()
   })
 
-  // workspaceNeedsInput() counts nested delegates; activeChatsAll excludes
-  // them, so the header used to claim a chat needed you with no row to click.
+  // The lane header is derived from the same chat set as the rows beneath it,
+  // so it can never claim a chat needs you with no row to click.
   it('keeps the lane needs-you count equal to the rows rendered', async () => {
     const store = seedChats()
     store.chats = [
       ...store.chats,
       {
-        chat_id: 'delegate', project_id: 'personal-project', title: 'Internal delegate',
-        spawned_from_chat_id: 'quiet',
+        chat_id: 'asker', project_id: 'personal-project', title: 'Asks a question',
         pending_question: JSON.stringify({ questions: [{ question: 'Internal?' }] }),
         created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(30), archived: false, local: true,
       },
