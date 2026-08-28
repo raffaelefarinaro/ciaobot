@@ -875,6 +875,7 @@ def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, 
 
     resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
     assert resp.status_code == 200
+    flow_id = resp.json()["flow_id"]
 
     # Simulate the TTL elapsing before the user pastes the code back.
     store = client.app.state.gws_manual_pkce_store
@@ -892,7 +893,11 @@ def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, 
 
     resp = client.post(
         "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=stale-code"},
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=stale-code",
+            "flow_id": flow_id,
+        },
     )
     assert resp.status_code == 400
     assert "expired" in resp.json()["error"].lower()
