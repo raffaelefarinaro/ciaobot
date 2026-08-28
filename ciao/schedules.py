@@ -910,7 +910,12 @@ class ScheduleManager:
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
 
-    async def catch_up(self, now: datetime | None = None) -> list[str]:
+    async def catch_up(
+        self,
+        now: datetime | None = None,
+        *,
+        skip_system: bool = False,
+    ) -> list[str]:
         """Fire each schedule once when its latest expected run was missed.
 
         Called once on startup so schedules recover after the server was down
@@ -919,6 +924,12 @@ class ScheduleManager:
         original prompt is dispatched unchanged (without backdating its
         context to the missed slot).
 
+        With ``skip_system`` the packaged system routines are left out: right
+        after a first-time setup the onboarding chat should be the only new
+        conversation, so routines wait for their next regular tick instead of
+        firing all at once from the catch-up pass (see
+        `ciao.setup_marker.SETUP_CATCH_UP_GRACE`).
+
         Returns the list of schedule_ids that were fired.
         """
         current = now or _now_utc()
@@ -926,6 +937,8 @@ class ScheduleManager:
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
+                continue
+            if skip_system and entry.scope == "system":
                 continue
             tz = ZoneInfo(entry.timezone_name)
             localized = current.astimezone(tz)

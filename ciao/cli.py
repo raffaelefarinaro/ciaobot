@@ -738,6 +738,15 @@ def setup_workspace(
             encoding="utf-8",
         )
         written.append(env_path)
+        # First-time setup: stamp when this workspace was provisioned so the
+        # post-setup restart can hold system-routine catch-up for a grace
+        # period. The onboarding chat should be the first thing a new user
+        # sees, not four parallel routine chats replaying missed runs.
+        from ciao.setup_marker import write_setup_marker
+
+        written.append(
+            write_setup_marker(root / ".runtime")
+        )
     else:
         # Merge into the user's file: keep every existing line untouched
         # (values, comments, unknown variables) and append only the Ciaobot
