@@ -1604,6 +1604,22 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(config))
 
 
+def _gws_manual_pkce_store(request: Request):
+    """Return the app's manual-flow PKCE verifier store, creating one on first use.
+
+    Mirrors :func:`_gws_relogin_manager`: lazily attached so a bare test app
+    (only ``config`` on ``app.state``) still works, while ``main.py`` wires
+    the shared instance at startup. See ``ManualPkceStore`` (issue #354).
+    """
+    store = getattr(request.app.state, "gws_manual_pkce_store", None)
+    if store is None:
+        from ciao.gws_auth import ManualPkceStore
+
+        store = ManualPkceStore()
+        request.app.state.gws_manual_pkce_store = store
+    return store
+
+
 async def gws_auth_url(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -1629,10 +1645,17 @@ async def gws_auth_url(request: Request) -> JSONResponse:
             return JSONResponse({"error": "client_secret.json missing client_id"}, status_code=400)
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
+        # PKCE (issue #354): this manual/paste flow cannot validate `state` on
+        # paste-back (the user, not the browser, carries the code across the
+        # trust boundary), so a code_challenge is the RFC 8252 remedy. The
+        # verifier is held server-side, keyed by profile, until the matching
+        # exchange call.
+        code_verifier = _gws_manual_pkce_store(request).start(profile)
         auth_url = gws_auth.build_auth_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scopes=gws_auth.scopes_for_profile(profile),
+            code_challenge=gws_auth.code_challenge_s256(code_verifier),
         )
         return JSONResponse({"auth_url": auth_url})
     except ValueError as e:
@@ -1668,6 +1691,32 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
         code = gws_auth.extract_code_from_input(code_or_url)
+        # The verifier for this profile's most recent auth-url call, if any
+        # (issue #354). "none" (no PKCE flow pending — never started, a
+        # legacy client, or superseded by a later auth-url call) is treated
+        # like a flow that never used PKCE: the exchange omits the verifier,
+        # matching whatever the auth URL itself sent. "expired" is different:
+        # Google is still holding a code_challenge for this profile, so
+        # silently omitting the verifier would fail with a confusing
+        # Google-side error — tell the user plainly to restart the flow
+        # instead. (A server restart between the two requests looks like
+        # "none" here, since the tombstone lives only in memory; that case
+        # degrades to Google's own invalid_grant/invalid_request error below,
+        # surfaced the same secret-free way as any other exchange failure —
+        # not a silent mismatch.)
+        pkce_store = _gws_manual_pkce_store(request)
+        pkce_status = pkce_store.status(profile)
+        if pkce_status == "expired":
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in link expired before the code was pasted "
+                        "back. Start manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
+        code_verifier = pkce_store.peek(profile) if pkce_status == "active" else None
         # Token exchange + credential write happen off the event loop; the
         # helper never logs the code, tokens, or secret.
         await asyncio.to_thread(
@@ -1676,6 +1725,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             profile,
             code=code,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to

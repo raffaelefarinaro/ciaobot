@@ -26,6 +26,7 @@ Security invariants (see issue #145):
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -305,6 +306,44 @@ def client_uses_loopback(config_dir: Path | None) -> bool:
 
 
 
+# ── PKCE (RFC 7636) ───────────────────────────────────────────────────────
+#
+# Manual/paste OAuth flows (the PWA "paste the redirect code" panel, and the
+# headless `ciao gws-auth-helper`) cannot validate `state` on paste-back: the
+# user, not the browser, carries the code across the trust boundary, so a
+# copy-pasted `state` is not proof of anything. PKCE is the RFC 8252 remedy —
+# it binds the authorization code to the client that requested it, so a code
+# intercepted or replayed elsewhere is useless without the verifier that
+# never left this process. See issue #354.
+
+# RFC 7636 §4.1: 43-128 characters from [A-Za-z0-9-._~]. `secrets.token_urlsafe`
+# already draws only from the base64url alphabet (A-Za-z0-9-_), a subset of
+# that unreserved charset, so no extra filtering is needed.
+_PKCE_MIN_LENGTH = 43
+_PKCE_MAX_LENGTH = 128
+
+
+def generate_code_verifier(length: int = 64) -> str:
+    """Return a cryptographically random PKCE code verifier (RFC 7636 §4.1)."""
+    if not (_PKCE_MIN_LENGTH <= length <= _PKCE_MAX_LENGTH):
+        raise ValueError(
+            f"PKCE code verifier length must be between {_PKCE_MIN_LENGTH} and {_PKCE_MAX_LENGTH}"
+        )
+    verifier = ""
+    while len(verifier) < length:
+        verifier += secrets.token_urlsafe(length)
+    return verifier[:length]
+
+
+def code_challenge_s256(verifier: str) -> str:
+    """Derive the S256 PKCE code challenge from a verifier (RFC 7636 §4.2).
+
+    base64url(SHA-256(ASCII(verifier))), no padding.
+    """
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 # ── Consent URL + token exchange (shared by all flows) ───────────────────
 
 
@@ -314,6 +353,8 @@ def build_auth_url(
     redirect_uri: str,
     scopes: str,
     state: str | None = None,
+    code_challenge: str | None = None,
+    code_challenge_method: str = "S256",
 ) -> str:
     params = {
         "scope": scopes,
@@ -325,6 +366,14 @@ def build_auth_url(
     }
     if state:
         params["state"] = state
+    if code_challenge:
+        # Optional: Google's OAuth endpoint accepts PKCE for installed-app
+        # clients and ignores it for a client that predates this, so an
+        # in-flight legacy flow (URL built before this code shipped) is
+        # unaffected — the exchange below only sends a verifier when a
+        # challenge was actually requested.
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = code_challenge_method
     return _AUTH_ENDPOINT + "?" + urllib.parse.urlencode(params)
 
 
@@ -370,6 +419,7 @@ def exchange_code(
     client_secret: str,
     code: str,
     redirect_uri: str,
+    code_verifier: str | None = None,
 ) -> dict[str, Any]:
     """Exchange an authorization code for tokens at Google's token endpoint.
 
@@ -377,19 +427,24 @@ def exchange_code(
     :class:`ValueError` with a secret-free message on failure. The returned
     dict is the raw token response and MUST NOT be logged.
 
+    ``code_verifier`` is the PKCE verifier matching the ``code_challenge`` sent
+    to :func:`build_auth_url` for this flow (issue #354); omitted when the
+    auth URL was built without one (or predates PKCE support).
+
     The socket timeout matters: the exchange runs inside the single-threaded
     callback server's ``do_GET``, so an unbounded request would hang the
     listener and keep ``shutdown()`` from ever returning, leaking the socket.
     """
-    data = urllib.parse.urlencode(
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        }
-    ).encode("utf-8")
+    payload = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        payload["code_verifier"] = code_verifier
+    data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(
         _TOKEN_ENDPOINT,
         data=data,
@@ -541,8 +596,13 @@ def exchange_and_store(
     *,
     code: str,
     redirect_uri: str,
+    code_verifier: str | None = None,
 ) -> dict[str, Any]:
     """Full server-side code→credentials step, reused by every flow.
+
+    ``code_verifier`` is the PKCE verifier generated alongside the auth URL
+    for this flow, when one was used (issue #354); pass ``None`` for a flow
+    that did not send a ``code_challenge``.
 
     Returns ``{"ok": True, "email": ...}`` on success. Raises
     :class:`ValueError` with a secret-free message otherwise.
@@ -561,6 +621,7 @@ def exchange_and_store(
         client_secret=client_secret,
         code=code,
         redirect_uri=redirect_uri,
+        code_verifier=code_verifier,
     )
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
@@ -580,6 +641,105 @@ def exchange_and_store(
         scopes=granted_scopes,
     )
     return {"ok": True, "email": email}
+
+
+# ── Manual/paste flow PKCE state (issue #354) ─────────────────────────────
+#
+# The manual "upload client_secret.json → get consent URL → paste the
+# redirect back" panel is genuinely stateless server-side today: the auth-url
+# and exchange endpoints are two independent requests that share nothing but
+# the profile name. PKCE needs the verifier generated for the auth URL to be
+# the one sent at exchange time, so this tiny store carries it across that
+# gap — the smallest piece of cross-request state the flow needs, kept only
+# long enough for a human to consent in the browser and paste the code back.
+
+# A generous window. PKCE's threat model is a code intercepted or replayed
+# outside this process (a hostile inspecting network traffic or a browser
+# history), not how long the verifier sits in memory — the verifier is opaque
+# random data held only here and is replaced the instant `start` runs again
+# for the same profile, so a long TTL costs essentially nothing. It has to
+# comfortably outlast a human reading Google's consent screen, picking an
+# account, granting scopes, and copying the redirect URL back — a distracted
+# or slow user must not be punished for taking their time (issue #354).
+MANUAL_PKCE_TTL_SECONDS = 3600.0
+
+
+class ManualPkceStore:
+    """Holds one pending PKCE verifier per profile between auth-url and exchange.
+
+    Starting a new flow for a profile replaces (invalidates) any previous
+    pending verifier for that profile, mirroring how a fresh
+    :class:`GwsReloginManager` session replaces an in-flight one. Never
+    logged; verifiers are opaque, secret-adjacent material.
+
+    An expired entry is kept (as a tombstone, verifier discarded) rather than
+    deleted, so :meth:`status` can still tell "a challenge was issued for this
+    profile and the verifier is gone" apart from "no PKCE flow was ever
+    started for this profile" — the exchange endpoint needs that distinction:
+    the first case must fail loudly (Google is holding a challenge for the
+    code; silently omitting the verifier gets a confusing ``invalid_grant``),
+    while the second must silently omit the verifier, matching whatever the
+    auth URL itself sent (issue #354). A restart of the server process is the
+    one case this cannot help with — the tombstone lives only in memory — see
+    ``gws_exchange_code`` for how that degrades.
+    """
+
+    def __init__(self, ttl: float = MANUAL_PKCE_TTL_SECONDS) -> None:
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        # profile -> (verifier or "" once expired, expires_at)
+        self._pending: dict[str, tuple[str, float]] = {}
+
+    def start(self, profile: str) -> str:
+        """Generate a fresh verifier for ``profile``, replacing any pending one."""
+        verifier = generate_code_verifier()
+        with self._lock:
+            self._pending[profile] = (verifier, time.time() + self._ttl)
+        return verifier
+
+    def peek(self, profile: str) -> str | None:
+        """Return the live pending verifier for ``profile``, or ``None``.
+
+        ``None`` covers both "no flow pending" and "expired" — callers that
+        need to tell those apart (to avoid silently sending Google's token
+        endpoint a request with no verifier when one is expected) should use
+        :meth:`status` first.
+
+        Non-destructive: a failed paste-back (wrong code, typo) can be
+        retried with the same verifier without restarting the whole flow.
+        """
+        with self._lock:
+            entry = self._pending.get(profile)
+            if entry is None:
+                return None
+            verifier, expires_at = entry
+            if time.time() > expires_at or not verifier:
+                return None
+            return verifier
+
+    def status(self, profile: str) -> str:
+        """``"active"`` | ``"expired"`` | ``"none"`` for ``profile``.
+
+        ``"expired"`` means a challenge was issued and is still live at
+        Google but the verifier is gone — the caller must not proceed
+        without one. ``"none"`` means no PKCE flow is pending at all (never
+        started, already consumed by a later ``start``, or this process
+        restarted since the auth URL was built) — a caller may safely treat
+        that like a flow that never used PKCE.
+        """
+        with self._lock:
+            entry = self._pending.get(profile)
+            if entry is None:
+                return "none"
+            verifier, expires_at = entry
+            if time.time() > expires_at:
+                # Tombstone it in place: keep the "something was issued"
+                # signal, but drop the verifier itself (never hold expired
+                # secret-adjacent material longer than necessary).
+                if verifier:
+                    self._pending[profile] = ("", expires_at)
+                return "expired"
+            return "active"
 
 
 # ── Token health (cheap ``auth status`` ping) ─────────────────────────────
@@ -866,6 +1026,11 @@ class _ReloginSession:
     status: str = "pending"  # pending | completed | error
     email: str = ""
     error: str = ""
+    # PKCE verifier for this session (issue #354). The loopback flow already
+    # validates `state`, so this is defense in depth rather than the primary
+    # fix (that's the manual/paste flows), but it is a small, safe addition
+    # since the session already carries per-flow state end to end.
+    code_verifier: str = ""
     _done: threading.Event = field(default_factory=threading.Event)
 
 
@@ -919,6 +1084,7 @@ class GwsReloginManager:
             self._cancel_locked(profile)
 
             state = secrets.token_urlsafe(24)
+            code_verifier = generate_code_verifier()
             handler_cls = self._make_handler(profile, state)
             # Port 0 → OS assigns a free ephemeral loopback port. Google's
             # installed-app OAuth allows a loopback redirect on any port.
@@ -930,6 +1096,7 @@ class GwsReloginManager:
                 redirect_uri=redirect_uri,
                 scopes=scopes_for_profile(profile),
                 state=state,
+                code_challenge=code_challenge_s256(code_verifier),
             )
             now = time.time()
             thread = threading.Thread(
@@ -947,6 +1114,7 @@ class GwsReloginManager:
                 expires_at=now + self._ttl,
                 server=server,
                 thread=thread,
+                code_verifier=code_verifier,
             )
             server._ciao_session = session  # type: ignore[attr-defined]
             self._sessions[profile] = session
@@ -1058,6 +1226,7 @@ class GwsReloginManager:
                     session.profile,
                     code=code or "",
                     redirect_uri=session.redirect_uri,
+                    code_verifier=session.code_verifier,
                 )
                 session.email = result.get("email", "")
                 session.status = "completed"

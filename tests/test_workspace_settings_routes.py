@@ -686,6 +686,17 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     assert "accounts.google.com/o/oauth2/auth" in resp.json()["auth_url"]
     assert "client_id=test-client-id" in resp.json()["auth_url"]
 
+    # PKCE (issue #354): the manual/paste flow cannot validate `state` on
+    # paste-back, so the auth URL must carry a code_challenge, and the
+    # verifier that produced it must be the one sent at exchange time below.
+    from urllib.parse import parse_qs, urlparse
+
+    from ciao import gws_auth
+
+    auth_query = parse_qs(urlparse(resp.json()["auth_url"]).query)
+    assert auth_query["code_challenge_method"] == ["S256"]
+    challenge = auth_query["code_challenge"][0]
+
     # 3. Test exchange code
     # Mock urllib.request.urlopen to return tokens
     class MockResponse:
@@ -700,10 +711,12 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
             pass
 
     mock_called = False
+    captured_body = {}
     def mock_urlopen(req, *args, **kwargs):
         nonlocal mock_called
         mock_called = True
         assert req.full_url == "https://oauth2.googleapis.com/token"
+        captured_body["data"] = req.data.decode("utf-8")
         return MockResponse()
 
     import urllib.request
@@ -716,6 +729,13 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200
     assert mock_called is True
+
+    # The verifier generated for the auth-url call above must be the one
+    # actually sent to the token endpoint, and it must derive the same
+    # challenge that was on the auth URL.
+    sent_verifier = parse_qs(captured_body["data"])["code_verifier"][0]
+    assert gws_auth.code_challenge_s256(sent_verifier) == challenge
+
     data = resp.json()
     profiles = {p["name"]: p for p in data["profiles"]}
     assert profiles["personal"]["configured"] is True
@@ -771,7 +791,7 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
     import ciao.gws_auth
     monkeypatch.setattr(
         ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
     )
 
     class _FakeMonitor:
@@ -816,7 +836,7 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor_cls, "check_once", loud)
     monkeypatch.setattr(
         ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
     )
 
     resp = client.post(
@@ -824,6 +844,98 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
         json={"profile": "personal", "code": "test-code"},
     )
     assert resp.status_code == 200
+
+
+def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, monkeypatch):
+    """A verifier that expired between auth-url and paste-back must fail
+    loudly with a "restart the flow" message (issue #354 code review) —
+    Google is still holding a code_challenge for this profile, so silently
+    omitting code_verifier would surface a confusing invalid_grant instead.
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
+    assert resp.status_code == 200
+
+    # Simulate the TTL elapsing before the user pastes the code back.
+    store = client.app.state.gws_manual_pkce_store
+    for profile, (verifier, _expires_at) in list(store._pending.items()):
+        store._pending[profile] = (verifier, 0.0)
+
+    exchange_called = False
+
+    def unexpected_exchange(*args, **kwargs):
+        nonlocal exchange_called
+        exchange_called = True
+        return {"ok": True, "email": "should-not-be-reached@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "http://localhost/?code=stale-code"},
+    )
+    assert resp.status_code == 400
+    assert "expired" in resp.json()["error"].lower()
+    assert exchange_called is False
+
+
+def test_gws_exchange_without_a_pending_pkce_flow_omits_verifier(tmp_path, monkeypatch):
+    """A profile that never called auth-url through this store (legacy
+    client, or a flow superseded by a later start) must still exchange
+    normally, with no code_verifier sent — the same behavior as before PKCE
+    existed."""
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict = {}
+
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
+        captured["code_verifier"] = code_verifier
+        return {"ok": True, "email": "x@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", fake_exchange)
+
+    # No prior call to /auth-url for this profile.
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "http://localhost/?code=some-code"},
+    )
+    assert resp.status_code == 200
+    assert captured["code_verifier"] is None
 
 
 def test_gws_profile_payload_uses_granted_scopes_for_chips_and_purpose(tmp_path):

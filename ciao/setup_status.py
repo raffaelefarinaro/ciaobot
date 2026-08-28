@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import json
@@ -762,6 +763,29 @@ def _claude_status(
     # `oauthAccount` block in ~/.claude.json can belong to the Desktop app
     # while the CLI credential store is signed out (issue #347). Fail closed.
     app_path = claude_app_path()
+    if auth_status.get("cli_too_old"):
+        # This CLI predates `claude auth status`; reporting it as "signed out"
+        # would send the user to re-authenticate against a command that
+        # cannot exist yet, instead of upgrading (issue #354). Still fails
+        # closed (`ok=False`) — this only changes the actionable text, which
+        # is the field the PWA already renders verbatim for every provider
+        # row, so no new field needs plumbing through to the client.
+        return _provider(
+            name="claude",
+            ok=False,
+            auth="missing",
+            command=claude_install_command(),
+            detail=(
+                "This Claude CLI build is too old to report sign-in status "
+                "(`claude auth status` is not a recognized command). Upgrade "
+                "the Claude CLI, then check again."
+            ),
+            version=version,
+            skills=claude_skills,
+            mcps=claude_mcps,
+            install_url=CLAUDE_INSTALL_DOCS_URL,
+            cli_path=binary,
+        )
     detail = (
         "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
         "no separate CLI install is needed."
@@ -781,6 +805,20 @@ def _claude_status(
     )
 
 
+#  Commander.js-style CLIs (which `claude` is) reject an unknown subcommand
+#  with one of these shapes on stderr (occasionally stdout), e.g.
+#  "error: unknown command 'auth'". An old `claude` binary predating the
+#  `auth` subcommand fails this way, and must be told apart from a real
+#  "not signed in" so the message points at upgrading, not re-authenticating.
+_UNKNOWN_SUBCOMMAND_RE = re.compile(
+    r"unknown command|unrecognized command|no such command", re.IGNORECASE
+)
+
+
+def _looks_like_unknown_subcommand(*texts: str) -> bool:
+    return any(_UNKNOWN_SUBCOMMAND_RE.search(text or "") for text in texts)
+
+
 def claude_auth_status(
     binary: str,
     *,
@@ -792,6 +830,9 @@ def claude_auth_status(
         "unparseable": False,
         "email": "",
         "org_name": "",
+        # Set when `claude auth status` itself is unavailable (an old CLI
+        # predating the `auth` subcommand) rather than reachable-but-signed-out.
+        "cli_too_old": False,
     }
     process_env = os.environ.copy()
     if env is not None:
@@ -808,6 +849,11 @@ def claude_auth_status(
     except (OSError, subprocess.TimeoutExpired):
         return result
     if completed.returncode != 0:
+        # Fail closed either way (`logged_in` stays False), but an unknown
+        # subcommand is not evidence of being signed out — it means this CLI
+        # cannot even report status, so say that instead (issue #354).
+        if _looks_like_unknown_subcommand(completed.stdout or "", completed.stderr or ""):
+            result["cli_too_old"] = True
         return result
     try:
         payload = json.loads(completed.stdout or "")

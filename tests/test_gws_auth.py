@@ -87,6 +87,180 @@ def test_build_auth_url_includes_state_and_client() -> None:
     assert "client_id=cid" in url
     assert "state=xyz" in url
     assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2F" in url
+    # No PKCE params when no challenge is requested: an in-flight legacy flow
+    # (built before PKCE support existed) must not be affected.
+    assert "code_challenge" not in url
+
+
+# ── PKCE (RFC 7636, issue #354) ───────────────────────────────────────────
+
+
+def test_generate_code_verifier_charset_and_length_bounds() -> None:
+    allowed = set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+    verifier = gws_auth.generate_code_verifier()
+    assert 43 <= len(verifier) <= 128
+    assert set(verifier) <= allowed
+
+    short = gws_auth.generate_code_verifier(43)
+    assert len(short) == 43
+    long = gws_auth.generate_code_verifier(128)
+    assert len(long) == 128
+
+    with pytest.raises(ValueError):
+        gws_auth.generate_code_verifier(42)
+    with pytest.raises(ValueError):
+        gws_auth.generate_code_verifier(129)
+
+    # Two calls must not collide.
+    assert gws_auth.generate_code_verifier() != gws_auth.generate_code_verifier()
+
+
+def test_code_challenge_s256_matches_known_vector() -> None:
+    # RFC 7636 Appendix B worked example.
+    verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    assert gws_auth.code_challenge_s256(verifier) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+
+def test_build_auth_url_includes_code_challenge() -> None:
+    verifier = gws_auth.generate_code_verifier()
+    challenge = gws_auth.code_challenge_s256(verifier)
+    url = gws_auth.build_auth_url(
+        client_id="cid",
+        redirect_uri="http://127.0.0.1:5000/",
+        scopes="openid",
+        code_challenge=challenge,
+    )
+    query = parse_qs(urlparse(url).query)
+    assert query["code_challenge"] == [challenge]
+    assert query["code_challenge_method"] == ["S256"]
+
+
+def test_exchange_code_sends_matching_code_verifier(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"refresh_token": "rtok"}'
+
+    def fake_urlopen(req, *args, **kwargs):
+        captured["body"] = req.data.decode("utf-8")
+        return _FakeResp()
+
+    monkeypatch.setattr(gws_auth.urllib.request, "urlopen", fake_urlopen)
+
+    gws_auth.exchange_code(
+        client_id="cid",
+        client_secret="csecret",
+        code="the-code",
+        redirect_uri="http://127.0.0.1:9/",
+        code_verifier="the-verifier",
+    )
+    sent = parse_qs(captured["body"])
+    assert sent["code_verifier"] == ["the-verifier"]
+    assert sent["code"] == ["the-code"]
+
+
+def test_exchange_code_omits_code_verifier_when_none(monkeypatch) -> None:
+    """No PKCE was used for this flow: the exchange must not send a stray param."""
+    captured: dict[str, str] = {}
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"refresh_token": "rtok"}'
+
+    def fake_urlopen(req, *args, **kwargs):
+        captured["body"] = req.data.decode("utf-8")
+        return _FakeResp()
+
+    monkeypatch.setattr(gws_auth.urllib.request, "urlopen", fake_urlopen)
+
+    gws_auth.exchange_code(
+        client_id="cid", client_secret="csecret", code="c", redirect_uri="r"
+    )
+    assert "code_verifier" not in parse_qs(captured["body"])
+
+
+# ── ManualPkceStore (manual/paste flow cross-request PKCE state) ─────────
+
+
+def test_manual_pkce_store_round_trip() -> None:
+    store = gws_auth.ManualPkceStore()
+    verifier = store.start("personal")
+    assert 43 <= len(verifier) <= 128
+    # Non-destructive: peeking again (e.g. a retried paste-back) returns the
+    # same verifier rather than consuming it.
+    assert store.peek("personal") == verifier
+    assert store.peek("personal") == verifier
+
+
+def test_manual_pkce_store_unknown_profile_is_none() -> None:
+    store = gws_auth.ManualPkceStore()
+    assert store.peek("never-started") is None
+    assert store.status("never-started") == "none"
+
+
+def test_manual_pkce_store_restart_replaces_pending_verifier() -> None:
+    store = gws_auth.ManualPkceStore()
+    first = store.start("personal")
+    second = store.start("personal")
+    assert first != second
+    assert store.peek("personal") == second
+    assert store.status("personal") == "active"
+
+
+def test_manual_pkce_store_expires_after_ttl(monkeypatch) -> None:
+    fake_time = {"now": 1000.0}
+    monkeypatch.setattr(gws_auth.time, "time", lambda: fake_time["now"])
+    store = gws_auth.ManualPkceStore(ttl=10.0)
+    store.start("personal")
+    assert store.peek("personal") is not None
+    assert store.status("personal") == "active"
+    fake_time["now"] += 11.0
+    assert store.peek("personal") is None
+
+
+def test_manual_pkce_store_distinguishes_expired_from_never_started(monkeypatch) -> None:
+    """`status` must tell "a challenge is stranded at Google" (expired) apart
+    from "no PKCE flow was ever pending" (none) — issue #354 code review: a
+    caller that cannot tell these apart would silently omit the verifier for
+    an expired flow and get a confusing invalid_grant from Google instead of
+    an actionable "restart the flow" message."""
+    fake_time = {"now": 1000.0}
+    monkeypatch.setattr(gws_auth.time, "time", lambda: fake_time["now"])
+
+    store = gws_auth.ManualPkceStore(ttl=10.0)
+    assert store.status("personal") == "none"
+    store.start("personal")
+    assert store.status("personal") == "active"
+    fake_time["now"] += 11.0
+    # Expired, not "none": a real challenge is stranded at Google.
+    assert store.status("personal") == "expired"
+    assert store.peek("personal") is None
+    # Still expired (tombstoned, not deleted) on a second check.
+    assert store.status("personal") == "expired"
+
+    # A different, never-touched profile is genuinely "none".
+    assert store.status("other") == "none"
+
+
+def test_manual_pkce_default_ttl_is_generous() -> None:
+    """The default TTL must comfortably outlast a slow/distracted user on
+    Google's consent screen — 600s proved too tight (issue #354 review)."""
+    assert gws_auth.MANUAL_PKCE_TTL_SECONDS >= 1800.0
 
 
 def test_extract_code_from_input() -> None:
@@ -187,7 +361,7 @@ def test_exchange_and_store_uses_injected_exchange(tmp_path: Path, monkeypatch) 
     config_dir = gws_auth.profile_config_dir(cfg, "personal")
     _write_client_secret(config_dir)
 
-    def fake_exchange(*, client_id, client_secret, code, redirect_uri):
+    def fake_exchange(*, client_id, client_secret, code, redirect_uri, code_verifier=None):
         assert client_id == "cid"
         assert code == "the-code"
         # id_token payload carries the email (base64url of a JSON blob).
@@ -505,9 +679,10 @@ def test_relogin_completes_via_loopback(tmp_path: Path) -> None:
 
     captured: dict = {}
 
-    def fake_exchange(config, profile, *, code, redirect_uri):
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
         captured["code"] = code
         captured["redirect_uri"] = redirect_uri
+        captured["code_verifier"] = code_verifier
         return {"ok": True, "email": "loop@example.com"}
 
     manager = gws_auth.GwsReloginManager(cfg, exchange_fn=fake_exchange, session_ttl=10)
@@ -526,6 +701,12 @@ def test_relogin_completes_via_loopback(tmp_path: Path) -> None:
     assert urlparse(query["redirect_uri"][0]).port == port
     assert f":{port}/" in started["redirect_uri"]
 
+    # PKCE (issue #354): the loopback flow already validates `state`, but
+    # gets PKCE too as a small, safe delta since it already carries per-flow
+    # session state end to end.
+    assert query["code_challenge_method"] == ["S256"]
+    challenge = query["code_challenge"][0]
+
     # A mismatched state must be ignored (session stays pending).
     _drive_callback(port, "?code=evil&state=wrong")
     assert manager.status("personal")["status"] == "pending"
@@ -537,6 +718,9 @@ def test_relogin_completes_via_loopback(tmp_path: Path) -> None:
     assert final["email"] == "loop@example.com"
     assert captured["code"] == "good-code"
     assert captured["redirect_uri"] == started["redirect_uri"]
+    # The verifier handed to the exchange must be the one whose S256 digest
+    # produced the code_challenge on the auth URL.
+    assert gws_auth.code_challenge_s256(captured["code_verifier"]) == challenge
 
 
 def test_relogin_reports_google_error(tmp_path: Path) -> None:
@@ -598,7 +782,7 @@ def test_relogin_cancel_tears_down_the_listener(tmp_path: Path) -> None:
     _write_client_secret(gws_auth.profile_config_dir(cfg, "personal"))
     exchanges: list[str] = []
 
-    def fake_exchange(config, profile, *, code, redirect_uri):
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
         exchanges.append(code)
         return {"ok": True, "email": "x@example.com"}
 
@@ -636,7 +820,7 @@ def test_relogin_cancel_invalidates_an_in_flight_callback(tmp_path: Path) -> Non
     release_exchange = threading_mod.Event()
     exchange_ran = threading_mod.Event()
 
-    def blocking_exchange(config, profile, *, code, redirect_uri):
+    def blocking_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
         exchange_started_event.set()
         release_exchange.wait(timeout=5)
         exchange_ran.set()
