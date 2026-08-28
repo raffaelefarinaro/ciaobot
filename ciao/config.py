@@ -509,11 +509,6 @@ class CiaoConfig:
     # See ``ciao/memory_tool.py``.
     memory_char_limit: int = 3000
     user_char_limit: int = 1375
-    # Ciaobot's managed agent control plane. MCP is the only control surface;
-    # the legacy CLI path survives only as a runtime degrade when the MCP
-    # server is unavailable at request time.
-    mcp_enabled: bool = True
-    control_surface: str = "mcp"
     # Lazy MCP tool discovery. Every tool schema in ``tools/list`` is injected
     # into every chat's context window whether the turn uses it or not; the
     # full catalog costs ~9k tokens. With this on, only a small core plus the
@@ -530,11 +525,6 @@ class CiaoConfig:
         if not vault_root.is_absolute():
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
-        # "auto" was the user-facing A/B benchmark option and is gone. The
-        # runtime MCP-degrade path still sets the legacy literal internally,
-        # so legacy stays a valid config value alongside the mcp default.
-        if self.control_surface not in {"legacy", "mcp"}:
-            self.control_surface = "legacy"
         if not self.workspaces:
             self.workspaces = _bootstrap_registry(
                 self.vault_root,
@@ -1417,16 +1407,8 @@ class CiaoConfig:
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
             ),
-            mcp_enabled=source.get("CIAO_MCP_ENABLED", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             mcp_lazy_tools=source.get("CIAO_MCP_LAZY_TOOLS", "true").strip().lower()
             not in {"0", "false", "no", "off"},
-            control_surface=(
-                source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
-                if source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
-                in {"legacy", "mcp"}
-                else "mcp"
-            ),
         )
 
 

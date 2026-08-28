@@ -41,7 +41,6 @@ def system_prompt_payload(
     memory_block: str,
     *,
     base_system_prompt: dict | None = None,
-    control_surface: str = "legacy",
 ) -> dict | None:
     """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
@@ -49,10 +48,6 @@ def system_prompt_payload(
     ``SystemPromptPreset`` ``append`` field. ``exclude_dynamic_sections`` moves
     per-session cwd / git / OS / auto-memory paths into the first user message so
     the static preset + append stay cacheable across sessions (Claude SDK ≥0.1.58).
-
-    ``control_surface`` is accepted for call-site compatibility only: the core
-    instructions are transport-agnostic, so the legacy and MCP arms receive
-    identical text and there is nothing left to strip.
     """
     existing_append = ""
     if isinstance(base_system_prompt, dict):

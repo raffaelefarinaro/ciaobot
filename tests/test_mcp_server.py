@@ -75,7 +75,6 @@ def _service(tmp_path: Path, *, mode: str = "auto") -> tuple[CiaoMcpService, _Fa
     config = SimpleNamespace(
         state_path=tmp_path / ".runtime" / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
     )
     service = CiaoMcpService(config)
     control_plane = _FakeControlPlane(mode=mode)
@@ -1038,7 +1037,6 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     pcm = SimpleNamespace(
         update_chat=lambda cid, **kwargs: SimpleNamespace(
             chat_id=cid,
-            control_surface="",
             to_dict=lambda local=True: {"chat_id": cid, **kwargs},
         ),
         is_session_local=lambda c: True,
@@ -1612,7 +1610,6 @@ def test_discover_project_servers_reports_env_and_observed_tools(
     config = SimpleNamespace(
         state_path=runtime / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
         workspace_root=workspace,
     )
     service = CiaoMcpService(config)
@@ -1658,7 +1655,6 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     config = SimpleNamespace(
         state_path=runtime / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
         workspace_root=workspace,
     )
     service = CiaoMcpService(config)
@@ -1674,7 +1670,6 @@ def _lazy_service(
     config = SimpleNamespace(
         state_path=tmp_path / ".runtime" / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
         mcp_lazy_tools=lazy,
     )
     service = CiaoMcpService(config)

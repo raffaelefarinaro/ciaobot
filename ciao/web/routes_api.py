@@ -2484,7 +2484,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -2531,13 +2530,6 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
-    if "control_surface" in body:
-        surface = str(body.get("control_surface") or "").strip()
-        if surface not in {"", "legacy", "mcp", "auto"}:
-            return JSONResponse(
-                {"error": "control_surface must be legacy, mcp, auto, or empty"},
-                status_code=400,
-            )
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2548,15 +2540,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
-        if chat is not None and "control_surface" in body:
-            changed = chat.control_surface != surface
-            chat.control_surface = surface
-            if changed:
-                pcm._revoke_mcp_chat(chat_id)
-                provider_service = pcm._providers.pop(chat_id, None)
-                if provider_service is not None:
-                    asyncio.create_task(provider_service.disconnect())
-                pcm._save(reason="chat_control_surface")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:

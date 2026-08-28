@@ -514,9 +514,7 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using Claude Code CLI: %s", system_cli)
 
 
-        system_prompt = system_prompt_payload(
-            "", control_surface=request.control_surface
-        )
+        system_prompt = system_prompt_payload("")
 
         options = ClaudeAgentOptions(
             model=requested_model,
@@ -593,9 +591,9 @@ class ClaudeProvider(BaseSDKProvider):
             # ``mcp_servers``, so strict mode silently suppressed all of them.
             # Connectors are always allowed (Ciaobot no longer ships an opinion
             # on them); they must stay loaded so they remain reachable. The
-            # ciaobot server is still injected above, and a server that is
-            # unavailable at spawn time already degrades to the legacy surface
-            # in ProjectChatManager.
+            # The ciaobot server is still injected above; a chat whose
+            # control plane is unavailable never reaches this point, because
+            # ProjectChatManager refuses to build the request at all.
 
             # Pre-approve the non-destructive half of our own control plane.
             # Auto mode's classifier escalates every MCP tool that isn't

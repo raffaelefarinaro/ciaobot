@@ -154,10 +154,6 @@ export interface ChatInfo {
   // Provider-native thinking/reasoning level ('' = provider default).
   // Allowed values per provider come from ModelsResponse.thinking_levels.
   thinking_level?: string
-  // Ciaobot control surface. Engine-controlled now (MCP by default, with a
-  // legacy fallback); no longer user-set from the PWA. Kept on ChatInfo
-  // because the engine still returns/persists it, preserving round-trip typing.
-  control_surface?: '' | 'legacy' | 'mcp'
   session_id: string
   created_at: string
   archived: boolean

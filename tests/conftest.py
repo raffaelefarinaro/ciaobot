@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from ciao import job_runs as jr
 from ciao import proposal_outcomes as po
+from types import SimpleNamespace
 
 
 @pytest.fixture(autouse=True)
@@ -66,3 +67,19 @@ def _isolate_proposal_outcomes(tmp_path: Path) -> None:
     yield
     po._runtime_dir_override = None
     po.reset_tally_cache()
+
+
+def attach_stub_mcp(manager):
+    """Give a test-built ``ProjectChatManager`` a stub MCP control plane.
+
+    The Ciaobot MCP server is mandatory: ``build_agent_request`` raises
+    ``McpUnavailableError`` without one, so any test that dispatches a turn
+    needs a service the way a running server always has one.
+    """
+    manager._mcp_service = SimpleNamespace(
+        credentials_for_chat=lambda chat, project: (
+            "http://127.0.0.1:8443/mcp/",
+            "tok-test",
+        )
+    )
+    return manager

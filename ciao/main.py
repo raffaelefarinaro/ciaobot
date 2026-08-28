@@ -601,13 +601,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         on_finish=_background_finished,
     )
 
-    # Create and wire up web app. MCP stays available while legacy remains
-    # the default so controlled A/B runs can select a surface per chat.
+    # Create and wire up web app. The MCP control plane is mandatory for chat;
+    # first-run setup is the one state without one, and a chat attempted there
+    # fails loudly rather than running an agent that cannot reach Ciaobot.
     from ciao.mcp_server import CiaoMcpService
 
     mcp_service = None
     control_plane = None
-    if bool(getattr(config, "mcp_enabled", True)) and not getattr(config, "bootstrap_mode", False):
+    if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
