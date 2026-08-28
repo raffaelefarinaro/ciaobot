@@ -2030,6 +2030,7 @@ import SettingsAutomation from './settings/SettingsAutomation.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2990,9 +2991,11 @@ function gwsReloginHelpUrl(): string {
 // the client's own loopback and never arrive — those users must use the
 // manual paste flow instead.
 function gwsOnEngineHost(): boolean {
-  if (inDesktopApp && !isNodeClient.value) return true
-  const host = window.location.hostname
-  return !isNodeClient.value && (host === 'localhost' || host === '127.0.0.1' || host === '[::1]')
+  return isGwsEngineHostEligible(window.location.hostname, inDesktopApp, {
+    loaded: nodeStatusLoaded.value,
+    error: nodeStatusError.value,
+    isClient: isNodeClient.value,
+  })
 }
 
 async function gwsReloginStart(profileName: string) {
@@ -4323,6 +4326,11 @@ async function saveAuthSettings() {
 // just enough to answer "whose settings am I editing": in client mode every
 // other card on this page is served by the host through the tunnel.
 const nodeStatus = ref<NodeStatus | null>(null)
+// Tri-state signal for gwsOnEngineHost (issue #351): nodeStatus reading null
+// is ambiguous between "still loading" and "the fetch failed", and both must
+// not be silently treated as a confirmed host role off a loopback hostname.
+const nodeStatusLoaded = ref(false)
+const nodeStatusError = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
@@ -4343,8 +4351,12 @@ const hostScopeLabel = computed(() => {
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+    nodeStatusError.value = false
   } catch {
     /* leave null on failure: cards then read as host-mode, which is the default */
+    nodeStatusError.value = true
+  } finally {
+    nodeStatusLoaded.value = true
   }
 }
 
