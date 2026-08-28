@@ -70,7 +70,8 @@ function hasActions(): boolean {
 async function runAction(action: OperatorAction): Promise<void> {
   const { ok } = await housekeeping.run(action.id)
   // The star nudge's run records the star; the tile then disappears, so the
-  // only feedback is this toast.
+  // only feedback is this toast. Only the strip's explicit run button lands
+  // here — a link click never records anything (see onLinkClick).
   if (ok && action.id === 'github-star') {
     projectStore.pushToast({
       chat_id: '',
@@ -80,14 +81,16 @@ async function runAction(action: OperatorAction): Promise<void> {
   }
 }
 
-// A tile's external link opens in a new tab. Only the GitHub-star nudge
-// records the run too (so the tile clears after starring). Other links —
-// e.g. release notes on the update tile — must NOT run the action, or
-// clicking "Release notes" would start an update the user never asked for.
+// A tile's external link opens in a new tab. The GitHub-star nudge's link
+// deliberately does NOT run the action: opening the repository page confirms
+// nothing — the visitor may not be signed in, and inspecting or closing the
+// tab is not a star. Recording `starred` here would thank users for an
+// action they never took and silence the nudge permanently. The tile clears
+// through the operator's explicit dismiss ("Later") instead, and other
+// links — e.g. release notes on the update tile — never ran the action in
+// the first place (clicking "Release notes" must not start an update).
 async function onLinkClick(action: OperatorAction): Promise<void> {
-  if (action.id === 'github-star') {
-    await runAction(action)
-  }
+  void action
 }
 
 async function dismissAction(action: OperatorAction): Promise<void> {
