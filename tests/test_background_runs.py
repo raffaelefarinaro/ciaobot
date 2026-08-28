@@ -939,7 +939,6 @@ def _plane(manager: ProjectChatManager, runner: BackgroundRunner | None) -> Ciao
         ),
         project_chat_manager=manager,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
         background_runner=runner,
     )
 

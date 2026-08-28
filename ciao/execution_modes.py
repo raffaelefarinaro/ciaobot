@@ -108,6 +108,8 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "background_run_status",
     "schedules_list",
     "schedule",
+    # Deprecated aliases onto interval schedules; still auto-approved while
+    # they exist so a model reaching for the old name is not a friction wall.
     "loops_list",
     "loop",
     "file_surface",

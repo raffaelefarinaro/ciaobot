@@ -56,11 +56,11 @@
     </span>
 
     <span
-      v-if="loopSummary"
-      class="chat-signal chat-signal--loop"
-      :class="{ stopped: !loopSummary.running }"
-      :title="loopTitle"
-      :aria-label="loopTitle"
+      v-if="intervalSummary"
+      class="chat-signal chat-signal--interval"
+      :class="{ stopped: !intervalSummary.running }"
+      :title="intervalTitle"
+      :aria-label="intervalTitle"
     >↻</span>
 
     <span
@@ -116,13 +116,20 @@ const primarySignal = computed<'needs' | 'working' | 'agents' | 'delegates' | 'r
   return null
 })
 
-const loopSummary = computed(() => taskStore.loopsByChat.get(props.chatId) || null)
-const loopTitle = computed(() => {
-  if (!loopSummary.value) return ''
-  const label = loopSummary.value.count > 1 ? `${loopSummary.value.count} loops` : 'A loop'
-  return loopSummary.value.running
+// Interval automations bound to this chat -- the "this chat re-runs itself"
+// marker. Distinct from a time-of-day schedule, which is not a property of the
+// chat in the same way.
+const intervalSummary = computed(
+  () => taskStore.intervalsByChat.get(props.chatId) || null,
+)
+const intervalTitle = computed(() => {
+  if (!intervalSummary.value) return ''
+  const label = intervalSummary.value.count > 1
+    ? `${intervalSummary.value.count} interval automations`
+    : 'An interval automation'
+  return intervalSummary.value.running
     ? `${label} running in this chat`
-    : `${label} attached to this chat (stopped)`
+    : `${label} attached to this chat (paused)`
 })
 </script>
 
@@ -291,13 +298,13 @@ const loopTitle = computed(() => {
   100% { transform: scale(1.9); opacity: 0; }
 }
 
-.chat-signal--loop {
+.chat-signal--interval {
   color: var(--accent);
   font-size: var(--text-lg);
   font-weight: 700;
 }
 
-.chat-signal--loop.stopped {
+.chat-signal--interval.stopped {
   color: var(--fg3);
 }
 

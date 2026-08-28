@@ -20,7 +20,6 @@ function seed() {
   store.projectStreaming = {}
   store.backgroundAgents = {}
   const taskStore = useTaskStore()
-  taskStore.loops = [] as unknown as typeof taskStore.loops
   return { store, taskStore }
 }
 
@@ -62,14 +61,35 @@ describe('ChatSignals', () => {
     expect(one.find('.chat-signal-count').exists()).toBe(false)
   })
 
-  it('renders loop and retry modifiers with their accessible labels', () => {
+  it('renders interval and retry modifiers with their accessible labels', () => {
     const { store, taskStore } = seed()
     store.chats[0].retry = { status: 'pending' } as never
-    taskStore.loops = [{ web_chat_id: 'chat-1', running: false, loop_id: 'loop-1' }] as unknown as typeof taskStore.loops
+    taskStore.schedules = [{
+      schedule_id: 'sched-1',
+      frequency: 'interval',
+      interval_minutes: 10,
+      web_chat_id: 'chat-1',
+      enabled: false,
+    }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
     expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
-    expect(wrapper.find('.chat-signal--loop').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
+  })
+
+  it('ignores a time-of-day schedule bound to the chat', () => {
+    // The marker means "this chat re-runs itself", which a 09:00 daily briefing
+    // delivered here is not.
+    const { taskStore } = seed()
+    taskStore.schedules = [{
+      schedule_id: 'sched-1',
+      frequency: 'daily',
+      interval_minutes: 0,
+      web_chat_id: 'chat-1',
+      enabled: true,
+    }] as unknown as typeof taskStore.schedules
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--interval').exists()).toBe(false)
   })
 
   it('marks an unread chat for attention without adding a count', () => {

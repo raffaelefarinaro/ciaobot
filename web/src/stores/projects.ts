@@ -3695,17 +3695,17 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  // A single loop lifecycle call can fan out several `loops_changed` frames
-  // (create-then-start), and each one would otherwise cost a full GET /api/loops
-  // per open tab. Coalesce a burst into one refetch. The tasks store is imported
-  // lazily to keep it out of this module's import graph.
-  let loopsRefetchTimer: ReturnType<typeof setTimeout> | null = null
-  function scheduleLoopsRefetch(): void {
-    if (loopsRefetchTimer !== null) return
-    loopsRefetchTimer = setTimeout(() => {
-      loopsRefetchTimer = null
+  // A single automation lifecycle call can fan out several `schedules_changed`
+  // frames (create-then-enable), and each one would otherwise cost a full
+  // GET /api/schedules per open tab. Coalesce a burst into one refetch. The
+  // tasks store is imported lazily to keep it out of this module's import graph.
+  let schedulesRefetchTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleSchedulesRefetch(): void {
+    if (schedulesRefetchTimer !== null) return
+    schedulesRefetchTimer = setTimeout(() => {
+      schedulesRefetchTimer = null
       void import('./tasks')
-        .then(({ useTaskStore }) => useTaskStore().fetchLoops())
+        .then(({ useTaskStore }) => useTaskStore().fetchSchedules())
         .catch(() => {})
     }, 150)
   }
@@ -4009,12 +4009,12 @@ export const useProjectStore = defineStore('projects', () => {
         })
         break
       }
-      case 'loops_changed': {
-        // A loop was created/edited/started/stopped/deleted elsewhere (the
-        // model mid-turn, the Schedules page, another tab). Refetch so the
-        // chat's loop banner and the sidebar/home loop markers appear without
-        // a manual reload.
-        scheduleLoopsRefetch()
+      case 'schedules_changed': {
+        // An automation was created/edited/paused/resumed/deleted elsewhere
+        // (the model mid-turn, the Automations page, another tab). Refetch so
+        // the chat's automation banner and the sidebar/home markers appear
+        // without a manual reload.
+        scheduleSchedulesRefetch()
         break
       }
       case 'gws_health': {

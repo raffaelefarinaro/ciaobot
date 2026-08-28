@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import type {
-  Loop,
   RuntimeProvider,
   Schedule,
   StatusResponse,
@@ -25,6 +24,7 @@ export interface ScheduleUpdate {
   chat_id?: number
   thread_id?: number | null
   frequency?: string
+  interval_minutes?: number
   day_of_month?: number | null
   run_at_date?: string | null
   web_chat_id?: string | null
@@ -40,21 +40,22 @@ export interface ScheduleUpdate {
 
 export const useTaskStore = defineStore('tasks', () => {
   const schedules = ref<Schedule[]>([])
-  const loops = ref<Loop[]>([])
   const status = ref<StatusResponse | null>(null)
   const models = ref<ModelsResponse | null>(null)
   const stats = ref<CliStats | null>(null)
   const loading = ref(false)
 
-  // One shared lookup for chat loop signals. Home and the sidebar must agree
-  // about both the number of loops and whether any of them is running.
-  const loopsByChat = computed(() => {
+  // Interval schedules bound to one existing chat -- the cadence that replaced
+  // loops. Kept as one shared lookup because Home, the sidebar, and the chat
+  // banner must agree about both the count and whether any of them is live.
+  const intervalsByChat = computed(() => {
     const byChat = new Map<string, { count: number; running: boolean }>()
-    for (const loop of loops.value) {
-      const previous = byChat.get(loop.web_chat_id)
-      byChat.set(loop.web_chat_id, {
+    for (const s of schedules.value) {
+      if (s.frequency !== 'interval' || !s.web_chat_id) continue
+      const previous = byChat.get(s.web_chat_id)
+      byChat.set(s.web_chat_id, {
         count: (previous?.count || 0) + 1,
-        running: Boolean(previous?.running || loop.running),
+        running: Boolean(previous?.running || s.enabled),
       })
     }
     return byChat
@@ -62,10 +63,6 @@ export const useTaskStore = defineStore('tasks', () => {
 
   async function fetchSchedules() {
     schedules.value = await api.get<Schedule[]>('/api/schedules')
-  }
-
-  async function fetchLoops() {
-    loops.value = await api.get<Loop[]>('/api/loops')
   }
 
   async function fetchStatus() {
@@ -86,7 +83,7 @@ export const useTaskStore = defineStore('tasks', () => {
 
   async function fetchAll() {
     loading.value = true
-    await Promise.all([fetchSchedules(), fetchLoops(), fetchStatus(), fetchModels(), fetchStats()])
+    await Promise.all([fetchSchedules(), fetchStatus(), fetchModels(), fetchStats()])
     loading.value = false
   }
 
@@ -94,43 +91,65 @@ export const useTaskStore = defineStore('tasks', () => {
     status.value = await api.patch<StatusResponse>('/api/status', updates)
   }
 
-  async function createSchedule(
-    time: string,
-    prompt: string,
-    timezone?: string,
-    daysOfWeek?: string[],
-    chatId?: number,
-    threadId?: number | null,
-    frequency?: string,
-    dayOfMonth?: number | null,
-    webChatId?: string | null,
-    webProjectId?: string | null,
-    model?: string,
-    runAtDate?: string | null,
-    archivePolicy?: ScheduleArchivePolicy,
-    provider?: RuntimeProvider,
-  ) {
-    const body: Record<string, unknown> = { time, prompt, timezone, days_of_week: daysOfWeek, frequency, day_of_month: dayOfMonth }
-    if (archivePolicy) body.archive_policy = archivePolicy
-    if (runAtDate) body.run_at_date = runAtDate
-    if (model) body.model = model
-    if (provider) body.provider = provider
-    if (webProjectId) {
-      body.web_project_id = webProjectId
+  /**
+   * Fields accepted by `POST /api/schedules`.
+   *
+   * Was a fourteen-argument positional signature; adding `interval_minutes` to
+   * it would have meant threading another `undefined` through the middle of
+   * every call. One object, named at the call site instead.
+   */
+  async function createSchedule(input: {
+    prompt: string
+    frequency: string
+    time?: string
+    timezone?: string
+    daysOfWeek?: string[]
+    dayOfMonth?: number | null
+    runAtDate?: string | null
+    // Required when frequency is 'interval'; ignored otherwise.
+    intervalMinutes?: number
+    webChatId?: string | null
+    webProjectId?: string | null
+    chatId?: number
+    threadId?: number | null
+    model?: string
+    provider?: RuntimeProvider
+    archivePolicy?: ScheduleArchivePolicy
+  }) {
+    const body: Record<string, unknown> = {
+      time: input.time || '',
+      prompt: input.prompt,
+      timezone: input.timezone,
+      days_of_week: input.daysOfWeek,
+      frequency: input.frequency,
+      day_of_month: input.dayOfMonth,
+    }
+    if (input.frequency === 'interval') body.interval_minutes = input.intervalMinutes
+    if (input.archivePolicy) body.archive_policy = input.archivePolicy
+    if (input.runAtDate) body.run_at_date = input.runAtDate
+    if (input.model) body.model = input.model
+    if (input.provider) body.provider = input.provider
+    if (input.webProjectId) {
+      body.web_project_id = input.webProjectId
       body.chat_id = 0
-    } else if (webChatId) {
-      body.web_chat_id = webChatId
+    } else if (input.webChatId) {
+      body.web_chat_id = input.webChatId
       body.chat_id = 0
     } else {
-      if (chatId !== undefined) body.chat_id = chatId
-      if (threadId !== undefined) body.thread_id = threadId
+      if (input.chatId !== undefined) body.chat_id = input.chatId
+      if (input.threadId !== undefined) body.thread_id = input.threadId
     }
     const s = await api.post<Schedule>('/api/schedules', body)
     schedules.value.push(s)
+    return s
   }
 
-  async function runScheduleNow(scheduleId: string): Promise<{ schedule_id: string; chat_id?: string }> {
-    return await api.post<{ schedule_id: string; chat_id?: string }>(`/api/schedule-run/${scheduleId}`)
+  async function runScheduleNow(
+    scheduleId: string,
+  ): Promise<{ schedule_id: string; chat_id?: string; status?: string }> {
+    return await api.post<{ schedule_id: string; chat_id?: string; status?: string }>(
+      `/api/schedule-run/${scheduleId}`,
+    )
   }
 
   async function updateSchedule(scheduleId: string, updates: ScheduleUpdate) {
@@ -145,39 +164,9 @@ export const useTaskStore = defineStore('tasks', () => {
     schedules.value = schedules.value.filter(s => s.schedule_id !== scheduleId)
   }
 
-  async function createLoop(body: {
-    prompt: string
-    web_chat_id: string
-    interval_minutes: number
-    title?: string
-    autostart?: boolean
-    start?: boolean
-  }) {
-    const loop = await api.post<Loop>('/api/loops', body)
-    loops.value.push(loop)
-    return loop
-  }
-
-  async function updateLoop(loopId: string, updates: { prompt?: string; title?: string; interval_minutes?: number; web_chat_id?: string; autostart?: boolean; running?: boolean }) {
-    const loop = await api.patch<Loop>(`/api/loops/${loopId}`, updates)
-    const idx = loops.value.findIndex(x => x.loop_id === loopId)
-    if (idx >= 0) loops.value[idx] = loop
-    return loop
-  }
-
-  async function runLoopNow(loopId: string): Promise<{ loop_id: string; chat_id?: string; status: string }> {
-    return await api.post<{ loop_id: string; chat_id?: string; status: string }>(`/api/loop-run/${loopId}`)
-  }
-
-  async function deleteLoop(loopId: string) {
-    await api.del(`/api/loops/${loopId}`)
-    loops.value = loops.value.filter(l => l.loop_id !== loopId)
-  }
-
   return {
-    schedules, loops, loopsByChat, status, models, stats, loading,
-    fetchSchedules, fetchLoops, fetchStatus, fetchModels, fetchStats, fetchAll,
+    schedules, intervalsByChat, status, models, stats, loading,
+    fetchSchedules, fetchStatus, fetchModels, fetchStats, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,
-    createLoop, updateLoop, runLoopNow, deleteLoop,
   }
 })

@@ -516,7 +516,6 @@ def _control_plane(manager: ProjectChatManager) -> CiaoControlPlane:
         SimpleNamespace(workspace=lambda name: object() if name == "work" else None),
         project_chat_manager=manager,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
 

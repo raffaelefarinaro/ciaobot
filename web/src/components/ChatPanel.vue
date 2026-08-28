@@ -196,7 +196,7 @@
     </PaneHeader>
 
     <!-- Context bar: what this chat is attached to — a supervisor, subchats,
-         loops, schedules. These were four sibling banner blocks, each a v-for,
+         automations. These were four sibling banner blocks, each a v-for,
          so a chat with all four opened with its first message below the fold.
          Collapsed it is one line of counted chips; expanded it is the same
          detail rows with the same actions. -->
@@ -251,25 +251,18 @@
           >Open</router-link>
         </div>
 
-        <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
-          <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-          <span class="loop-banner-text">
-            <strong>{{ l.title || 'Loop' }}</strong>
-            · every {{ l.interval_minutes }}m
-            · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
-            <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
-          </span>
-          <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
-          <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-        </div>
-
         <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-          <AppIcon class="loop-banner-ico" name="clock" :size="18" />
+          <!-- Interval entries keep the cycle glyph loops used; everything else
+               keeps the clock, so the cadence reads before the text does. -->
+          <span v-if="s.frequency === 'interval'" class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+          <AppIcon v-else class="loop-banner-ico" name="clock" :size="18" />
           <span class="loop-banner-text">
-            <strong>{{ s.title || 'Schedule' }}</strong>
+            <strong>{{ s.title || 'Automation' }}</strong>
             · {{ scheduleCadence(s) }}
-            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.last_status === 'busy'"> (waiting, chat busy)</template>
+            <template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
           </span>
+          <button class="btn-small" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
           <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
           <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
         </div>
@@ -431,12 +424,13 @@
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
               <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
-                <!-- Loop/schedule tick, not something the reader typed. Without
-                     this the two are indistinguishable in the transcript. -->
+                <!-- An automation's tick, not something the reader typed.
+                     Without this the two are indistinguishable in the
+                     transcript. -->
                 <span
                   v-if="item.msg.unattended"
                   class="unattended-mark"
-                  title="Sent automatically by a loop or schedule"
+                  title="Sent automatically by an automation"
                 >&#10227; auto</span>
                 <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
@@ -1220,7 +1214,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1596,15 +1590,12 @@ function saveEditQueue(chatId: string, entryId: string) {
   cancelEditQueue()
 }
 
-// Loops bound to this chat (loop-driven chats get a banner with controls).
 const taskStore = useTaskStore()
-const chatLoops = computed(() =>
-  taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
-)
-// Schedules linked to this chat: either the chat carries a schedule_id
-// backlink (project schedules, stamped at creation) or the schedule pins
-// this chat via web_chat_id (fixed-chat schedules). Mirrors the loop banner
-// but durable across runs because each run stamps the backlink on the chat.
+// Automations linked to this chat: either the chat carries a schedule_id
+// backlink (project schedules, stamped at creation) or the automation pins
+// this chat via web_chat_id (fixed-chat schedules, and every interval entry
+// that replaced a loop). Durable across runs because each run stamps the
+// backlink on the chat.
 const chatSchedules = computed(() => {
   const cid = chat.value?.chat_id
   const sid = chat.value?.schedule_id
@@ -1613,7 +1604,7 @@ const chatSchedules = computed(() => {
   )
 })
 
-// Delegate lineage banners (same visual language as loop/schedule banners).
+// Delegate lineage banners (same visual language as the automation banner).
 // Parent link when this chat was spawned; children list when this chat is a
 // supervisor. Archived children stay out of the strip.
 const delegateParent = computed(() => {
@@ -1647,17 +1638,26 @@ const contextRelations = computed<ContextRelation[]>(() => {
     const n = delegateChildren.value.length
     rels.push({ key: 'children', label: `${n} subchat${n === 1 ? '' : 's'}`, glyph: '↳' })
   }
-  if (chatLoops.value.length) {
-    const running = chatLoops.value.some(l => l.running)
-    const label = chatLoops.value.length === 1
-      ? `loop ${chatLoops.value[0].interval_minutes}m`
-      : `${chatLoops.value.length} loops`
-    rels.push({ key: 'loops', label, glyph: '↻', live: running })
+  // Interval entries get their own chip with the cycle glyph: "this chat
+  // re-runs itself" is a different fact from "something fires here at 09:00",
+  // and collapsing them into one count hid it.
+  const intervals = chatSchedules.value.filter(s => s.frequency === 'interval')
+  const timed = chatSchedules.value.filter(s => s.frequency !== 'interval')
+  if (intervals.length) {
+    const label = intervals.length === 1
+      ? `every ${intervals[0].interval_minutes}m`
+      : `${intervals.length} interval runs`
+    rels.push({
+      key: 'intervals',
+      label,
+      glyph: '↻',
+      live: intervals.some(s => s.enabled),
+    })
   }
-  if (chatSchedules.value.length) {
-    const label = chatSchedules.value.length === 1
-      ? `scheduled ${scheduleCadence(chatSchedules.value[0])}`
-      : `${chatSchedules.value.length} schedules`
+  if (timed.length) {
+    const label = timed.length === 1
+      ? `scheduled ${scheduleCadence(timed[0])}`
+      : `${timed.length} schedules`
     rels.push({ key: 'schedules', label })
   }
   return rels
@@ -1746,43 +1746,26 @@ const busyDelegateCount = computed(() => {
 })
 const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
-  taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
 })
-async function toggleLoop(l: Loop) {
-  await taskStore.updateLoop(l.loop_id, { running: !l.running })
-}
 
-// Lightweight 30-second tick powering the "next in Xm" countdown in the loop
-// banner.  Only runs while there are running loops bound to this chat.
+// Lightweight 30-second tick powering the "next in Xm" countdown in the
+// automation banner. Only runs while this chat has a live automation.
 const loopNow = ref(Date.now())
 let loopTick: ReturnType<typeof setInterval> | null = null
-watch([chatLoops, chatSchedules], ([loops, scheds]) => {
-  const hasRunning = loops.some(l => l.running)
+watch(chatSchedules, (scheds) => {
   const hasScheduled = scheds.some(s => s.enabled && s.next_run)
-  if ((hasRunning || hasScheduled) && !loopTick) {
+  if (hasScheduled && !loopTick) {
     loopNow.value = Date.now()
     loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasRunning && !hasScheduled && loopTick) {
+  } else if (!hasScheduled && loopTick) {
     clearInterval(loopTick)
     loopTick = null
   }
 }, { immediate: true })
 onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
 
-function loopCountdown(l: Loop): string {
-  if (!l.next_run) return ''
-  // Touch loopNow so Vue re-evaluates when the tick fires.
-  const diffMs = new Date(l.next_run).getTime() - loopNow.value
-  if (diffMs <= 0) return 'soon'
-  const mins = Math.ceil(diffMs / 60_000)
-  if (mins < 60) return `in ${mins}m`
-  const hrs = Math.floor(mins / 60)
-  const rm = mins % 60
-  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
-}
-
-// ── Schedule banner helpers ──
+// ── Automation banner helpers ──
 const scheduleRunningId = ref<string | null>(null)
 function scheduleCadence(s: Schedule): string {
   const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
@@ -1796,6 +1779,7 @@ function scheduleCadence(s: Schedule): string {
     }
     case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
     case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
+    case 'interval': return `every ${s.interval_minutes}m`
     case 'manual': return 'manual'
     default: return s.frequency
   }
@@ -1814,9 +1798,16 @@ async function runScheduleNow(s: Schedule) {
   scheduleRunningId.value = s.schedule_id
   try {
     await taskStore.runScheduleNow(s.schedule_id)
+  } catch {
+    // An interval run into a chat that is already streaming is refused rather
+    // than queued. Nothing to surface here beyond clearing the button.
   } finally {
     scheduleRunningId.value = null
   }
+}
+
+async function toggleScheduleEnabled(s: Schedule) {
+  await taskStore.updateSchedule(s.schedule_id, { enabled: !s.enabled })
 }
 const project = computed(() => store.activeProject)
 
@@ -6018,7 +6009,7 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
-/* Marks a turn fired by a loop or schedule. Accent-coloured so it reads as a
+/* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
   color: var(--accent);
@@ -7373,7 +7364,7 @@ details[open] > .activity-summary::before {
   color: var(--fg);
 }
 
-/* ── Loop banner ── */
+/* ── Automation banner ── */
 /* ── Context bar ─────────────────────────────────────────────────────
    Collapsed: one line of counted chips. Expanded: the detail rows, which
    keep the original .loop-banner-row layout and actions. */
@@ -7418,7 +7409,7 @@ details[open] > .activity-summary::before {
   font-weight: 700;
   line-height: 1;
 }
-/* A running loop is the one thing here that is actively happening. */
+/* A live automation is the one thing here that is actively happening. */
 .ctx-chip-glyph.live { color: var(--accent); }
 /* Filled, because it means the user is the blocker — same rule as the
    sidebar, home lanes and the action dock. */

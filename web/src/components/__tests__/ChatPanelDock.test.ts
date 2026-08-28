@@ -104,7 +104,6 @@ async function mountPanel(setup: (store: ReturnType<typeof useProjectStore>) => 
   setup(store)
 
   const taskStore = useTaskStore()
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {

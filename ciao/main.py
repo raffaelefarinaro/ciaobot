@@ -17,8 +17,7 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.loops import LoopEntry, LoopManager, LoopStore
-from ciao.schedules import ScheduleManager, ScheduleStore
+from ciao.schedules import ScheduleManager, ScheduleStore, migrate_loops
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
@@ -499,6 +498,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     transcript_root = config.logs_root / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
+    # Loops were folded into schedules as the `interval` cadence. Import any
+    # legacy `.runtime/loops.json` before the store is read, so a device
+    # upgrading (or syncing that file in from one that has not upgraded yet)
+    # keeps its automations instead of losing them silently.
+    try:
+        migrate_loops(config.state_path.parent)
+    except Exception:
+        logger.warning("Could not import legacy loops.json", exc_info=True)
+
     # `workspace_names` is read on every list, not captured once, so adding a
     # workspace produces its per-workspace system routines without a restart.
     schedule_store = ScheduleStore(
@@ -546,36 +554,29 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.node_state import NodeStateManager
     node_state_manager = NodeStateManager(config.state_path.parent)
 
+    # An interval schedule bound to an existing chat can only dispatch into a
+    # live, non-archived one. Treat an archived (or deleted) target as
+    # dispatchable while its project still resolves — the dispatcher forks or
+    # opens a replacement chat there — and as undispatchable otherwise, so the
+    # entry is disabled instead of erroring every interval with "Cannot send
+    # messages to an archived chat" (issue #126).
+    def _interval_target_dispatchable(entry) -> bool:
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if not chat_id:
+            return True  # project-bound: a fresh chat is created per run
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and not chat.archived:
+            return True
+        return pcm.resolve_automation_project(entry) is not None
+
     schedule_manager = ScheduleManager(
         store=schedule_store,
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
         is_node_active=node_state_manager.is_active,
-    )
-
-    # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
-    # run with the chat's own model/mode (no override), and skip (not queue)
-    # when the chat still has a turn in flight.
-    async def _dispatch_loop(entry):
-        return await pcm.dispatch_loop(entry, entry.prompt)
-
-    # A loop can only dispatch into a live, non-archived chat. Treat an
-    # archived (or deleted) target as not-dispatchable so LoopManager
-    # auto-stops the loop instead of erroring every interval with
-    # "Cannot send messages to an archived chat" (issue #126).
-    def _loop_target_dispatchable(target: LoopEntry) -> bool:
-        chat = pcm.get_chat(target.web_chat_id)
-        if chat is not None and not chat.archived:
-            return True
-        return pcm._resolve_loop_project(target) is not None
-
-    loop_manager = LoopManager(
-        store=LoopStore(config.state_path.parent),
-        dispatch=_dispatch_loop,
         chat_busy=pcm.chat_stream_active,
-        chat_exists=_loop_target_dispatchable,
-        is_node_active=node_state_manager.is_active,
+        chat_dispatchable=_interval_target_dispatchable,
     )
 
     # Background command runs (issue #282): a subprocess-only sibling of
@@ -623,7 +624,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         logger.warning("Could not backfill schedule project names", exc_info=True)
 
     app.state.schedule_manager = schedule_manager
-    app.state.loop_manager = loop_manager
     app.state.background_runner = background_runner
     # Lets the wake flusher defer runs to the runner when the restart drain
     # blocks delivery, so the next start replays those wakes.
@@ -658,7 +658,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             config,
             project_chat_manager=pcm,
             schedule_manager=schedule_manager,
-            loop_manager=loop_manager,
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
@@ -808,14 +807,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # done; the post-setup restart (no longer in bootstrap mode) starts them.
     if getattr(config, "bootstrap_mode", False):
         logger.info(
-            "Bootstrap mode: holding schedule/loop dispatch until setup completes."
+            "Bootstrap mode: holding schedule dispatch until setup completes."
         )
     else:
+        # One ticker for every cadence. Interval entries resume on their own
+        # within an interval of boot; they are excluded from the catch-up pass
+        # because replaying intervals missed during downtime is worthless.
         schedule_manager.start()
-        # Loops with autostart begin running now; manually-started loops stay
-        # stopped until started from the Automations page. No catch-up pass:
-        # missed poll iterations from downtime are worthless, cadence just resumes.
-        loop_manager.start()
 
         # Resolve any background run left non-terminal by a crash (the
         # graceful path terminates them on shutdown, so this normally finds

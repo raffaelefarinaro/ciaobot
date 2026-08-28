@@ -289,7 +289,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        # Loops — in-chat interval automations (Automations page)
+        # Loops — retired; interval schedules now cover them. Kept for one
+        # release so a PWA build cached before the merge keeps working.
         Route("/api/loops", list_loops, methods=["GET"]),
         Route("/api/loops", create_loop, methods=["POST"]),
         Route("/api/loop-run/{loop_id}", run_loop_now, methods=["POST"]),

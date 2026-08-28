@@ -401,10 +401,10 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'projects_reordered'; workspace: string; order: string[] }
-  // A loop was created, edited, started, stopped, or deleted. Carries no
-  // payload: the client refetches /api/loops, which is the only place the
+  // An automation was created, edited, paused, resumed, or deleted. Carries no
+  // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
-  | { type: 'loops_changed' }
+  | { type: 'schedules_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
@@ -479,7 +479,14 @@ export interface Schedule {
   // because context_label is always set, so its truthiness says nothing
   // about whether the target is still there.
   context_available?: boolean
-  frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once'
+  // 'interval' is the sub-day cadence that replaced loops: it fires
+  // interval_minutes after its last run rather than at a time of day.
+  frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once' | 'interval'
+  interval_minutes: number
+  // Outcome of the most recent interval run. Interval entries have no expected
+  // wall-clock slot, so `missed` is always false for them and this is what
+  // reports their health instead. Empty on wall-clock schedules.
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -499,24 +506,6 @@ export interface Schedule {
   scope?: string
   editable?: boolean
   removable?: boolean
-}
-
-// In-chat loop: re-dispatches its prompt into one fixed chat every N minutes.
-export interface Loop {
-  loop_id: string
-  prompt: string
-  web_chat_id: string
-  created_at: string
-  interval_minutes: number
-  title: string
-  autostart: boolean
-  last_run_at: string
-  last_status: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
-  scope?: 'user' | 'system'
-  // Computed server-side
-  running: boolean
-  context_label: string
-  next_run: string | null
 }
 
 // ── Status & Models ─────────────────────────────────────────────────────

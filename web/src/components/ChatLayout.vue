@@ -609,8 +609,6 @@ const pageDocumentTitle = computed(() => {
     if (scheduleId) {
       const schedule = taskStore.schedules.find(s => s.schedule_id === scheduleId)
       if (schedule?.title) return schedule.title
-      const loop = taskStore.loops.find(l => l.loop_id === scheduleId)
-      if (loop?.title) return loop.title
     }
     return 'automations'
   }
@@ -686,7 +684,6 @@ onMounted(async () => {
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
-  taskStore.fetchLoops().catch(() => {})
   const chatId = route.params.chatId as string
   if (chatId && store.chats.find(c => c.chat_id === chatId)) {
     await store.openChatFromDeepLink(chatId)

@@ -45,7 +45,6 @@ from ciao.jsonio import write_private_text
 from ciao.memory_tool import resolve_region
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import WorkspaceConfig
-from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -66,10 +65,16 @@ from ciao.providers.opencode import (
 )
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
+    DEFAULT_INTERVAL_MINUTES,
+    FREQUENCIES,
+    INTERVAL_FREQUENCY,
     ScheduleEntry,
     compute_last_expected_run,
     compute_next_run,
+    is_interval,
     normalize_archive_policy,
+    normalize_interval_minutes,
+    publish_automations_changed,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -4989,7 +4994,13 @@ def _enrich_schedule(
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
-        entry_dict["context_available"] = chat is not None
+        # An interval entry whose chat was archived or deleted is still
+        # dispatchable while its project resolves — the run continues in a
+        # replacement chat — so do not mark it unavailable and send the user to
+        # re-pick a target they do not need to change.
+        entry_dict["context_available"] = chat is not None or (
+            is_interval(entry) and pcm.resolve_automation_project(entry) is not None
+        )
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)
@@ -5002,6 +5013,8 @@ def _enrich_schedule(
     entry_dict["last_expected_run"] = (
         last_expected.isoformat() if last_expected is not None else None
     )
+    # Interval entries never report a missed run: compute_last_expected_run
+    # returns None for them, so this stays False by construction.
     missed = False
     if last_expected is not None:
         expected_day = last_expected.date().isoformat()
@@ -5119,6 +5132,31 @@ async def create_schedule(request: Request) -> JSONResponse:
     mode = state.get_mode(ctx)
 
     frequency = body.get("frequency", "weekly")
+    if frequency not in FREQUENCIES:
+        return JSONResponse(
+            {"error": f"unknown frequency '{frequency}'"}, status_code=400
+        )
+    # Interval cadence is measured from the last dispatch, so it needs no time
+    # of day — but it does need a cadence and a target, since an entry with
+    # neither would tick forever against nothing.
+    interval_minutes = 0
+    if frequency == INTERVAL_FREQUENCY:
+        try:
+            interval_minutes = normalize_interval_minutes(
+                body.get("interval_minutes", DEFAULT_INTERVAL_MINUTES)
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not web_chat_id and not web_project_id:
+            return JSONResponse(
+                {"error": "interval schedules require web_chat_id or web_project_id"},
+                status_code=400,
+            )
+        if web_chat_id and pcm.get_chat(web_chat_id) is None:
+            return JSONResponse(
+                {"error": "web_chat_id must point to an existing chat"},
+                status_code=400,
+            )
     run_at_date = body.get("run_at_date")
     # Reject one-off schedules pointed at a past datetime — they would
     # never auto-fire, and silently keeping them around is worse than 400.
@@ -5173,6 +5211,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         days_of_week=body.get("days_of_week"),
         thread_id=body.get("thread_id"),
         frequency=frequency,
+        interval_minutes=interval_minutes,
         day_of_month=body.get("day_of_month"),
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
@@ -5183,6 +5222,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
     )
+    publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
 
 
@@ -5198,6 +5238,18 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         if "paused" in str(exc).lower():
             return JSONResponse({"error": str(exc)}, status_code=409)
         raise
+    # Interval entries refuse rather than queue: a manual run into a chat that
+    # is already streaming would stack a second prompt behind the live turn.
+    if result.get("status") == "busy":
+        return JSONResponse(
+            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            status_code=409,
+        )
+    if result.get("status") == "missing-chat":
+        return JSONResponse(
+            {"error": "target chat no longer exists", **result}, status_code=409
+        )
+    publish_automations_changed(request.app.state.project_chat_manager)
     return JSONResponse(result, status_code=201)
 
 
@@ -5207,6 +5259,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if request.method == "DELETE":
         sm = request.app.state.schedule_manager
         ok = sm.delete(schedule_id)
+        publish_automations_changed(request.app.state.project_chat_manager)
         return JSONResponse({"ok": ok})
     # PATCH
     store = request.app.state.schedule_manager._store
@@ -5231,7 +5284,21 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if "chat_id" in body:
         entry.chat_id = body["chat_id"]
     if "frequency" in body:
+        if body["frequency"] not in FREQUENCIES:
+            return JSONResponse(
+                {"error": f"unknown frequency '{body['frequency']}'"}, status_code=400
+            )
         entry.frequency = body["frequency"]
+        # Switching to interval without naming a cadence would leave 0 stored,
+        # which interval_delta floors to one minute — far faster than anything
+        # the caller asked for. Seed the default instead.
+        if is_interval(entry) and not entry.interval_minutes:
+            entry.interval_minutes = DEFAULT_INTERVAL_MINUTES
+    if "interval_minutes" in body:
+        try:
+            entry.interval_minutes = normalize_interval_minutes(body["interval_minutes"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "day_of_month" in body:
         entry.day_of_month = body["day_of_month"]
     if "run_at_date" in body:
@@ -5278,46 +5345,59 @@ async def schedule_detail(request: Request) -> JSONResponse:
         # caller would otherwise get a 500 for asking something answerable.
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
+    publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm))
 
 
-# ── Loops ────────────────────────────────────────────────────────────────
-# In-chat loops: re-dispatch a prompt into one fixed chat every N minutes.
-# Runtime start/stop state lives in the LoopManager (autostart decides what
-# runs at boot), so PATCH {"running": bool} toggles the manager, everything
-# else edits the persisted entry.
+# ── Loops (compatibility) ────────────────────────────────────────────────
+# Loops were folded into schedules as the `interval` cadence. These routes stay
+# for one release so a PWA build cached before the merge — or another device
+# still running the old app — keeps working: they translate the legacy Loop
+# shape to and from an interval schedule. Nothing in the current frontend calls
+# them. Remove them, and the `loops_changed` event, in the release after next.
 
-def _enrich_loop(entry, manager, pcm=None) -> dict:
-    """Serialize a LoopEntry and attach computed fields (running, context_label, next_run)."""
-    entry_dict = asdict(entry)
-    running = manager.is_running(entry.loop_id)
-    entry_dict["running"] = running
-    chat = pcm.get_chat(entry.web_chat_id) if pcm else None
-    entry_dict["context_label"] = chat.title if chat else entry.web_chat_id
-    next_run = None
-    if running:
-        if entry.last_run_at:
-            try:
-                last = datetime.fromisoformat(entry.last_run_at)
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
-                next_run = (last + entry.interval()).isoformat()
-            except ValueError:
-                pass
-        else:
-            next_run = datetime.now(UTC).isoformat(timespec="seconds")
-    entry_dict["next_run"] = next_run
-    return entry_dict
+def _loop_view(entry: ScheduleEntry, pcm=None) -> dict:
+    """Render an interval schedule in the retired Loop shape."""
+    chat = pcm.get_chat(entry.web_chat_id) if pcm and entry.web_chat_id else None
+    next_run = compute_next_run(entry)
+    return {
+        "loop_id": entry.schedule_id,
+        "prompt": entry.prompt,
+        "web_chat_id": entry.web_chat_id or "",
+        "web_project_id": entry.web_project_id or "",
+        "workspace": entry.workspace,
+        "created_at": entry.created_at,
+        "interval_minutes": entry.interval_minutes,
+        "title": entry.title,
+        # The merged primitive has one flag where loops had two, so both legacy
+        # fields report it: a stopped entry neither ticks now nor resumes later.
+        "autostart": entry.enabled,
+        "running": entry.enabled,
+        "last_run_at": entry.last_dispatched_at,
+        "last_status": entry.last_status,
+        "scope": entry.scope,
+        "context_label": chat.title if chat else (entry.web_chat_id or ""),
+        "next_run": next_run.isoformat() if next_run is not None else None,
+    }
+
+
+def _interval_entries(sm) -> list[ScheduleEntry]:
+    return [entry for entry in sm.list_entries() if is_interval(entry)]
+
+
+def _interval_entry(sm, loop_id: str) -> ScheduleEntry | None:
+    entry = sm._store.get(loop_id)
+    return entry if entry is not None and is_interval(entry) else None
 
 
 async def list_loops(request: Request) -> JSONResponse:
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    return JSONResponse([_enrich_loop(entry, lm, pcm) for entry in lm.list()])
+    return JSONResponse([_loop_view(entry, pcm) for entry in _interval_entries(sm)])
 
 
 async def create_loop(request: Request) -> JSONResponse:
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
@@ -5325,49 +5405,54 @@ async def create_loop(request: Request) -> JSONResponse:
     if not prompt:
         return JSONResponse({"error": "prompt is required"}, status_code=400)
     web_chat_id = (body.get("web_chat_id") or "").strip()
-    if not web_chat_id:
-        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
-    chat = pcm.get_chat(web_chat_id)
+    chat = pcm.get_chat(web_chat_id) if web_chat_id else None
     if chat is None:
-        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+        return JSONResponse(
+            {"error": "web_chat_id must point to an existing chat"}, status_code=400
+        )
     try:
-        interval_minutes = int(body.get("interval_minutes", 10))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
-    if interval_minutes < 1:
-        return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+        interval_minutes = normalize_interval_minutes(
+            body.get("interval_minutes", DEFAULT_INTERVAL_MINUTES)
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    # A loop inherits the workspace of its chat's project, same as a schedule.
-    loop_project_id = getattr(chat, "project_id", "") or ""
-    loop_project = pcm.get_project(loop_project_id) if loop_project_id else None
-    entry = lm.create(
+    project_id = getattr(chat, "project_id", "") or ""
+    project = pcm.get_project(project_id) if project_id else None
+    state = request.app.state.state_store
+    entry = sm.create(
+        daily_time_utc="",
         prompt=prompt,
-        web_chat_id=web_chat_id,
+        # Empty model/mode is what makes each run inherit the target chat.
+        model="",
+        mode=state.get_mode(ChatContext(chat_id=0)),
+        chat_id=0,
+        frequency=INTERVAL_FREQUENCY,
         interval_minutes=interval_minutes,
+        web_chat_id=web_chat_id,
         title=(body.get("title") or "").strip(),
-        # Starting implies autostart, so a running loop survives a restart
-        # instead of going quietly dead (see CiaoControlPlane.loop_create).
-        autostart=bool(body.get("autostart")) or bool(body.get("start")),
-        web_project_id=loop_project_id,
-        workspace=getattr(loop_project, "workspace", "") or "",
+        workspace=getattr(project, "workspace", "") or "",
     )
-    if body.get("start"):
-        lm.start_loop(entry.loop_id)
-    publish_loops_changed(pcm)
-    return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
+    # Loops recorded the chat's project only so a lost chat could be replaced
+    # there; on a schedule web_project_id means "new chat per run", so the
+    # replacement target is carried by `workspace` instead.
+    if not (body.get("autostart") or body.get("start")):
+        entry.enabled = False
+        sm.replace(entry)
+    publish_automations_changed(pcm)
+    return JSONResponse(_loop_view(entry, pcm), status_code=201)
 
 
 async def loop_detail(request: Request) -> JSONResponse:
-    """Handle PATCH (update / start / stop) and DELETE for a single loop."""
+    """Handle PATCH (update / start / stop) and DELETE for one interval entry."""
     loop_id = request.path_params["loop_id"]
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
     if request.method == "DELETE":
-        deleted = lm.delete(loop_id)
-        publish_loops_changed(pcm)
+        deleted = sm.delete(loop_id)
+        publish_automations_changed(pcm)
         return JSONResponse({"ok": deleted})
-    # PATCH
-    entry = lm.get(loop_id)
+    entry = _interval_entry(sm, loop_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     body = await request.json()
@@ -5380,79 +5465,56 @@ async def loop_detail(request: Request) -> JSONResponse:
         entry.title = (body["title"] or "").strip()
     if "interval_minutes" in body:
         try:
-            interval_minutes = int(body["interval_minutes"])
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
-        if interval_minutes < 1:
-            return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
-        entry.interval_minutes = interval_minutes
+            entry.interval_minutes = normalize_interval_minutes(body["interval_minutes"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "web_chat_id" in body:
         web_chat_id = (body["web_chat_id"] or "").strip()
         if not web_chat_id or pcm.get_chat(web_chat_id) is None:
-            return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+            return JSONResponse(
+                {"error": "web_chat_id must point to an existing chat"}, status_code=400
+            )
         entry.web_chat_id = web_chat_id
-    if "autostart" in body:
-        entry.autostart = bool(body["autostart"])
-    lm.replace(entry)
-    if "running" in body:
-        if body["running"]:
-            chat = pcm.get_chat(entry.web_chat_id)
-            if chat is None:
-                project = pcm._resolve_loop_project(entry)
-                if project is None:
-                    # Nothing left to dispatch into: the target chat is gone and
-                    # the loop's project/workspace no longer resolves. Starting
-                    # it would mark it running while every tick no-ops.
-                    return JSONResponse(
-                        {
-                            "error": (
-                                "This loop's chat and project are both gone. "
-                                "Point it at an existing chat before starting it."
-                            )
-                        },
-                        status_code=409,
+    # `autostart` and `running` were separate flags; both now set `enabled`.
+    for key in ("autostart", "running"):
+        if key in body:
+            entry.enabled = bool(body[key])
+    if entry.enabled and pcm.get_chat(entry.web_chat_id) is None:
+        if pcm.resolve_automation_project(entry) is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "This automation's chat and project are both gone. "
+                        "Point it at an existing chat before starting it."
                     )
-                new_chat = pcm.create_chat(
-                    project.project_id,
-                    title=entry.title or f"Loop: {entry.prompt[:30]}",
-                )
-                entry.web_chat_id = new_chat.chat_id
-                lm.replace(entry)
-            elif chat.archived:
-                # The target chat was archived (e.g. by an auto-archive
-                # policy) while the loop was stopped. Resuming into a dead
-                # chat would just auto-stop again on the next tick, so fork
-                # a fresh chat from the archived transcript and re-point the
-                # loop at it instead.
-                try:
-                    new_chat = pcm.continue_archived_chat(entry.web_chat_id)
-                except ValueError as exc:
-                    return JSONResponse({"error": str(exc)}, status_code=409)
-                entry.web_chat_id = new_chat.chat_id
-                lm.replace(entry)
-            lm.start_loop(loop_id)
-        else:
-            lm.stop_loop(loop_id)
-    publish_loops_changed(pcm)
-    return JSONResponse(_enrich_loop(entry, lm, pcm))
+                },
+                status_code=409,
+            )
+    sm.replace(entry)
+    publish_automations_changed(pcm)
+    return JSONResponse(_loop_view(entry, pcm))
 
 
 async def run_loop_now(request: Request) -> JSONResponse:
-    """Fire one loop iteration immediately (works even when stopped)."""
+    """Fire one interval run immediately (works while the entry is stopped)."""
     loop_id = request.path_params["loop_id"]
-    lm = request.app.state.loop_manager
-    try:
-        result = await lm.run_now(loop_id)
-    except ValueError:
+    sm = request.app.state.schedule_manager
+    if _interval_entry(sm, loop_id) is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    result = await sm.dispatch_now(loop_id)
+    payload = {**result, "loop_id": loop_id}
     if result.get("status") == "busy":
         return JSONResponse(
-            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            {"error": "chat has a turn in flight; retry when it finishes", **payload},
             status_code=409,
         )
     if result.get("status") == "missing-chat":
-        return JSONResponse({"error": "target chat no longer exists", **result}, status_code=409)
-    return JSONResponse(result, status_code=201)
+        return JSONResponse(
+            {"error": "target chat no longer exists", **payload}, status_code=409
+        )
+    publish_automations_changed(request.app.state.project_chat_manager)
+    return JSONResponse(payload, status_code=201)
+
 
 
 # ── Models ───────────────────────────────────────────────────────────────

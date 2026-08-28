@@ -5,7 +5,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
-import { useTaskStore } from '../../stores/tasks'
 import { useFileViewerStore } from '../../stores/fileViewer'
 
 function timestamp(secondsAgo: number): string {
@@ -52,8 +51,6 @@ function seedChats(includeChats = true) {
 
 async function mountHome(includeChats = true) {
   seedChats(includeChats)
-  const taskStore = useTaskStore()
-  taskStore.loops = [] as unknown as typeof taskStore.loops
   const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
   const wrapper = mount(HomeRecentChats, { attachTo: document.body })
   await nextTick()
@@ -81,8 +78,6 @@ describe('HomeRecentChats lanes and tiers', () => {
   it('swaps the lane content when the active workspace changes', async () => {
     seedChats()
     const store = useProjectStore()
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -132,8 +127,6 @@ describe('HomeRecentChats lanes and tiers', () => {
     store.chats = store.chats.map(chat =>
       chat.chat_id === 'older' ? { ...chat, project_id: 'personal-project' } : chat,
     ) as unknown as typeof store.chats
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -185,8 +178,6 @@ describe('HomeRecentChats lanes and tiers', () => {
     ] as unknown as typeof store.chats
     const viewer = useFileViewerStore()
     const openSpy = vi.spyOn(viewer, 'open').mockResolvedValue(true)
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -339,8 +330,6 @@ describe('HomeRecentChats lanes and tiers', () => {
         created_at: timestamp(90), last_activity_at: timestamp(90), last_read_at: timestamp(90), archived: false, local: true,
       },
     ] as unknown as typeof store.chats
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -402,8 +391,6 @@ describe('HomeRecentChats lanes and tiers', () => {
   it('anchors the first arrow press to the active workspace lane', async () => {
     const store = seedChats()
     store.activeWorkspace = 'work'
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -451,8 +438,6 @@ describe('HomeRecentChats regressions', () => {
     store.projects = [
       { project_id: 'personal-project', name: 'Personal project', workspace: 'renamed-away' },
     ] as unknown as typeof store.projects
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -484,8 +469,6 @@ describe('HomeRecentChats regressions', () => {
         created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(30), archived: false, local: true,
       },
     ] as unknown as typeof store.chats
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -605,8 +588,6 @@ describe('HomeRecentChats new-chat project picker', () => {
         ? { ...chat, project_id: 'personal-general' }
         : chat,
     ) as unknown as typeof store.chats
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()

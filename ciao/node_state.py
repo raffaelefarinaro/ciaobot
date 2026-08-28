@@ -1,6 +1,6 @@
 """Node state for Ciaobot host/client multi-device mode.
 
-Host: full local instance (schedules, loops, vault writes).
+Host: full local instance (schedules, vault writes).
 Client: thin tunnel — PWA/tray proxy to a remote host; local automations pause.
 
 Legacy role names ``active``/``standby`` are migrated to ``host``/``client``.
@@ -147,7 +147,7 @@ class NodeStateManager:
         tmp.replace(self.state_file)
 
     def is_active(self) -> bool:
-        """True when this node is the host (runs schedules/loops)."""
+        """True when this node is the host (runs schedules and vault writes)."""
         return self.get_role() == "host"
 
     def is_client(self) -> bool:

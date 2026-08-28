@@ -197,7 +197,6 @@ describe('page tag per view', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {

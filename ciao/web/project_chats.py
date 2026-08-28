@@ -878,11 +878,11 @@ class ChatInfo:
     # Drives the per-message footer in the PWA (time of send, agent latency).
     # Recorded at the orchestration layer so it stays provider-agnostic.
     user_turn_timings: dict = field(default_factory=dict)
-    # Map of user-turn index (as str) → True for turns fired by a loop or
-    # schedule rather than typed by the user. Without it a loop tick renders as
+    # Map of user-turn index (as str) → True for turns fired by an automation
+    # rather than typed by the user. Without it an automation run renders as
     # an ordinary user bubble, so neither the reader nor the model can tell the
     # difference (the model narrated "even though you're actively messaging me"
-    # while replying to its own loop prompt). Absent key = interactive turn, so
+    # while replying to its own recurring prompt). Absent key = interactive turn, so
     # pre-feature chats degrade to today's behaviour.
     user_turn_unattended: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
@@ -962,7 +962,7 @@ class ChatInfo:
     # prepare_schedule_chat for both branches (web_project_id spawns a new
     # chat per run, web_chat_id reuses a fixed chat). Lets the PWA show a
     # "triggered by schedule X" banner on the chat that survives later runs
-    # (a schedule is 1:many with chats, so unlike loops the link can't live
+    # (a project-bound schedule is 1:many with chats, so the link can't live
     # only on the automation side). Empty for interactive chats.
     schedule_id: str = ""
     schedule_title: str = ""
@@ -4993,15 +4993,15 @@ class ProjectChatManager:
     ) -> BridgeMode:
         """Pick the runtime permission mode for ``chat``.
 
-        ``unattended`` (a schedule or loop tick) forces ``bypass``. Nobody is
+        ``unattended`` (an automation run) forces ``bypass``. Nobody is
         watching such a turn, so every mode that can escalate resolves to an
         unanswerable prompt: ``_drive`` auto-denies it with "Scheduled runs
         cannot wait for interactive approval", and the automation fails while
-        reporting success. A loop that fetches a page and writes a snapshot
+        reporting success. An automation that fetches a page and writes a snapshot
         died on its first tool call under the previous default (chats inherit
         `auto`; ``ScheduleEntry.mode`` also defaults to `auto`). The
         authorization for these turns happened when the user created the
-        schedule or loop, which is the same trade every cron runner makes.
+        automation, which is the same trade every cron runner makes.
         Deny rules still apply — they are evaluated before the callback — so
         the per-workspace denylist (`Skill(schedule)`, harness tools) is not
         weakened by this.
@@ -5159,7 +5159,7 @@ class ProjectChatManager:
     ) -> AgentRequest:
         """Resolve all routing parameters and construct an AgentRequest.
 
-        ``unattended`` marks a schedule- or loop-driven turn, which changes
+        ``unattended`` marks an automation-driven turn, which changes
         the permission mode (see ``_effective_mode_for_chat``).
         """
         prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
@@ -8218,6 +8218,15 @@ class ProjectChatManager:
         ``provider`` applies only when this dispatch creates a new chat
         (web_project_id path). For fixed-chat schedules (web_chat_id),
         the existing chat's provider is honoured.
+
+        A fixed-chat *interval* entry is handled differently in two ways. It
+        never has its model/mode overwritten — each run uses whatever the user
+        configured on the chat, which is the defining property the merged
+        `interval` cadence inherited from loops. And a missing or archived
+        target does not end the run: the archived transcript is forked, or a
+        fresh chat is opened in the entry's project, and ``entry.web_chat_id``
+        is re-pointed at it. Only when no project resolves either does this
+        return None, which the caller turns into "disable the entry".
         """
         from datetime import UTC, datetime
 
@@ -8263,11 +8272,20 @@ class ProjectChatManager:
             return chat.chat_id
         elif web_chat_id:
             target_chat = self._chats.get(web_chat_id)
+            interval = getattr(entry, "frequency", "") == "interval"
+            if interval and (target_chat is None or target_chat.archived):
+                replacement = self._rehome_interval_chat(entry, prompt)
+                if replacement is None:
+                    return None
+                web_chat_id = replacement.chat_id
+                target_chat = replacement
             if target_chat is None:
                 logger.warning("Schedule target chat %s not found, skipping", web_chat_id)
                 return None
-            target_chat.model = model
-            target_chat.mode = mode
+            if not interval:
+                # Interval runs inherit the chat's own model/mode instead.
+                target_chat.model = model
+                target_chat.mode = mode
             _stamp(target_chat)
             self._save()
             return cast(str, web_chat_id)
@@ -8311,66 +8329,40 @@ class ProjectChatManager:
         existing = self._broker.get(chat_id)
         return existing is not None and not existing.background
 
-    async def dispatch_loop(self, entry, prompt: str) -> dict[str, str]:
-        """Dispatch one loop iteration into the loop's fixed chat.
+    def _rehome_interval_chat(self, entry, prompt: str) -> ChatInfo | None:
+        """Point a fixed-chat interval entry at a usable chat, or None.
 
-        Unlike schedules, loops never override the chat's model or mode:
-        each iteration runs with whatever the user configured on the chat.
-        If the target chat is missing or archived, auto-fork or create a fresh
-        chat in the loop's project and re-point entry.web_chat_id.
-        Returns a status dict: "ok", "error", "busy" (active turn already
-        in flight), or "missing-chat".
+        An archived target is forked so the run keeps the conversation it was
+        following; a deleted one is replaced with a fresh chat in the entry's
+        project. Mutates ``entry.web_chat_id``; the caller persists the entry.
         """
-        chat_id = entry.web_chat_id
+        chat_id = getattr(entry, "web_chat_id", "") or ""
         chat = self._chats.get(chat_id)
-        if chat is None or chat.archived:
-            if chat is not None and chat.archived:
-                try:
-                    new_chat = self.continue_archived_chat(chat_id)
-                    entry.web_chat_id = new_chat.chat_id
-                    chat_id = new_chat.chat_id
-                except Exception:
-                    project = self._resolve_loop_project(entry)
-                    if project is None:
-                        logger.warning("Loop target chat %s archived and project unresolvable, skipping", chat_id)
-                        return {"status": "missing-chat"}
-                    new_chat = self.create_chat(
-                        project.project_id,
-                        title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
-                    )
-                    entry.web_chat_id = new_chat.chat_id
-                    chat_id = new_chat.chat_id
-            else:
-                project = self._resolve_loop_project(entry)
-                if project is None:
-                    logger.warning("Loop target chat %s not found, skipping", chat_id)
-                    return {"status": "missing-chat"}
-                new_chat = self.create_chat(
-                    project.project_id,
-                    title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
+        title = (getattr(entry, "title", "") or "").strip()
+        if chat is not None and chat.archived:
+            try:
+                forked = self.continue_archived_chat(chat_id)
+                entry.web_chat_id = forked.chat_id
+                return forked
+            except Exception:  # noqa: BLE001 — fall through to a fresh chat
+                logger.warning(
+                    "Could not continue archived chat %s for schedule %s; "
+                    "opening a fresh one instead",
+                    chat_id, getattr(entry, "schedule_id", ""), exc_info=True,
                 )
-                entry.web_chat_id = new_chat.chat_id
-                chat_id = new_chat.chat_id
-
-        if self.chat_stream_active(chat_id):
-            return {"status": "busy", "chat_id": chat_id}
-        is_error = False
-        try:
-            stream = self.start_stream(chat_id, prompt, unattended=True)
-            async for payload in stream.subscribe():
-                if not isinstance(payload, dict):
-                    continue
-                event_type = payload.get("type")
-                if event_type == "error":
-                    is_error = True
-                elif event_type == "result":
-                    is_error = bool(payload.get("is_error"))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Loop dispatch to %s failed", chat_id)
-            return {"status": "error", "chat_id": chat_id}
-        return {"status": "error" if is_error else "ok", "chat_id": chat_id}
+        project = self.resolve_automation_project(entry)
+        if project is None:
+            logger.warning(
+                "Interval schedule target chat %s is gone and its project is "
+                "unresolvable, skipping", chat_id,
+            )
+            return None
+        fresh = self.create_chat(
+            project.project_id,
+            title=title or f"Every run: {prompt[:30]}",
+        )
+        entry.web_chat_id = fresh.chat_id
+        return fresh
 
     async def dispatch_schedule(
         self,
@@ -8382,7 +8374,7 @@ class ProjectChatManager:
         *,
         target_chat_id: str | None = None,
     ) -> dict[str, str]:
-        """Dispatch a schedule and return metadata (chat_id, archived_to)."""
+        """Dispatch a schedule and return metadata (chat_id, status, archived_to)."""
         web_project_id = getattr(entry, "web_project_id", None)
         web_chat_id = getattr(entry, "web_chat_id", None)
 
@@ -8402,9 +8394,12 @@ class ProjectChatManager:
         _sched_started = datetime.now(UTC)
         _sched_schedule_id = getattr(entry, "schedule_id", "") or ""
 
-        # Save original model/mode for fixed-chat dispatches
+        # Save original model/mode for fixed-chat dispatches. Interval entries
+        # are exempt: prepare_schedule_chat leaves the chat's settings alone for
+        # them, so there is nothing to restore.
         orig_model = orig_mode = None
-        if not web_project_id and web_chat_id:
+        interval = getattr(entry, "frequency", "") == "interval"
+        if not interval and not web_project_id and web_chat_id:
             chat = self._chats.get(target_id)
             if chat:
                 orig_model, orig_mode = chat.model, chat.mode
@@ -8473,7 +8468,7 @@ class ProjectChatManager:
             outcome.stream_error = True
             logger.exception("Schedule dispatch to %s failed", target_id)
         finally:
-            if orig_model is not None and not web_project_id and web_chat_id:
+            if orig_model is not None and not interval and not web_project_id and web_chat_id:
                 chat = self._chats.get(target_id)
                 if chat:
                     chat.model = orig_model
@@ -8546,6 +8541,11 @@ class ProjectChatManager:
                 )
 
         _sched_status, _sched_error = _schedule_dispatch_status(outcome)
+        # Interval entries surface their own last_status in the UI, so hand the
+        # classification back. "skipped" (a permission prompt or a deferred
+        # retry) is not an error, but it is not a completed run either -- report
+        # it as such rather than flattening it to "ok".
+        result["status"] = "error" if _sched_status == "error" else _sched_status
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
@@ -8639,13 +8639,15 @@ class ProjectChatManager:
                 return p
         return None
 
-    def _resolve_loop_project(self, entry: object) -> ProjectInfo | None:
-        """Resolve the target project for a loop entry.
+    def resolve_automation_project(self, entry: object) -> ProjectInfo | None:
+        """Resolve the project a chat-bound automation may open a chat in.
 
-        Returns None when the loop names no project or workspace we still know
-        about. Callers treat that as "stop this loop" — re-homing it into an
-        arbitrary project would run the user's prompt against the wrong
-        workspace, on a schedule, unattended.
+        Used when an interval schedule's fixed target chat is gone or archived:
+        the run can continue in a replacement chat, but only inside a project
+        the entry actually names. Returns None when the entry names no project
+        or workspace we still know about, and callers treat that as "disable
+        this entry" — re-homing it into an arbitrary project would run the
+        user's prompt against the wrong workspace, unattended.
         """
         web_project_id = getattr(entry, "web_project_id", "") or ""
         if web_project_id and web_project_id in self._projects:
