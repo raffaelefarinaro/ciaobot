@@ -128,6 +128,10 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
 
+# What ``compute_next_run`` can actually parse out of ``daily_time_utc``.
+# Anything else makes a wall-clock schedule unfireable.
+_VALID_DAILY_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
 _CONTEXT_BLOCK_RE = re.compile(
     r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
     re.DOTALL,
@@ -5503,6 +5507,22 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
+    # A wall-clock cadence needs a parseable time. Without one compute_next_run
+    # returns None and tick() never matches, so the entry would persist as
+    # enabled and silently never fire — the failure an interval entry edited to
+    # daily walks straight into, since interval entries carry no daily_time_utc.
+    # Reject it here rather than storing an automation that cannot run.
+    if entry.frequency not in {"manual", INTERVAL_FREQUENCY}:
+        if not _VALID_DAILY_TIME.match(entry.daily_time_utc or ""):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"frequency '{entry.frequency}' needs a HH:MM time; "
+                        f"got {entry.daily_time_utc!r}"
+                    )
+                },
+                status_code=400,
+            )
     try:
         store.replace(entry)
     except ValueError as exc:

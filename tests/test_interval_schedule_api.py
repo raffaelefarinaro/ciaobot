@@ -314,3 +314,62 @@ def test_legacy_delete(client: TestClient) -> None:
     assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": True}
     assert client.get("/api/loops").json() == []
     assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": False}
+
+
+def test_interval_to_wall_clock_without_a_time_is_rejected(client: TestClient) -> None:
+    """An interval entry carries no ``daily_time_utc``.
+
+    Editing one to a wall-clock cadence therefore arrives with the time empty.
+    Persisting that produced an automation that reads as enabled and can never
+    fire: ``compute_next_run`` cannot parse the empty string, so ``tick()``
+    never matches it.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    resp = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": ""}
+    )
+
+    assert resp.status_code == 400
+    assert "HH:MM" in resp.json()["error"]
+
+    # The entry is untouched, still a working interval.
+    after = client.get("/api/schedules").json()
+    entry = next(s for s in after if s["schedule_id"] == schedule_id)
+    assert entry["frequency"] == INTERVAL_FREQUENCY
+    assert entry["next_run"] is not None
+
+
+def test_interval_to_wall_clock_with_a_time_is_accepted(client: TestClient) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    body = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": "09:30"}
+    ).json()
+
+    assert body["frequency"] == "daily"
+    assert body["daily_time_utc"] == "09:30"
+    assert body["next_run"] is not None
+
+
+@pytest.mark.parametrize("bad", ["", "9:30", "25:00", "09:60", "nope", "09:30:00"])
+def test_wall_clock_times_that_compute_next_run_cannot_parse_are_rejected(
+    client: TestClient, bad: str
+) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+    resp = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": bad}
+    )
+    assert resp.status_code == 400, f"{bad!r} should not be storable"
+
+
+def test_manual_and_interval_still_need_no_time(client: TestClient) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    assert client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "manual"}
+    ).status_code == 200
+    assert client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"frequency": INTERVAL_FREQUENCY, "interval_minutes": 5},
+    ).status_code == 200

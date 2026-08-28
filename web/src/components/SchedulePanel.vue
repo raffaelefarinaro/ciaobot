@@ -156,7 +156,13 @@
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
                 <label>Time</label>
-                <input v-model="editData.time" type="time" />
+                <input v-model="editData.time" type="time" :aria-invalid="cardEditBlocked || undefined" />
+                <!-- Switching an interval entry to a wall-clock cadence leaves
+                     this empty; without a time the automation would save as
+                     enabled and never fire. -->
+                <p v-if="cardEditBlocked" class="field-hint field-hint--warn">
+                  Pick a time — this cadence needs one to run.
+                </p>
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
                 <label>Timezone</label>
@@ -186,7 +192,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -268,7 +274,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -311,7 +317,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -351,7 +357,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -378,7 +384,7 @@
         <div class="card-actions">
           <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
           <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-          <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+          <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
         </div>
       </div>
 
@@ -833,6 +839,16 @@ function showsTimeOfDay(s: Schedule): boolean {
 const editShowsTimeOfDay = computed(
   () => editData.value.frequency !== 'manual' && editData.value.frequency !== 'interval',
 )
+
+// An interval entry has no `daily_time_utc`, so editing one to a wall-clock
+// cadence starts with the time field empty. Saving that persisted an empty
+// `daily_time_utc`, which `compute_next_run` cannot parse — leaving an
+// automation that reads as enabled in the UI and silently never fires. Every
+// Save in this panel sends the whole payload, so all of them are gated.
+const cardEditValid = computed(
+  () => !editShowsTimeOfDay.value || /^\d{2}:\d{2}$/.test(editData.value.time || ''),
+)
+const cardEditBlocked = computed(() => cardDirty.value && !cardEditValid.value)
 
 function enabledToggleLabel(s: Schedule): string {
   if (isIntervalSchedule(s)) return s.enabled ? 'Stop' : 'Start'
@@ -1309,6 +1325,8 @@ function closeSchedule() {
 }
 .form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group label { font-size: var(--text-xs); color: var(--fg2); }
+.field-hint { margin: 4px 0 0; font-size: var(--text-xs); }
+.field-hint--warn { color: var(--warning); }
 .form-group input, .form-group select, .form-group textarea {
   padding: 6px 10px;
   border: 1px solid var(--border);
