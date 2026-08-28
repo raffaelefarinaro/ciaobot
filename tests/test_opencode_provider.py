@@ -155,7 +155,6 @@ def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
         model="",
         mode="auto",
         provider="opencode",
-        control_surface="mcp",
     )
     instructions = provider._chat_system_instructions(request)
     assert "Ciaobot core instructions" in instructions
@@ -1917,7 +1916,7 @@ async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
     provider._client = FakeClient()  # type: ignore[assignment]
     request = AgentRequest(
         prompt="hi", model="opencode/big-pickle", mode="bypass", provider="opencode",
-        mcp_url="http://127.0.0.1:1234/mcp", mcp_token="tok-abc", mcp_required=True,
+        mcp_url="http://127.0.0.1:1234/mcp", mcp_token="tok-abc",
     )
 
     await provider._register_control_plane(request)
@@ -1931,7 +1930,8 @@ async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_refused_control_plane_is_fatal_only_when_required(tmp_path):
+async def test_a_refused_control_plane_is_fatal(tmp_path):
+    """The control plane is mandatory: a refusal fails the turn, never degrades."""
     from ciao.models import AgentRequest
 
     class Refusing:
@@ -1941,18 +1941,15 @@ async def test_a_refused_control_plane_is_fatal_only_when_required(tmp_path):
                 text = "nope"
             return R()
 
-    def _request(required: bool):
-        return AgentRequest(
-            prompt="hi", model="m", mode="bypass", provider="opencode",
-            mcp_url="http://127.0.0.1:1/mcp", mcp_token="t", mcp_required=required,
-        )
+    request = AgentRequest(
+        prompt="hi", model="m", mode="bypass", provider="opencode",
+        mcp_url="http://127.0.0.1:1/mcp", mcp_token="t",
+    )
 
     provider = _provider(tmp_path)
     provider._client = Refusing()  # type: ignore[assignment]
-    # Optional: degrade rather than break the turn.
-    await provider._register_control_plane(_request(False))
     with pytest.raises(RuntimeError, match="refused the Ciaobot MCP"):
-        await provider._register_control_plane(_request(True))
+        await provider._register_control_plane(request)
 
 
 @pytest.mark.asyncio

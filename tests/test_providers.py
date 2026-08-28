@@ -63,10 +63,8 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
         model="sonnet",
         mode="auto",
         provider="claude",
-        control_surface="mcp",
         mcp_url="http://127.0.0.1:8443/mcp/",
         mcp_token="secret-session-token",
-        mcp_required=True,
     )
 
     await provider._ensure_connected(request)
@@ -142,10 +140,8 @@ async def test_claude_does_not_duplicate_native_guide_memory(
         model="sonnet",
         mode="auto",
         provider="claude",
-        control_surface="mcp",
         mcp_url="http://127.0.0.1:8443/mcp/",
         mcp_token="secret",
-        mcp_required=True,
     )
 
     await provider._ensure_connected(request)
@@ -181,7 +177,6 @@ async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeyp
         model="sonnet",
         mode="plan",
         provider="claude",
-        control_surface="mcp",
         mcp_url="http://127.0.0.1:8443/mcp/",
         mcp_token="secret-session-token",
     )

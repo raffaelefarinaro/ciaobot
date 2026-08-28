@@ -220,8 +220,7 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 **Ciaobot agent control plane:**
 
-- `CIAO_MCP_ENABLED`: enables the embedded authenticated MCP endpoint and managed-process integration. Default `true`.
-- `CIAO_CONTROL_SURFACE`: `legacy` or `mcp` (default `mcp`). `legacy` preserves CLI/skill/direct-file adapters; `mcp` is fail-closed. `auto` is a per-chat setting, not an env value: a chat left on `auto` reads the promoted per-provider result from `.runtime/control_surface_decision.json` and falls back to `legacy` when there is no promoted winner.
+- The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
 - `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).

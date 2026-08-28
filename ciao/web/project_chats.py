@@ -35,12 +35,23 @@ class RestartDrainingError(RuntimeError):
         super().__init__(message)
 
 
+class McpUnavailableError(RuntimeError):
+    """Raised when a turn cannot be built because the control plane is down.
+
+    The Ciaobot MCP server is the only agent-facing control surface, so there
+    is nothing to degrade to: a turn dispatched without it would run an agent
+    that cannot see or change anything in Ciaobot. ``_drive``'s error handler
+    publishes this as a normal failed turn, so the user sees why instead of
+    getting a silently crippled answer.
+    """
+
+
 class UnknownModelError(ValueError):
     """A model id that is not in the configured set.
 
     Raised by ``ProjectChatManager._validate_configured_model``. Distinct
     from the other ``ValueError``s ``create_chat`` raises (unknown provider,
-    bucket, control surface) so the MCP delegate boundary can translate only
+    bucket) so the MCP delegate boundary can translate only
     the model failure to ``invalid_model`` and leave the rest as
     ``invalid_request`` (#259).
     """
@@ -842,9 +853,6 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
-    # Empty inherits the server default. MCP-only since the legacy/auto A/B
-    # surface was removed.
-    control_surface: str = ""
     session_id: str = ""
     # SDK session ids this chat rotated through earlier in the SAME
     # conversation (autocompact, or a resume-failure fallback that forks a
@@ -997,7 +1005,6 @@ class ChatInfo:
             "provider": self.provider,
             "mode": self.mode,
             "thinking_level": self.thinking_level,
-            "control_surface": self.control_surface,
             "session_id": self.session_id,
             "created_at": self.created_at,
             "archived": self.archived,
@@ -1374,7 +1381,6 @@ class ProjectChatManager:
                 # project workspace decides routing).
                 mode=cd.get("mode", self._config.claude_mode),
                 thinking_level=cd.get("thinking_level", ""),
-                control_surface=cd.get("control_surface", ""),
                 session_id=cd.get("session_id", ""),
                 previous_session_ids=list(cd.get("previous_session_ids", [])),
                 created_at=cd.get("created_at", ""),
@@ -1480,7 +1486,6 @@ class ProjectChatManager:
                     "provider": c.provider,
                     "mode": c.mode,
                     "thinking_level": c.thinking_level,
-                    "control_surface": c.control_surface,
                     "session_id": c.session_id,
                     "previous_session_ids": c.previous_session_ids,
                     "created_at": c.created_at,
@@ -3143,7 +3148,6 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
-        control_surface: str | None = None,
         spawned_from_chat_id: str = "",
         delegation_id: str = "",
     ) -> ChatInfo:
@@ -3151,8 +3155,6 @@ class ProjectChatManager:
             raise ValueError(f"Project '{project_id}' not found")
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
-        if control_surface not in {None, "", "legacy", "mcp", "auto"}:
-            raise ValueError(f"Unknown control surface '{control_surface}'")
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
         # Per-workspace default: one workspace can default to a cheaper tier
@@ -3192,7 +3194,6 @@ class ProjectChatManager:
             provider=chat_provider,
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
-            control_surface=control_surface or "",
             created_at=_now_iso(),
             spawned_from_chat_id=spawned_from_chat_id,
             delegation_id=delegation_id,
@@ -5127,7 +5128,7 @@ class ProjectChatManager:
 
         Inputs are deliberately excluded: command arguments can contain user
         data or credentials.  The record is enough to compare tool selection,
-        call counts, provider, surface, and timing across implementations.
+        call counts, provider, and timing across implementations.
         """
         path = Path(self._config.state_path).parent / "agent_tool_calls.jsonl"
         record = {
@@ -5135,7 +5136,6 @@ class ProjectChatManager:
             "chat_id": chat.chat_id,
             "project_id": chat.project_id,
             "provider": chat.provider,
-            "control_surface": request.control_surface,
             "tool": event.tool_name,
             "tool_use_id": event.tool_use_id or "",
             "parent_tool_use_id": event.parent_tool_use_id or "",
@@ -5171,46 +5171,26 @@ class ProjectChatManager:
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
-        surface = str(
-            getattr(chat, "control_surface", "")
-            or getattr(self._config, "control_surface", "legacy")
-            or "legacy"
-        )
-        if surface not in {"legacy", "mcp", "auto"}:
-            surface = "legacy"
-        # Auto uses the most recent promoted full-suite decision for this
-        # provider. Missing/invalid/tied decisions fail safely to legacy.
-        if surface == "auto":
-            from ciao.control_surfaces import resolve_auto_surface
-
-            resolved_surface = resolve_auto_surface(self._config, chat.provider)
-        else:
-            resolved_surface = surface
-        mcp_url = ""
-        mcp_token = ""
-        if resolved_surface == "mcp":
-            service = self._mcp_service
-            project = self._projects.get(chat.project_id)
-            if (
-                service is None
-                or not bool(getattr(self._config, "mcp_enabled", True))
-                or project is None
-            ):
-                # MCP is the default transport, so an unavailable server must
-                # not make the app unusable (bootstrap, CIAO_MCP_ENABLED=false).
-                # Degrade gracefully to legacy and log a WARNING; the SettingsView
-                # MCP status display and logs make the fallback observable.
-                logger.warning(
-                    "Ciaobot MCP unavailable for chat %s (service=%s, mcp_enabled=%s, "
-                    "project=%s); falling back to the legacy control surface.",
-                    chat.chat_id,
-                    service is not None,
-                    bool(getattr(self._config, "mcp_enabled", True)),
-                    project is not None,
-                )
-                resolved_surface = "legacy"
-            else:
-                mcp_url, mcp_token = service.credentials_for_chat(chat, project)
+        # The Ciaobot MCP control plane is the only agent-facing control
+        # surface. There is no CLI/direct-file fallback to degrade to, so a
+        # missing server or project fails the turn here rather than dispatching
+        # an agent that silently cannot reach Ciaobot. stream_chat's caller
+        # turns this into a durable error turn in the transcript.
+        service = self._mcp_service
+        project = self._projects.get(chat.project_id)
+        if service is None or project is None:
+            logger.error(
+                "Ciaobot MCP unavailable for chat %s (service=%s, project=%s)",
+                chat.chat_id,
+                service is not None,
+                project is not None,
+            )
+            raise McpUnavailableError(
+                "Ciaobot's MCP control plane is not running, so this chat "
+                "cannot start a turn. Finish first-run setup or restart "
+                "Ciaobot, then try again."
+            )
+        mcp_url, mcp_token = service.credentials_for_chat(chat, project)
 
         return AgentRequest(
             prompt=full_prompt,
@@ -5223,10 +5203,8 @@ class ProjectChatManager:
             extra_env=self._build_extra_env(chat),
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
-            control_surface=resolved_surface,  # type: ignore[arg-type]
             mcp_url=mcp_url,
             mcp_token=mcp_token,
-            mcp_required=resolved_surface == "mcp",
             context_digest=context_digest,
             context_session_id=context_session_id,
             stable_context_prefix=self._stable_context_prefix(chat),
