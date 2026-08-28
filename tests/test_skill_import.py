@@ -144,7 +144,7 @@ def test_import_rejects_an_unregistered_workspace(tmp_path: Path) -> None:
 
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(config=config)),
-        headers={},
+        headers={"content-length": "100"},
         form=_fake_form,
         query_params={},
     )
@@ -156,6 +156,58 @@ def test_import_rejects_an_unregistered_workspace(tmp_path: Path) -> None:
     assert "Unknown workspace: typo-ws" in response.body.decode()
     # Nothing was written outside the registered roots.
     assert not (tmp_path / "typo-ws").exists()
+
+
+def test_import_rejects_a_missing_or_malformed_content_length(tmp_path: Path) -> None:
+    """No valid Content-Length, no multipart parse.
+
+    The pre-parse guard is the only cheap bound on the request body: a
+    chunked/HTTP2 client that omits (or mangles) the header must be rejected
+    before `request.form()` spools the whole body to disk or proxy memory.
+    """
+    import io
+    import zipfile
+    from types import SimpleNamespace
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.web.routes_api import skill_import
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault"),
+        },
+    )
+
+    form_calls: list[int] = []
+
+    async def _fake_form():
+        form_calls.append(1)
+        return {}
+
+    import asyncio
+
+    # Missing header entirely.
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+        headers={},
+        form=_fake_form,
+        query_params={},
+    )
+    response = asyncio.run(skill_import(request))
+    assert response.status_code == 400
+    assert "Zip too large" in response.body.decode()
+
+    # Malformed header.
+    request.headers = {"content-length": "not-a-number"}
+    response = asyncio.run(skill_import(request))
+    assert response.status_code == 400
+
+    # And the multipart parser was never invoked: the body was never read.
+    assert form_calls == []
 
 
 def test_extract_writes_valid_skill(tmp_path: Path) -> None:
