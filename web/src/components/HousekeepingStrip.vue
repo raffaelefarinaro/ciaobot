@@ -105,7 +105,13 @@ async function openView(action: OperatorAction): Promise<void> {
 function renderedDetail(detail: string): string {
   // Missed-schedule detail is markdown (bullets with [name](/schedules/id)).
   // Other tiles are plain sentences — markdown rendering keeps them as <p>.
-  return renderMarkdown(detail)
+  //
+  // Details are prose, not authored HTML: a sentence naming a placeholder path
+  // ("copy it into skills/<name>/") would otherwise be parsed as an inline tag
+  // and dropped by the sanitizer, deleting the one word the sentence is about.
+  // Escaping the angle brackets first keeps the text and leaves markdown link
+  // and list syntax untouched.
+  return renderMarkdown(detail.replace(/</g, '&lt;').replace(/>/g, '&gt;'))
 }
 
 async function onDetailClick(event: MouseEvent): Promise<void> {
