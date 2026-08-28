@@ -128,11 +128,11 @@ with its own shell and filesystem is not duplicated as an MCP tool:
 `system` key. `capabilities_get`, `automation_runs_list`, `debug_issues_get`,
 `agent_context_get`, `chat_mark_read`, `package_status_get`, and the deferred
 `lifecycle_*` tools were dropped as host/PWA concerns. Retry, new-session,
-and the schedule/loop lifecycle verbs are folded into parameterized tools
+and the schedule lifecycle verbs are folded into parameterized tools
 (`chat_retry` with an `action`, `chat_handover` with empty provider/model for
-an in-place new session, `schedule_action`, `loop_action`). The
-schedule/loop/project create/update/restore verbs are folded into `schedule`,
-`loop`, and `project` tools with an `action` param; complete/delete are folded
+an in-place new session, `schedule_action`). The
+schedule/project create/update/restore verbs are folded into `schedule`
+and `project` tools with an `action` param; complete/delete are folded
 into `project_action`. `workspace_update`, `workspace_delete`,
 `project_files_list`, and `adversarial_review` were moved to the PWA / CLI /
 skill surface (admin or redundant with native tools).
@@ -148,14 +148,21 @@ skill surface (admin or redundant with native tools).
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
-| Loops | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
+| Loops (deprecated) | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
 | Workspace files | `file_surface` |
 
-`loop` with `action="create"` starts the cadence immediately (`start=true` by
-default) and returns the real `running` flag. `autostart` is a separate axis: it only decides
-whether the loop comes back up after a server restart. They were previously
-conflated, so a loop created with `autostart=true` reported as running while the
-PWA banner correctly said `stopped`.
+**Sub-day recurrence** is `schedule` with `frequency="interval"` and
+`interval_minutes`. Combined with `chat_id` it keeps one conversation going and
+inherits that chat's model and mode; combined with `project_id` it opens a
+fresh chat per run.
+
+The `loops_list` / `loop` / `loop_action` tools are **deprecated** and translate
+onto interval schedules for one release. Loops were a separate primitive with
+two runtime flags — `start` (tick now) and `autostart` (come back after a
+restart) — which were routinely conflated: a loop created with
+`autostart=true` reported as running while the PWA banner correctly said
+`stopped`. The merged primitive has one `enabled` flag, and both legacy fields
+report it.
 
 **Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
 SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
@@ -226,7 +233,7 @@ Claude managed provider, both of which decisively favored MCP:
 
 - Ollama `minimax-m3:cloud` (production opus-tier): legacy 51/60 (85%) vs MCP
   59/60 (98.3%), higher score, zero quota blocks. The legacy hand-editing path
-  was materially less reliable (`loop_create` persisted 0/4, `vault_write`
+  was materially less reliable (loop creation persisted 0/4, `vault_write`
   content dropped).
 - OpenRouter `anthropic/claude-sonnet-5`: legacy 60/60 vs MCP 60/60, MCP faster
   with 75% fewer tool calls (+9.56).

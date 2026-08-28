@@ -568,7 +568,6 @@ async def _assert_current_project_action_is_deferred(action: str) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="token-1",
@@ -641,7 +640,6 @@ def _chat_create_control_plane(
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace() if schedule_manager is None else schedule_manager,
-        loop_manager=SimpleNamespace(),
     )
 
 
@@ -756,7 +754,6 @@ def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=schedules,
-        loop_manager=SimpleNamespace(),
     )
     principal = _chat_create_principal()
 
@@ -1048,7 +1045,6 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = _chat_create_principal()
 
@@ -1058,8 +1054,9 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
-def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> None:
-    from ciao.loops import LoopManager, LoopStore
+def _interval_control_plane(tmp_path: Path):
+    """A control plane whose caller is a chat in the `work` workspace."""
+    from ciao.schedules import ScheduleManager, ScheduleStore
 
     pcm = _ChatCreatePcm()
     pcm.projects["project-work"] = SimpleNamespace(
@@ -1072,28 +1069,96 @@ def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> 
         if cid == "chat-work"
         else None
     )
-    manager = LoopManager(store=LoopStore(tmp_path))
     config = SimpleNamespace(
         workspace=lambda name: object() if name in {"personal", "work"} else None
     )
     control_plane = CiaoControlPlane(
         config,
         project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
-        loop_manager=manager,
+        schedule_manager=ScheduleManager(store=ScheduleStore(tmp_path)),
     )
     principal = _chat_create_principal(
         chat_id="chat-work",
         project_id="project-work",
         workspace="work",
     )
+    return control_plane, principal
+
+
+def test_interval_schedule_defaults_to_caller_and_stamps_workspace(
+    tmp_path: Path,
+) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Check PRs",
+        frequency="interval",
+        interval_minutes=15,
+        chat_id="chat-work",
+    )
+
+    data = result["data"]
+    assert data["frequency"] == "interval"
+    assert data["interval_minutes"] == 15
+    assert data["web_chat_id"] == "chat-work"
+    assert data["workspace"] == "work"
+    # Empty model is what makes each run inherit the target chat's settings.
+    assert data["model"] == ""
+    # No wall-clock slot, so a next run is still reported (cadence from now).
+    assert data["next_run"]
+
+
+def test_interval_schedule_rejects_a_cadence_below_the_floor(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            principal,
+            prompt="Check PRs",
+            frequency="interval",
+            interval_minutes=0,
+            chat_id="chat-work",
+        )
+    assert excinfo.value.code == "invalid_interval"
+
+
+def test_unknown_frequency_is_refused(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            principal, prompt="p", frequency="hourly", chat_id="chat-work"
+        )
+    assert excinfo.value.code == "invalid_frequency"
+
+
+def test_deprecated_loop_create_makes_an_interval_schedule(tmp_path: Path) -> None:
+    """The retired `loop` tool stays wired for one release."""
+    control_plane, principal = _interval_control_plane(tmp_path)
 
     result = control_plane.loop_create(principal, "", "Check PRs", interval_minutes=15)
 
-    assert result["data"]["web_chat_id"] == "chat-work"
-    assert result["data"]["web_project_id"] == "project-work"
-    assert result["data"]["workspace"] == "work"
-    assert result["data"]["interval_minutes"] == 15
+    data = result["data"]
+    assert data["web_chat_id"] == "chat-work"
+    assert data["workspace"] == "work"
+    assert data["interval_minutes"] == 15
+    # start defaults to True, and `autostart` reports the same one flag.
+    assert data["running"] is True and data["autostart"] is True
+
+    # The same entry is a first-class schedule.
+    listed = control_plane.schedules_list(principal)["data"]
+    assert [row["schedule_id"] for row in listed] == [data["loop_id"]]
+    assert listed[0]["frequency"] == "interval"
+
+
+def test_deprecated_loop_create_without_start_stays_stopped(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    result = control_plane.loop_create(
+        principal, "", "Check PRs", autostart=False, start=False
+    )
+    assert result["data"]["running"] is False
 
 
 @pytest.mark.asyncio
@@ -1105,7 +1170,12 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
 
     async def _archive_chat(cid: str) -> SimpleNamespace:
         archived_calls.append(cid)
-        return SimpleNamespace(path=Path("/tmp/chat.md"))
+        return SimpleNamespace(
+            outcome=SimpleNamespace(path=Path("/tmp/chat.md")),
+            delegates=[],
+            stopped_ids=lambda: [],
+            failed_ids=lambda: [],
+        )
 
     fake_pcm = SimpleNamespace(
         archive_chat=_archive_chat,
@@ -1116,7 +1186,6 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
         config,
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
     control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
@@ -1160,7 +1229,6 @@ def test_project_and_chat_resolution_defaults() -> None:
         config,
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="t1",
@@ -1215,7 +1283,6 @@ def _workspace_control_plane(tmp_path: Path, *, workspaces: tuple[str, ...] = ("
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     return plane, config, refreshes
 
@@ -1291,7 +1358,6 @@ def test_gws_status_reports_connected_profile(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1346,7 +1412,6 @@ def test_gws_status_reports_needs_relogin(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1405,7 +1470,6 @@ def test_gws_status_suppresses_debounced_invalid_reading(tmp_path: Path) -> None
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1445,7 +1509,6 @@ def test_gws_status_reports_unknown_health_as_not_connected(tmp_path: Path) -> N
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1505,7 +1568,6 @@ def test_gws_status_reports_stale_reading_as_not_connected(tmp_path: Path) -> No
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1932,7 +1994,6 @@ def _file_surface_plane(
         config,
         project_chat_manager=_StreamPcm(stream),
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
         connection_tracker=connection_tracker,
     )
 

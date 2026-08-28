@@ -28,15 +28,6 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    // Read-only view of one subagent's own conversation. Nested under the chat
-    // that spawned it because that is the only place the transcript exists —
-    // a Claude Code subagent is a transcript file, not a resumable session.
-    path: '/chat/:chatId/subagent/:agentId',
-    name: 'chat-subagent',
-    component: () => import('./components/ChatLayout.vue'),
-    meta: { requiresAuth: true },
-  },
-  {
     path: '/project/:projectId',
     name: 'project',
     component: () => import('./components/ChatLayout.vue'),

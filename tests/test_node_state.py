@@ -9,7 +9,6 @@ from starlette.testclient import TestClient
 
 from ciao.node_state import NodeStateManager
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
-from ciao.loops import LoopEntry, LoopManager, LoopStore
 from ciao.web.routes_node import (
     node_connect_endpoint,
     node_demote_endpoint,
@@ -131,31 +130,36 @@ async def test_schedule_manager_pauses_in_standby(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_loop_manager_pauses_in_standby(tmp_path: Path):
+async def test_interval_schedules_pause_in_standby(tmp_path: Path):
+    """Interval entries are due on every tick once their gap elapses, so a
+    standby node that kept ticking them would double-run the host's cadence."""
     node_mgr = NodeStateManager(tmp_path)
-    store = LoopStore(tmp_path)
+    store = ScheduleStore(tmp_path)
 
-    loop_entry = store.create(
-        prompt="loop prompt",
-        web_chat_id="chat-1",
+    store.create(
+        daily_time_utc="",
+        prompt="interval prompt",
+        model="",
+        mode="auto",
+        chat_id=0,
+        frequency="interval",
         interval_minutes=1,
-        autostart=True,
+        web_chat_id="chat-1",
     )
 
     dispatches = []
-    async def mock_dispatch(entry):
+    async def mock_dispatch(entry, model, mode, provider, *, target_chat_id=None):
         dispatches.append(entry)
 
-    loop_mgr = LoopManager(
+    sched_mgr = ScheduleManager(
         store=store,
-        dispatch=mock_dispatch,
+        dispatch_to_web=mock_dispatch,
+        prepare_chat=lambda entry, *args: entry.web_chat_id,
         is_node_active=node_mgr.is_active,
     )
-    loop_mgr.start_loop(loop_entry.loop_id)
 
-    # Set standby
     node_mgr.demote()
-    await loop_mgr.tick()
+    await sched_mgr.tick()
     assert len(dispatches) == 0
 
 

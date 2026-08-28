@@ -18,7 +18,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
-import { useTaskStore } from '../../stores/tasks'
 
 function timestamp(secondsAgo: number): string {
   return new Date(Date.now() - secondsAgo * 1000).toISOString()
@@ -59,8 +58,6 @@ function seed(withNeedsYou: boolean) {
 
 async function render(withNeedsYou: boolean): Promise<string[]> {
   seed(withNeedsYou)
-  const taskStore = useTaskStore()
-  taskStore.loops = [] as unknown as typeof taskStore.loops
   const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
   const wrapper = mount(HomeRecentChats)
   await nextTick()
@@ -102,8 +99,6 @@ describe('home lane rendered shape', () => {
     const store = seed(false)
     // Same shape the server leaves behind: activity newer than the last read.
     store.chats[0].last_read_at = new Date(Date.parse(store.chats[0].last_activity_at!) - 1000).toISOString()
-    const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats)
     await nextTick()

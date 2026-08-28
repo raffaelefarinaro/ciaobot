@@ -47,7 +47,6 @@ def plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="token-1",
@@ -144,7 +143,6 @@ def test_refresh_writes_this_roots_index_after_the_re_rooting(
             _workspace_vault_root=lambda ws: tmp_path / ws / "memory-vault"
         ),
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="t", chat_id="c", project_id="p", workspace="work", provider="claude"

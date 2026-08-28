@@ -78,12 +78,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
-| GET, POST | `/api/schedules` | List or create schedules |
-| POST | `/api/schedule-run/{schedule_id}` | Run schedule now |
-| PATCH, DELETE | `/api/schedules/{schedule_id}` | Update or delete schedule |
-| GET, POST | `/api/loops` | List or create in-chat loops (re-dispatch a prompt into a fixed chat every N minutes) |
-| POST | `/api/loop-run/{loop_id}` | Fire one loop iteration now (409 when the chat has a turn in flight) |
-| PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
+| GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
+| POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
+| PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
+| GET, POST | `/api/loops` | **Deprecated** — loops became interval schedules. Translates the legacy Loop shape onto them; removed after the next release |
+| POST | `/api/loop-run/{loop_id}` | **Deprecated** — alias of `/api/schedule-run/{id}` |
+| PATCH, DELETE | `/api/loops/{loop_id}` | **Deprecated** — `{"running": bool}` and `{"autostart": bool}` both set `enabled` |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
@@ -479,23 +479,24 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 # Run a schedule on demand. Auto-archived routines can return archived_to.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedule-run/$SID"
 
-# Create a loop: re-sends the prompt into one existing chat every N minutes.
-# No model field — iterations run with the chat's own model/mode. autostart=true
-# starts it with the server; start=true starts it right now. GET /api/loops
-# enriches each entry with `running`, `context_label`, and `next_run`.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/loops" \
+# Create an interval automation bound to one existing chat: re-sends the prompt
+# every N minutes, keeping that conversation going. Pass no model — each run
+# inherits the chat's own model and mode. `time` and `timezone` are ignored:
+# cadence is measured from the last dispatch, not a wall-clock slot.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedules" \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Check my PRs for review changes; reply \"no changes\" if nothing new.","web_chat_id":"chat-...","interval_minutes":10,"autostart":false,"start":true}'
+  -d '{"prompt":"Check my PRs for review changes; reply \"no changes\" if nothing new.","frequency":"interval","interval_minutes":10,"web_chat_id":"chat-..."}'
 
-# Start / stop a loop (runtime state; survives only via autostart across restarts).
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/loops/$LID" \
-  -H 'content-type: application/json' -d '{"running":false}'
+# Same cadence, fresh chat per run: pass web_project_id instead of web_chat_id
+# (and a model/provider if you want an override rather than the workspace default).
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedules" \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Sweep the inbox and report anything urgent.","frequency":"interval","interval_minutes":30,"web_project_id":"proj-..."}'
 
-# Fire one iteration now (works while stopped). 409 if the chat is mid-turn.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/loop-run/$LID"
-
-# Delete a loop (also stops it).
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/loops/$LID"
+# Pause / resume it. One flag: a paused entry neither runs now nor resumes on
+# the next boot. "Run now" still works while paused.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/schedules/$SID" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
@@ -674,12 +675,12 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that extracts session insights, folds the project doc, writes a trajectory and files memory proposals (`ciao/insights.py:extract_and_append`); this event fires when the pipeline starts, as each step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was learned from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
-- `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
+- `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. `loops_changed` is emitted alongside it, carrying the same meaning, for a PWA build cached before loops were folded into schedules; it will be dropped with the `/api/loops` routes.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
 Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.
 
-**Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by up to 3 same-backend vision models. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted), `picker` closes the question so the PWA can open the model selector and the user re-sends, and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The question is skipped entirely for text-only turns and for unattended (loop/schedule) turns, which close with the bubble instead of waiting.
+**Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by up to 3 same-backend vision models. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted), `picker` closes the question so the PWA can open the model selector and the user re-sends, and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The question is skipped entirely for text-only turns and for unattended (automation) turns, which close with the bubble instead of waiting.
 
 **Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
@@ -693,18 +694,18 @@ Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` 
 - WS `/ws/chat/{chat_id}` `user_echo` event: adds optional `sent_at`.
 - WS `/ws/chat/{chat_id}` `result` event: adds optional `sent_at`, `completed_at`, `duration_ms`.
 
-**Unattended turns (loop / schedule ticks)**
+**Unattended turns (automation ticks)**
 
-A loop or schedule fires its prompt as an ordinary user turn, so without a marker it is indistinguishable from something the user typed — the model read its own loop prompt as a live message and replied "even though you're actively messaging me".
+An automation fires its prompt as an ordinary user turn, so without a marker it is indistinguishable from something the user typed — the model read its own recurring prompt as a live message and replied "even though you're actively messaging me".
 
 - WS `user_echo` gains `unattended: true` on such turns; `GET /api/chats/{chat_id}/messages` sets the same flag on the user entry, read back from `ChatInfo.user_turn_unattended` (keyed by turn index). The SDK session file records no sender, so the flag has to come from our own per-turn record. Absent = interactive, so old chats are unaffected.
 - The PWA renders a `↻ auto` marker in the bubble footer.
 - The model gets a matching line inside the injected-context block (stripped from rendered history) telling it the turn is unattended, that nobody is watching, and not to ask questions or wait for approvals.
 - Permission mode for these turns is `bypass`: an escalation would be auto-denied ("Scheduled runs cannot wait for interactive approval"), which silently broke any automation needing network access or a first-time write. Deny rules still apply.
 
-**Loop / schedule banner**
+**Automation banner**
 
-The PWA shows a banner at the top of a chat when an automation is bound to it. Loops are 1:1 with one fixed chat, so the banner is driven by filtering `GET /api/loops` where `loop.web_chat_id === chat.chat_id`. Schedules are 1:many (a `web_project_id` schedule spawns a new chat each run), so the chat carries a durable backlink instead: `ChatInfo.schedule_id` and `ChatInfo.schedule_title`, stamped in `prepare_schedule_chat` for both the project-schedule (new chat) and fixed-chat (`web_chat_id`) branches and included in every chat object via `to_dict()`. The banner filters `GET /api/schedules` where `s.schedule_id === chat.schedule_id` OR `s.web_chat_id === chat.chat_id` (the second arm covers fixed-chat schedules). Each row links to `/schedules/<id>` (Manage) and offers Run now (`POST /api/schedule-run/{schedule_id}`). Existing chats predating the field stay empty-string and render no banner.
+The PWA shows a banner at the top of a chat when an automation is bound to it. A project-bound automation is 1:many (it spawns a new chat each run), so the chat carries a durable backlink: `ChatInfo.schedule_id` and `ChatInfo.schedule_title`, stamped in `prepare_schedule_chat` for both the project (new chat) and fixed-chat (`web_chat_id`) branches and included in every chat object via `to_dict()`. The banner filters `GET /api/schedules` where `s.schedule_id === chat.schedule_id` OR `s.web_chat_id === chat.chat_id` (the second arm covers every fixed-chat automation, including the interval entries that replaced loops). Each row links to `/schedules/<id>` (Manage) and offers Pause/Resume (`PATCH {"enabled": bool}`) and Run now (`POST /api/schedule-run/{schedule_id}`). Existing chats predating the field stay empty-string and render no banner.
 
 **File-touch cards**
 
@@ -751,9 +752,9 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/vaul
 
 - Project and chat state: `.runtime/web_projects.json`. `.runtime/server.lock` prevents two backend processes from owning this registry, and `.runtime/web_projects.audit.jsonl` records append-only mutation IDs/revisions for repair without storing chat content. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py`; `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
-- `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the schedule banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Loop / schedule banner" above.
+- `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the automation banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Automation banner" above.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
-- Loop state: `.runtime/loops.json` (`ciao/loops.py`, `LoopEntry`). Running/stopped is runtime-only state in the `LoopManager`: `autostart` decides what runs after boot, so prefer the API over direct file writes for loops.
+- Automation state: `.runtime/schedules.json` (`ciao/schedules.py`, `ScheduleEntry`), every cadence in one store. A legacy `.runtime/loops.json` is imported once on startup as `frequency: "interval"` entries — the `loop-…` id is kept as the `schedule_id` so deep links still resolve — and renamed `loops.json.migrated`. Interval entries additionally carry `interval_minutes` and `last_status` (`""` | `running` | `ok` | `error` | `busy` | `missing-chat`); their `missed` is always false, since relative cadence has no expected slot to have missed.
 - Uploaded media: under the configured runtime/media directory
 
 ## Naming

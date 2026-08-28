@@ -175,7 +175,7 @@
           </div>
         </template>
         <template v-else>
-          <div v-if="workspaceSchedules.length === 0" class="empty-hint">// no automations in this workspace</div>
+          <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
 
           <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
@@ -215,14 +215,36 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span
-                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
-                  title="This automation is working"
-                />
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="userLoops.length">
+          <div class="schedule-group">
+            <div class="schedule-group-header">
+              <span>Custom Loops</span>
+              <span class="schedule-group-count">{{ userLoops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in userLoops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
+                <span
+                  v-if="l.running && l.web_chat_id && store.isChatStreaming(l.web_chat_id)"
+                  class="spinner-dot"
+                  title="This loop is working"
+                />
               </router-link>
             </div>
           </div>
@@ -243,19 +265,40 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span
-                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
-                  title="This automation is working"
-                />
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
           </div>
         </template>
 
+        <template v-if="systemLoops.length">
+          <div class="schedule-group schedule-group--system">
+            <div class="schedule-group-header">
+              <span>System Loops</span>
+              <span class="schedule-group-count">{{ systemLoops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in systemLoops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
+                <span
+                  v-if="l.running && l.web_chat_id && store.isChatStreaming(l.web_chat_id)"
+                  class="spinner-dot"
+                  title="This loop is working"
+                />
+              </router-link>
+            </div>
+          </div>
+        </template>
         </template>
       </div>
 
@@ -1128,7 +1171,7 @@ import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from 
 import { useProposalsStore } from '../stores/proposals'
 import { isLightTheme } from '../lib/theme'
 import ChatSignals from './ChatSignals.vue'
-import { scheduleInWorkspace } from '../lib/automationWorkspace'
+import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
@@ -1346,26 +1389,16 @@ const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
 const workspaceSchedules = computed(() =>
-  taskStore.schedules.filter(s => scheduleInWorkspace(
-    s,
+  taskStore.schedules.filter(s => scheduleInWorkspace(s, store.activeWorkspace)),
+)
+const workspaceLoops = computed(() =>
+  taskStore.loops.filter(l => loopInWorkspace(
+    l,
     store.activeWorkspace,
     store.chats,
     store.projects,
   )),
 )
-
-/**
- * The badge in a row's time slot: paused, cadence, or fire time.
- *
- * An interval entry has no time of day, so showing `daily_time_utc` left the
- * slot blank and the row unreadable. Its cadence goes there instead.
- */
-function cadenceBadge(s: Schedule): string {
-  if (!s.enabled) return 'off'
-  if (s.frequency === 'interval') return `${s.interval_minutes}m`
-  if (s.frequency === 'manual') return '·'
-  return s.daily_time_utc
-}
 
 const oneOffSchedules = computed(() => {
   return workspaceSchedules.value
@@ -1382,6 +1415,12 @@ const userRoutines = computed(() =>
 )
 const systemAutomations = computed(() =>
   workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope === 'system'),
+)
+const userLoops = computed(() =>
+  workspaceLoops.value.filter(l => l.scope !== 'system'),
+)
+const systemLoops = computed(() =>
+  workspaceLoops.value.filter(l => l.scope === 'system'),
 )
 
 // ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
@@ -1451,7 +1490,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
+import type { ChatInfo, ProjectInfo } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1478,11 +1517,8 @@ const isAnyChatWorking = computed(() => {
 })
 
 const hasAutomationWarning = computed(() => {
-  return taskStore.schedules.some(s =>
-    s.enabled && (
-      s.missed || s.last_status === 'error' || s.last_status === 'missing-chat'
-    ),
-  )
+  return taskStore.schedules.some(s => s.enabled && s.missed) ||
+         taskStore.loops.some(l => l.running && (l.last_status === 'error' || l.last_status === 'missing-chat'))
 })
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
@@ -2668,8 +2704,8 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: var(--radius-sm);
 }
 
-/* Interval-automation marker on a chat row. Accent while the cadence is live,
-   muted when it is paused, so "this chat re-runs itself" reads at a glance
+/* Loop marker on a chat row. Accent while the cadence is live, muted when the
+   loop exists but is stopped, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
 .badge {
   display: inline-flex;

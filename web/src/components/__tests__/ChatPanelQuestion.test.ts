@@ -121,7 +121,6 @@ async function mountLayout(seed: { questions?: ReturnType<typeof makeQuestion>[]
 
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
   const { default: ChatLayout } = await import('../ChatLayout.vue')
   const wrapper = mount(ChatLayout, {

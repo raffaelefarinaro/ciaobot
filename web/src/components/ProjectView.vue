@@ -289,50 +289,6 @@
     </div>
 
     <section
-      v-else-if="activeTab === 'loops'"
-      :id="panelId('loops')"
-      class="card automation-card"
-      role="tabpanel"
-      :aria-labelledby="tabId('loops')"
-      tabindex="0"
-    >
-      <div class="card-header">
-        <div>
-          <h3>loops <span v-if="loopCount !== undefined">({{ loopCount }})</span></h3>
-          <p class="card-hint">Prompts that repeat inside a chat in this project.</p>
-        </div>
-      </div>
-      <div v-if="projectLoops.length" class="automation-list">
-        <button
-          v-for="loop in projectLoops"
-          :key="loop.loop_id"
-          type="button"
-          class="automation-row"
-          @click="openAutomation(loop.loop_id)"
-        >
-          <span class="automation-row-main">
-            <span class="automation-title">{{ loop.title || promptTitle(loop.prompt) }}</span>
-            <span class="automation-status" :class="{ running: loop.running }">
-              {{ loop.running ? 'running' : 'stopped' }}
-            </span>
-          </span>
-          <span class="automation-row-meta">
-            <span>every {{ loop.interval_minutes }} min</span>
-            <span class="dot">·</span>
-            <span>{{ loopTargetLabel(loop) }}</span>
-            <span class="dot">·</span>
-            <span>last {{ automationTimestamp(loop.last_run_at) }}</span>
-          </span>
-        </button>
-      </div>
-      <!-- Absence is only asserted once the fetch has actually resolved
-           (Rule S6): a failed or in-flight load must not read as "none". -->
-      <div v-else-if="loopsState === 'loading'" class="empty-row">// loading loops…</div>
-      <div v-else-if="loopsState === 'error'" class="empty-row">// could not load loops</div>
-      <div v-else class="empty-row">// no loops send prompts into this project</div>
-    </section>
-
-    <section
       v-else-if="activeTab === 'schedules'"
       :id="panelId('schedules')"
       class="card automation-card"
@@ -342,8 +298,8 @@
     >
       <div class="card-header">
         <div>
-          <h3>schedules <span v-if="scheduleCount !== undefined">({{ scheduleCount }})</span></h3>
-          <p class="card-hint">Scheduled prompts delivered to this project or one of its chats.</p>
+          <h3>automations <span v-if="scheduleCount !== undefined">({{ scheduleCount }})</span></h3>
+          <p class="card-hint">Prompts dispatched into this project or one of its chats on a cadence.</p>
         </div>
       </div>
       <div v-if="projectSchedules.length" class="automation-list">
@@ -369,9 +325,9 @@
           </span>
         </button>
       </div>
-      <div v-else-if="schedulesState === 'loading'" class="empty-row">// loading schedules…</div>
-      <div v-else-if="schedulesState === 'error'" class="empty-row">// could not load schedules</div>
-      <div v-else class="empty-row">// no schedules deliver prompts to this project</div>
+      <div v-else-if="schedulesState === 'loading'" class="empty-row">// loading automations…</div>
+      <div v-else-if="schedulesState === 'error'" class="empty-row">// could not load automations</div>
+      <div v-else class="empty-row">// no automations deliver prompts to this project</div>
     </section>
   </div>
   <div v-else class="empty-state">// project not found.</div>
@@ -391,7 +347,7 @@ import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
-import type { ChatInfo, Loop, Schedule } from '../lib/types'
+import type { ChatInfo, Schedule } from '../lib/types'
 
 interface ProjectFile {
   path: string
@@ -410,7 +366,7 @@ const router = useRouter()
 
 const project = computed(() => store.projects.find(p => p.project_id === props.projectId) || null)
 
-type ProjectTab = 'overview' | 'loops' | 'schedules'
+type ProjectTab = 'overview' | 'schedules'
 const activeTab = ref<ProjectTab>('overview')
 
 // Unique per mounted instance so the tab/panel id pairs stay valid even if two
@@ -421,8 +377,7 @@ const panelId = (key: ProjectTab) => `${uid}-panel-${key}`
 
 const projectTabs = computed(() => [
   { key: 'overview' as const, label: 'Overview' },
-  { key: 'loops' as const, label: 'Loops', count: loopCount.value },
-  { key: 'schedules' as const, label: 'Schedules', count: scheduleCount.value },
+  { key: 'schedules' as const, label: 'Automations', count: scheduleCount.value },
 ])
 
 const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
@@ -459,9 +414,6 @@ watch(project, (p) => {
 
 const allChats = computed(() => store.chats.filter(c => c.project_id === props.projectId))
 const projectChatIds = computed(() => new Set(allChats.value.map(chat => chat.chat_id)))
-const projectLoops = computed(() =>
-  taskStore.loops.filter(loop => projectChatIds.value.has(loop.web_chat_id)),
-)
 const projectSchedules = computed(() =>
   taskStore.schedules.filter(schedule =>
     schedule.web_project_id === props.projectId
@@ -471,7 +423,7 @@ const projectSchedules = computed(() =>
 
 // The task store is filled by ChatLayout's fire-and-forget fetch, so an empty
 // list here could mean "none", "still loading" or "the request failed" — three
-// different answers that all rendered as "no loops". Track the load so the
+// different answers that all rendered as "no automations". Track the load so the
 // panel can say which, and so a tab omits a count it cannot vouch for.
 const automationLoad = ref<'loading' | 'ready' | 'error'>('loading')
 
@@ -481,16 +433,10 @@ function automationState(count: number): 'list' | 'loading' | 'error' | 'none' {
   if (automationLoad.value === 'error') return 'error'
   return 'none'
 }
-const loopsState = computed(() => automationState(projectLoops.value.length))
 const schedulesState = computed(() => automationState(projectSchedules.value.length))
 
 // undefined means "unknown", which renders as no count at all rather than a 0
 // that would be indistinguishable from a real zero.
-const loopCount = computed(() =>
-  loopsState.value === 'loading' || loopsState.value === 'error'
-    ? undefined
-    : projectLoops.value.length,
-)
 const scheduleCount = computed(() =>
   schedulesState.value === 'loading' || schedulesState.value === 'error'
     ? undefined
@@ -499,7 +445,7 @@ const scheduleCount = computed(() =>
 
 async function loadAutomations(): Promise<void> {
   try {
-    await Promise.all([taskStore.fetchLoops(), taskStore.fetchSchedules()])
+    await taskStore.fetchSchedules()
     automationLoad.value = 'ready'
   } catch {
     automationLoad.value = 'error'
@@ -542,10 +488,6 @@ function promptTitle(prompt: string): string {
   return first.length > 60 ? first.slice(0, 57) + '...' : first
 }
 
-function loopTargetLabel(loop: Loop): string {
-  return loop.context_label || allChats.value.find(chat => chat.chat_id === loop.web_chat_id)?.title || 'Unavailable chat'
-}
-
 function scheduleTargetLabel(schedule: Schedule): string {
   if (schedule.web_project_id === props.projectId) return 'new chat per run'
   if (schedule.web_chat_id) {
@@ -557,6 +499,7 @@ function scheduleTargetLabel(schedule: Schedule): string {
 }
 
 function scheduleFrequencyLabel(schedule: Schedule): string {
+  if (schedule.frequency === 'interval') return `every ${schedule.interval_minutes} min`
   if (schedule.frequency === 'once') return `once · ${schedule.run_at_date || 'date pending'}`
   if (schedule.frequency === 'manual') return 'manual'
   if (schedule.frequency === 'monthly') return `monthly · day ${schedule.day_of_month || '—'}`

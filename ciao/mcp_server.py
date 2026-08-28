@@ -30,6 +30,7 @@ from ciao.control_plane import (
     McpPrincipal,
     _UNSET,
 )
+from ciao.schedules import DEFAULT_INTERVAL_MINUTES
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -249,10 +250,12 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "archive_policy": "manual",
     "workspace": "",
 }
+# Retained for the deprecated `loop` tool; the merged `schedule` tool takes
+# interval_minutes through _SCHEDULE_CREATE_DEFAULTS-less None handling.
 _LOOP_CREATE_DEFAULTS: dict[str, Any] = {
     "prompt": "",
     "chat_id": "",
-    "interval_minutes": 10,
+    "interval_minutes": DEFAULT_INTERVAL_MINUTES,
     "title": "",
     "autostart": False,
     "start": True,
@@ -1703,6 +1706,7 @@ class CiaoMcpService:
             daily_time: str | None = None,
             timezone: str | None = None,
             frequency: str | None = None,
+            interval_minutes: int | None = None,
             days_of_week: list[str] | None = None,
             day_of_month: int | None = None,
             run_at_date: str | None = None,
@@ -1756,11 +1760,23 @@ class CiaoMcpService:
                     Ciaobot clears the consumed error log after a clean run
                     that uses one.
                 daily_time: Local HH:MM in `timezone`, default "09:00"
-                    (persisted as the legacy field daily_time_utc).
+                    (persisted as the legacy field daily_time_utc). Ignored for
+                    frequency="interval", which has no time of day.
                 timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
                     the user's local timezone unless they ask for UTC.
-                frequency: "daily" | "weekly" | "monthly" | "manual" | "once";
-                    default "weekly".
+                frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
+                    "interval"; default "weekly". Use "interval" for sub-day
+                    recurrence ("every 30 minutes") — see interval_minutes.
+                interval_minutes: interval only — whole minutes between runs,
+                    minimum 1, default 10. Combine with chat_id for a cadence
+                    that keeps one conversation going (each run inherits that
+                    chat's model and mode; the schedule's own model/provider are
+                    ignored), or with project_id for a fresh chat per run. Give
+                    the prompt a short fixed no-change response for a no-op run,
+                    so repeated runs stay cheap and scannable. A run that comes
+                    due while the target chat is still streaming is skipped and
+                    retried on the next tick, not queued; intervals missed while
+                    the server was down are not replayed.
                 days_of_week: weekly only — lowercase "mon".."sun".
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
@@ -1792,7 +1808,8 @@ class CiaoMcpService:
 
             An enabled schedule with a missed latest occurrence (e.g. the
             server was off) runs once on startup; older missed intervals are
-            not replayed.
+            not replayed. Interval schedules are excluded from that catch-up:
+            their cadence simply resumes.
             """
             # Snapshot the caller's arguments before any other local exists.
             # Doing it first is what keeps helper locals out of the payload: a
@@ -1869,7 +1886,12 @@ class CiaoMcpService:
 
         @tool(name="loops_list", annotations=_READ, structured_output=True)
         async def loops_list() -> dict[str, Any]:
-            """List in-chat loops in the active workspace."""
+            """DEPRECATED — use `schedules_list` and read the interval entries.
+
+            Loops became the `interval` cadence of a schedule. This lists the
+            interval schedules bound to a chat in the active workspace, in the
+            retired loop shape, and will be removed.
+            """
             return await self._invoke("loops_list", lambda cp, p: cp.loops_list(p))
 
         @tool(name="loop", annotations=_WRITE, structured_output=True)
@@ -1883,36 +1905,38 @@ class CiaoMcpService:
             start: bool | None = None,
             loop_id: str = "",
         ) -> dict[str, Any]:
-            """Create or update an in-chat loop.
+            """DEPRECATED — call `schedule` with frequency="interval" instead.
 
-            A loop re-sends one prompt into a fixed chat every N minutes,
-            retaining that chat's context. Use a loop rather than a schedule
-            for sub-day recurrence that needs one conversation's continuity;
-            use a schedule instead when each run should get a fresh project chat.
+            Loops became one cadence of the schedule primitive. Prefer:
+            `schedule(action="create", frequency="interval",
+            interval_minutes=N, chat_id=..., prompt=...)`, which does the same
+            thing, reports the same fields as every other automation, and can
+            also open a fresh chat per run (pass project_id instead of
+            chat_id). This tool remains for one release and will be removed.
+
+            It creates or updates an interval schedule bound to one chat: the
+            prompt is re-sent into that chat every N minutes, retaining its
+            context and running with that chat's own model and mode.
 
             action:
-                "create" — create an interval loop and (by default) start it
-                    immediately.
-                "update" — update an existing loop's fields. Pass loop_id to
-                    target it; all other fields are optional overrides.
+                "create" — create an interval entry and (by default) start it.
+                "update" — update an existing entry. Pass loop_id to target it;
+                    all other fields are optional overrides.
 
             Args (create):
                 chat_id: An existing chat id, or omit / pass empty / "this" for
                     the calling chat. If you must target another chat, resolve
                     its id via chats_list first — chat titles aren't unique.
                 prompt: Give a short, fixed no-change response for a no-op
-                    tick, so repeated iterations stay cheap and scannable.
-                interval_minutes: There is no model field — each iteration
-                    uses the target chat's current model and mode.
-                autostart: Only controls whether the loop starts again on
-                    server boot. It does NOT start the loop now — `start`
-                    does that.
-                start: True (default) begins the cadence immediately, so the
-                    first tick fires within a minute. Pass False only when the
-                    user asked for a loop they will start by hand later; say
-                    which you did instead of claiming a stopped loop is
-                    running. The returned payload carries the real `running`
-                    flag — report that, not your intent.
+                    run, so repeated runs stay cheap and scannable.
+                interval_minutes: Whole minutes, minimum 1, default 10. There
+                    is no model field — each run uses the target chat's current
+                    model and mode.
+                autostart, start: These collapsed into one enabled flag when
+                    loops merged into schedules. Either being true means "run
+                    it"; only both false leaves it stopped. The returned
+                    payload carries the real `running` flag — report that, not
+                    your intent.
 
             Args (update): loop_id is required; every other field is unset by
                 default and only a field you pass is changed. `start` is
@@ -1920,11 +1944,13 @@ class CiaoMcpService:
                 (same as loop_action), and the returned payload carries the
                 resulting `running` flag.
 
-            If the target chat is busy when a tick fires, that iteration is
+            If the target chat is busy when a run comes due, that run is
             skipped and retried on the next tick (not queued). If the target
-            chat is missing or archived, the loop stops. Loops do not catch
-            up missed ticks after downtime (unlike schedules, which fire once
-            for a missed occurrence on startup).
+            chat is gone, the run continues in a replacement chat in the same
+            project, or the entry is disabled when no project resolves either.
+            Interval entries do not catch up runs missed during downtime
+            (unlike wall-clock schedules, which fire once for a missed
+            occurrence on startup).
             """
             # Snapshot the arguments before any other local exists, so no helper
             # local can leak into the control-plane payload.
@@ -1985,13 +2011,17 @@ class CiaoMcpService:
 
         @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
         async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
-            """Run one lifecycle action on an in-chat loop.
+            """DEPRECATED — use `schedule_action` on the interval schedule.
+
+            Loops became interval schedules, and their ids are schedule ids:
+            `schedule_action(schedule_id=..., action="pause"|"resume"|"run"
+            |"delete")` is the replacement. This tool remains for one release.
 
             action:
-                "start"  — start the loop's runtime cadence.
-                "stop"   — stop the cadence without deleting it.
-                "run"    — run one iteration immediately.
-                "delete" — delete the loop (destructive).
+                "start"  — start the cadence (same as schedule_action resume).
+                "stop"   — stop it without deleting (same as pause).
+                "run"    — run once immediately.
+                "delete" — delete the entry (destructive).
             """
             dispatch = {
                 "start": lambda cp, p: cp.loop_start(p, loop_id),

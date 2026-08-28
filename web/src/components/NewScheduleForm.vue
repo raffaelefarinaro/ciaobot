@@ -5,11 +5,15 @@
         <label>Workspace</label>
         <div class="inherited-value">{{ workspaceLabel }}</div>
       </div>
-      <div v-if="frequency !== 'manual'" class="form-group">
+      <div v-if="isInterval" class="form-group">
+        <label>Every (minutes)</label>
+        <input v-model.number="intervalMinutes" type="number" min="1" required />
+      </div>
+      <div v-if="needsTimeOfDay" class="form-group">
         <label>Time</label>
         <input v-model="time" type="time" required />
       </div>
-      <div v-if="frequency !== 'manual'" class="form-group">
+      <div v-if="needsTimeOfDay" class="form-group">
         <label>Timezone</label>
         <select v-model="timezone">
           <option value="Europe/Zurich">Europe/Zurich</option>
@@ -31,7 +35,7 @@
           </optgroup>
         </select>
       </div>
-      <div class="form-group">
+      <div v-if="!inheritsChatModel" class="form-group">
         <label>Model</label>
         <ModelSelector
           :model-value="model"
@@ -42,6 +46,14 @@
         />
         <p class="hint">Provider and model inherit from {{ workspaceLabel }} unless you choose an override.</p>
       </div>
+      <div v-else class="form-group">
+        <label>Model</label>
+        <div class="inherited-value">From the chat</div>
+        <p class="hint">
+          Every run uses the target chat's own model and mode — change the chat's
+          model to change this automation's.
+        </p>
+      </div>
     </div>
     <div class="form-group">
       <label>Frequency</label>
@@ -50,8 +62,16 @@
         <option value="daily">Daily</option>
         <option value="weekly">Weekly</option>
         <option value="monthly">Monthly</option>
+        <option value="interval">Every N minutes</option>
         <option value="manual">Manual (run on click only)</option>
       </select>
+      <p v-if="isInterval" class="hint">
+        Fires N minutes after its last run rather than at a time of day. Pick a
+        chat under <strong>Deliver to</strong> to keep one conversation going
+        between runs, or a project to open a fresh chat each time. A run that
+        comes due while the chat is still working is skipped and retried
+        shortly after, never queued.
+      </p>
     </div>
     <div class="form-group">
       <label>Archive behavior</label>
@@ -82,7 +102,7 @@
       <label>Prompt</label>
       <textarea v-model="prompt" placeholder="Schedule prompt" rows="2" required></textarea>
     </div>
-    <button class="btn-primary" :disabled="!prompt || !contextKey || (frequency !== 'manual' && !time) || (frequency === 'once' && !runAtDate)">Create Schedule</button>
+    <button class="btn-primary" :disabled="!canSubmit">Create automation</button>
   </form>
 </template>
 
@@ -102,6 +122,7 @@ const prompt = ref('')
 const timezone = ref('Europe/Zurich')
 const contextKey = ref('')
 const frequency = ref('weekly')
+const intervalMinutes = ref(10)
 const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const selectedDays = ref<string[]>([])
 const dayOfMonth = ref<number | null>(null)
@@ -110,6 +131,26 @@ const model = ref('')
 const archivePolicy = ref<ScheduleArchivePolicy>('manual')
 
 const todayDate = computed(() => new Date().toISOString().split('T')[0])
+
+const isInterval = computed(() => frequency.value === 'interval')
+// Interval cadence is relative and manual never auto-fires, so neither takes a
+// time of day.
+const needsTimeOfDay = computed(
+  () => frequency.value !== 'manual' && !isInterval.value,
+)
+// An interval run into one existing chat inherits that chat's model and mode:
+// the backend ignores a model set here, so don't offer one.
+const inheritsChatModel = computed(
+  () => isInterval.value && contextKey.value.startsWith('web:'),
+)
+
+const canSubmit = computed(() => {
+  if (!prompt.value || !contextKey.value) return false
+  if (needsTimeOfDay.value && !time.value) return false
+  if (isInterval.value && (!intervalMinutes.value || intervalMinutes.value < 1)) return false
+  if (frequency.value === 'once' && !runAtDate.value) return false
+  return true
+})
 
 onMounted(() => {
   if (!store.models) store.fetchModels()
@@ -205,25 +246,31 @@ async function submit() {
     threadId = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
 
-  await store.createSchedule(
-    frequency.value === 'manual' ? '' : time.value,
-    prompt.value,
-    timezone.value,
-    frequency.value === 'weekly' && selectedDays.value.length > 0 ? selectedDays.value : undefined,
-    chatId,
-    threadId,
-    frequency.value,
-    frequency.value === 'monthly' ? dayOfMonth.value : undefined,
+  await store.createSchedule({
+    prompt: prompt.value,
+    frequency: frequency.value,
+    time: needsTimeOfDay.value ? time.value : '',
+    timezone: timezone.value,
+    daysOfWeek:
+      frequency.value === 'weekly' && selectedDays.value.length > 0
+        ? selectedDays.value
+        : undefined,
+    dayOfMonth: frequency.value === 'monthly' ? dayOfMonth.value : undefined,
+    runAtDate: frequency.value === 'once' ? runAtDate.value : null,
+    intervalMinutes: intervalMinutes.value,
     webChatId,
     webProjectId,
-    model.value || undefined,
-    frequency.value === 'once' ? runAtDate.value : null,
-    archivePolicy.value,
-    selectedProvider.value,
-  )
+    chatId,
+    threadId,
+    // A chat-bound interval run inherits the chat, so never send an override.
+    model: inheritsChatModel.value ? undefined : model.value || undefined,
+    provider: inheritsChatModel.value ? undefined : selectedProvider.value,
+    archivePolicy: archivePolicy.value,
+  })
   time.value = ''
   prompt.value = ''
   frequency.value = 'weekly'
+  intervalMinutes.value = 10
   selectedDays.value = []
   dayOfMonth.value = null
   runAtDate.value = ''

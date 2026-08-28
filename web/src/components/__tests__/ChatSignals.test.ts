@@ -20,7 +20,7 @@ function seed() {
   store.projectStreaming = {}
   store.backgroundAgents = {}
   const taskStore = useTaskStore()
-  taskStore.loops = [] as unknown as typeof taskStore.loops
+  taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return { store, taskStore }
 }
 
@@ -55,36 +55,26 @@ describe('ChatSignals', () => {
     const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(many.find('.chat-signal--agents').exists()).toBe(true)
     expect(many.find('.chat-signal-count').text()).toBe('3')
-    expect(many.find('.chat-signal--agents').attributes('aria-label')).toBe('3 agents running')
+    expect(many.find('.chat-signal--agents').attributes('aria-label')).toContain('3 background agents')
 
     store.backgroundAgents = { 'chat-1': 1 }
     const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(one.find('.chat-signal-count').exists()).toBe(false)
-    expect(one.find('.chat-signal--agents').attributes('aria-label')).toBe('1 agent running')
   })
 
-  // The poll and the watcher tick on different clocks, so a row must not read
-  // idle just because the pushed count has not arrived yet.
-  it('counts running subagents the watcher has not announced yet', () => {
-    const { store } = seed()
-    store.runningSubagents = {
-      'chat-1': [
-        { agent_id: 'a1', description: 'Sweep', status: 'running' },
-        { agent_id: 'a2', description: 'Verify', status: 'running' },
-      ],
-    }
-    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--agents').attributes('aria-label')).toBe('2 agents running')
-    expect(wrapper.find('.chat-signal-count').text()).toBe('2')
-  })
-
-  it('renders loop and retry modifiers with their accessible labels', () => {
+  it('renders interval and retry modifiers with their accessible labels', () => {
     const { store, taskStore } = seed()
     store.chats[0].retry = { status: 'pending' } as never
-    taskStore.loops = [{ web_chat_id: 'chat-1', running: false, loop_id: 'loop-1' }] as unknown as typeof taskStore.loops
+    taskStore.schedules = [{
+      schedule_id: 'sched-1',
+      frequency: 'interval',
+      interval_minutes: 10,
+      web_chat_id: 'chat-1',
+      enabled: false,
+    }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
     expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
-    expect(wrapper.find('.chat-signal--loop').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
   })
 

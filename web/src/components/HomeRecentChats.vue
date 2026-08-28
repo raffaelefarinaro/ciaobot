@@ -172,7 +172,7 @@
 
           <!-- Chats whose archive POST is in flight. The panel already closed
                optimistically; this queue is where the chat lives while the engine
-               finishes the transcript write. -->
+               finishes the transcript write and delegate cascade. -->
           <div v-if="lane.archivingChats.length" class="home-tier home-tier--archiving">
             <div class="home-tier-label"><span>archiving</span></div>
             <div
@@ -434,7 +434,7 @@ function makeLane(
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsInput(chatId),
-      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasRunningSubagents(chatId),
+      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasActiveDelegates(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
     archivingChats: (workspace && workspace !== 'unknown' && archivingChatsByWorkspace.value.get(workspace)) || [],
@@ -460,8 +460,9 @@ function laneHasChats(lane: HomeLane): boolean {
   return lane.chats.length > 0
 }
 
-// Derived from the same chat set as the rows beneath it, so the header can
-// never claim a chat needs you with no row to answer.
+// Derived from the same chat set as the rows beneath it. workspaceNeedsInput()
+// counts nested delegates, which activeChatsAll deliberately excludes, so using
+// it here made the header claim a chat needs you with no row to answer.
 function laneNeedsCount(lane: HomeLane): number {
   return lane.tiers.needsYou.length
 }

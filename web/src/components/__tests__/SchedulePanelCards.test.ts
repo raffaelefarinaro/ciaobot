@@ -71,9 +71,7 @@ async function mountPanel(schedule = makeSchedule()): Promise<VueWrapper> {
 
   const store = useTaskStore()
   store.schedules = [schedule]
-  store.loops = []
   store.fetchSchedules = vi.fn(async () => {})
-  store.fetchLoops = vi.fn(async () => {})
   store.fetchModels = vi.fn(async () => {})
   store.updateSchedule = vi.fn(async () => schedule)
 
@@ -232,5 +230,80 @@ describe('SchedulePanel property cards', () => {
     expect(wrapper.findAll('.card-edit')).toHaveLength(0)
     // …but the system workspace switcher is still reachable.
     expect(card(wrapper, 'Delivery').find('.system-workspace-control').exists()).toBe(true)
+  })
+  // ── Interval cadence (the primitive that replaced loops) ──
+
+  it('shows the cadence and a status row instead of a time of day', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval',
+      interval_minutes: 15,
+      daily_time_utc: '',
+      web_chat_id: 'chat-1',
+      web_project_id: null,
+      last_status: 'busy',
+      next_run: '2020-01-01T00:00:00Z',
+    }))
+    const scheduleCard = card(wrapper, 'Schedule')
+    const rows = scheduleCard.findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('Every 15 min'))).toBe(true)
+    // No time of day: interval cadence has none, and an empty "At" row read as
+    // a schedule with a broken time.
+    expect(rows.some(r => r.startsWith('At'))).toBe(false)
+    // last_status is the health report; the missed-run check cannot speak for
+    // a relative cadence.
+    expect(rows.some(r => r.includes('waiting — chat busy'))).toBe(true)
+    // An overdue interval is not rendered as an absolute past time.
+    expect(rows.some(r => r.includes('when the chat is free'))).toBe(true)
+  })
+
+  it('reads the model off the target chat for a chat-bound interval entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval',
+      interval_minutes: 10,
+      web_chat_id: 'chat-1',
+      web_project_id: null,
+      model: 'opus',
+      effective_model: 'sonnet',
+    }))
+    // A stored model is ignored at dispatch, so it must not be presented as
+    // the active override.
+    expect(card(wrapper, 'Engine').text()).toContain('sonnet (from the target chat)')
+    expect(card(wrapper, 'Engine').text()).not.toContain('override')
+  })
+
+  it('says Stop rather than Disable for an interval entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval',
+      interval_minutes: 10,
+      web_chat_id: 'chat-1',
+      web_project_id: null,
+    }))
+    expect(wrapper.text()).toContain('Stop')
+    expect(wrapper.text()).not.toContain('Disable')
+  })
+
+  it('saves an edited cadence and clears the time of day', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval',
+      interval_minutes: 10,
+      daily_time_utc: '',
+      web_chat_id: 'chat-1',
+      web_project_id: null,
+    }))
+    const store = useTaskStore()
+    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    const minutes = card(wrapper, 'Schedule').find('input[type="number"]')
+    await minutes.setValue(45)
+    await card(wrapper, 'Schedule').find('.card-actions .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(store.updateSchedule).toHaveBeenCalledWith(
+      'sched-1',
+      expect.objectContaining({
+        frequency: 'interval',
+        interval_minutes: 45,
+        time: '',
+      }),
+    )
   })
 })

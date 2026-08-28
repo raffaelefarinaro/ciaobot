@@ -13,6 +13,7 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
+import { archiveFailedToast, archiveStoppedToast } from '../lib/archiveCopy'
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsInsights } from '../lib/postprocessView'
@@ -21,9 +22,9 @@ import type {
   ProjectInfo,
   ChatInfo,
   ChatPostprocess,
+  ChatRow,
+  ChatGroup,
   ChatMessage,
-  RunningSubagent,
-  RunningSubagentsResponse,
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
@@ -111,10 +112,6 @@ export const useProjectStore = defineStore('projects', () => {
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
-  // Live subagents per chat, from /api/subagents/running. Metadata only (no
-  // transcripts), refreshed on a poll while anything is working, so the
-  // sidebar can list what every chat has in flight — not just the open one.
-  const runningSubagents = ref<Record<string, RunningSubagent[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -265,7 +262,7 @@ export const useProjectStore = defineStore('projects', () => {
   // Optimistic archiving: chats whose archive POST is in flight. They are
   // removed from active lists immediately and shown in the home "archiving…"
   // queue so the chat panel can close without waiting for the server's disk
-  // work (the transcript write). The map is keyed by chat_id
+  // work (transcript write + delegate cascade). The map is keyed by chat_id
   // and cleared on success (archived stays true, tidying takes over) or on
   // failure (archived is rolled back, row reappears).
   const archivingChats = ref<Record<string, boolean>>({})
@@ -732,30 +729,6 @@ export const useProjectStore = defineStore('projects', () => {
     },
   )
 
-  // Anything working anywhere: a streaming turn or background agents. Gates
-  // the running-subagent poll so an idle app makes no requests at all.
-  const anyChatWorking = computed(() =>
-    Object.values(streaming.value).some(Boolean)
-    || Object.values(projectStreaming.value).some(Boolean)
-    || Object.values(backgroundAgents.value).some(n => n > 0),
-  )
-
-  let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
-  let runningSubagentRefreshGeneration = 0
-  watch(anyChatWorking, (working) => {
-    if (runningSubagentTimer !== null) {
-      clearInterval(runningSubagentTimer)
-      runningSubagentTimer = null
-    }
-    // Refresh on both edges: rising paints the rows without waiting a tick,
-    // falling is what clears the last of them once the work is over.
-    void refreshRunningSubagents()
-    if (!working) return
-    runningSubagentTimer = setInterval(() => {
-      void refreshRunningSubagents()
-    }, 4000)
-  })
-
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
     return chats.value
@@ -763,8 +736,70 @@ export const useProjectStore = defineStore('projects', () => {
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
   }
 
+  // Sidebar ordering: every supervisor immediately followed by its delegates,
+  // which render indented. Deliberately separate from projectChats, which stays
+  // the flat list the counts (unread, needs-input) are summed over — a
+  // delegate's unread still belongs to its project.
+  function projectChatRows(projectId: string): ChatRow[] {
+    return projectChatGroups(projectId).flatMap(group => [
+      { chat: group.chat, isDelegate: false },
+      ...group.delegates.map(chat => ({ chat, isDelegate: true })),
+    ])
+  }
+
+  function projectChatGroups(projectId: string): ChatGroup[] {
+    const all = projectChats(projectId)
+    const visible = new Set(all.map(c => c.chat_id))
+    const byParent = new Map<string, ChatInfo[]>()
+    for (const chat of all) {
+      const parent = chat.spawned_from_chat_id
+      if (!parent || !visible.has(parent)) continue
+      const siblings = byParent.get(parent) || []
+      siblings.push(chat)
+      byParent.set(parent, siblings)
+    }
+    const groups: ChatGroup[] = []
+    for (const chat of all) {
+      // A delegate nests only when its supervisor is visible in this same
+      // project. Orphans (supervisor archived, deleted, or moved elsewhere)
+      // stay top-level rather than vanishing from the sidebar entirely.
+      if (chat.spawned_from_chat_id && visible.has(chat.spawned_from_chat_id)) continue
+      groups.push({ chat, delegates: byParent.get(chat.chat_id) || [] })
+    }
+    return groups
+  }
+
   function chatActivity(chat: ChatInfo): string {
     return chat.last_activity_at || chat.created_at
+  }
+
+  // Built once per chats mutation so the delegate filters below stay linear
+  // instead of scanning the whole list for every chat's supervisor.
+  const chatsById = computed(() => new Map(chats.value.map(c => [c.chat_id, c])))
+
+  // True when this chat is a nested delegate whose supervisor is still a
+  // visible (non-archived, local) chat. Used to hide subchats from home /
+  // recent surfaces so you jump back into the supervisor and reach children
+  // from there. Orphans (supervisor archived/missing) stay listed.
+  function isNestedDelegate(chat: ChatInfo): boolean {
+    const parentId = chat.spawned_from_chat_id
+    if (!parentId) return false
+    const parent = chatsById.value.get(parentId)
+    return Boolean(parent && !parent.archived && parent.local !== false)
+  }
+
+  // A chat's active delegate subchats, as the user can actually see them.
+  //
+  // One definition, because the same filter had drifted into three copies and
+  // two of them dropped the `local !== false` guard that every other
+  // visibility computation applies — so an archive button offered to take "2
+  // subchats" while the sidebar listed 1. Counts shown to the user must match
+  // the rows they can see. The server-side cascade deliberately covers remote
+  // delegates too; that asymmetry is intentional, not a bug to paper over here.
+  function activeDelegatesFor(chatId: string): ChatInfo[] {
+    return chats.value.filter(
+      c => c.spawned_from_chat_id === chatId && !c.archived && c.local !== false,
+    )
   }
 
   // Most recent (max 5) non-archived chats in the active workspace.
@@ -772,6 +807,7 @@ export const useProjectStore = defineStore('projects', () => {
     const wsProjectIds = new Set(workspaceProjects.value.map(p => p.project_id))
     return chats.value
       .filter(c => !c.archived && c.local !== false && wsProjectIds.has(c.project_id))
+      .filter(c => !isNestedDelegate(c))
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
       .slice(0, 5)
@@ -781,9 +817,11 @@ export const useProjectStore = defineStore('projects', () => {
   // chat with activity, across ALL workspaces, newest first (uncapped). The
   // home surface is a global hub, so unlike recentChats it isn't scoped to
   // the active workspace — each chat carries its own workspace/project tag.
+  // Nested delegates are omitted; open the supervisor to reach them.
   const activeChatsAll = computed<ChatInfo[]>(() => {
     return chats.value
       .filter(c => !c.archived && c.local !== false)
+      .filter(c => !isNestedDelegate(c))
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
   })
@@ -799,16 +837,17 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
-  // Subagents this chat has working right now, from /api/subagents/running.
-  // Sidebar rows and the per-row "working" signal read this; it is deliberately
-  // separate from `subagents` (full transcripts, active chat only) because the
-  // sidebar covers every chat and must stay cheap to keep fresh.
-  function runningSubagentsFor(chatId: string): RunningSubagent[] {
-    return runningSubagents.value[chatId] || []
-  }
-
-  function chatHasRunningSubagents(chatId: string): boolean {
-    return runningSubagentsFor(chatId).length > 0
+  // True when a delegate nested under this chat (or under one of its own
+  // delegates) is streaming or has background agents. A supervisor chat with
+  // no live turn of its own still has real work in flight while a delegate is
+  // busy, and the home lanes / per-row signal only checked the chat's own
+  // state — a project full of working subchats read as "quiet".
+  function chatHasActiveDelegates(chatId: string, seen: Set<string> = new Set()): boolean {
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(
+      d => isChatStreaming(d.chat_id) || chatHasBackgroundAgents(d.chat_id) || chatHasActiveDelegates(d.chat_id, seen),
+    )
   }
 
   // ── Post-archive pipeline ────────────────────────────────────────────────
@@ -1454,6 +1493,9 @@ export const useProjectStore = defineStore('projects', () => {
   // the list, so an exact per-chat count isn't needed.
   function chatUnread(chatId: string): number {
     const chat = chats.value.find(c => c.chat_id === chatId)
+    // Delegate completion is internal model-to-model traffic. It wakes the
+    // supervisor, so the child must never create a second unread notification.
+    if (chat && isNestedDelegate(chat)) return 0
     // Invariant: the chat the user is actively looking at is, by definition,
     // read. Suppress the badge regardless of the server's last_read_at. This
     // also closes a race in `chat_result_ready` where api.get('/api/chats')
@@ -1472,12 +1514,21 @@ export const useProjectStore = defineStore('projects', () => {
   // while the picker/card is live. Unlike unread, this stays visible even
   // when the chat is the active tab.
   //
-  function chatNeedsInput(chatId: string): boolean {
+  // Also true when a delegate nested under this chat (recursively) is
+  // blocked the same way: a supervisor whose subagent is stuck on an
+  // Approve/Deny prompt is exactly as blocked as one asked a question
+  // directly, and mirroring only chatHasActiveDelegates's "still working"
+  // signal left an approval request reading as mere background activity
+  // instead of something the user must act on.
+  function chatNeedsInput(chatId: string, seen: Set<string> = new Set()): boolean {
     if (activeQuestions.value[chatId]?.length) return true
     if (pendingPermissions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (parseQuestions(chat?.pending_question).length > 0) return true
-    return Boolean(chat?.pending_permission)
+    if (chat?.pending_permission) return true
+    if (seen.has(chatId)) return false
+    seen.add(chatId)
+    return activeDelegatesFor(chatId).some(d => chatNeedsInput(d.chat_id, seen))
   }
 
   // The first outstanding question is useful on the home card, where it can
@@ -1625,7 +1676,6 @@ export const useProjectStore = defineStore('projects', () => {
         : [{ value: 'claude', label: 'Claude' }]
       projects.value = p
       reconcileChatList(c)
-      void refreshRunningSubagents()
       const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
       if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
         activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
@@ -2402,23 +2452,36 @@ export const useProjectStore = defineStore('projects', () => {
     // Guard against double-clicks: the button is already disabled while the
     // optimistic state is live, but event handlers can still double-fire.
     if (archivingChats.value[chatId]) return
-    // Remember whether we actually closed the socket. If the POST fails the
-    // chat is still live, and a closed socket is marked as an intentional
-    // close so nothing auto-reconnects it — the chat would go silent, with no
-    // tokens, permission cards or AskUserQuestion prompts, and no sign
-    // anything broke.
-    const hadSocket = Boolean(sockets.value[chatId])
+    // The server cascades archival to delegate subchats. Note this filter has
+    // no `local !== false` guard, unlike activeDelegatesFor(): the cascade
+    // covers remote delegates too, so the socket bookkeeping here has to as
+    // well. Only user-facing counts exclude them.
+    const childIds = chats.value
+      .filter(c => c.spawned_from_chat_id === chatId && !c.archived)
+      .map(c => c.chat_id)
+    const allIds = [chatId, ...childIds]
+    // Remember which sockets we actually closed. If the POST fails these chats
+    // are all still live, and a closed socket is marked as an intentional close
+    // so nothing auto-reconnects it — the chat would go silent, with no tokens,
+    // permission cards or AskUserQuestion prompts, and no sign anything broke.
+    const closedIds = allIds.filter(id => Boolean(sockets.value[id]))
     // Snapshot for rollback if the POST fails. A failure must not leave the
     // chat hidden from the sidebar with archived:true and no transcript.
-    const chatBefore = chats.value.find(ch => ch.chat_id === chatId)
-    const prevArchived = chatBefore ? chatBefore.archived : false
+    const prevArchived = new Map<string, boolean>()
+    for (const id of allIds) {
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) prevArchived.set(id, c.archived)
+    }
     const wasActive = activeChatId.value === chatId
     // Optimistic UI: hide from active lists immediately and show in the
     // home "archiving…" queue so the panel can close without waiting for
-    // the server's disk work (the transcript write).
-    archivingChats.value[chatId] = true
-    pendingArchived.value.add(chatId)
-    if (chatBefore) chatBefore.archived = true
+    // the server's disk work (transcript write + delegate cascade).
+    for (const id of allIds) {
+      archivingChats.value[id] = true
+      pendingArchived.value.add(id)
+      const c = chats.value.find(ch => ch.chat_id === id)
+      if (c) c.archived = true
+    }
     if (wasActive) {
       activeChatId.value = null
       persistState()
@@ -2429,6 +2492,7 @@ export const useProjectStore = defineStore('projects', () => {
       }).catch(() => {})
     }
     disconnectWs(chatId)
+    for (const childId of childIds) disconnectWs(childId)
 
     let res: ArchiveChatResponse
     try {
@@ -2436,11 +2500,17 @@ export const useProjectStore = defineStore('projects', () => {
     } catch (e) {
       // Roll back optimistic mutation: chat reappears in the sidebar / home
       // active lanes and its socket is put back so streaming resumes.
-      const c = chats.value.find(ch => ch.chat_id === chatId)
-      if (c) c.archived = prevArchived
-      delete archivingChats.value[chatId]
-      pendingArchived.value.delete(chatId)
-      if (hadSocket) connectWs(chatId)
+      for (const [id, prev] of prevArchived) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prev
+        delete archivingChats.value[id]
+        pendingArchived.value.delete(id)
+      }
+      for (const id of allIds) {
+        delete archivingChats.value[id]
+        pendingArchived.value.delete(id)
+      }
+      for (const id of closedIds) connectWs(id)
       if (wasActive && activeChatId.value === null) {
         activeChatId.value = chatId
         persistState()
@@ -2452,13 +2522,52 @@ export const useProjectStore = defineStore('projects', () => {
       throw e
     }
 
-    if (res?.postprocess) {
-      const c = chats.value.find(ch => ch.chat_id === chatId)
-      // The response closes the race where the chat_postprocess event is
-      // emitted after the archive request has already cleared this pane.
-      if (c) c.postprocess = res.postprocess
+    // Mark only what the server confirms. Flipping every child on a bare 2xx
+    // dropped skipped delegates out of the sidebar, recentChats and
+    // activeChatsAll while they were still streaming, and listed them in the
+    // archive with no transcript behind them. Optimistic already flipped them,
+    // so revert any id the server did not confirm.
+    const confirmed = new Set(
+      Array.isArray(res?.archived_chat_ids) ? res.archived_chat_ids : [chatId],
+    )
+    for (const id of allIds) {
+      if (!confirmed.has(id)) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) c.archived = prevArchived.get(id) ?? false
+        pendingArchived.value.delete(id)
+      } else if (id === chatId && res?.postprocess) {
+        const c = chats.value.find(ch => ch.chat_id === id)
+        if (c) {
+          // The response closes the race where the chat_postprocess event is
+          // emitted after the archive request has already cleared this pane.
+          c.postprocess = res.postprocess
+        }
+      }
+      delete archivingChats.value[id]
     }
-    delete archivingChats.value[chatId]
+    // Any child the entry never listed stays removed from archiving map
+    // (it was not an optimistic id, but guard anyway).
+    for (const chat of chats.value) {
+      if (confirmed.has(chat.chat_id) && chat.chat_id !== chatId && res?.postprocess) {
+        // Delegates' postprocess arrives via /ws/events, not the response.
+      }
+    }
+    // A child the server did not archive is still running: put its socket back.
+    for (const id of closedIds) {
+      if (!confirmed.has(id)) connectWs(id)
+    }
+
+    // Archiving is immediate, so it may have discarded a delegate's in-flight
+    // turn. Say so — it is the user's work that was thrown away.
+    const stopped = (res?.stopped_chat_ids || []).filter(id => id !== chatId)
+    if (stopped.length) {
+      pushToast({ chat_id: '', ...archiveStoppedToast(stopped.length) })
+    }
+    const failed = res?.failed_chat_ids || []
+    if (failed.length) {
+      const toast = archiveFailedToast(failed.length)
+      pushErrorToast(toast.title, toast.body)
+    }
     // Active already cleared optimistically; keep the guard for races where
     // the user switched chats between the optimistic clear and the response.
     if (activeChatId.value === chatId) {
@@ -3111,21 +3220,6 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  // Live subagents across every working chat, for the sidebar rows. Replaced
-  // wholesale rather than merged: the server omits chats with nothing running,
-  // and that omission is exactly how a finished subagent's row disappears.
-  async function refreshRunningSubagents(): Promise<void> {
-    const generation = ++runningSubagentRefreshGeneration
-    try {
-      const r = await api.get<RunningSubagentsResponse>('/api/subagents/running')
-      if (generation !== runningSubagentRefreshGeneration) return
-      runningSubagents.value = (r && typeof r === 'object' && r.chats) ? r.chats : {}
-    } catch {
-      // Transient (offline, host proxy down): keep the last known rows rather
-      // than blanking the sidebar on one failed poll.
-    }
-  }
-
   // ── Chat switching ──────────────────────────────────────────────────
 
   function chatExistsInList(chatId: string, list: ChatInfo[] = chats.value): boolean {
@@ -3601,17 +3695,17 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  // A single loop lifecycle call can fan out several `loops_changed` frames
-  // (create-then-start), and each one would otherwise cost a full GET /api/loops
-  // per open tab. Coalesce a burst into one refetch. The tasks store is imported
-  // lazily to keep it out of this module's import graph.
-  let loopsRefetchTimer: ReturnType<typeof setTimeout> | null = null
-  function scheduleLoopsRefetch(): void {
-    if (loopsRefetchTimer !== null) return
-    loopsRefetchTimer = setTimeout(() => {
-      loopsRefetchTimer = null
+  // A single automation lifecycle call can fan out several `schedules_changed`
+  // frames (create-then-enable), and each one would otherwise cost a full
+  // GET /api/schedules per open tab. Coalesce a burst into one refetch. The
+  // tasks store is imported lazily to keep it out of this module's import graph.
+  let schedulesRefetchTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleSchedulesRefetch(): void {
+    if (schedulesRefetchTimer !== null) return
+    schedulesRefetchTimer = setTimeout(() => {
+      schedulesRefetchTimer = null
       void import('./tasks')
-        .then(({ useTaskStore }) => useTaskStore().fetchLoops())
+        .then(({ useTaskStore }) => useTaskStore().fetchSchedules())
         .catch(() => {})
     }, 150)
   }
@@ -3695,6 +3789,10 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_result_ready': {
         const resultChat = chats.value.find(c => c.chat_id === msg.chat_id)
+        // The server suppresses delegate result events, but keep this guard
+        // for older servers and replayed events so internal child work cannot
+        // leak into the notification tray.
+        if (resultChat && isNestedDelegate(resultChat)) break
         const isFocused = activeChatId.value === msg.chat_id &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
@@ -3739,9 +3837,6 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_subagents_ready': {
-        // The sidebar's subagent rows come from a poll; this is the same
-        // signal a tick later, so use it to redraw immediately.
-        void refreshRunningSubagents()
         const prevAgents = backgroundAgents.value[msg.chat_id] || 0
         if (msg.remaining > 0) {
           backgroundAgents.value[msg.chat_id] = msg.remaining
@@ -3914,12 +4009,12 @@ export const useProjectStore = defineStore('projects', () => {
         })
         break
       }
-      case 'loops_changed': {
-        // A loop was created/edited/started/stopped/deleted elsewhere (the
-        // model mid-turn, the Schedules page, another tab). Refetch so the
-        // chat's loop banner and the sidebar/home loop markers appear without
-        // a manual reload.
-        scheduleLoopsRefetch()
+      case 'schedules_changed': {
+        // An automation was created/edited/paused/resumed/deleted elsewhere
+        // (the model mid-turn, the Automations page, another tab). Refetch so
+        // the chat's automation banner and the sidebar/home markers appear
+        // without a manual reload.
+        scheduleSchedulesRefetch()
         break
       }
       case 'gws_health': {
@@ -5510,13 +5605,13 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows, projectChatGroups,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, runningSubagentsFor, chatHasRunningSubagents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, activeDelegatesFor, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasActiveDelegates, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
@@ -5536,7 +5631,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, refreshRunningSubagents, setReentrySummaryEnabled,
+    loadMessages, loadSubagents, setReentrySummaryEnabled,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,

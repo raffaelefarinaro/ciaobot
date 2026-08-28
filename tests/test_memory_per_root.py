@@ -55,7 +55,6 @@ def _plane(config: CiaoConfig) -> CiaoControlPlane:
         config,
         project_chat_manager=SimpleNamespace(),
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
 

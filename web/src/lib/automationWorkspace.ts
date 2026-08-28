@@ -1,31 +1,35 @@
-import type { ChatInfo, Loop, ProjectInfo, Schedule, WorkspaceName } from './types'
+import type { ChatInfo, ProjectInfo, Schedule, WorkspaceName } from './types'
 
-export function scheduleInWorkspace(
+/**
+ * The workspace a schedule belongs to.
+ *
+ * The stored `workspace` field is authoritative, but an interval entry
+ * imported from a loop may carry none: loops derived their workspace from the
+ * chat they were bound to. Fall back to that derivation so a migrated entry
+ * still lands in the right sidebar group instead of disappearing from all of
+ * them.
+ */
+export function workspaceForSchedule(
   schedule: Schedule,
-  workspace: WorkspaceName,
-): boolean {
-  return schedule.workspace === workspace
-}
-
-export function workspaceForLoop(
-  loop: Loop,
   chats: ChatInfo[],
   projects: ProjectInfo[],
 ): WorkspaceName | undefined {
-  const chat = chats.find(item => item.chat_id === loop.web_chat_id)
+  if (schedule.workspace) return schedule.workspace
+  if (!schedule.web_chat_id) return undefined
+  const chat = chats.find(item => item.chat_id === schedule.web_chat_id)
   const project = chat
     ? projects.find(item => item.project_id === chat.project_id)
     : undefined
   return project?.workspace
 }
 
-export function loopInWorkspace(
-  loop: Loop,
+export function scheduleInWorkspace(
+  schedule: Schedule,
   workspace: WorkspaceName,
-  chats: ChatInfo[],
-  projects: ProjectInfo[],
+  chats: ChatInfo[] = [],
+  projects: ProjectInfo[] = [],
 ): boolean {
-  return workspaceForLoop(loop, chats, projects) === workspace
+  return workspaceForSchedule(schedule, chats, projects) === workspace
 }
 
 /**

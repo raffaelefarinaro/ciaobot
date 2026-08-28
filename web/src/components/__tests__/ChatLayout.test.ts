@@ -93,7 +93,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -139,7 +138,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [{
@@ -217,7 +215,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -267,7 +264,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -329,7 +325,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -395,7 +390,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -453,7 +447,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -507,7 +500,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -571,7 +563,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -631,7 +622,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -683,7 +673,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -755,7 +744,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -803,7 +791,6 @@ describe('ChatLayout', () => {
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -867,7 +854,6 @@ describe('ChatLayout', () => {
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -916,7 +902,6 @@ describe('ChatLayout', () => {
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -964,7 +949,6 @@ describe('ChatLayout', () => {
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -1052,9 +1036,7 @@ describe('ChatLayout home arrow navigation', () => {
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
 
     const taskStore = useTaskStore()
-    taskStore.loops = [] as unknown as typeof taskStore.loops
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     // HomeRecentChats is deliberately NOT stubbed: the lanes are the thing under

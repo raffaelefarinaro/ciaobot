@@ -5,7 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
-import type { ChatInfo, Loop, ProjectInfo } from '../../lib/types'
+import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
@@ -88,27 +88,7 @@ class MemoryStorage {
   clear() { this.values.clear() }
 }
 
-function makeLoop(loopId: string): Loop {
-  return {
-    loop_id: loopId,
-    prompt: 'tick',
-    web_chat_id: 'chat-1',
-    created_at: '2026-08-01T00:00:00Z',
-    interval_minutes: 5,
-    title: loopId,
-    autostart: false,
-    last_run_at: '',
-    last_status: '',
-    running: true,
-    context_label: '',
-    next_run: null,
-  }
-}
-
-async function mountPanel(
-  setup: (store: ReturnType<typeof useProjectStore>) => void = () => {},
-  loops: Loop[] = [],
-) {
+async function mountPanel(setup: (store: ReturnType<typeof useProjectStore>) => void = () => {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -124,8 +104,6 @@ async function mountPanel(
   setup(store)
 
   const taskStore = useTaskStore()
-  taskStore.loops = loops
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
@@ -156,6 +134,10 @@ function approval(id: string, tool: string) {
   return { request_id: id, tool_name: tool, tool_input: { cmd: 'ls' } }
 }
 
+function questionPayload() {
+  return JSON.stringify({ questions: [{ question: 'Which label?', options: [{ label: 'triage' }] }] })
+}
+
 // ChatPanel's dock reads store.activeQuestions (the live, in-turn picker), while
 // chatNeedsInput also considers the persisted pending_question on the chat.
 function liveQuestion() {
@@ -174,15 +156,23 @@ describe('ChatPanel context bar', () => {
     wrapper.unmount()
   })
 
-  // The banner blocks were each a v-for, so a chat with all of them opened
+  // The four banner blocks were each a v-for, so a chat with all of them opened
   // with its first message below the fold. Collapsed is now one line.
   it('collapses every relation into counted chips, detail hidden', async () => {
-    const { wrapper } = await mountPanel(undefined, [makeLoop('loop-1'), makeLoop('loop-2')])
+    const { wrapper } = await mountPanel(store => {
+      store.chats = [
+        makeChat('chat-1', { spawned_from_chat_id: 'parent-1' }),
+        makeChat('parent-1', { title: 'Supervisor' }),
+        makeChat('kid-1', { spawned_from_chat_id: 'chat-1' }),
+        makeChat('kid-2', { spawned_from_chat_id: 'chat-1' }),
+      ]
+    })
 
     expect(wrapper.find('.ctx-bar').exists()).toBe(true)
     // Chip text carries a leading glyph, so match on substring.
     const labels = wrapper.findAll('.ctx-chip').map(c => c.text())
-    expect(labels.some(l => l.includes('2 loops'))).toBe(true)
+    expect(labels.some(l => l.includes('delegate'))).toBe(true)
+    expect(labels.some(l => l.includes('2 subchats'))).toBe(true)
     // Detail rows stay behind the disclosure.
     expect(wrapper.find('.ctx-detail').exists()).toBe(false)
     expect(wrapper.findAll('.loop-banner-row')).toHaveLength(0)
@@ -190,11 +180,28 @@ describe('ChatPanel context bar', () => {
   })
 
   it('expands to the detail rows on click', async () => {
-    const { wrapper } = await mountPanel(undefined, [makeLoop('loop-1')])
+    const { wrapper } = await mountPanel(store => {
+      store.chats = [
+        makeChat('chat-1', { spawned_from_chat_id: 'parent-1' }),
+        makeChat('parent-1', { title: 'Supervisor' }),
+      ]
+    })
 
     await wrapper.get('.ctx-summary').trigger('click')
     expect(wrapper.find('.ctx-detail').exists()).toBe(true)
     expect(wrapper.find('.loop-banner-row').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // A blocked subchat must not be hidden behind a disclosure.
+  it('surfaces a needs-you subchat on the collapsed bar', async () => {
+    const { wrapper } = await mountPanel(store => {
+      store.chats = [
+        makeChat('chat-1'),
+        makeChat('kid-1', { spawned_from_chat_id: 'chat-1', pending_question: questionPayload() }),
+      ]
+    })
+    expect(wrapper.find('.ctx-attn').exists()).toBe(true)
     wrapper.unmount()
   })
 })

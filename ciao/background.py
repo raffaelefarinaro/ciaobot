@@ -8,7 +8,7 @@ itself plus the one wake turn.
 
 Shape borrowed from two existing modules:
 
-* :mod:`ciao.loops` for the registry side — a JSON store
+* :mod:`ciao.schedules` for the registry side — a JSON store
   (``.runtime/background/state.json``) plus a manager that owns runtime state
   and a janitor task.
 * :mod:`ciao.job_runs` for the recorder side — every finished run is also

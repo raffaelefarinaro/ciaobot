@@ -48,11 +48,9 @@ function seed() {
   store.backgroundAgents = {}
   store.bootstrapped = true
   const taskStore = useTaskStore()
-  taskStore.loops = [] as unknown as typeof taskStore.loops
   taskStore.schedules = [] as unknown as typeof taskStore.schedules
   // ProjectView fetches these itself so it can tell "none" from "not loaded".
   // Stub them so the tests drive the store directly and stay deterministic.
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
   return store
 }
@@ -117,37 +115,60 @@ describe('ProjectView chat rows', () => {
     expect(wrapper.find('.chat-signals').attributes('data-workspace-color')).toBe('emerald')
   })
 
-  it('lists only loops and schedules associated with the project', async () => {
+  it('lists only the automations associated with the project', async () => {
     seed()
     const taskStore = useTaskStore()
-    taskStore.loops = [{
-      loop_id: 'loop-project',
+    taskStore.schedules = [{
+      schedule_id: 'interval-project',
+      daily_time_utc: '',
       prompt: 'Check the project PRs',
-      web_chat_id: 'chat-read',
+      chat_id: 0,
       created_at: '2026-08-01T00:00:00Z',
+      timezone_name: 'Europe/Zurich',
+      last_triggered_on: '',
+      days_of_week: null,
+      thread_id: null,
+      context_label: 'Read chat',
+      frequency: 'interval',
       interval_minutes: 10,
       title: 'PR watcher',
-      autostart: false,
-      last_run_at: '',
-      last_status: '',
-      running: true,
-      context_label: 'Read chat',
+      day_of_month: null,
+      run_at_date: null,
+      web_chat_id: 'chat-read',
+      web_project_id: null,
+      workspace: 'personal',
+      model: '',
       next_run: null,
+      last_expected_run: null,
+      missed: false,
+      enabled: true,
+      archive_policy: 'manual',
     }, {
-      loop_id: 'loop-other',
+      schedule_id: 'interval-other',
+      daily_time_utc: '',
       prompt: 'Check another project',
-      web_chat_id: 'chat-missing',
+      chat_id: 0,
       created_at: '2026-08-01T00:00:00Z',
+      timezone_name: 'Europe/Zurich',
+      last_triggered_on: '',
+      days_of_week: null,
+      thread_id: null,
+      context_label: 'Other chat',
+      frequency: 'interval',
       interval_minutes: 20,
       title: 'Other watcher',
-      autostart: false,
-      last_run_at: '',
-      last_status: '',
-      running: false,
-      context_label: 'Other chat',
+      day_of_month: null,
+      run_at_date: null,
+      web_chat_id: 'chat-missing',
+      web_project_id: null,
+      workspace: 'personal',
+      model: '',
       next_run: null,
-    }] as unknown as typeof taskStore.loops
-    taskStore.schedules = [{
+      last_expected_run: null,
+      missed: false,
+      enabled: false,
+      archive_policy: 'manual',
+    }, {
       schedule_id: 'schedule-project',
       daily_time_utc: '09:00',
       prompt: 'Send the daily brief',
@@ -220,16 +241,16 @@ describe('ProjectView chat rows', () => {
 
     const wrapper = await mountView()
 
-    await wrapper.get('[data-tab="loops"]').trigger('click')
-    expect(wrapper.get('.automation-card').text()).toContain('PR watcher')
-    expect(wrapper.get('.automation-card').text()).not.toContain('Other watcher')
-    expect(wrapper.get('[data-tab="loops"]').text()).toContain('1')
-
     await wrapper.get('[data-tab="schedules"]').trigger('click')
-    expect(wrapper.get('.automation-card').text()).toContain('Send the daily brief')
-    expect(wrapper.get('.automation-card').text()).toContain('Send the chat brief')
-    expect(wrapper.get('.automation-card').text()).not.toContain('Send another brief')
-    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('2')
+    const text = wrapper.get('.automation-card').text()
+    expect(text).toContain('PR watcher')
+    expect(text).toContain('every 10 min')
+    expect(text).toContain('Send the daily brief')
+    expect(text).toContain('Send the chat brief')
+    // Bound to a chat outside this project.
+    expect(text).not.toContain('Other watcher')
+    expect(text).not.toContain('Send another brief')
+    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('3')
   })
 })
 
@@ -249,8 +270,8 @@ describe('ProjectView tabs', () => {
     const tablist = wrapper.get('[role="tablist"]')
     expect(tablist.attributes('aria-label')).toBe('Project sections')
     const tabs = tablist.findAll('[role="tab"]')
-    expect(tabs).toHaveLength(3)
-    expect(tabs.map(t => t.attributes('data-tab'))).toEqual(['overview', 'loops', 'schedules'])
+    expect(tabs).toHaveLength(2)
+    expect(tabs.map(t => t.attributes('data-tab'))).toEqual(['overview', 'schedules'])
   })
 
   it('tracks the active tab with aria-selected', async () => {
@@ -258,16 +279,16 @@ describe('ProjectView tabs', () => {
     const wrapper = await mountView()
 
     expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
-    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('false')
+    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('false')
 
-    await wrapper.get('[data-tab="loops"]').trigger('click')
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
     expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('false')
-    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
   })
 
   // aria-controls must name a real tabpanel, and that panel must point back.
-  it.each(['overview', 'loops', 'schedules'])('pairs the %s tab with its panel', async (key) => {
+  it.each(['overview', 'schedules'])('pairs the %s tab with its panel', async (key) => {
     seed()
     const wrapper = await mountView()
     await wrapper.get(`[data-tab="${key}"]`).trigger('click')
@@ -302,10 +323,10 @@ describe('ProjectView tabs', () => {
     const wrapper = await mountView()
 
     const tabindexes = () => wrapper.findAll('[role="tab"]').map(t => t.attributes('tabindex'))
-    expect(tabindexes()).toEqual(['0', '-1', '-1'])
+    expect(tabindexes()).toEqual(['0', '-1'])
 
     await wrapper.get('[data-tab="schedules"]').trigger('click')
-    expect(tabindexes()).toEqual(['-1', '-1', '0'])
+    expect(tabindexes()).toEqual(['-1', '0'])
   })
 
   it('moves right and left with the arrow keys, wrapping at the ends', async () => {
@@ -313,9 +334,6 @@ describe('ProjectView tabs', () => {
     const wrapper = await mountView()
 
     await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
-    expect(wrapper.get('[data-tab="loops"]').attributes('aria-selected')).toBe('true')
-
-    await wrapper.get('[data-tab="loops"]').trigger('keydown', { key: 'ArrowRight' })
     expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
 
     // Wraps forward past the last tab...
@@ -356,7 +374,7 @@ describe('ProjectView tabs', () => {
       expect(document.activeElement).toBe(overview)
 
       await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
-      expect(document.activeElement).toBe(wrapper.get('[data-tab="loops"]').element)
+      expect(document.activeElement).toBe(wrapper.get('[data-tab="schedules"]').element)
     } finally {
       wrapper.unmount()
     }
@@ -373,37 +391,35 @@ describe('ProjectView automations load state', () => {
   it('says it is loading rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchLoops').mockReturnValue(new Promise(() => {}))
     vi.spyOn(taskStore, 'fetchSchedules').mockReturnValue(new Promise(() => {}))
 
     const wrapper = await mountView()
-    await wrapper.get('[data-tab="loops"]').trigger('click')
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('loading loops')
-    expect(wrapper.get('.automation-card').text()).not.toContain('no loops send prompts')
+    expect(wrapper.get('.automation-card').text()).toContain('loading automations')
+    expect(wrapper.get('.automation-card').text()).not.toContain('no automations deliver')
     // A count it cannot vouch for is omitted, not printed as 0.
-    expect(wrapper.get('[data-tab="loops"]').text()).not.toContain('0')
+    expect(wrapper.get('[data-tab="schedules"]').text()).not.toContain('0')
   })
 
   it('reports a failed load rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchLoops').mockRejectedValue(new Error('offline'))
     vi.spyOn(taskStore, 'fetchSchedules').mockRejectedValue(new Error('offline'))
 
     const wrapper = await mountView()
     await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('could not load schedules')
+    expect(wrapper.get('.automation-card').text()).toContain('could not load automations')
     expect(wrapper.get('[data-tab="schedules"]').text()).not.toContain('0')
   })
 
   it('reports a real zero once the load resolves', async () => {
     seed()
     const wrapper = await mountView()
-    await wrapper.get('[data-tab="loops"]').trigger('click')
+    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('no loops send prompts into this project')
-    expect(wrapper.get('[data-tab="loops"]').text()).toContain('0')
+    expect(wrapper.get('.automation-card').text()).toContain('no automations deliver prompts to this project')
+    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('0')
   })
 })

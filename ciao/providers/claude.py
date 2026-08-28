@@ -538,7 +538,7 @@ class ClaudeProvider(BaseSDKProvider):
             # all 68 workspace skills and 8 agents still resolve with this
             # set). Used to drop the bundled `schedule` / `loop` skills out of
             # the model's context entirely, since Ciaobot's own schedules and
-            # loops supersede them. See HARNESS_DISABLED_SKILLS.
+            # automations supersede them. See HARNESS_DISABLED_SKILLS.
             settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
             # The request already carries the provider-neutral context capsule.
             # Keep hooks for process behavior only; injecting context here as
@@ -597,7 +597,7 @@ class ClaudeProvider(BaseSDKProvider):
 
             # Pre-approve the non-destructive half of our own control plane.
             # Auto mode's classifier escalates every MCP tool that isn't
-            # readOnlyHint, so "create the loop you just asked me for" raised
+            # readOnlyHint, so "create the automation you just asked me for" raised
             # an Approve/Deny card. These names bypass the PermissionGate;
             # destructive tools (delete/stop/lifecycle) are absent from the
             # policy and still prompt. See AUTO_APPROVED_MCP_TOOLS in
