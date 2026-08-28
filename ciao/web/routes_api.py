@@ -3879,7 +3879,14 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     )
     if path is None:
         return []
-    state = await asyncio.to_thread(subagent_tracking.parse_session_subagents, path)
+    def _scan() -> list[subagent_tracking.SubagentInfo]:
+        # Both halves belong off the event loop. running_agents() is not a
+        # cheap filter over the parsed state: it stats and tail-reads each
+        # running agent's own transcript, and this endpoint is polled by the
+        # sidebar for every working chat.
+        state = subagent_tracking.parse_session_subagents(path)
+        return subagent_tracking.running_agents(path, state)
+
     return [
         {
             "agent_id": info.agent_id,
@@ -3889,7 +3896,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             "status": info.status,
             "turn_index": info.turn_index,
         }
-        for info in subagent_tracking.running_agents(path, state)
+        for info in await asyncio.to_thread(_scan)
     ]
 
 
@@ -5335,6 +5342,20 @@ async def create_schedule(request: Request) -> JSONResponse:
     target_project = pcm.get_project(web_project_id) if web_project_id else None
     if workspace not in known_workspaces and web_project_id:
         workspace = target_project.workspace if target_project else ""
+    if workspace not in known_workspaces and web_chat_id:
+        # A chat-bound entry has no project id to stamp from, but it still
+        # needs a workspace: `resolve_automation_project` is what lets an
+        # interval run continue in a replacement chat once the target chat is
+        # archived or deleted, and with neither field set it returns None and
+        # the entry is disabled instead of re-homed. Derive it from the chat's
+        # own project, which is what the loop routes always did.
+        target_chat = pcm.get_chat(web_chat_id)
+        chat_project = (
+            pcm.get_project(target_chat.project_id)
+            if target_chat is not None and target_chat.project_id
+            else None
+        )
+        workspace = getattr(chat_project, "workspace", "") or ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],

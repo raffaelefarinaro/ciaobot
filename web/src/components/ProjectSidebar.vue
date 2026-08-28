@@ -1447,7 +1447,13 @@ async function selectAutomationWorkspace(workspace: string) {
 
 function missedCountFor(workspace: string): number {
   return taskStore.schedules.filter(
-    s => s.enabled && s.missed && scheduleInWorkspace(s, workspace),
+    // Same arguments as `workspaceSchedules`, or the badge counts a different
+    // set than the list below it: an entry with no stored workspace (every
+    // chat-bound one created before the stamp landed) resolves only through
+    // the chat/project fallback.
+    s => s.enabled && s.missed && scheduleInWorkspace(
+      s, workspace, store.chats, store.projects,
+    ),
   ).length
 }
 
@@ -1478,11 +1484,13 @@ const isAnyChatWorking = computed(() => {
 })
 
 const hasAutomationWarning = computed(() => {
-  return taskStore.schedules.some(s =>
-    s.enabled && (
-      s.missed || s.last_status === 'error' || s.last_status === 'missing-chat'
-    ),
-  )
+  return taskStore.schedules.some(s => {
+    // `missing-chat` is set at the same moment the entry is disabled (the
+    // dispatcher found neither a target chat nor a project to re-home into),
+    // so gating it on `enabled` hid the one failure that cannot fix itself.
+    if (s.last_status === 'missing-chat') return true
+    return s.enabled && (s.missed || s.last_status === 'error')
+  })
 })
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.

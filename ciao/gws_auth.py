@@ -689,13 +689,36 @@ class ManualPkceStore:
         # status: active/expired/superseded)
         self._pending: dict[str, tuple[str, str, float, str]] = {}
 
+    # How long an expired tombstone is kept after its verifier is dropped. Long
+    # enough that a user who pastes a code back after the window still gets the
+    # "start manual connect again" message rather than a confusing
+    # ``invalid_grant`` from Google, short enough that ``_pending`` cannot grow
+    # without bound in a process that runs for months.
+    _TOMBSTONE_TTL_SECONDS = 24 * 3600.0
+
     def start(self, profile: str) -> tuple[str, str]:
         """Generate a flow ID and verifier for ``profile``."""
         flow_id = secrets.token_urlsafe(32)
         verifier = generate_code_verifier()
         with self._lock:
+            self._prune_locked()
             self._pending[flow_id] = (profile, verifier, time.time() + self._ttl, "active")
         return flow_id, verifier
+
+    def _prune_locked(self) -> None:
+        """Drop tombstones nobody can still be pasting a code for.
+
+        Nothing else removes an entry, so without this every auth-url request
+        leaks one for the life of the process. Live and recently expired flows
+        are kept: :meth:`status` still has to tell them apart from "no flow was
+        ever started".
+        """
+        cutoff = time.time() - self._TOMBSTONE_TTL_SECONDS
+        for flow_id, (_profile, _verifier, expires_at, _status) in list(
+            self._pending.items()
+        ):
+            if expires_at < cutoff:
+                del self._pending[flow_id]
 
     def peek(self, flow_id: str, profile: str | None = None) -> str | None:
         """Return the live verifier for ``flow_id``, or ``None``.
@@ -748,10 +771,21 @@ class ManualPkceStore:
             return "active"
 
     def status_for_profile(self, profile: str) -> str:
-        """Return whether ``profile`` has any active manual flow."""
+        """Return whether ``profile`` has any *live* manual flow.
+
+        The TTL has to be honoured here, not just the stored status word: an
+        entry only becomes an ``"expired"`` tombstone when :meth:`status` is
+        called with its own flow ID, which never happens for a client that
+        sends no ``flow_id`` at all. Reading the stale ``"active"`` word meant
+        one auth-url request permanently refused every later flow-ID-less
+        exchange for that profile with "this sign-in flow needs a flow ID".
+        """
+        now = time.time()
         with self._lock:
-            for entry_profile, _verifier, _expires_at, status in self._pending.values():
-                if entry_profile == profile and status == "active":
+            for entry_profile, verifier, expires_at, status in self._pending.values():
+                if entry_profile != profile or status != "active":
+                    continue
+                if verifier and now <= expires_at:
                     return "active"
         return "none"
 

@@ -73,3 +73,7 @@ secrets/
 # instead of web/ or desktop/. There is no root package.json, so this is only
 # ever accidental.
 /node_modules/
+
+# Editor/agent scratch copies of source files. A 128KB ProjectSidebar.vue.tmp
+# was committed once; nothing builds these, so they are dead weight in review.
+*.tmp
