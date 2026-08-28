@@ -643,6 +643,52 @@ def test_unconsumed_project_facts_queue_addressed_to_their_doc(tmp_path: Path) -
     assert rows[0].target == "projects/x/doc.md"
 
 
+def test_project_fact_from_general_chat_is_review_not_project_specific(
+    tmp_path: Path,
+) -> None:
+    """A project tag without a canonical chat doc must not create an unroutable row."""
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n"
+        "## Decisions\n"
+        "- Chose Postgres over SQLite because concurrency. [idx=1] [project]\n",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "review"
+    assert rows[0]["target"] == ""
+
+
+def test_project_fact_uses_canonical_doc_even_when_model_supplies_a_path(
+    tmp_path: Path,
+) -> None:
+    """Extraction output cannot redirect a project fact to another document."""
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n"
+        "## Decisions\n"
+        "- Chose Postgres over SQLite because concurrency. [idx=1] "
+        "[project: guessed/other.md]\n",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path="projects/canonical/doc.md"
+    )
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert rows[0]["kind"] == "project"
+    assert rows[0]["target"] == "projects/canonical/doc.md"
+
+
 def test_queue_bullet_round_trips_payload() -> None:
     proposal = mp.MemoryProposal(
         target="people", text="Alba - a collaborator.",

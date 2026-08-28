@@ -731,13 +731,29 @@ def proposals_from_archive(
                 )
             proposals = [p for p in proposals if p.target != "project"]
         elif project_doc_path:
+            # The chat's resolved canonical doc is authoritative. Do not trust
+            # a path guessed by the extraction model, since that could route a
+            # fact into a different project.
             proposals = [
-                p if p.target != "project" or p.payload
+                p if p.target != "project"
                 else MemoryProposal(
                     target=p.target,
                     text=p.text,
                     source_section=p.source_section,
                     payload=project_doc_path,
+                )
+                for p in proposals
+            ]
+        else:
+            # A General chat has no project document to own a project-scoped
+            # fact. Keep the claim reviewable, but never create an unroutable
+            # project proposal with a missing or model-invented destination.
+            proposals = [
+                p if p.target != "project"
+                else MemoryProposal(
+                    target="review",
+                    text=p.text,
+                    source_section=p.source_section,
                 )
                 for p in proposals
             ]
