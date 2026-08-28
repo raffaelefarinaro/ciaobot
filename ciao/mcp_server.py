@@ -21,6 +21,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from ciao.control_plane import (
@@ -130,6 +131,103 @@ _DESTRUCTIVE = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=False,
 )
+
+# ── lazy tool discovery ──────────────────────────────────────────────────
+# Every schema returned by ``tools/list`` is injected into every chat's
+# context window whether the turn uses it or not: the full catalog is ~37KB
+# of JSON, ~9k tokens, per chat. Only a small core is listed eagerly; the
+# rest are reached through ``tools_search`` (schemas on demand) and
+# ``tools_call`` (dispatch by name).
+#
+# This is list-side only. Hidden tools stay registered, so authentication,
+# plan-mode gating, and telemetry are unchanged, and a client that already
+# knows a name can still call it directly.
+#
+# Groups follow the control-plane domains so one ``tools_search`` pulls
+# everything a task needs in a single round trip.
+_TOOL_GROUPS: dict[str, tuple[str, ...]] = {
+    "context": ("context_get",),
+    "memory": ("memory_status", "memory_update"),
+    "vault": ("vault_search",),
+    "gws": ("gws_status",),
+    "projects": ("projects_list", "project_get", "project", "project_action"),
+    "workspaces": ("workspaces_list", "workspace_create"),
+    "chats": (
+        "chats_list",
+        "chat_get",
+        "chat_create",
+        "chat_update",
+        "chat_send",
+        "chat_continue",
+        "chat_retry",
+        "chat_handover",
+        "chat_fork",
+        "chat_archive",
+        "chat_stop",
+        "chat_delete",
+    ),
+    "delegates": ("delegate_spawn", "delegates_list"),
+    "background": (
+        "background_run_start",
+        "background_run_status",
+        "background_run_cancel",
+    ),
+    "schedules": ("schedules_list", "schedule", "schedule_action"),
+    "loops": ("loops_list", "loop", "loop_action"),
+    "files": ("file_surface",),
+}
+
+_GROUP_OF_TOOL: dict[str, str] = {
+    name: group for group, names in _TOOL_GROUPS.items() for name in names
+}
+
+# The discovery pair. They are never hidden and never dispatchable.
+_META_TOOLS: frozenset[str] = frozenset({"tools_search", "tools_call"})
+
+# Listed eagerly alongside the meta pair: the three reads a turn needs to
+# orient itself before it knows which group it wants.
+_CORE_TOOLS: frozenset[str] = frozenset(
+    {"context_get", "memory_status", "vault_search"}
+)
+
+
+def _tools_search_description() -> str:
+    """Build the ``tools_search`` description from the group map.
+
+    The catalog of names lives in the description rather than in a call
+    result so the model knows what exists without a round trip; only the
+    schemas are deferred. Generated so it cannot drift from _TOOL_GROUPS.
+    """
+    groups = "; ".join(
+        f"{group} ({', '.join(names)})" for group, names in _TOOL_GROUPS.items()
+    )
+    return (
+        "Reveal the Ciaobot tools that tools/list does not show, then run one "
+        "with tools_call.\n\n"
+        "Ciaobot's catalog is too large to inject into every turn, so only a "
+        "core is listed and the rest are described here on demand. Pass a "
+        "group name for every schema in that group, a tool name for one "
+        "schema, or free text to match names and descriptions. With no "
+        "argument you get a one-line summary of each hidden tool.\n\n"
+        f"Groups: {groups}."
+    )
+
+
+_TOOLS_CALL_DESCRIPTION = (
+    "Run a Ciaobot tool by name, including the ones tools/list does not "
+    "show.\n\n"
+    "Call tools_search first for the tool's schema; ``arguments`` is the "
+    "object that schema describes. Tools flagged destructive are always "
+    "listed and must be called under their own name -- this dispatcher "
+    "refuses them so their approval prompt cannot be routed around."
+)
+
+
+def _summarize(description: str) -> str:
+    """First sentence-ish of a tool docstring, for the catalog listing."""
+    first = (description or "").strip().split("\n\n", 1)[0]
+    return " ".join(first.split())[:180]
+
 
 # Create-time defaults for the merged `schedule` and `loop` tools. Their
 # signatures default every field to None instead, so an "update" can tell a
@@ -276,6 +374,8 @@ class CiaoMcpService:
         self.registry = McpSessionRegistry()
         self.control_plane: CiaoControlPlane | None = None
         self._tool_names: set[str] = set()
+        self._tool_annotations: dict[str, ToolAnnotations | None] = {}
+        self.lazy_tools = bool(getattr(config, "mcp_lazy_tools", True))
         self._last_error = ""
         self._telemetry_path = Path(config.state_path).parent / "mcp_tool_calls.jsonl"
         issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
@@ -285,7 +385,9 @@ class CiaoMcpService:
                 "Use these tools for Ciaobot memory, vault, projects, chats, "
                 "schedules, loops, files, and application state. Prefer them "
                 "over curl, the ciao CLI, or direct .runtime edits. All paths "
-                "are relative to the active workspace or vault."
+                "are relative to the active workspace or vault. Most of the "
+                "catalog is not listed: call tools_search to get the schemas "
+                "for a group, then tools_call to run one."
             ),
             host="127.0.0.1",
             streamable_http_path="/",
@@ -300,6 +402,10 @@ class CiaoMcpService:
             ),
         )
         self._register_tools()
+        if self.lazy_tools:
+            # Replace the handler FastMCP installed in _setup_handlers. The
+            # tool manager keeps every tool; only the listing is filtered.
+            self.server._mcp_server.list_tools()(self._list_visible_tools)
         self.http_app = self.server.streamable_http_app()
 
     def bind(self, control_plane: CiaoControlPlane) -> None:
@@ -332,6 +438,8 @@ class CiaoMcpService:
             "bound": self.control_plane is not None,
             "tool_count": len(self._tool_names),
             "tools": sorted(self._tool_names),
+            "lazy_tools": self.lazy_tools,
+            "listed_tools": sorted(self._visible_tool_names()),
             "last_error": self._last_error,
             "env_path": str(_workspace_env_path(workspace_root)),
             "project_servers": self._discover_project_mcp_servers(),
@@ -908,10 +1016,224 @@ class CiaoMcpService:
         name = str(kwargs.get("name") or (args[0] if args else ""))
         if name:
             self._tool_names.add(name)
+            self._tool_annotations[name] = kwargs.get("annotations")
         return self.server.tool(*args, **kwargs)
+
+    # ── lazy tool discovery ──────────────────────────────────────────────
+
+    def _destructive_tool_names(self) -> set[str]:
+        return {
+            name
+            for name, annotations in self._tool_annotations.items()
+            if annotations is _DESTRUCTIVE
+        }
+
+    def _visible_tool_names(self) -> set[str]:
+        """Names ``tools/list`` reports.
+
+        Destructive tools stay listed on purpose. Auto-approval is a static
+        name allowlist on the provider side (``AUTO_APPROVED_MCP_TOOLS``), so
+        a tool reached through ``tools_call`` would inherit the dispatcher's
+        approval instead of its own. Keeping them named — and refusing them in
+        the dispatcher — keeps that boundary exactly where it is today.
+        """
+        if not self.lazy_tools:
+            return set(self._tool_names)
+        keep = _META_TOOLS | _CORE_TOOLS | self._destructive_tool_names()
+        return {name for name in self._tool_names if name in keep}
+
+    async def _list_visible_tools(self) -> list[Any]:
+        visible = self._visible_tool_names()
+        return [
+            tool for tool in await self.server.list_tools() if tool.name in visible
+        ]
+
+    def _describe_tool(self, tool: Any, *, visible: set[str]) -> dict[str, Any]:
+        annotations = self._tool_annotations.get(tool.name)
+        return {
+            "name": tool.name,
+            "group": _GROUP_OF_TOOL.get(tool.name, ""),
+            "description": tool.description or "",
+            "input_schema": tool.inputSchema,
+            "destructive": annotations is _DESTRUCTIVE,
+            "read_only": annotations is _READ,
+            "listed": tool.name in visible,
+        }
+
+    async def _tools_search(self, query: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        principal = self._principal_or_none()
+        status = "ok"
+        try:
+            visible = self._visible_tool_names()
+            catalog = [
+                tool
+                for tool in await self.server.list_tools()
+                if tool.name not in _META_TOOLS
+            ]
+            term = (query or "").strip().lower()
+            if not term:
+                data: dict[str, Any] = {
+                    "query": "",
+                    "matched": 0,
+                    "catalog": [
+                        {
+                            "name": tool.name,
+                            "group": _GROUP_OF_TOOL.get(tool.name, ""),
+                            "listed": tool.name in visible,
+                            "summary": _summarize(tool.description or ""),
+                        }
+                        for tool in sorted(catalog, key=lambda t: t.name)
+                    ],
+                }
+                return {"ok": True, "data": data}
+
+            if term in _TOOL_GROUPS:
+                hits = [t for t in catalog if _GROUP_OF_TOOL.get(t.name) == term]
+            else:
+                hits = [t for t in catalog if t.name == term]
+                if not hits:
+                    hits = [t for t in catalog if term in t.name]
+                if not hits:
+                    hits = [
+                        t for t in catalog if term in (t.description or "").lower()
+                    ][:8]
+
+            if not hits:
+                return {
+                    "ok": True,
+                    "data": {
+                        "query": query,
+                        "matched": 0,
+                        "catalog": [
+                            {
+                                "name": tool.name,
+                                "group": _GROUP_OF_TOOL.get(tool.name, ""),
+                                "listed": tool.name in visible,
+                                "summary": _summarize(tool.description or ""),
+                            }
+                            for tool in sorted(catalog, key=lambda t: t.name)
+                        ],
+                    },
+                }
+            return {
+                "ok": True,
+                "data": {
+                    "query": query,
+                    "matched": len(hits),
+                    "tools": [
+                        self._describe_tool(tool, visible=visible)
+                        for tool in sorted(hits, key=lambda t: t.name)
+                    ],
+                },
+            }
+        except Exception:  # noqa: BLE001 - tool boundary must be fail-safe
+            status = "error"
+            raise
+        finally:
+            self._record_tool_call(
+                name="tools_search",
+                principal=principal,
+                status=status,
+                error_code="internal_error" if status == "error" else "",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+    async def _tools_call(
+        self, name: str, arguments: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        target = (name or "").strip()
+        refusal = self._dispatch_refusal(target)
+        if refusal:
+            self._record_tool_call(
+                name="tools_call",
+                principal=self._principal_or_none(),
+                status="error",
+                error_code="invalid_request",
+                duration_ms=0,
+            )
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_request",
+                    "message": refusal,
+                    "retryable": False,
+                },
+            }
+        # The tool manager validates ``arguments`` against the tool's own
+        # signature and runs the registered coroutine, so the inner _invoke
+        # still applies the principal, plan-mode gate, and telemetry under the
+        # real tool name. Private only because FastMCP exposes no public
+        # "call without converting the result" entry point.
+        try:
+            value = await self.server._tool_manager.call_tool(
+                target,
+                arguments or {},
+                context=self.server.get_context(),
+                convert_result=False,
+            )
+        except ToolError as exc:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_request",
+                    "message": f"{target}: {exc}",
+                    "retryable": False,
+                },
+            }
+        if isinstance(value, dict):
+            return value
+        return {"ok": True, "data": value}
+
+    def _dispatch_refusal(self, target: str) -> str:
+        """Why ``tools_call`` will not run ``target``, or "" if it will."""
+        if not target:
+            return "tools_call needs the name of a Ciaobot tool."
+        if target in _META_TOOLS:
+            return f"{target} cannot dispatch to itself."
+        if target not in self._tool_names:
+            return (
+                f"Unknown Ciaobot tool {target!r}. "
+                "Call tools_search with no argument for the catalog."
+            )
+        if target in self._destructive_tool_names():
+            return (
+                f"{target} is destructive and is listed in tools/list. "
+                "Call it directly by name so its approval prompt is raised."
+            )
+        return ""
+
+    def _principal_or_none(self) -> McpPrincipal | None:
+        try:
+            return self._principal()
+        except ControlPlaneError:
+            return None
 
     def _register_tools(self) -> None:  # noqa: C901 - catalog is intentionally explicit
         tool = self._tool
+
+        # ── lazy discovery pair ──────────────────────────────────────────
+        # Declared first so they lead AUTO_APPROVED_MCP_TOOLS, which mirrors
+        # this file's declaration order.
+        @tool(
+            name="tools_search",
+            annotations=_READ,
+            structured_output=True,
+            description=_tools_search_description(),
+        )
+        async def tools_search(query: str = "") -> dict[str, Any]:
+            return await self._tools_search(query)
+
+        @tool(
+            name="tools_call",
+            annotations=_WRITE,
+            structured_output=True,
+            description=_TOOLS_CALL_DESCRIPTION,
+        )
+        async def tools_call(
+            name: str, arguments: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            return await self._tools_call(name, arguments)
 
         @tool(name="context_get", annotations=_READ, structured_output=True)
         async def context_get() -> dict[str, Any]:

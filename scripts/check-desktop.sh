@@ -41,6 +41,34 @@ if [[ -n "$missing" ]]; then
   exit 1
 fi
 
+# Tauri resolves every bundle.resources path while running the build script, so
+# an absent desktop/runtime aborts `cargo fmt`/`clippy`/`test` before a single
+# check runs — the gate is unusable on a fresh checkout. CI builds the real
+# runtime first (.github/workflows/ci.yml), but that downloads a pinned CPython
+# and takes minutes, which is more than this gate is for. A placeholder
+# satisfies the path lookup; none of the Rust checks read its contents.
+RUNTIME="$DESKTOP/runtime"
+STUBBED_RUNTIME=0
+if [[ ! -d "$RUNTIME" ]]; then
+  mkdir -p "$RUNTIME"
+  cat > "$RUNTIME/README.txt" <<'EOF'
+Placeholder created by scripts/check-desktop.sh so Tauri can resolve the
+`../runtime` resource path. The real bundled Python runtime is built by
+scripts/build-bundled-runtime.sh. An app bundled against this placeholder has
+no engine inside it: resolve_ciao() finds no Contents/Resources/ciao-runtime/
+bin/ciao and reports "Ciaobot engine unavailable".
+EOF
+  STUBBED_RUNTIME=1
+fi
+
+runtime_note() {
+  [[ "$STUBBED_RUNTIME" -eq 1 ]] || return 0
+  echo
+  echo "Note: desktop/runtime was missing, so a placeholder was created. The"
+  echo "Rust checks above are unaffected, but any .app built from this tree has"
+  echo "no engine bundled. Run scripts/build-bundled-runtime.sh for a real one."
+}
+
 step() { printf '\n=== %s ===\n' "$1"; }
 
 step "sidecar build (swiftc, aarch64)"
@@ -58,6 +86,7 @@ step "cargo test"
 if [[ "$FAST" -eq 1 ]]; then
   echo
   echo "Desktop gate passed (--fast: bundle build skipped)."
+  runtime_note
   exit 0
 fi
 
@@ -82,3 +111,4 @@ codesign -v "$APP" || { echo "FAIL: bundle signature invalid" >&2; exit 1; }
 
 echo
 echo "Desktop gate passed: sidecar bundled, aarch64, signed, and runnable."
+runtime_note
