@@ -17,14 +17,30 @@ use std::{
 /// The cursor starts unset and the first poll only primes it, so launching the
 /// app (or connecting to a host with a full log) never replays a backlog.
 ///
-/// `primed` records that first poll separately from `cursor`. An empty log at
-/// launch leaves the cursor unset, so deriving "is this the priming poll?" from
+/// Priming is recorded separately from `cursor`. An empty log at launch leaves
+/// the cursor unset, so deriving "is this the priming poll?" from
 /// `cursor.is_none()` would prime twice and swallow the first real entry.
+///
+/// It is recorded *per source*, because the engine and the file are not the
+/// same log on a client node. The app restarts the engine as it launches, so
+/// the first poll — one second in — usually lands while the engine is still
+/// unreachable and falls back to the file. On a client that file holds only
+/// what this machine itself ran, so priming from it parked the cursor days in
+/// the past; the next poll, with the engine up, asked the *host* for
+/// everything after that stale timestamp and posted the lot as fresh banners.
+/// Letting each source prime once means the first answer the engine gives is
+/// still a priming answer, whatever the file did before it.
+///
+/// The cost is bounded and deliberate: an entry written in the one poll
+/// interval between the last answer from one source and the first answer from
+/// the other is swallowed with that priming batch. Losing at most a second of
+/// banners on a single handover beats replaying a whole backlog.
 #[derive(Debug)]
 pub struct NotificationLogTail {
     path: PathBuf,
     cursor: Option<f64>,
-    primed: bool,
+    primed_by_engine: bool,
+    primed_by_file: bool,
     seen: HashSet<String>,
 }
 
@@ -49,7 +65,8 @@ impl NotificationLogTail {
         Self {
             path: path.into(),
             cursor: None,
-            primed: false,
+            primed_by_engine: false,
+            primed_by_file: false,
             seen: HashSet::new(),
         }
     }
@@ -64,8 +81,20 @@ impl NotificationLogTail {
     /// `fetched` is the engine's answer, or `None` when the call failed — the
     /// caller owns the HTTP so this stays testable without a server.
     pub fn poll(&mut self, fetched: Option<Vec<Value>>) -> Vec<Value> {
-        let priming = !self.primed;
-        self.primed = true;
+        // Each source primes once. A file-fallback poll must not consume the
+        // engine's priming turn: it reads a different log on a client node,
+        // and the cursor it leaves behind is a timestamp in that other log.
+        let from_engine = fetched.is_some();
+        let priming = if from_engine {
+            !self.primed_by_engine
+        } else {
+            !self.primed_by_file
+        };
+        if from_engine {
+            self.primed_by_engine = true;
+        } else {
+            self.primed_by_file = true;
+        }
         let entries = match fetched {
             Some(entries) => entries,
             // Engine down: read this machine's own log, applying the cursor the
@@ -226,6 +255,43 @@ mod tests {
         assert_eq!(posted.len(), 1);
         assert_eq!(posted[0]["title"], "new");
         assert!(tail.poll(None).is_empty());
+    }
+
+    // The client-mode restart flood: launching the app restarts the engine, so
+    // the first poll falls back to this machine's own log. On a client that log
+    // is stale — only what this machine ran — and priming from it left the
+    // cursor days in the past. The engine's first answer, tunnelled to the
+    // host, then carried the host's whole backlog and posted every entry.
+    #[test]
+    fn a_stale_file_prime_does_not_replay_the_hosts_backlog() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("notifications.jsonl");
+        fs::write(&path, "{\"ts\":1.0,\"title\":\"days old, local\"}\n").unwrap();
+        let mut tail = NotificationLogTail::at_end(&path);
+
+        // Engine still starting: falls back to the stale local log.
+        assert!(tail.poll(None).is_empty());
+        assert_eq!(tail.cursor(), 1.0);
+
+        // Engine up. The host answers with everything after that stale cursor;
+        // none of it may be posted, because the engine has not primed yet.
+        let backlog = vec![
+            entry(2.0, "host, read days ago"),
+            entry(3.0, "host, read yesterday"),
+        ];
+        assert!(
+            tail.poll(Some(backlog)).is_empty(),
+            "the host backlog must not be replayed as banners"
+        );
+        assert_eq!(tail.cursor(), 3.0);
+
+        // Genuinely new host entries still arrive.
+        let posted = tail.poll(Some(vec![
+            entry(3.0, "host, read yesterday"),
+            entry(4.0, "new"),
+        ]));
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "new");
     }
 
     #[test]
