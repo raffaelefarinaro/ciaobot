@@ -602,13 +602,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         on_finish=_background_finished,
     )
 
-    # Create and wire up web app. MCP stays available while legacy remains
-    # the default so controlled A/B runs can select a surface per chat.
+    # Create and wire up web app. The MCP control plane is mandatory for chat;
+    # first-run setup is the one state without one, and a chat attempted there
+    # fails loudly rather than running an agent that cannot reach Ciaobot.
     from ciao.mcp_server import CiaoMcpService
 
     mcp_service = None
     control_plane = None
-    if bool(getattr(config, "mcp_enabled", True)) and not getattr(config, "bootstrap_mode", False):
+    if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
@@ -833,9 +834,23 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
         # serving requests.
+        #
+        # Right after a first-time setup the onboarding chat should be the only
+        # new conversation: within the post-setup grace window, system routines
+        # are skipped here and simply fire at their next regular tick, instead
+        # of all replaying their missed runs in parallel at first launch.
+        from ciao.setup_marker import catch_up_grace_active
+
+        grace_active = catch_up_grace_active(config.state_path.parent)
+        if grace_active:
+            logger.info(
+                "Post-setup grace window active: holding system-routine "
+                "catch-up; routines fire at their next regular tick."
+            )
+
         async def _run_catch_up() -> None:
             try:
-                fired = await schedule_manager.catch_up()
+                fired = await schedule_manager.catch_up(skip_system=grace_active)
                 if fired:
                     logger.info("Schedule catch-up fired %d schedule(s): %s",
                                 len(fired), ", ".join(fired))

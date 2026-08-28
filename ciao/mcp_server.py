@@ -432,7 +432,9 @@ class CiaoMcpService:
     def status(self) -> dict[str, Any]:
         workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
         return {
-            "enabled": bool(getattr(self.config, "mcp_enabled", True)),
+            # Retained for the PWA status payload's shape. The control plane is
+            # mandatory, so a live service is by definition enabled.
+            "enabled": True,
             "url": self.url,
             "bound": self.control_plane is not None,
             "tool_count": len(self._tool_names),
@@ -1463,7 +1465,6 @@ class CiaoMcpService:
             provider: str | None = None,
             model: str | None = None,
             mode: str | None = None,
-            control_surface: str | None = None,
             prompt: str | None = None,
         ) -> dict[str, Any]:
             """Create a fresh chat, optionally sending its first prompt in the same call.
@@ -1489,7 +1490,6 @@ class CiaoMcpService:
                     provider=provider,
                     model=model,
                     mode=mode,
-                    control_surface=control_surface,  # type: ignore[arg-type]
                     prompt=prompt,
                 ),
                 mutating=True,
@@ -1504,7 +1504,6 @@ class CiaoMcpService:
             mode: str | None = None,
             thinking_level: str | None = None,
             project_id: str | None = None,
-            control_surface: str | None = None,
         ) -> dict[str, Any]:
             """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
             return await self._invoke(
@@ -1518,7 +1517,6 @@ class CiaoMcpService:
                     mode=mode,
                     thinking_level=thinking_level,
                     project_id=project_id,
-                    control_surface=control_surface,
                 ),
                 mutating=True,
             )

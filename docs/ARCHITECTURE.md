@@ -38,6 +38,7 @@ ciao/                          Python backend (Starlette).
   error_log.py                 Rotating file handler for server ERROR+ logs (`server_errors.log`), plus an opt-in DEBUG sibling (`server_debug.log`, enabled by `CIAO_LOG_LEVEL=debug`) surfaced through the debug issue report. Consumed by the error-triage schedule and the debug issue report.
   debug_report.py              Aggregate runtime issues (server error log + failed job runs) for the dev-mode `GET /api/debug/issues` endpoint and the `{{ISSUE_REPORT}}` schedule placeholder.
   startup_triage.py            Startup error triage: harvest runtime errors into a fix-it chat through the schedule pipeline.
+  setup_marker.py              First-time-setup receipt (`.runtime/setup-completed-at`, written only when setup creates a workspace's `.env` from scratch). Startup reads it to hold system-routine catch-up for 24h, so a brand-new install is greeted by its onboarding chat rather than four parallel routine chats replaying missed runs.
   job_runs.py                  Fail-open recorder for background-job runs. Appends one JSON record per run to `.runtime/job_runs.jsonl` (size-trimmed like `error_log.py`). Background tasks wrap their work in `track()`/`track_sync()`; `automation_summary()` feeds the Settings → Automation page. Also holds the live view: an in-memory in-flight registry (`inflight_runs()`) plus an optional publisher (`set_publisher()`, attached at startup to the chat manager's event bus) so a job can be shown as running, not only after it lands. `JobSpec.step_of` marks a step that runs inside another job's task on that job's trigger, reported as the owner's `steps` rather than as a peer automation.
   models.py                    Shared data models (ChatContext, AgentRequest, etc.).
   model_tiers.py               Claude's tier vocabulary (haiku / sonnet / opus / fable) recognized as bare model aliases; no cross-provider mapping tables.
@@ -45,8 +46,7 @@ ciao/                          Python backend (Starlette).
   provider_service.py          Provider request builder and execution wrapper.
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
   workspaces.py                Shared logical-workspace registry rules (validation, serialization, persistence) used by the PWA routes and the control-plane workspace tools.
-  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py. Tool discovery is lazy (`CIAO_MCP_LAZY_TOOLS`, on by default): every schema in `tools/list` is injected into every chat's context window whether the turn uses it or not, ~9k tokens for the full catalog, so only the core reads and the `tools_search`/`tools_call` pair are listed and the rest are described on demand. Filtering is list-side only — every tool stays registered, so auth, the plan-mode gate, and per-tool telemetry are unchanged, and a client that already knows a name can still call it directly. Destructive tools stay listed on purpose: auto-approval is a static name allowlist (`AUTO_APPROVED_MCP_TOOLS`), so a destructive tool reached through the dispatcher would inherit the dispatcher's approval instead of raising its own card, and `tools_call` refuses them for the same reason. `_TOOL_GROUPS` must name every registered tool: a tool in no group would be hidden from the listing and from discovery at once.
-  control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
+  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py. Tool discovery is lazy (`CIAO_MCP_LAZY_TOOLS`, on by default): every schema in `tools/list` is injected into every chat's context window whether the turn uses it or not, ~9k tokens for the full catalog, so only the core reads and the `tools_search`/`tools_call` pair are listed and the rest are described on demand. Filtering is list-side only — every tool stays registered, so auth, the plan-mode gate, and per-tool telemetry are unchanged, and a client that already knows a name can still call it directly. Destructive tools stay listed on purpose: auto-approval is a static name allowlist (`AUTO_APPROVED_MCP_TOOLS`), so a destructive tool reached through the dispatcher would inherit the dispatcher's approval instead of raising its own card, and `tools_call` refuses them for the same reason. `_TOOL_GROUPS` must name every registered tool: a tool in no group would be hidden from the listing and from discovery at once. MCP is the only control surface and is mandatory: there is no `CIAO_MCP_ENABLED` or `CIAO_CONTROL_SURFACE` switch and no `ciao/control_surfaces.py` legacy-decision reader.
   signals.py                   Restart / deploy signals.
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude/opencode provider approval policies and Ciaobot's auto-approved MCP control plane.
@@ -258,26 +258,19 @@ telemetry. Each managed provider process receives a short-lived capability
 scoped to one chat/project/workspace/provider. Claude receives the server and
 Authorization header through `ClaudeAgentOptions.mcp_servers`; opencode receives
 equivalent per-process configuration. Project servers remain in `.mcp.json`
-and credentials stay as environment references. When the MCP server is unavailable a chat degrades gracefully to the legacy
-surface with a logged WARNING instead of failing the turn; that is an internal
-runtime fallback (`resolved_surface = "legacy"` on the agent request), not a
-user-facing surface. Self-disconnecting operations defer until their caller
-chat drains. See `docs/MCP.md`.
+and credentials stay as environment references. Self-disconnecting operations
+defer until their caller chat drains. See `docs/MCP.md`.
 
-MCP is the control surface (`config.control_surface = "mcp"`) for both
-providers; `legacy` survives as a hidden fallback selectable via
-`CIAO_CONTROL_SURFACE` or the per-chat `ChatInfo.control_surface` escape hatch
-(the PWA never exposed a selector), and as the automatic degrade when the MCP
-server is unavailable at request time. `ChatInfo.control_surface` still permits
-legacy and MCP chats to coexist. Accepted config/env values are `legacy` and
-`mcp` only: the `auto` A/B option and the paired `ciao
-benchmark-control-surfaces` evaluator that produced its evidence were removed
-once the evaluation had settled on MCP. The per-chat `auto` path in
-`ProjectChatManager` still resolves through `control_surfaces.resolve_auto_surface`,
-which reads `.runtime/control_surface_decision.json` and falls back to legacy
-for missing, partial, tied, or malformed decisions — but nothing writes that
-file any more, so an existing chat pinned to `auto` resolves from a stale
-decision or degrades to legacy.
+The MCP control plane is mandatory and is the only agent-facing control
+surface: there is no CLI/skill/direct-file fallback and no per-chat or
+per-server surface selector. `ProjectChatManager.build_agent_request` raises
+`McpUnavailableError` when the MCP service or the chat's project is missing,
+and `_drive` turns that into a normal failed turn in the transcript, so a chat
+never runs an agent that silently cannot reach Ciaobot. First-run setup is the
+one state without a control plane (no workspace yet); a chat attempted there
+fails with the same error. The `legacy`/`auto` surfaces and the
+`ciao benchmark-control-surfaces` evaluator that compared them were removed
+once the evaluation had settled on MCP.
 
 Server restart requests drain chat work before shutting down: active broker streams, already-queued follow-up turns, and background-subagent watchers are allowed to settle, while brand-new turns are rejected once draining begins. When drain starts, `ProjectChatManager.begin_restart_drain` publishes `server_restarting` on `/ws/events` (and the connect snapshot carries `restarting: true`) so every open PWA shows the full-screen restart overlay instead of treating turn rejection as a chat error. Shutdown starts only after several consecutive idle observations so the handoff from a completed parent turn to its background-agent watcher or synthesis stream cannot create a false-idle race. The macOS menu-bar action uses `/api/active-chats` as a guard before its direct launchd restart and asks the operator to retry once active chats finish.
 

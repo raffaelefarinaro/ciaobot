@@ -13,11 +13,14 @@ from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import (
+    McpUnavailableError,
     ProjectChatManager,
     _StreamOutcome,
     _cap_reentry_summary,
     _reentry_transcript_text,
 )
+
+from tests.conftest import attach_stub_mcp
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -29,12 +32,16 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         state_path=runtime / "state.json",
         media_root=runtime / "media",
     )
-    return ProjectChatManager(
+    manager = ProjectChatManager(
         config,
         state_store=StateStore(config.state_path, tmp_path, config.media_root),
         transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
         path=runtime / "web_projects.json",
     )
+    # The MCP control plane is mandatory for a turn, so every manager that
+    # builds one needs a service; the one test that asserts the missing-server
+    # failure clears it explicitly.
+    return attach_stub_mcp(manager)
 
 
 def _persisted_chats(tmp_path: Path) -> dict[str, dict]:
@@ -160,23 +167,33 @@ def test_registry_audit_records_chat_create_and_delete(tmp_path: Path) -> None:
     )
 
 
-def test_build_agent_request_falls_back_to_legacy_without_mcp_service(
-    tmp_path: Path,
-) -> None:
-    # The default control surface is mcp, but a manager with no MCP service must
-    # degrade gracefully to legacy instead of raising, so the app stays usable.
+def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> None:
+    # The MCP control plane is the only control surface: with no service there
+    # is nothing to degrade to, so the turn must fail loudly instead of
+    # dispatching an agent that cannot reach Ciaobot.
     manager = _make_manager(tmp_path)
-    assert manager._config.control_surface == "mcp"
-    assert manager._mcp_service is None
+    manager._mcp_service = None
     project = manager.create_project("Fallback", workspace="work")
     chat = manager.create_chat(project.project_id)
-    assert chat.control_surface == ""  # inherits the server default
+
+    with pytest.raises(McpUnavailableError):
+        manager.build_agent_request(chat, prompt="hi")
+
+    transcript_request = manager.build_agent_request(
+        chat, prompt="hi", require_mcp=False
+    )
+    assert transcript_request.mcp_url == ""
+    assert transcript_request.mcp_token == ""
+
+
+def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Attached", workspace="work")
+    chat = manager.create_chat(project.project_id)
 
     request = manager.build_agent_request(chat, prompt="hi")
-    assert request.control_surface == "legacy"
-    assert request.mcp_required is False
-    assert request.mcp_url == ""
-    assert request.mcp_token == ""
+    assert request.mcp_url == "http://127.0.0.1:8443/mcp/"
+    assert request.mcp_token == "tok-test"
 
 
 @pytest.mark.asyncio
@@ -247,23 +264,6 @@ async def test_opencode_effective_model_is_persisted_for_model_less_chat(
 
     assert chat.model == "opencode/big-pickle"
     assert _persisted_chats(tmp_path)[chat.chat_id]["model"] == "opencode/big-pickle"
-
-
-def test_chat_control_surface_round_trips_through_registry(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("MCP evaluation", workspace="personal")
-    chat = manager.create_chat(project.project_id)
-    chat.control_surface = "mcp"
-    chat.user_turn_count = 1
-    manager._save(reason="test_control_surface")
-
-    persisted = _persisted_chats(tmp_path)[chat.chat_id]
-    assert persisted["control_surface"] == "mcp"
-
-    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
-    assert reloaded is not None
-    assert reloaded.control_surface == "mcp"
-    assert reloaded.to_dict()["control_surface"] == "mcp"
 
 
 def test_reentry_summary_is_cached_bounded_and_invalidated_by_queue(

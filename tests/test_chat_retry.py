@@ -9,6 +9,8 @@ from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
+from tests.conftest import attach_stub_mcp
+
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
@@ -21,12 +23,12 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
-    return ProjectChatManager(
+    return attach_stub_mcp(ProjectChatManager(
         config,
         state_store=state,
         transcript_store=transcripts,
         path=runtime / "web_projects.json",
-    )
+    ))
 
 
 async def _consume(stream) -> list[dict]:

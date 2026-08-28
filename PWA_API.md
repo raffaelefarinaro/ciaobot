@@ -319,9 +319,6 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 # thinking_levels) and is safe to change mid-chat; it resets to '' on
 # handover. Changing provider
 # on a started chat returns 400; use handover instead.
-# control_surface (legacy|mcp|auto|'') is still accepted here as an escape
-# hatch, but it is engine-controlled now (MCP by default, legacy fallback);
-# the PWA no longer exposes a selector for it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 

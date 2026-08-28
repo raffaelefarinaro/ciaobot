@@ -30,7 +30,6 @@ from ciao.fts_search import (
 )
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import resolve_region, update_region
-from ciao.models import ControlSurface
 from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
@@ -395,8 +394,6 @@ class CiaoControlPlane:
             "chat": chat.to_dict(local=self.pcm.is_session_local(chat)) if chat else None,
             "provider": principal.provider,
             "role": principal.role,
-            "control_surface": getattr(chat, "control_surface", "")
-            or getattr(self.config, "control_surface", "legacy"),
         })
 
     def system_status_get(self, principal: McpPrincipal) -> dict[str, Any]:
@@ -783,7 +780,6 @@ class CiaoControlPlane:
         provider: str | None = None,
         model: str | None = None,
         mode: str | None = None,
-        control_surface: ControlSurface | None = None,
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
@@ -792,9 +788,6 @@ class CiaoControlPlane:
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
         )
-        if control_surface is not None:
-            chat.control_surface = control_surface
-            self.pcm._save()
         result = chat.to_dict(local=True)
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True
@@ -819,7 +812,6 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
-        control_surface: str | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
@@ -841,28 +833,6 @@ class CiaoControlPlane:
         )
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
-        if control_surface is not None:
-            if control_surface not in {"", "legacy", "mcp", "auto"}:
-                raise ControlPlaneError("invalid_control_surface", "Use legacy, mcp, auto, or empty inheritance.")
-            old_surface = updated.control_surface
-            updated.control_surface = control_surface
-            if old_surface != control_surface:
-                async def _disconnect_after_turn() -> None:
-                    while chat_id in self.pcm.active_chat_ids():
-                        await asyncio.sleep(0.25)
-                    self.pcm._revoke_mcp_chat(chat_id)
-                    provider_service = self.pcm._providers.pop(chat_id, None)
-                    if provider_service is not None:
-                        await provider_service.disconnect()
-
-                if chat_id == principal.chat_id:
-                    asyncio.create_task(_disconnect_after_turn())
-                else:
-                    self.pcm._revoke_mcp_chat(chat_id)
-                    provider_service = self.pcm._providers.pop(chat_id, None)
-                    if provider_service is not None:
-                        asyncio.create_task(provider_service.disconnect())
-            self.pcm._save()
         result = updated.to_dict(local=self.pcm.is_session_local(updated))
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True

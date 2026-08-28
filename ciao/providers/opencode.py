@@ -869,9 +869,7 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _chat_system_instructions(self, request: AgentRequest) -> str:
         """Return the compact core for normal chats, never bounded memory."""
-        payload = system_prompt_payload(
-            "", control_surface=request.control_surface
-        ) or {}
+        payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
@@ -1101,15 +1099,10 @@ class OpencodeProvider(BaseSDKProvider):
                 "/mcp", json={"name": MCP_SERVER_NAME, "config": config}
             )
         except httpx.HTTPError as exc:
-            if request.mcp_required:
-                raise RuntimeError(f"could not attach the Ciaobot MCP server: {exc}") from exc
-            logger.warning("opencode: Ciaobot MCP server not attached: %s", exc)
-            return
+            raise RuntimeError(f"could not attach the Ciaobot MCP server: {exc}") from exc
         if response.status_code >= 400:
             detail = _sanitize_error(response.text)
-            if request.mcp_required:
-                raise RuntimeError(f"opencode refused the Ciaobot MCP server: {detail}")
-            logger.warning("opencode: Ciaobot MCP server refused: %s", detail)
+            raise RuntimeError(f"opencode refused the Ciaobot MCP server: {detail}")
 
     async def disconnect(self) -> None:
         """Tear down the server, denying anything still awaiting a reply."""
