@@ -452,6 +452,50 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
     assert scandit_entry["vault_root"] == str(install / "memory-vault")
 
 
+def test_apply_reports_a_failed_partial_move_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing rollback must not read as a clean refusal.
+
+    When a later forward `git mv` fails and unwinding an earlier completed
+    move fails too (the same disk/permission problem persists), the operator
+    must not get a refusal that implies the source layout is intact while
+    some notes sit at the destination with no applied receipt to recover
+    from.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    real_run_git = vault_relocate._run_git
+    forward_calls = {"n": 0}
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:1] == ("mv",) and len(args) == 3:
+            src = args[1]
+            forward = src.startswith("memory-vault/") and not src.startswith(
+                "memory-vault/scandit"
+            )
+            if forward:
+                forward_calls[0] += 1
+                if forward_calls[0] == 2:
+                    return (128, "fatal: simulated forward failure")
+            # Rollback: moving FROM the scandit destination BACK to source.
+            if src.startswith("memory-vault/scandit"):
+                return (128, "fatal: simulated rollback failure")
+        return real_run_git(root, *args)
+
+    forward_calls = [0]
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("simulated forward failure" in r for r in result["refusals"])
+    # The rollback failure is surfaced, not swallowed: the refusal names the
+    # divergence between disk and registry instead of claiming a clean undo.
+    assert any("rollback also failed" in r for r in result["refusals"]), result["refusals"]
+
+
 # -- undo collision with a recreated source ----------------------------------
 
 

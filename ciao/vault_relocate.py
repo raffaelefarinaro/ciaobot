@@ -500,14 +500,40 @@ def apply(
         destination.rmdir()
 
     applied: list[dict[str, str]] = []
+
+    def _unwind_applied() -> str | None:
+        """Move completed moves back; returns the first rollback error.
+
+        A rollback `git mv` can itself fail (the same disk-full or permission
+        problem that broke the forward move usually persists). Swallowing
+        that would report a clean refusal while some notes sit at the
+        destination with the registry describing the source and no applied
+        receipt to recover from — so the failure is surfaced to the caller.
+        """
+        first_error: str | None = None
+        for done in reversed(applied):
+            (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
+            rb_code, rb_out = _run_git(
+                install_root, "mv", done["destination"], done["source"]
+            )
+            if rb_code != 0 and first_error is None:
+                first_error = rb_out
+        return first_error
+
     for src_rel, dst_rel in moves_to_apply:
         (install_root / dst_rel).parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", src_rel, dst_rel)
         if code != 0:
-            for done in reversed(applied):
-                _run_git(install_root, "mv", done["destination"], done["source"])
+            rollback_error = _unwind_applied()
+            refusals = [f"git mv failed for {src_rel}: {out}"]
+            if rollback_error:
+                refusals.append(
+                    "the partial-move rollback also failed; some notes may "
+                    "sit at their new locations while the registry still "
+                    f"describes the old layout: {rollback_error}"
+                )
             payload["status"] = "refused"
-            payload["refusals"] = [f"git mv failed for {src_rel}: {out}"]
+            payload["refusals"] = refusals
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
         applied.append({"source": src_rel, "destination": dst_rel})
@@ -528,8 +554,14 @@ def apply(
         # (permissions, disk full) shows up only now, with the vault already
         # moved on disk — leaving it moved with the registry unrepointed would
         # orphan it under a path nothing resolves to anymore, so unwind.
-        for done in reversed(applied):
-            _run_git(install_root, "mv", done["destination"], done["source"])
+        refusals = [f"could not persist the new location in the registry: {exc}"]
+        rollback_error = _unwind_applied()
+        if rollback_error:
+            refusals.append(
+                "the partial-move rollback also failed; some notes may sit at "
+                "their new locations while the registry still describes the "
+                f"old layout: {rollback_error}"
+            )
         if source_removed:
             source.mkdir(parents=True, exist_ok=True)
         if not result.whole_directory and destination.is_dir() and not any(destination.iterdir()):
@@ -538,7 +570,7 @@ def apply(
             except OSError:
                 pass
         payload["status"] = "refused"
-        payload["refusals"] = [f"could not persist the new location in the registry: {exc}"]
+        payload["refusals"] = refusals
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
     payload["registry_before"] = registry_before
@@ -560,13 +592,18 @@ def apply(
     try:
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
     except OSError as exc:
-        for done in reversed(applied):
-            (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
-            _run_git(install_root, "mv", done["destination"], done["source"])
+        rollback_error = _unwind_applied()
         if registry_before is not None:
             _write_registry(runtime_root, registry_before)
+        refusals = [f"could not persist the relocation receipt: {exc}"]
+        if rollback_error:
+            refusals.append(
+                "the partial-move rollback also failed; some notes may sit at "
+                "their new locations while the registry still describes the "
+                f"old layout: {rollback_error}"
+            )
         payload["status"] = "refused"
-        payload["refusals"] = [f"could not persist the relocation receipt: {exc}"]
+        payload["refusals"] = refusals
         return payload
     return payload
 
