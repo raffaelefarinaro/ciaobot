@@ -91,7 +91,7 @@ vi.mock('../../lib/api', () => {
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
-      counts: { custom: 1, github: 1, stock: 0 },
+      counts: { custom: 1, stock: 0 },
       skills: [
         {
           name: 'airtable-projects',
@@ -101,16 +101,6 @@ vi.mock('../../lib/api', () => {
           description: 'Create Airtable projects',
           path: 'skills/airtable-projects/SKILL.md',
           content: '# airtable-projects\ncustom skill content',
-          installed_targets: ['claude'],
-        },
-        {
-          name: 'brainstorming',
-          label: 'github',
-          source: 'example-org/skill-pack',
-          source_type: 'github',
-          description: 'Explore design before implementation',
-          path: '.claude/skills/brainstorming/SKILL.md',
-          content: '# brainstorming\ngithub skill content',
           installed_targets: ['claude'],
         },
       ],
@@ -449,7 +439,7 @@ describe('component mount smoke', () => {
   })
 
 
-  it('SettingsView renders skills with custom and github labels on /settings/skills', async () => {
+  it('SettingsView renders skills with custom and stock labels on /settings/skills', async () => {
     const router = makeRouter()
     await router.push('/settings/skills')
     await router.isReady()
@@ -463,9 +453,48 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
     expect(wrapper.text()).toContain('custom skills')
-    expect(wrapper.text()).toContain('brainstorming')
-    expect(wrapper.text()).toContain('github / package skills')
+    expect(wrapper.text()).toContain('stock skills')
     wrapper.unmount()
+  })
+
+  it('SettingsView renders the notifications card on /settings/notifications', async () => {
+    const router = makeRouter()
+    await router.push('/settings/notifications')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('notifications')
+    expect(wrapper.text()).toContain('Get a notification when a chat replies')
+    wrapper.unmount()
+  })
+
+  it('SettingsView explains notifications in the desktop app instead of blanking', async () => {
+    // The tray's "Notification Settings…" navigates the desktop window here, so
+    // the desktop branch must render guidance rather than nothing.
+    window.__CIAOBOT_DESKTOP__ = true
+    try {
+      const router = makeRouter()
+      await router.push('/settings/notifications')
+      await router.isReady()
+      const mod = await import('../SettingsView.vue')
+      const wrapper = mount(mod.default as never, {
+        global: { plugins: [router], stubs: { Teleport: true } },
+      })
+      await flushPromises()
+      await nextTick()
+
+      expect(wrapper.text()).toContain('menu-bar')
+      expect(wrapper.text()).toContain('Native Notifications')
+      expect(wrapper.text()).not.toContain('Enable on this device')
+      wrapper.unmount()
+    } finally {
+      delete window.__CIAOBOT_DESKTOP__
+    }
   })
 
   it('SettingsView keeps subagents and commands on separate settings pages', async () => {
@@ -756,7 +785,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows the OpenAI voice key without provider protocol labels', async () => {
+  it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -767,11 +796,12 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const voiceKeyRow = wrapper.findAll('.credential-row')
-      .find((row) => row.text().includes('OpenAI voice API key'))
-    expect(voiceKeyRow).toBeTruthy()
-    expect(voiceKeyRow!.text()).toContain('cloud transcription and speech')
-    expect(voiceKeyRow!.find('input[type="password"]').exists()).toBe(true)
+    // Provider auth goes through each CLI (`ciao auth <provider>`), so the old
+    // key-entry rows and Save Keys button are gone — even if a stale payload
+    // still advertises key metadata.
+    expect(wrapper.text()).not.toContain('OpenAI voice API key')
+    expect(wrapper.findAll('input[type="password"]').length).toBe(0)
+    expect(wrapper.text()).not.toContain('Save Keys')
     expect(wrapper.text()).not.toContain('Agent SDK ready')
     expect(wrapper.text()).not.toContain('app-server protocol compatible')
     expect(wrapper.text()).not.toContain('connection and protocol')
@@ -789,10 +819,13 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.text()).toContain('defaults per provider')
+    // Defaults are now per-CLI inside the connection rows (no separate "defaults per provider" card).
+    expect(wrapper.text()).toContain('Default model')
+    expect(wrapper.text()).toContain('Default thinking')
+    expect(wrapper.text()).not.toContain('defaults per provider')
     expect(wrapper.text()).not.toContain('model routing')
-    // opencode exposes an editable default-model selector.
-    const opencodeSelector = wrapper.find('.model-selector')
+    // opencode exposes an editable default-model selector inside its provider card.
+    const opencodeSelector = wrapper.find('.provider-connections .model-selector')
     expect(opencodeSelector.exists()).toBe(true)
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
@@ -856,9 +889,12 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      const rowTitles = wrapper.findAll('.provider-defaults-row .provider-defaults-title').map((el) => el.text())
-      expect(rowTitles).toContain('Anthropic (via Claude Code)')
-      expect(rowTitles).not.toContain('opencode')
+      // Per-CLI defaults live inside the connection rows now; opencode's
+      // inline defaults are hidden when its catalog is empty.
+      const inlineBlocks = wrapper.findAll('.provider-inline-defaults')
+      expect(inlineBlocks.length).toBe(1)
+      expect(wrapper.text()).toContain('Automatic — Claude Code picks its own default.')
+      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(0)
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/models', originalModels)
@@ -919,11 +955,6 @@ describe('component mount smoke', () => {
 
   it('ProjectView mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../ProjectView.vue'))
-    expect(errors).toEqual([])
-  })
-
-  it('SchedulesView mounts without throwing', async () => {
-    const errors = await mountAndSettle(() => import('../SchedulesView.vue'))
     expect(errors).toEqual([])
   })
 })

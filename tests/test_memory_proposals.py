@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import unittest.mock
 from pathlib import Path
 
 from ciao import memory_proposals as mp
@@ -653,3 +655,399 @@ def test_queue_bullet_round_trips_payload() -> None:
     assert bullet is not None
     assert bullet.kind == "people"
     assert bullet.target == "Alba"
+
+
+# --- CLI: memory-proposal-add -----------------------------------------------
+
+
+def _add_args(tmp_path: Path, **overrides):
+    import argparse
+
+    defaults = {
+        "workspace": tmp_path,
+        "vault_root": tmp_path / "memory-vault",
+        "text": "A workstream invisible to the vault scores zero everywhere.",
+        "kind": "memory",
+        "payload": "",
+        "source": "chat-824cd4ec",
+        "json": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_add_command_queues_a_reviewable_fact(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """A curator-discovered fact lands in the machine queue, not just prose.
+
+    Archive-time routing only sees chats that grew a session-insights
+    section; facts the nightly curation run finds by reading a transcript in
+    full must get the same review path (list, promote, dismiss).
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path))
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "memory"
+    assert "scores zero everywhere" in rows[0]["text"]
+    assert rows[0]["source"] == "chat-824cd4ec"
+    out = capsys.readouterr().out
+    assert "Queued [memory] proposal" in out
+
+
+def test_add_command_dedupes_identical_text(tmp_path: Path) -> None:
+    """Re-filing what an earlier run queued is a no-op, not a duplicate.
+
+    The nightly run re-reads the same transcripts until the user promotes or
+    dismisses; a queue that grows one copy per night stops being readable.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    first = _memory_proposal_add_command(_add_args(tmp_path))
+    second = _memory_proposal_add_command(_add_args(tmp_path))
+
+    assert first == second == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    assert len(mp.list_proposals(queue)) == 1
+
+
+def test_add_command_rejects_an_unknown_kind(tmp_path: Path) -> None:
+    """A kind outside DESTINATIONS is refused, not written through.
+
+    ``MemoryProposal.as_bullet`` is deliberately total for archive batches —
+    one odd proposal must not fail a whole archive — but the CLI is an agent
+    command where a typo'd kind would queue an unroutable bullet.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path, kind="memories"))
+
+    assert exit_code == 2
+    assert not (
+        tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    ).exists()
+
+
+def test_add_command_requires_payload_for_addressed_kinds(tmp_path: Path) -> None:
+    """`people`/`project` without a payload would queue an unroutable bullet.
+
+    The PWA accept handlers refuse such rows ("the bullet names no person" /
+    "the bullet names no project doc"), so a successful CLI invocation must
+    not be able to create one.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    for kind in ("people", "project"):
+        exit_code = _memory_proposal_add_command(
+            _add_args(tmp_path, kind=kind, payload="")
+        )
+
+        assert exit_code == 2, kind
+        assert not (
+            tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+        ).exists()
+
+    # Naming the target unblocks both kinds.
+    assert (
+        _memory_proposal_add_command(
+            _add_args(tmp_path, kind="people", payload="Mo Salah")
+        )
+        == 0
+    )
+
+
+def test_add_command_json_serializes_an_explicit_workspace(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--json with an explicit --workspace emits parseable JSON.
+
+    argparse supplies the workspace as a Path, which json.dump refuses to
+    serialize; the command reports the resolved root instead so a caller
+    never sees a TypeError after the queue was already modified.
+    """
+    import json as json_module
+
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, json=True, workspace=tmp_path)
+    )
+
+    assert exit_code == 0
+    payload = json_module.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+    assert payload["workspace"] == str(tmp_path)
+
+
+def test_add_command_queues_verbatim_text_from_file(tmp_path: Path) -> None:
+    """A fact filed via --text-file lands byte-for-byte, shell hazards and all.
+
+    The curator reads transcripts full of `$(...)`, backticks, `$VARS`, and
+    quotes. Passing such text as a shell argument executes or mangles it;
+    the file path is the non-interpolated input route, so what reaches the
+    queue must equal what the agent wrote.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    hazardous = (
+        'Deploy tag is "$(cat VERSION)" on `runner-2`; $CI_ENV says "staging"'
+    )
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text(hazardous + "\n", encoding="utf-8")
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["text"] == hazardous
+
+
+def test_add_command_rejects_ambiguous_fact_inputs(tmp_path: Path) -> None:
+    """Both or neither of text/--text-file is a usage error, not a guess."""
+    from ciao.cli import _memory_proposal_add_command
+
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text("A fact.", encoding="utf-8")
+
+    both = _memory_proposal_add_command(
+        _add_args(tmp_path, text="A fact.", text_file=str(fact_file))
+    )
+    neither = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file="")
+    )
+    missing = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(tmp_path / "absent.txt"))
+    )
+
+    assert both == neither == missing == 2
+    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_add_command_flattens_a_multiline_fact_file(tmp_path: Path) -> None:
+    """Embedded newlines become one single-line bullet that dedupes cleanly.
+
+    The queue is line-oriented Markdown: a raw multiline fact would parse as
+    a truncated first line, strand the continuation lines (or spawn phantom
+    bullets), and never match itself on re-filing because no parsed bullet
+    carries the full original text.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    multiline = "Deploy froze on Tuesday.\n- [memory] injected-looking line\n"
+    fact_file = tmp_path / "fact.txt"
+    fact_file.write_text(multiline, encoding="utf-8")
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Deploy froze on Tuesday. - [memory] injected-looking line"
+
+    # The flattened form is what dedupe sees, so a re-file of the same file
+    # is the documented no-op rather than a second copy.
+    again = _memory_proposal_add_command(
+        _add_args(tmp_path, text="", text_file=str(fact_file))
+    )
+    assert again == 0
+    assert len(mp.list_proposals(queue)) == 1
+
+
+def test_add_command_flattens_source_and_payload(tmp_path: Path) -> None:
+    """Provenance fields cannot split a bullet or spawn a phantom proposal.
+
+    ``--source`` carries a chat identifier and ``--payload`` a person name, but
+    both are free text on the way in. A newline in either splits the written
+    line, so the queue parses a truncated first bullet plus whatever the
+    continuation looks like — and the real text never appears as one parsed
+    bullet, so re-filing it dodges dedupe.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    exit_code = _memory_proposal_add_command(
+        _add_args(
+            tmp_path,
+            text="Release trains freeze on Tuesdays.",
+            kind="people",
+            payload="Mo Salah\n- [memory] phantom payload row",
+            source="chat-1\n- [memory] phantom source row",
+        )
+    )
+
+    assert exit_code == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    rows = mp.list_proposals(queue)
+    # One bullet in, one bullet out: no truncation, no injected extra rows.
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Release trains freeze on Tuesdays."
+    assert rows[0]["kind"] == "people"
+
+    # The single written line still parses, so dedupe recognises a re-file.
+    again = _memory_proposal_add_command(
+        _add_args(
+            tmp_path,
+            text="Release trains freeze on Tuesdays.",
+            kind="people",
+            payload="Mo Salah",
+            source="chat-1",
+        )
+    )
+    assert again == 0
+    assert len(mp.list_proposals(queue)) == 1
+
+
+def test_bullet_keeps_its_delimiters_out_of_free_text_fields() -> None:
+    """A `]` in the payload or a `)` in the source must not end its own slot.
+
+    ``as_bullet`` owns the queue's line grammar: the destination head closes on
+    the first `]` and the provenance tail on the first `)`, so an unescaped one
+    inside either field makes the whole bullet unparseable — the row then
+    exists in the file but is invisible to the review UI and to dedupe.
+    """
+    proposal = mp.MemoryProposal(
+        target="people",
+        text="Prefers async standups.",
+        source_section="chat-1 (imported)",
+        payload="Alex] Rivera",
+    )
+
+    bullet = proposal.as_bullet()
+
+    assert bullet.count("]") == 1
+    assert bullet.count(")") == 1
+    assert mp._existing_proposal_texts(bullet) == {"Prefers async standups."}
+
+
+def test_dismissed_facts_are_not_refiled_by_the_next_run(tmp_path: Path) -> None:
+    """A dismissal outlives its row: dedupe consults the decision history.
+
+    Removing the bullet is not enough — the nightly run re-reads the same
+    transcript while it counts as recent and would re-file identical text,
+    resurrecting a decision the user already made.
+    """
+    from ciao.cli import _memory_proposal_add_command
+
+    text = "The release train freezes every second Tuesday."
+    assert _memory_proposal_add_command(_add_args(tmp_path, text=text)) == 0
+
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    removed = mp.remove_proposal_by_substring(queue, "release train")
+    assert removed is not None
+    kind, removed_text = removed
+    mp.record_dismissal(queue, text=removed_text, kind=kind)
+
+    # The next nightly pass re-files what the transcript still supports.
+    exit_code = _memory_proposal_add_command(_add_args(tmp_path, text=text))
+
+    assert exit_code == 0
+    assert mp.list_proposals(queue) == []
+    log = queue.with_suffix(".dismissed.jsonl")
+    assert "release train" in log.read_text(encoding="utf-8")
+
+
+def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
+    """A scheduled run files into the logical workspace's queue, not the shared vault.
+
+    Scheduled chats export ``CIAO_VAULT_ROOT`` at the install-wide shared
+    vault while re-rooting is still pending; appending to that raw value
+    strands the fact in a stray file the review UI never reads. The active
+    workspace name must win and resolve through the registry — the same
+    authority the PWA's ``workspace_vault_root`` reads with.
+    """
+    import argparse
+    import json as json_module
+
+    from ciao.cli import _memory_proposal_add_command
+
+    root = tmp_path / "install"
+    runtime = root / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json_module.dumps([
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "client", "vault_root": "memory-vault/client"},
+        ]),
+        encoding="utf-8",
+    )
+    shared = tmp_path / "shared-vault"
+    shared.mkdir()
+    monkeypatch_env = {
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_ACTIVE_WORKSPACE": "client",
+        "CIAO_VAULT_ROOT": str(shared),
+    }
+
+    args = argparse.Namespace(
+        workspace=None,
+        vault_root=None,
+        text="A client-scoped fact.",
+        kind="memory",
+        payload="",
+        source="chat-abc",
+        json=False,
+    )
+    with unittest.mock.patch.dict(os.environ, monkeypatch_env):
+        exit_code = _memory_proposal_add_command(args)
+
+    assert exit_code == 0
+    queue = root / "memory-vault" / "client" / "Workspace" / "Memory-Proposals.md"
+    assert queue.is_file()
+    assert not (shared / "Workspace" / "Memory-Proposals.md").exists()
+
+    # An explicit --workspace is a manual invocation: it keeps winning over
+    # the ambient active-workspace name. With no explicit vault root and no
+    # exported one either, the queue lands under that folder's own default.
+    explicit_dir = tmp_path / "manual"
+    manual_env = {k: v for k, v in monkeypatch_env.items() if k != "CIAO_VAULT_ROOT"}
+    explicit_args = argparse.Namespace(
+        workspace=explicit_dir,
+        vault_root=None,
+        text="A manual fact.",
+        kind="memory",
+        payload="",
+        source="chat-abc",
+        json=False,
+    )
+    with unittest.mock.patch.dict(os.environ, manual_env):
+        assert _memory_proposal_add_command(explicit_args) == 0
+    assert (explicit_dir / "memory-vault" / "Workspace" / "Memory-Proposals.md").is_file()
+
+
+def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
+    """Blank decisions record nothing; unreadable sidecar lines never crash."""
+    from ciao.cli import _memory_proposal_add_command
+    from ciao.memory_proposals import dismissed_log_path
+
+    assert _memory_proposal_add_command(_add_args(tmp_path)) == 0
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+
+    assert mp.record_dismissal(queue, text="   ") is False
+
+    log = dismissed_log_path(queue)
+    log.write_text("{not json}\n\n", encoding="utf-8")
+    assert mp._dismissed_texts(queue) == set()
+    # A well-formed entry alongside junk still contributes its text.
+    log.write_text(
+        '{not json}\n{"text": "kept fact", "kind": "memory"}\n',
+        encoding="utf-8",
+    )
+    assert mp._dismissed_texts(queue) == {"kept fact"}
+    # The pre-rename .log sidecar is read too, so history written before the
+    # extension change keeps protecting across the upgrade.
+    legacy = queue.with_suffix(".dismissed.log")
+    legacy.write_text('{"text": "legacy fact", "kind": "memory"}\n', encoding="utf-8")
+    assert mp._dismissed_texts(queue) == {"kept fact", "legacy fact"}

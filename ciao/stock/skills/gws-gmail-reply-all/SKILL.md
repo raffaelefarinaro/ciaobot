@@ -7,14 +7,14 @@ metadata:
 
 # gmail +reply-all
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Reply-all to a message (handles threading automatically)
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id <ID> --body <TEXT>
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id <ID> --body <TEXT>
 ```
 
 ## Flags
@@ -36,12 +36,12 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id <ID> --body 
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Sounds good to me!'
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Updated' --remove bob@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Adding Eve' --cc eve@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body '<i>Noted</i>' --html
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Notes attached' -a notes.pdf
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Draft reply' --draft
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Sounds good to me!'
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Updated' --remove bob@example.com
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Adding Eve' --cc eve@example.com
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body '<i>Noted</i>' --html
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Notes attached' -a notes.pdf
+ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 ```
 
 ## Tips

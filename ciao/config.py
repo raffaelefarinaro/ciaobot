@@ -472,7 +472,6 @@ class CiaoConfig:
     restart_exit_code: int = 75
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
-    auto_update_github_skills: bool = False
     pwa_port: int = 8443
     pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
@@ -483,9 +482,6 @@ class CiaoConfig:
     # Claude Code session JSONL through a fast cheap model and append a
     # `## Session insights` section to the archived markdown.
     insights_enabled: bool = True
-    # Skip only single-shot chats by default; multi-turn chats have enough
-    # context to be useful for durable insight extraction.
-    insights_size_gate_turns: int = 2
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
@@ -511,7 +507,7 @@ class CiaoConfig:
     # the workspace CLAUDE.md. Loaded natively by each provider's guide
     # loader at session start; edited with Edit on the guide.
     # See ``ciao/memory_tool.py``.
-    memory_char_limit: int = 2200
+    memory_char_limit: int = 3000
     user_char_limit: int = 1375
     # Ciaobot's managed agent control plane. MCP is the only control surface;
     # the legacy CLI path survives only as a runtime degrade when the MCP
@@ -1390,17 +1386,12 @@ class CiaoConfig:
             not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
-            auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false").strip().lower()
-            not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},
-            insights_size_gate_turns=int(
-                source.get("CIAO_INSIGHTS_MIN_TURNS", "2") or "2"
-            ),
             insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
             insights_backfill_on_startup=source.get(
                 "CIAO_INSIGHTS_BACKFILL_ON_STARTUP", "false"
@@ -1414,7 +1405,7 @@ class CiaoConfig:
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
             memory_char_limit=int(
-                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "2200"
+                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "3000"
             ),
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"

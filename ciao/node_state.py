@@ -4,6 +4,12 @@ Host: full local instance (schedules, loops, vault writes).
 Client: thin tunnel — PWA/tray proxy to a remote host; local automations pause.
 
 Legacy role names ``active``/``standby`` are migrated to ``host``/``client``.
+
+Naming note: "handover" in this module (``last_handover``, ``/api/node/handover``,
+the force-handover action) means the DEVICE ROLE switch between host and client.
+It is unrelated to a chat's provider-session handover
+(``handover_context_pending`` in ``ciao/web/project_chats.py``); only the word is
+shared. See the comment on that field for the other side of the disambiguation.
 """
 
 from __future__ import annotations
@@ -18,6 +24,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Roles were renamed from active/standby to host/client ("active" also collided
+# with peer entries' `is_active`). Values persisted by older releases are
+# normalized through this map on every read and rewritten in their canonical
+# form on the next save, but the aliases stay accepted forever: a state file may
+# not have been rewritten yet, and an unknown role would silently flip a client
+# back to host (normalize_role's fallback), resuming schedules on both machines.
 _ROLE_ALIASES = {
     "active": "host",
     "standby": "client",

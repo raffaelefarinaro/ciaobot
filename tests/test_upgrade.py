@@ -9,17 +9,17 @@ from ciao.upgrade import update_skills
 def test_update_skills_uses_packaged_sync(monkeypatch, caplog, tmp_path) -> None:
     called = []
 
-    def _sync(workspace):
-        called.append(workspace)
+    def _sync(workspace, **kwargs):
+        called.append((workspace, kwargs))
         return SimpleNamespace(custom_installed=2)
 
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", _sync)
 
     with caplog.at_level(logging.INFO):
-        result = update_skills(str(tmp_path))
+        result = update_skills(str(tmp_path), workspace_name="work")
 
     assert result is None
-    assert called == [str(tmp_path)]
+    assert called == [(str(tmp_path), {"workspace_name": "work"})]
     assert "Installed 2 custom skill(s)." in caplog.text
 
 

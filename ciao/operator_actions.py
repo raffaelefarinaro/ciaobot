@@ -31,10 +31,12 @@ Contract, enforced in tests
 
 from __future__ import annotations
 
+import inspect
+import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -76,6 +78,14 @@ class OperatorAction:
     # unreachable from the one place that mentions them.
     view_label: str = ""
     view_route: str = ""
+    # An external page this action links to (release notes, the repository).
+    # Rendered like a run button but opens a new tab; pressing it may also
+    # record the run (see the GitHub star nudge).
+    link_label: str = ""
+    link_url: str = ""
+    # A "not now" button for ask-style actions: records a suppression receipt
+    # via dismiss_action() instead of running a fix.
+    dismiss_label: str = ""
     # Unmissable and not dismissible: a precondition the install cannot get past
     # on its own. Deliberately NOT an app-wide lock — the one realistic cause is
     # an uncommitted vault, and locking the app would take away the assistant the
@@ -97,6 +107,9 @@ class OperatorAction:
             "chat_prompt": self.chat_prompt,
             "view_label": self.view_label,
             "view_route": self.view_route,
+            "link_label": self.link_label,
+            "link_url": self.link_url,
+            "dismiss_label": self.dismiss_label,
             "blocking": self.blocking,
         }
 
@@ -174,6 +187,8 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
     if not status.get("update_available"):
         return []
     latest = status.get("latest_version") or ""
+    from ciao.package_version import latest_release_redirect_url
+
     return [
         OperatorAction(
             id="package-update",
@@ -184,6 +199,8 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             f"{status.get('current_version') or 'unknown'}.",
             glyph="▲",
             workspace="",
+            link_label="Release notes",
+            link_url=latest_release_redirect_url(),
             chat_label="How to install",
             chat_prompt=(
                 f"A new Ciaobot version ({latest}) is available. The current "
@@ -191,6 +208,95 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
                 "installer; check Settings for the update, and explain how to "
                 "install it on this machine without losing data."
             ),
+        )
+    ]
+
+
+# -- GitHub star nudge ------------------------------------------------------
+
+# Promotional, so it sorts after every machine-condition tile (the strip is
+# ordered by ascending severity). A star is the cheapest way a happy user can
+# help the project, but it is an ask, not a condition — hence the receipt.
+_STAR_NUDGE_SEVERITY = 80
+# "Later" suppresses the ask for this long, then it may surface once more.
+_STAR_SNOOZE_DAYS = 30
+
+
+def _star_receipt_path(context: DetectionContext) -> Path | None:
+    runtime = context.runtime
+    if runtime is None:
+        return None
+    return Path(runtime) / "star-receipt.json"
+
+
+def _read_star_receipt(context: DetectionContext) -> dict[str, Any]:
+    path = _star_receipt_path(context)
+    if path is None:
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _write_star_receipt(context: DetectionContext, status: str) -> None:
+    path = _star_receipt_path(context)
+    if path is None:
+        return
+    now = context.now or datetime.now(UTC)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"status": status, "at": now.isoformat()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.exception("operator actions: could not write star receipt")
+
+
+def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
+    """A one-time ask, not a machine condition: after setup has completed, a
+    GitHub star is the cheapest way for a happy user to help the project.
+
+    Receipt-gated like every one-timer: ``starred`` silences it for good, and
+    "Later" snoozes it instead of nagging on every home visit. Bootstrap
+    installs (the first-run wizard) stay silent — the ask only makes sense
+    once there is something to be happy about.
+    """
+    config = context.config
+    if getattr(config, "bootstrap_mode", False):
+        return []
+    receipt = _read_star_receipt(context)
+    status = str(receipt.get("status", ""))
+    if status == "starred":
+        return []
+    if status == "later":
+        try:
+            at = datetime.fromisoformat(str(receipt.get("at", "")))
+        except ValueError:
+            at = None
+        now = context.now or datetime.now(UTC)
+        if at is not None and now - at < timedelta(days=_STAR_SNOOZE_DAYS):
+            return []
+    from ciao.package_version import latest_release_redirect_url
+
+    repo_url = latest_release_redirect_url().removesuffix("/releases/latest")
+    return [
+        OperatorAction(
+            id="github-star",
+            kind="github-star",
+            severity=_STAR_NUDGE_SEVERITY,
+            title="Enjoying Ciaobot?",
+            detail=(
+                "If Ciaobot is working well for you, a GitHub star helps other "
+                "developers discover it."
+            ),
+            glyph="★",
+            workspace="",
+            link_label="Star on GitHub",
+            link_url=repo_url,
+            dismiss_label="Later",
         )
     ]
 
@@ -235,13 +341,21 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
                 workspace=name,
                 chat_label="Fix in chat",
                 chat_prompt=(
-                    f"The vault for workspace '{name}' lives at {actual}, but its "
-                    f"standard location is {standard}. Inspect both locations, ask "
-                    "before resolving any conflicts, identify which files are vault "
-                    "content, make a backup before moving anything, then move the "
-                    "approved content and update the active workspace registry to "
-                    f"the standard path {standard}. Verify the workspace before "
-                    "removing the backup."
+                    f"Preview the move with `ciao vault-relocate {name}`, then "
+                    f"apply it with `ciao vault-relocate {name} --apply`. It moves "
+                    "this workspace's own content into the standard folder "
+                    "automatically and updates the registry; reverse it exactly "
+                    f"with `ciao vault-relocate {name} --undo`. If the preview "
+                    "lists anything it could not classify (a symlink, most often), "
+                    "resolve only those with the operator — don't ask about the "
+                    "move itself, and don't re-derive it by hand. If it refuses "
+                    "because the vault lives outside the install's git worktree "
+                    "(an external or hand-pinned vault root), that is a real "
+                    "limitation, not something to work around — tell the operator "
+                    "rather than moving it by hand yourself. After a successful "
+                    "apply, tell the operator Ciaobot needs a restart (Settings -> "
+                    "Restart) before the new location takes effect everywhere, "
+                    "including in this chat."
                 ),
             )
         )
@@ -611,6 +725,45 @@ def _detect_unmigrated_links(context: DetectionContext) -> list[OperatorAction]:
 # -- missed one-time schedules ----------------------------------------------
 
 
+def _schedule_display_name(entry: Any) -> str:
+    """Human label for a schedule: title > prompt snippet."""
+    title = str(getattr(entry, "title", "") or "").strip()
+    if title:
+        return title
+    raw = str(getattr(entry, "prompt", "") or "").strip()
+    if raw:
+        first = raw.splitlines()[0].strip() if raw.splitlines() else raw
+        if len(first) > 60:
+            return first[:57] + "…"
+        return first
+    return str(getattr(entry, "schedule_id", ""))
+
+
+def _once_target_datetime(entry: Any) -> datetime | None:
+    """The aware fire time of a ``once`` schedule, or ``None`` if malformed.
+
+    A one-time reminder fires at ``daily_time_utc`` on ``run_at_date`` in
+    ``timezone_name`` — the same target ``schedules.compute_next_run`` builds
+    for ``once`` entries. Treating midnight of ``run_at_date`` as the target
+    would mark a reminder due later today as already missed and let "Fire now"
+    dispatch (and delete) it early.
+    """
+    run_at_date = str(getattr(entry, "run_at_date", "") or "").strip()
+    if not run_at_date:
+        return None
+    try:
+        tz = ZoneInfo(entry.timezone_name or "UTC")
+        target_date = datetime.fromisoformat(run_at_date).date()
+        hh, mm = str(getattr(entry, "daily_time_utc", "") or "00:00").split(":", 1)
+        target_h, target_m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    return datetime(
+        target_date.year, target_date.month, target_date.day,
+        target_h, target_m, tzinfo=tz,
+    )
+
+
 def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     """One collapsed tile for every missed one-time schedule.
 
@@ -629,7 +782,7 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
         logger.exception("operator actions: schedule store read failed")
         return []
     now = context.now or datetime.now(UTC)
-    missed: list[str] = []
+    missed: list[Any] = []
     for entry in entries:
         if entry.frequency != "once" or not entry.enabled:
             continue
@@ -637,34 +790,57 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now >= target:
-            missed.append(entry.schedule_id)
+            missed.append(entry)
     if not missed:
         return []
+    # Build a detail that names each missed reminder with a link to its
+    # schedule detail (rendered as markdown in the strip). Cap the list so a
+    # burst does not blow up the tile.
+    preview = missed[:5]
+    bullet_lines: list[str] = []
+    for entry in preview:
+        label = _schedule_display_name(entry).replace("[", "\\[").replace("]", "\\]")
+        due = str(getattr(entry, "run_at_date", "") or "")
+        due_suffix = f" — due {due}" if due else ""
+        # Markdown link: [label](/schedules/schedule_id)
+        sid = str(getattr(entry, "schedule_id", ""))
+        bullet_lines.append(f"- [{label}](/schedules/{sid}){due_suffix}")
+    if len(missed) > len(preview):
+        bullet_lines.append(f"- …and {len(missed) - len(preview)} more")
+    detail_base = (
+        f"The server was down past {len(missed)} one-time reminder(s). "
+        "They were not auto-fired because they are stale by now."
+    )
+    detail = detail_base + "\n\nMissed:\n" + "\n".join(bullet_lines) if bullet_lines else detail_base
+    # Chat prompt also enumerates names so the operator can decide per item.
+    chat_lines = [
+        f"- { _schedule_display_name(e)} (/schedules/{getattr(e, 'schedule_id', '')}) — due {getattr(e, 'run_at_date', '')}"
+        for e in preview
+    ]
+    chat_prompt = (
+        f"{len(missed)} one-time reminder(s) were missed while the server "
+        "was off and were not auto-fired because they are stale. "
+        + "Missed:\n"
+        + "\n".join(chat_lines)
+        + ("\n…and more" if len(missed) > len(preview) else "")
+        + "\n\nFire the ones that are still relevant, or dismiss the rest."
+    )
     return [
         OperatorAction(
             id="missed-schedules",
             kind="missed-schedules",
             severity=10,
             title=f"{len(missed)} one-time reminder(s) were missed",
-            detail=(
-                f"The server was down past {len(missed)} one-time reminder(s). "
-                "They were not auto-fired because they are stale by now."
-            ),
+            detail=detail,
             glyph="⏰",
             workspace="",
             run_label="Fire now",
             chat_label="Review in chat",
-            chat_prompt=(
-                f"{len(missed)} one-time reminder(s) were missed while the server "
-                "was off and were not auto-fired because they are stale. Fire the "
-                "ones that are still relevant, or dismiss the rest."
-            ),
+            chat_prompt=chat_prompt,
         )
     ]
 
@@ -861,6 +1037,70 @@ def _detect_workspace_assets_stale(context: DetectionContext) -> list[OperatorAc
     return actions
 
 
+def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAction]:
+    """GitHub skills that were only represented by ``skills-lock.json``.
+
+    The GitHub install surface was removed: ``sync_workspace_skills`` no longer
+    restores missing cached copies, and the inventory no longer lists them. A
+    workspace that still carries a ``skills-lock.json`` therefore has skills
+    that are silently invisible — the operator has no recovery path unless the
+    cached copy is copied into ``skills/<name>/``. This detector surfaces that
+    so the operator can recover before the cache is gone.
+    """
+    config = context.config
+    install = getattr(config, "workspace_root", None)
+    if install is None:
+        return []
+    roots = [Path(install)]
+    for _name, root in _rerooted_targets(context):
+        if root not in roots:
+            roots.append(root)
+    locked: list[str] = []
+    for root in roots:
+        lockfile = root / "skills-lock.json"
+        if not lockfile.is_file():
+            continue
+        try:
+            data = json.loads(lockfile.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        skills = data.get("skills")
+        if not isinstance(skills, dict):
+            continue
+        for name in skills:
+            if name and not (root / "skills" / name / "SKILL.md").is_file():
+                locked.append(name)
+    if not locked:
+        return []
+    shown = ", ".join(sorted(locked)[:5])
+    more = f" and {len(locked) - 5} more" if len(locked) > 5 else ""
+    return [
+        OperatorAction(
+            id="locked-skills-orphaned",
+            kind="locked-skills-orphaned",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(locked)} GitHub skill(s) are no longer installed",
+            detail=(
+                f"These skills were installed from GitHub and are only recorded "
+                f"in skills-lock.json, which is no longer restored: {shown}{more}. "
+                "Copy each cached copy into skills/<name>/ to keep it."
+            ),
+            glyph="⚿",
+            workspace="",
+            chat_label="Recover them",
+            chat_prompt=(
+                f"These skills were installed from GitHub and are only recorded "
+                f"in skills-lock.json, which is no longer restored: {shown}{more}. "
+                "For each one, look for a cached copy under `.claude/skills/<name>/` "
+                "or `.agents/skills/<name>/` and copy it into `skills/<name>/` so it "
+                "stays installed, then run `ciao sync-skills` for that root. If no "
+                "cached copy exists, the skill is gone and I can help you re-add it "
+                "from its source or a zip."
+            ),
+        )
+    ]
+
+
 def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorAction]:
     """Skills the migration could not attribute to one workspace.
 
@@ -1037,15 +1277,17 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_root_missing,
     _detect_workspace_assets_stale,
     _detect_skill_triage_pending,
+    _detect_locked_skills_orphaned,
     _detect_legacy_env_ignored,
     _detect_mcp_uncomposed,
+    _detect_github_star,
 ]
 
 
 # -- run dispatch -----------------------------------------------------------
 
 
-def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
+async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
     """Perform the mechanical work for one action id.
 
     Returns ``(result, summary_text)``. Raises :class:`ValueError` for an
@@ -1055,15 +1297,41 @@ def run_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any
     """
     if action_id == "package-update":
         return _run_package_update(context)
+    if action_id == "github-star":
+        return _run_github_star(context)
     if action_id == "vault-vocabulary":
         return _run_vault_vocabulary(context)
     if action_id == "missed-schedules":
-        return _run_missed_schedules(context)
+        return await _run_missed_schedules(context)
     if action_id == "workspace-unmigrated":
         return _run_workspace_reroot(context)
     if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
         return _run_workspace_repair(context)
     raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Record a "not now" for one action id.
+
+    Same contract as :func:`run_action`: returns ``(result, summary_text)`` and
+    raises :class:`ValueError` for an unknown id. Only ask-style actions accept
+    a dismissal; a machine condition is never dismissed, only fixed.
+    """
+    if action_id == "github-star":
+        return _dismiss_github_star(context)
+    raise ValueError(f"unknown operator action id: {action_id}")
+
+
+def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Record the star so the ask never surfaces again."""
+    _write_star_receipt(context, "starred")
+    return {"status": "starred"}, "Thank you!"
+
+
+def _dismiss_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Snooze the ask for a while instead of nagging on every home visit."""
+    _write_star_receipt(context, "later")
+    return {"status": "later"}, "Maybe later."
 
 
 def _run_workspace_repair(context: DetectionContext) -> tuple[dict[str, Any], str]:
@@ -1153,7 +1421,7 @@ def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], st
     return summary, f"{renamed} type(s) renamed, {failed} failed."
 
 
-def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:
+async def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:
     manager = context.schedule_store
     if manager is None or not hasattr(manager, "dispatch_now"):
         raise ValueError("no schedule manager to fire missed one-timers")
@@ -1167,15 +1435,15 @@ def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], st
             continue
         if not entry.run_at_date:
             continue
-        try:
-            tz = ZoneInfo(entry.timezone_name or "UTC")
-            target = datetime.fromisoformat(entry.run_at_date).replace(tzinfo=tz)
-        except (ValueError, AttributeError):
+        target = _once_target_datetime(entry)
+        if target is None:
             continue
         if now < target:
             continue
         try:
-            manager.dispatch_now(entry.schedule_id)
+            res = manager.dispatch_now(entry.schedule_id)
+            if inspect.iscoroutine(res) or inspect.isawaitable(res):
+                await res
             fired.append(entry.schedule_id)
         except Exception as exc:  # noqa: BLE001 — one failure must not stop the rest
             errors.append(str(exc))

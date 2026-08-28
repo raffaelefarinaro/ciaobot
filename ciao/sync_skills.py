@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from ciao.jsonio import read_json_dict
 import os
 import re
 import shutil
@@ -14,8 +13,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-
-from ciao import skills_sync
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +42,6 @@ class SyncSkillsResult:
     opencode_mcps_pruned: int = 0
 
 
-# Bound the upstream `npx skills ...` calls. `npx -y` cold-downloads the
-# `skills` package and then does network git fetches; with no timeout a stall
-# (cold cache, slow/blocked network, an interactive prompt) hangs the
-# `update_skills` startup phase forever, which pins the boot overlay on
-# "booting" (overall_ready never flips). Bounded so the phase always ends.
-SKILLS_NPX_TIMEOUT = 180.0
 # Marker dropped into skills copied from ciao.stock so stale copies can be
 # pruned when the packaged set changes or a workspace skill overrides them.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
@@ -85,14 +76,6 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
     "pr-test-analyzer",
     "silent-failure-hunter",
 })
-
-
-def _load_json(path: Path) -> dict:
-    try:
-        data = read_json_dict(path)
-        return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
 
 
 def _remove_path(path: Path) -> None:
@@ -139,230 +122,27 @@ def _iter_entries(path: Path) -> list[Path]:
     return sorted(path.iterdir(), key=lambda entry: entry.name)
 
 
-def _active_upstream_lock(workspace: Path, lock: dict) -> dict:
-    """Exclude locked packages shadowed by a workspace-owned skill."""
-    skills = lock.get("skills")
-    if not isinstance(skills, dict):
-        return {**lock, "skills": {}}
-    active = {
-        name: entry
-        for name, entry in skills.items()
-        if not (workspace / "skills" / name / "SKILL.md").is_file()
-    }
-    return {**lock, "skills": active}
-
-
-def _installed_upstream_names(workspace: Path, candidates: set[str]) -> set[str]:
-    """Return locked-package names present in either provider catalog.
-
-    The upstream ``skills`` CLI stores canonical package directories under
-    ``.agents/skills`` and links provider-specific catalogs back to them.
-    Older installs may instead have a canonical ``.claude/skills`` directory,
-    so both layouts remain supported.
-    """
-    installed: set[str] = set()
-    catalogs = (workspace / ".claude" / "skills", workspace / ".agents" / "skills")
-    for name in candidates:
-        if (workspace / "skills" / name / "SKILL.md").is_file():
-            continue
-        for catalog in catalogs:
-            entry = catalog / name
-            if (entry / STOCK_SKILL_MARKER).is_file():
-                continue
-            if (entry / "SKILL.md").is_file():
-                installed.add(name)
-                break
-    return installed
-
-
-def _remove_upstream_skill(workspace: Path, name: str) -> None:
-    """Remove a locked package from both projections without touching overrides."""
-    if (workspace / "skills" / name / "SKILL.md").is_file():
-        return
-    catalogs = (workspace / ".claude" / "skills", workspace / ".agents" / "skills")
-    for catalog in catalogs:
-        entry = catalog / name
-        if (entry / STOCK_SKILL_MARKER).is_file():
-            continue
-        if entry.exists() or entry.is_symlink():
-            _remove_path(entry)
-
-
-def _update_upstream_skills(
-    workspace: Path,
-    names: Sequence[str],
-    *,
-    runner=subprocess.run,
-) -> bool:
-    if not names:
-        return True
-    print("Skills: updating changed/missing -> " + " ".join(names))
-    try:
-        result = runner(
-            ["npx", "-y", "skills", "update", "-p", "-y", *names],
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=SKILLS_NPX_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        print(
-            f"WARN: skills update timed out after {SKILLS_NPX_TIMEOUT:.0f}s",
-            file=sys.stderr,
-        )
-        return False
-    except OSError as exc:
-        print(f"WARN: skills update failed: {exc}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print("WARN: skills update reported errors", file=sys.stderr)
-        return False
-    return True
-
-
-def _restore_missing_upstream_skills(
-    workspace: Path,
-    lock: dict,
-    names: Sequence[str],
-    *,
-    runner=subprocess.run,
-) -> set[str]:
-    """Re-add missing locked packages without refreshing installed ones."""
-    lock_skills = lock.get("skills")
-    if not isinstance(lock_skills, dict):
-        return set()
-
-    grouped: dict[str, list[str]] = {}
-    for name in names:
-        entry = lock_skills.get(name)
-        if not isinstance(entry, dict) or not entry.get("source"):
-            print(f"WARN: locked skill {name} has no install source", file=sys.stderr)
-            continue
-        source = str(entry["source"])
-        if entry.get("ref"):
-            source = f"{source}#{entry['ref']}"
-        grouped.setdefault(source, []).append(name)
-
-    restored: set[str] = set()
-    for source, source_names in grouped.items():
-        print("Skills: restoring missing -> " + " ".join(source_names))
-        try:
-            result = runner(
-                [
-                    "npx",
-                    "-y",
-                    "skills",
-                    "add",
-                    source,
-                    "--skill",
-                    *source_names,
-                    "--agent",
-                    "claude-code",
-                    "-y",
-                ],
-                cwd=workspace,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=SKILLS_NPX_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            print(
-                "WARN: skills restore timed out after "
-                f"{SKILLS_NPX_TIMEOUT:.0f}s for " + " ".join(source_names),
-                file=sys.stderr,
-            )
-            continue
-        except OSError as exc:
-            print(f"WARN: skills restore failed: {exc}", file=sys.stderr)
-            continue
-        if result.returncode != 0:
-            print(
-                "WARN: skills restore reported errors for " + " ".join(source_names),
-                file=sys.stderr,
-            )
-            continue
-        restored.update(source_names)
-    return restored
-
-
-def _refresh_upstream_skills(
+def _install_stock_skills(
     workspace: Path,
     *,
-    runner=subprocess.run,
+    gws_profile: str | None = None,
 ) -> tuple[int, int]:
-    lockfile = workspace / "skills-lock.json"
-    if not lockfile.is_file():
-        print(f"Skills: {lockfile} missing, skipping upstream refresh.")
-        return 0, 0
-
-    cache_path = workspace / ".runtime" / "skills-sync-cache.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = _active_upstream_lock(workspace, _load_json(lockfile))
-    cache = _load_json(cache_path)
-    desired = skills_sync.desired_sources(lock)
-    cached_skills = cache.get("skills")
-    cached_names = set(cached_skills) if isinstance(cached_skills, dict) else set()
-    known_names = set(desired) | cached_names
-    installed = _installed_upstream_names(workspace, known_names)
-    missing = sorted(set(desired) - installed)
-    auto_update = os.environ.get(
-        "CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false"
-    ).strip().lower() not in {"0", "false", "no", "off"}
-
-    if not auto_update:
-        if not missing:
-            print("Skills: automatic GitHub updates disabled; locked skills are installed.")
-            return 0, 0
-        if shutil.which("npx") is None or shutil.which("git") is None:
-            print(
-                "WARN: npx or git not found, cannot install missing locked skills",
-                file=sys.stderr,
-            )
-            return 0, 0
-        print("Skills: automatic GitHub updates disabled; restoring missing locked skills.")
-        restored = _restore_missing_upstream_skills(
-            workspace, lock, missing, runner=runner
-        )
-        return len(restored), 0
-
-    if shutil.which("npx") is None or shutil.which("git") is None:
-        print("WARN: npx or git not found, skipping upstream skill refresh", file=sys.stderr)
-        return 0, 0
-
-    heads = skills_sync.remote_heads(set(skills_sync.desired_sources(lock).values()))
-    plan = skills_sync.plan(lock, cache, heads, installed)
-
-    for name in plan["to_prune"]:
-        _remove_upstream_skill(workspace, name)
-
-    missing_set = set(missing)
-    changed = [name for name in plan["to_update"] if name not in missing_set]
-    restored = _restore_missing_upstream_skills(
-        workspace, lock, missing, runner=runner
-    )
-    updated = _update_upstream_skills(workspace, changed, runner=runner)
-    if not plan["to_update"]:
-        print("Skills: upstream unchanged, no fetch needed.")
-
-    complete = updated and restored == missing_set
-    if complete:
-        cache_path.write_text(
-            json.dumps(skills_sync.build_cache(lock, heads, cache), indent=2),
-            encoding="utf-8",
-        )
-    refreshed = len(restored) + (len(changed) if updated else 0)
-    return refreshed, len(plan["to_prune"])
-
-
-def _install_stock_skills(workspace: Path) -> tuple[int, int]:
     """Copy packaged ``ciao.stock/skills`` into ``.claude/skills``.
 
     A workspace ``skills/<name>`` always wins over the packaged skill of the
     same name.  Copies carry ``STOCK_SKILL_MARKER`` so they are refreshed on
     every sync and pruned once they disappear from the package (or become
     shadowed by a workspace skill).
+
+    The ``gws-*`` skills are Google-Workspace integrations and are only
+    installed when the workspace has a GWS profile to use them against (see
+    ``gws_auth.workspace_gws_profile``). A workspace with no profile connected
+    gets the generic skills only — shipping GWS wrappers that name a credential
+    directory nobody created just produces auth errors and wasted catalog
+    surface. ``gws_profile`` carries the resolved account name: ``None`` (the
+    default) installs them unconditionally for callers that predate the profile
+    check, ``""`` skips them (no account linked), and a non-empty slug installs
+    them.
     """
     from importlib import resources
 
@@ -383,6 +163,12 @@ def _install_stock_skills(workspace: Path) -> tuple[int, int]:
             continue
         if (custom_dir / entry.name / "SKILL.md").is_file():
             continue  # workspace skill shadows the packaged one
+        # Google-account skills are gated on an actual profile for this
+        # workspace. `gws_profile` is deliberately passed through as a resolved
+        # value rather than recomputed here, so callers who already know the
+        # workspace's effective profile do not read it twice.
+        if entry.name.startswith("gws-") and gws_profile == "":
+            continue
         target = claude_skills / entry.name
         if target.is_symlink():
             continue  # user-managed link, leave it alone
@@ -1047,10 +833,208 @@ def _resolve_vault_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
+def _configured_memory_char_limit(workspace: Path) -> int | None:
+    """The effective ``CIAO_MEMORY_CHAR_LIMIT`` for cap-marker migration.
+
+    Resolution order mirrors what the server does at start (dotenv loads
+    without overriding exported variables): the process environment wins,
+    then the nearest ``.env`` defining the variable — the workspace's own,
+    walking up through owning directories (an install root that scaffolds
+    per-workspace agent roots keeps its ``.env`` there, and ``ciao setup``
+    re-scaffolding passes agent roots to sync without exporting its parsed
+    values), bounded at four levels up — then ``None`` meaning "use
+    memory_tool's shipped default". Each dotenv is parsed with python-dotenv
+    itself (``dotenv_values``, which mutates nothing) so exactly the syntaxes
+    the server accepts are honoured here — ``export`` prefixes, quoting,
+    inline comments. Building no ``CiaoConfig`` matters: its constructor
+    mutates shared env state mid-sync. Unparseable numeric values are
+    ignored, falling through to the next source or the shipped default.
+    """
+    sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
+    try:
+        from dotenv import dotenv_values
+    except ImportError:  # pragma: no cover - dotenv ships with the app
+        logger.debug("memory: python-dotenv unavailable for cap migration")
+        return None
+    for ancestor in [workspace, *workspace.parents[:4]]:
+        dotenv = ancestor / ".env"
+        if not dotenv.exists():
+            continue
+        try:
+            values = dotenv_values(dotenv) or {}
+        except Exception:  # noqa: BLE001 — advisory migration must not block sync
+            logger.debug(
+                "memory: could not parse %s for cap migration",
+                dotenv,
+                exc_info=True,
+            )
+            continue
+        raw = str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or "").strip()
+        if raw:
+            sources.append(raw)
+            break
+    for raw in sources:
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+    return None
+
+
 def _resolve_runtime_root(workspace: Path) -> Path:
     raw = os.environ.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
     root = Path(raw).expanduser()
     return root if root.is_absolute() else workspace / root
+
+
+def _any_workspace_has_gws_profile(config) -> bool:
+    """Whether any registered workspace has a usable Google account.
+
+    Used for the shared pre-re-root catalog, which one set of ``gws-*`` skills
+    serves for every workspace. That catalog must stay populated if any
+    workspace has a profile (the chats there set the linked ``GWS_PROFILE``),
+    and only be gated off when none do.
+    """
+    try:
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        return any(
+            workspace_gws_profile(config, name) != ""
+            for name in config.workspace_names()
+        )
+    except Exception:
+        return True
+
+
+def _config_for_root(root: Path):
+    """``CiaoConfig`` for the install that owns ``root``, or ``None``.
+
+    Derives the install root from the supplied agent root rather than the
+    ambient ``CIAO_WORKSPACE``/cwd, so a manual ``ciao sync-skills
+    --workspace /path/to/install/workspace`` run from anywhere resolves the
+    right registry. A post-re-root agent root is a child of the install root;
+    a pre-re-root root IS the install root. The config is only accepted when
+    it actually names ``root`` among its agent roots, so an unrelated install
+    is never matched.
+
+    The owning install is found with the side-effect-free ``agent_roots_for``
+    probe first: ``CiaoConfig.from_env`` writes a session secret when
+    ``PWA_AUTH_TOKEN`` is absent, so constructing it for a candidate that does
+    not own ``root`` would create stray ``.runtime/session-secret`` files under
+    both candidate roots before either is shown to be the owner. Only the
+    confirmed owner gets a config built.
+    """
+    from ciao.config import agent_roots_for  # noqa: PLC0415
+
+    candidates = [root.parent, root] if root.parent != root else [root]
+    owner: Path | None = None
+    for candidate in candidates:
+        runtime = candidate / ".runtime"
+        if not runtime.is_dir():
+            continue
+        try:
+            targets = agent_roots_for(candidate, runtime)
+        except Exception:
+            continue
+        if any(Path(r).resolve() == root.resolve() for r, _ in targets):
+            # Prefer the re-rooted owner (root.parent) over the single-root
+            # owner (root itself) when both name it.
+            owner = candidate
+            break
+    if owner is None:
+        return None
+
+    env: dict[str, str] = {k: v for k, v in os.environ.items()}
+    env["CIAO_WORKSPACE"] = str(owner)
+    dotenv_path = owner / ".env"
+    if dotenv_path.is_file():
+        try:
+            from dotenv import dotenv_values
+            for key, value in (dotenv_values(dotenv_path) or {}).items():
+                if value is not None and key not in env:
+                    env[key] = value
+        except Exception:  # noqa: BLE001 — env loading must not block sync
+            logger.debug("sync: could not load %s", dotenv_path, exc_info=True)
+    from ciao.config import CiaoConfig  # noqa: PLC0415
+
+    try:
+        return CiaoConfig.from_env(env)
+    except Exception:
+        return None
+
+
+def resolve_workspace_skills_gws_gate(config, root: Path, workspace_name: str) -> str | None:
+    """The ``gws-*`` gate for a sync target, aggregating when the root is shared.
+
+    ``None`` means "no gate" (install the GWS skills), ``""`` means "no profile
+    connected, skip them", and a non-empty slug installs them. On a pre-re-root
+    install every workspace's ``agent_root`` resolves to the same install root,
+    so the gate must consider ALL workspaces: unlinking one must not prune the
+    shared catalog while another still links an account. On a re-rooted install
+    each root is its own workspace and the gate is that workspace's profile.
+    """
+    try:
+        if config.agent_root(workspace_name) == config.workspace_root:
+            return "" if not _any_workspace_has_gws_profile(config) else None
+    except Exception:
+        pass
+    from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+    return workspace_gws_profile(config, workspace_name)
+
+
+def _resolve_workspace_gws_profile(
+    root: Path, workspace_name: str | None, gws_profile: str | None
+) -> str | None:
+    """The GWS profile to gate ``gws-*`` stock skills on, or ``None``.
+
+    ``None`` means "no gate" (the caller predates the profile check, or this
+    root cannot be tied to a registered workspace, or it is the shared
+    pre-re-root catalog that any workspace may use), ``""`` means "no profile
+    connected, skip GWS skills", and a non-empty slug installs them. Callers
+    with a ``CiaoConfig`` pass ``workspace_name``/``gws_profile`` explicitly;
+    the fallback here derives the config from ``root`` so CLI/startup sync
+    still applies the rule from a root path alone.
+    """
+    if gws_profile is not None:
+        return gws_profile
+    config = _config_for_root(root)
+    if config is None:
+        return None
+    if workspace_name is None:
+        workspace_name = _resolve_root_workspace(root, config)
+    if not workspace_name:
+        # An empty name is the pre-re-root SHARED catalog, one skill set served
+        # to every workspace. Gating it on a single (empty) name would prune the
+        # gws-* skills even though a linked workspace relies on them, so the
+        # whole catalog is kept unless no registered workspace has a profile.
+        return "" if not _any_workspace_has_gws_profile(config) else None
+    from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+    return workspace_gws_profile(config, workspace_name)
+
+
+def _resolve_root_workspace(root: Path, config=None) -> str | None:
+    """Map an agent root back to its registered workspace name, if any.
+
+    ``root`` is an agent root (``<install>/<name>`` after the re-rooting, or the
+    install root itself before it). Reads the registry through ``CiaoConfig``
+    derived from ``root``, which owns the pre-/post-re-rooting layout decision,
+    so a re-rooted install resolves each named root and a single-root or
+    unregistered install resolves to ``None``.
+    """
+    if config is None:
+        config = _config_for_root(root)
+    if config is None:
+        return None
+    try:
+        for candidate, name in config.agent_root_targets():
+            if Path(candidate).resolve() == root.resolve():
+                return str(name) if name else None
+    except Exception:
+        return None
+    return None
 
 
 def sync_workspace_skills(
@@ -1058,12 +1042,19 @@ def sync_workspace_skills(
     *,
     refresh_upstream: bool = True,
     runner=subprocess.run,
+    gws_profile: str | None = None,
+    workspace_name: str | None = None,
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_linked_workspace_guides(root)
     try:
         from ciao import job_runs
-        from ciao.memory_tool import default_memory_dir, ensure_regions, migrate_legacy_files
+        from ciao.memory_tool import (
+            default_memory_dir,
+            ensure_regions,
+            migrate_legacy_files,
+            migrate_region_caps,
+        )
 
         guide = root / "CLAUDE.md"
         # The legacy fold-in can only ever succeed once, so only pay for it
@@ -1080,6 +1071,21 @@ def sync_workspace_skills(
                     run.skip("no legacy memory files to migrate")
         else:
             ensure_regions(guide)
+        # Restamp markers still carrying a former shipped default so the
+        # guide every session loads advertises the cap the runtime enforces.
+        # The effective limit is resolved here, not inside memory_tool: a
+        # standalone `ciao sync-skills` never loads <root>/.env, and an
+        # override that lives only there must beat the stamp like it beats
+        # the runtime default after a server start.
+        restamped = migrate_region_caps(
+            guide, char_limit=_configured_memory_char_limit(root)
+        )
+        if restamped:
+            logger.info(
+                "memory: restamped region caps to current defaults in %s: %s",
+                guide,
+                ", ".join(restamped),
+            )
     except Exception:  # noqa: BLE001 — never block skill sync on memory regions
         logger.exception(
             "memory region ensure/migrate failed for %s; continuing skill sync",
@@ -1117,11 +1123,10 @@ def sync_workspace_skills(
 
     upstream_updated = 0
     upstream_pruned = 0
-    if refresh_upstream:
-        upstream_updated, upstream_pruned = _refresh_upstream_skills(root, runner=runner)
 
     legacy_codex_pruned = _cleanup_legacy_codex_projections(root)
-    stock_installed, stock_pruned = _install_stock_skills(root)
+    gws = _resolve_workspace_gws_profile(root, workspace_name, gws_profile)
+    stock_installed, stock_pruned = _install_stock_skills(root, gws_profile=gws)
     custom_installed, custom_pruned = _rebuild_custom_skill_links(root)
     stock_agents_installed, stock_agents_pruned = _install_stock_agents(root)
     print(
@@ -1203,14 +1208,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--skip-upstream",
         action="store_true",
-        help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
+        help="Deprecated: no-op. Skills are local folders under skills/; no remote refresh is performed.",
     )
     parser.add_argument("--verbose", action="store_true", help="Accepted for script compatibility.")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    sync_workspace_skills(
-        args.workspace,
-        refresh_upstream=not args.skip_upstream,
-    )
+    sync_workspace_skills(args.workspace)
     return 0
 
 

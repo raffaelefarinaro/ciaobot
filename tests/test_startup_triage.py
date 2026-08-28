@@ -139,4 +139,6 @@ def test_build_triage_entry_is_one_off_and_system_scoped() -> None:
     assert entry.frequency == "manual"
     assert entry.scope == "system"
     assert entry.editable is False and entry.removable is False
+    # Nothing needing attention archives itself instead of lingering in General.
+    assert entry.archive_policy == "auto"
     assert "{{ISSUE_REPORT}}" in entry.prompt

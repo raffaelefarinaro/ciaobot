@@ -31,6 +31,20 @@ from claude_agent_sdk import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_claude_cli() -> str | None:
+    """Absolute path to the Claude CLI for the SDK, or None to use its bundled one.
+
+    Prefers the SDK's own bundled binary when present, then an external
+    ``claude`` resolved against the login-shell PATH (the runtime strips the
+    bundled binary to keep the app small, and launchd omits dirs like
+    ``~/.local/bin``).
+    """
+    from ciao.providers.claude import get_bundled_claude_path
+    from ciao.tool_path import resolve_tool
+
+    return get_bundled_claude_path() or resolve_tool("claude")
+
+
 class OneShotError(RuntimeError):
     """A one-shot model call failed with whatever detail was available.
 
@@ -135,6 +149,11 @@ async def _run_claude_oneshot(
         skills=[],
         tools=[],
         strict_mcp_config=True,
+        # Resolve the external Claude CLI so one-shots keep working after the
+        # bundled _bundled/claude binary is stripped and under launchd, whose
+        # PATH omits login-shell dirs like ~/.local/bin. cli_path is optional;
+        # the SDK falls back to its own bundled binary when set to None.
+        cli_path=_resolve_claude_cli(),
         # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
         # model occasionally emits under ``tools=[]`` — a known SDK quirk
         # where the model starts to call a tool, gets nothing back, and the

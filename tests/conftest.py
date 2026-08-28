@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from ciao import job_runs as jr
+from ciao import proposal_outcomes as po
 
 
 @pytest.fixture(autouse=True)
@@ -53,3 +54,15 @@ def _isolate_job_runs(tmp_path: Path) -> None:
     jr._runtime_dir_override = None
     jr.set_publisher(None)
     jr._inflight.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proposal_outcomes(tmp_path: Path) -> None:
+    """Isolate proposal-outcome recording the same way ``_isolate_job_runs``
+    isolates the job-run log: without this, any route test exercising an
+    accept/dismiss would append to the developer's real ``.runtime``."""
+    po.configure(tmp_path)
+    po.reset_tally_cache()
+    yield
+    po._runtime_dir_override = None
+    po.reset_tally_cache()

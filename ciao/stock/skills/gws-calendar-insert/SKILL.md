@@ -7,14 +7,14 @@ metadata:
 
 # calendar +insert
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 create a new event
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
+ciao gws "$GWS_PROFILE" calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
 ```
 
 ## Flags
@@ -33,9 +33,9 @@ scripts/gws-profile.sh "$GWS_PROFILE" calendar +insert --summary <TEXT> --start 
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" calendar +insert --summary 'Meet' --start ... --end ... --meet
+ciao gws "$GWS_PROFILE" calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
+ciao gws "$GWS_PROFILE" calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
+ciao gws "$GWS_PROFILE" calendar +insert --summary 'Meet' --start ... --end ... --meet
 ```
 
 ## Tips

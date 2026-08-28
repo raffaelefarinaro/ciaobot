@@ -294,11 +294,8 @@
           role="status"
           aria-live="polite"
           aria-label="Loading conversation"
+          aria-busy="true"
         >
-          <div class="history-loading-inline" aria-hidden="true">
-            <span class="history-loading-spinner"></span>
-            <span>Loading conversation</span>
-          </div>
           <div class="skel-msg skel-msg--assistant" aria-hidden="true">
             <span class="history-skeleton-line history-skeleton-line--long"></span>
             <span class="history-skeleton-line history-skeleton-line--medium"></span>
@@ -1492,7 +1489,8 @@ function refreshSlashCommandPicker(): void {
 async function loadSlashCommands(): Promise<void> {
   try {
     const provider = encodeURIComponent(chat.value.provider || '')
-    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}`)
+    const workspace = encodeURIComponent(project.value?.workspace || store.activeWorkspace || '')
+    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}&workspace=${workspace}`)
     slashCommands.value = [
       ...(response.commands || []),
       ...(response.skills || []),
@@ -4809,8 +4807,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 }
 
 .skel-msg--assistant {
-  align-self: flex-start;
-  width: 100%;
+  align-self: stretch;
   margin-right: 48px;
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -4820,7 +4817,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 
 .skel-msg--user {
   align-self: flex-end;
-  width: 62%;
+  width: min(62%, calc(100% - 48px));
   margin-left: 48px;
   background: color-mix(in srgb, var(--accent2) 12%, var(--bg3));
   border: 1px solid var(--border-strong);
@@ -4857,25 +4854,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   .skel-msg--user { margin-left: 32px; }
 }
 
-.history-loading-inline {
-  display: flex;
-  align-items: center;
-  align-self: center;
-  gap: 9px;
-  padding: 4px 10px 2px;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-
-.history-loading-spinner {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: history-loading-spin 0.8s linear infinite;
-}
+/* history-loading-inline / spinner removed — skeleton is self-explanatory */
 
 .history-skeleton-line {
   display: block;
@@ -4919,7 +4898,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 
 @media (prefers-reduced-motion: reduce) {
   .history-skeleton-stack,
-  .history-loading-spinner,
   .history-skeleton-line {
     animation: none;
   }

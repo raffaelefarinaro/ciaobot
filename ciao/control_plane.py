@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 # normal ``= None`` default loses information before the control plane sees
 # it.
 _UNSET = object()
+
+# A GWS health reading older than this is treated as stale: the monitor
+# preserves prior state when probes are unavailable or checks are disabled, so
+# a cached "valid" reading can outlive the token it described. Mirrors the
+# default CIAO_GWS_HEALTH_INTERVAL (900s) plus a small grace period.
+_GWS_HEALTH_STALE_AFTER = 1200.0
 
 @dataclass(frozen=True, slots=True)
 class McpPrincipal:
@@ -396,13 +403,89 @@ class CiaoControlPlane:
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
 
+    def gws_status(self, principal: McpPrincipal) -> dict[str, Any]:
+        """Report Google Workspace connection status for the active workspace.
+
+        Resolves the workspace's linked ``gws_profile`` the same way the runtime
+        does (the operator-level default only counts when it names an account
+        that actually exists), then reports whether credentials are present and
+        whether the periodic health monitor's last reading says the token is
+        valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
+        the agent can answer "is Google connected?" without a subprocess.
+        """
+        workspace = self._workspace(principal)
+        from ciao import gws_auth
+
+        profile = str(
+            getattr(self.config.workspace(workspace), "gws_profile", "") or ""
+        ).strip()
+        if not profile:
+            default = str(getattr(self.config, "gws_default_profile", "") or "").strip()
+            profile = default if default in gws_auth.known_profiles(self.config) else ""
+        if not profile:
+            return _ok(
+                {
+                    "profile": "",
+                    "configured": False,
+                    "connected": False,
+                    "needs_relogin": False,
+                }
+            )
+
+        config_dir = gws_auth.profile_config_dir(self.config, profile)
+        credentials_present = False
+        if config_dir is not None:
+            credentials_present = any(
+                (config_dir / name).is_file()
+                for name in ("credentials.json", "credentials.enc")
+            )
+        health = gws_auth.read_health_cache(
+            Path(self.config.state_path).parent
+        ).get(profile, {})
+        token_valid = (
+            bool(health.get("token_valid")) if "token_valid" in health else None
+        )
+        # The health monitor preserves prior state when a probe is unavailable or
+        # checks are disabled (CIAO_GWS_HEALTH_INTERVAL=0), so a cached reading
+        # can outlive the token it described. Only a fresh, confirmed valid
+        # reading establishes a connection; a stale one is reported as unknown
+        # rather than assumed good.
+        checked_at = health.get("checked_at")
+        fresh = (
+            isinstance(checked_at, (int, float))
+            and (time.time() - float(checked_at)) <= _GWS_HEALTH_STALE_AFTER
+        )
+        connected = bool(credentials_present and token_valid is True and fresh)
+        # The health monitor debounces a single invalid reading (notify_threshold
+        # consecutive invalid runs) before treating a login as dead. Mirror that:
+        # only a confirmed invalid state (notified_invalid) surfaces as
+        # needs_relogin, so a transient reading does not trigger a false
+        # re-authentication prompt.
+        needs_relogin = bool(
+            credentials_present
+            and token_valid is False
+            and health.get("notified_invalid")
+        )
+        return _ok(
+            {
+                "profile": profile,
+                "configured": credentials_present,
+                "connected": connected,
+                "token_valid": token_valid,
+                "needs_relogin": needs_relogin,
+                "token_error": str(health.get("token_error") or ""),
+                "checked_at": checked_at,
+                "stale": bool(credentials_present and not fresh),
+            }
+        )
+
     def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
         workspace = self._workspace(principal)
         guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         return _ok(memory_status_payload(
             guide,
-            memory_char_limit=int(getattr(self.config, "memory_char_limit", 2200)),
+            memory_char_limit=int(getattr(self.config, "memory_char_limit", 3000)),
             user_char_limit=int(getattr(self.config, "user_char_limit", 1375)),
         ))
 
@@ -421,7 +504,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
         limit = (
-            int(getattr(self.config, "memory_char_limit", 2200))
+            int(getattr(self.config, "memory_char_limit", 3000))
             if canonical == "memory"
             else int(getattr(self.config, "user_char_limit", 1375))
         )
@@ -1571,13 +1654,12 @@ class CiaoControlPlane:
 
     # ---- adversarial review ---------------------------------------------
 
-    async def skills_sync(self, principal: McpPrincipal, refresh_upstream: bool = False) -> dict[str, Any]:
+    async def sync_skills(self, principal: McpPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         from ciao.sync_skills import sync_workspace_skills
 
         result = await asyncio.to_thread(
             sync_workspace_skills,
             self.config.workspace_root,
-            refresh_upstream=refresh_upstream,
         )
         return _ok(asdict(result))

@@ -74,9 +74,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot --pattern latest.json --pattern install.sh --pattern ciaobot-installer-verify_universal
+          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot --pattern latest.json --pattern install.sh --pattern ciaobot-installer-verify_aarch64
           jq -e '.platforms["darwin-aarch64"].url and .platforms["darwin-aarch64"].signature' latest.json
-          jq -e '.platforms["darwin-x86_64"].url and .platforms["darwin-x86_64"].signature' latest.json
           if grep -q '__VERIFIER_SHA256__' install.sh; then
             echo "release installer still contains its checksum placeholder" >&2
             exit 1
@@ -85,11 +84,11 @@ jobs:
           # always downloads 0644 no matter what the upload chmod'd it to, and
           # that assertion could never pass. install.sh chmods the verifier
           # itself before running it. What is worth asserting is that the asset
-          # is the universal binary the installer expects to be able to run.
-          test -s ciaobot-installer-verify_universal
-          chmod 755 ciaobot-installer-verify_universal
-          lipo -info ciaobot-installer-verify_universal | grep -q "x86_64 arm64"
-          ./ciaobot-installer-verify_universal 2>&1 | grep -q "usage:"
+          # is the aarch64 binary the installer expects to be able to run.
+          test -s ciaobot-installer-verify_aarch64
+          chmod 755 ciaobot-installer-verify_aarch64
+          file ciaobot-installer-verify_aarch64 | grep -qi "arm64"
+          ./ciaobot-installer-verify_aarch64 2>&1 | grep -q "usage:"
       - name: Diagnostics
         if: failure()
         run: |

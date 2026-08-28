@@ -59,8 +59,9 @@ The supported macOS release path is the one-line installer:
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The installer downloads the signed universal app archive, verifies it with the
-published native verifier, and installs the bundled runtime into `Ciaobot.app`.
+The installer downloads the signed Apple Silicon (aarch64) app archive, verifies
+it with the published native verifier, and installs the bundled runtime into
+`Ciaobot.app`.
 When a configured workspace is already referenced by the LaunchAgent, it
 preserves that workspace and password; on a clean machine it leaves setup to
 the app's bootstrap onboarding rather than generating a hidden password. It
@@ -89,7 +90,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, embedded runtimes, universal app, native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, the embedded aarch64 runtime, the aarch64 app, the native verifier, installer, and updater metadata. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -118,9 +119,9 @@ npm test             # 61 test files under web/src
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
-Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, Rust
+1.90.0 with the `aarch64-apple-darwin` target, and `swiftc` from the Xcode
+Command Line Tools (it builds the `ciaobot-native` sidecar).
 
 `desktop/native/main.swift` uses Apple's FoundationModels, whose
 `GenerationOptions` initialiser was renamed: `sampling:` on the macOS 26 SDK,
@@ -136,8 +137,8 @@ before building the sidecar and print `xcodebuild -version`, so a toolchain skew
 is visible in the log instead of looking like a code regression.
 
 `./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
-`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
-signed, and runnable inside the built app. Run it after any change under
+`build-desktop` job does — and asserts the sidecar ends up bundled, signed, and
+runnable inside the built aarch64 app. Run it after any change under
 `desktop/`; `--fast` skips the bundle build when you have not touched
 `desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
 
@@ -153,7 +154,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cd ..
-npm run tauri build -- --target universal-apple-darwin
+npm run tauri build -- --target aarch64-apple-darwin
 ```
 
 The main webview loads the live localhost PWA and must never be added to a
@@ -365,7 +366,7 @@ exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). The `gws-*` skills are gated on the workspace having a Google account linked: `sync_workspace_skills` resolves each agent root's effective profile (its `gws_profile`, else the operator default only when that account actually exists) and skips the GWS skills when the workspace has no profile connected — shipping wrappers that name a credential directory nobody created just produces auth errors. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
 

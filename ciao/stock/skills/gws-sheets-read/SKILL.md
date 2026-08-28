@@ -7,14 +7,14 @@ metadata:
 
 # sheets +read
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Read values from a spreadsheet
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <RANGE>
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <RANGE>
 ```
 
 ## Flags
@@ -27,8 +27,8 @@ scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet <ID> --range <R
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +read --spreadsheet ID --range Sheet1
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
+ciao gws "$GWS_PROFILE" sheets +read --spreadsheet ID --range Sheet1
 ```
 
 ## Tips

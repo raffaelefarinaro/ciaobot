@@ -370,7 +370,13 @@ def _handover_marker(
 
 def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
-    if "reached your session usage limit" in low:
+    # Claude Code uses "You've hit your session limit" in its user-facing
+    # exhaustion banner, while the API-shaped error says "reached your
+    # session usage limit". Both should arm the deferred hourly retry.
+    if (
+        "reached your session usage limit" in low
+        or "hit your session limit" in low
+    ):
         return True
     # Temporary model saturation is a capacity error rather than a 429/quota
     # error. Treat it as hourly retryable so the user does not have to keep the
@@ -442,6 +448,12 @@ def _is_retryable_auth_error(text: str) -> bool:
     recovers without user intervention. Keep this narrow: only the
     ``oauth session expired`` / ``could not be refreshed`` shape is
     retried, not every ``Failed to authenticate`` (e.g. revoked keys).
+
+    ``Not logged in · Please run /login`` is the same class: the CLI reports
+    it when the credentials it holds lapsed mid-turn, and the next spawn
+    re-reads them from disk. It is retried on the same bounded ladder, so a
+    genuinely signed-out install stops after ``_MAX_CONNECTION_DROP_RETRIES``
+    instead of looping.
     """
     low = (text or "").lower()
     if "oauth session expired" in low:
@@ -449,6 +461,8 @@ def _is_retryable_auth_error(text: str) -> bool:
     if "failed to authenticate" in low and "could not be refreshed" in low:
         return True
     if "session expired" in low and "could not be refreshed" in low:
+        return True
+    if "not logged in" in low and "/login" in low:
         return True
     return False
 
@@ -655,6 +669,9 @@ def _normalize_tier(model: str) -> str:
     return canonical_tier(model) if is_tier(model) else model
 
 
+_INJECTED_CONTEXT_MARKER = "[CIAO_CONTEXT_BEGIN]"
+
+
 def _real_title(title: str) -> str | None:
     """Return *title* if it is a real provider title, else None.
 
@@ -662,9 +679,17 @@ def _real_title(title: str) -> str | None:
     ``New session - <timestamp>``) and only later write the generated title.
     Treating the placeholder as a real title would let the auto-title poll
     stop early and leave the sidebar stuck on it, so it is filtered out here.
+
+    Also rejected: a provider whose own summarizer degrades and echoes the
+    literal first session message back as the "title". That message carries
+    our injected context capsule (see `_build_prompt_prefix`), which is meant
+    to stay invisible to the user - accepting it verbatim both leaked
+    internal state into the sidebar and skipped the 6-word
+    `_fallback_title` truncation, which only runs when no native title is
+    accepted.
     """
     title = (title or "").strip()
-    if not title or _PLACEHOLDER_TITLE_RE.match(title):
+    if not title or _PLACEHOLDER_TITLE_RE.match(title) or _INJECTED_CONTEXT_MARKER in title:
         return None
     return title
 
@@ -836,6 +861,11 @@ class ChatInfo:
     # /api/chats/{id}/read). A chat is considered unread when
     # `last_activity_at > last_read_at`.
     last_read_at: str = ""
+    # Truncated text of the last assistant reply, set alongside
+    # `last_activity_at` wherever a turn finishes with real output. Mirrors
+    # `last_activity_at` so the sidebar's unread tile can show "what finished"
+    # without holding the full transcript in memory.
+    last_snippet: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -883,6 +913,14 @@ class ChatInfo:
     handover_messages: list[dict] = field(default_factory=list)
     # True until the first post-handover turn successfully seeds the new
     # provider with `handover_messages` inside the hidden Ciaobot context block.
+    #
+    # Naming note: "handover" here is PROVIDER-session context carry-over — set
+    # by provider switches, forks/continues, and by the workspace re-rooting
+    # (`workspace_reroot.flag_stranded_sessions`) for chats whose old session
+    # was stranded by the move. It has nothing to do with the multi-device
+    # host/client role handover in `ciao/node_state.py`; only the word collides.
+    # The key is persisted in `.runtime/web_projects.json`, so it cannot be
+    # renamed without breaking existing installs.
     handover_context_pending: bool = False
     # Stable routing facts are sent once per provider session. A changed
     # project/workspace digest or a new provider session re-sends them.
@@ -965,6 +1003,7 @@ class ChatInfo:
             "archived": self.archived,
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
+            "last_snippet": self.last_snippet,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -1348,6 +1387,7 @@ class ProjectChatManager:
                     "last_read_at",
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
+                last_snippet=cd.get("last_snippet", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
@@ -1447,6 +1487,7 @@ class ProjectChatManager:
                     "archived": c.archived,
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
+                    "last_snippet": c.last_snippet,
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
@@ -1868,7 +1909,7 @@ class ProjectChatManager:
                 f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable.\n"
                 f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
-                f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `CLAUDE.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `CLAUDE.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
                 f"6. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
                 f"7. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
@@ -1890,7 +1931,7 @@ class ProjectChatManager:
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to bootstrap the current vault structure and core documentation:\n"
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
-                f"2. **Core files**: Setup has already seeded the workspace-level `CLAUDE.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `CLAUDE.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
+                f"2. **Core files**: Setup has already seeded the workspace-level `CLAUDE.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `CLAUDE.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
                 f"4. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
                 f"5. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
@@ -4203,7 +4244,6 @@ class ProjectChatManager:
         run_insights = (
             getattr(config, "insights_enabled", False)
             and outcome.filtered_jsonl
-            and outcome.turn_count >= getattr(config, "insights_size_gate_turns", 0)
         )
         if run_insights:
             from ciao.insights import extract_and_append, resolve_insights_model
@@ -4817,22 +4857,17 @@ class ProjectChatManager:
     def _workspace_gws_profile(self, workspace: str | None) -> str:
         """The Google account this workspace uses, or "" when none is linked.
 
-        The operator-level default only counts when it names an account that
-        actually exists: pointing a chat at a credential directory nobody ever
-        created just produces confusing auth errors mid-task.
+        Resolved through ``gws_auth.workspace_gws_profile`` so skill sync and
+        the chat runtime agree on the same effective profile: an explicit link
+        or operator default only counts when it names an account that actually
+        exists (a bootstrap-synthetic or stale link points at a credential
+        directory nobody created, which just produces auth errors mid-task).
         """
-        workspace_config = self._config.workspace(workspace)
-        if workspace_config and workspace_config.gws_profile:
-            return workspace_config.gws_profile
-        default = self._config.gws_default_profile
-        if not default:
-            return ""
         try:
-            from ciao import gws_auth
-
-            return default if default in gws_auth.known_profiles(self._config) else ""
+            from ciao.gws_auth import workspace_gws_profile
         except Exception:
-            return default
+            return ""
+        return workspace_gws_profile(self._config, workspace)
 
     def _model_for_provider(self, model: str, provider: str) -> str:
         """A chat's model, resolved for the provider that will actually run it.
@@ -5946,7 +5981,13 @@ class ProjectChatManager:
                 self._retry_tasks.pop(chat_id, None)
 
     @staticmethod
-    def _result_snippet(text: str, limit: int = 140) -> str:
+    def _result_snippet(text: str, limit: int = 280) -> str:
+        """Flatten a reply to one line for the unread card and the push body.
+
+        The default is sized for the two-line clamp on the Home unread card
+        (`.home-chat-snippet`): at 140 the string ran out before the first line
+        did, so the card's second line was always blank.
+        """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if len(flat) > limit:
             flat = flat[: limit - 3] + "..."
@@ -6666,6 +6707,7 @@ class ProjectChatManager:
                         if chat_now.retry_status == "pending" and is_retry:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
+                        chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # Schedule the push with a small delay. If the user reads
@@ -6765,6 +6807,26 @@ class ProjectChatManager:
                 self.clear_notifications_cb(chat_id)
             except Exception:
                 logger.exception("clear_notifications_cb failed for %s", chat_id)
+        return chat
+
+    def mark_unread(self, chat_id: str) -> ChatInfo | None:
+        """Mark a chat as unread on purpose ("come back to this").
+
+        Clears ``last_read_at`` so ``last_activity_at > last_read_at`` holds on
+        every device, and publishes `chat_unread` so other tabs/devices raise
+        their badge. Opening the chat (or sending a turn) marks it read again
+        through the normal paths.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        chat.last_read_at = ""
+        self._save()
+        self._events.publish({
+            "type": "chat_unread",
+            "chat_id": chat_id,
+            "last_read_at": "",
+        })
         return chat
 
     def mark_all_read(self) -> list[str]:
@@ -7570,12 +7632,13 @@ class ProjectChatManager:
                         and text
                         and self._is_worth_announcing_nudge_reply(text)
                     ):
+                        snippet = self._result_snippet(text)
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
+                            chat_now.last_snippet = snippet
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
-                        snippet = self._result_snippet(text)
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
@@ -7903,8 +7966,9 @@ class ProjectChatManager:
             session_info = get_session_info(chat.session_id, directory=str(workspace))
             if session_info is None:
                 return None
-            title = (session_info.custom_title or "").strip() or (session_info.summary or "").strip()
-            return _real_title(title)
+            custom_title = (session_info.custom_title or "").strip()
+            summary = (session_info.summary or "").strip()
+            return _real_title(custom_title) or _real_title(summary)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None

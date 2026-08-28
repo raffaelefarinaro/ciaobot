@@ -759,3 +759,258 @@ def test_the_cli_does_not_claim_a_clean_vault_after_a_failed_write(
     assert "No wikilinks found" not in out.out
     assert "failed to write" in out.out
     assert "Permission denied" in out.err
+
+
+_ROSTER = """---
+type: project
+title: UX Team
+---
+# UX Team
+
+| Person | Role |
+|---|---|
+| [[People/Tibor\\|Tibor Kranjc]] | Lead |
+| [[People/Mo]] | Design |
+
+Outside a table: [[People/Tibor|Tibor Kranjc]].
+"""
+
+
+def test_a_table_cells_escaped_alias_pipe_stays_out_of_the_ref(tmp_path: Path) -> None:
+    """`\\|` is the only legal alias pipe inside a markdown table.
+
+    A bare `|` would close the cell, so a roster table has to escape it — and
+    the backslash used to be read as part of the ref. `[[People/Tibor\\|Tibor]]`
+    parsed as `People/Tibor\\`, resolved to nothing, and was rewritten to
+    `./People/Tibor\\.md`: a path with a stray backslash, relative to the wrong
+    directory, and reported as a wikilink that had *already* been dead. Every
+    wikilink in a table cell in the vault hit it.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(vault, "People/Tibor.md", "---\ntype: person\n---\n# Tibor\n")
+    _note(vault, "People/Mo.md", "---\ntype: person\n---\n# Mo\n")
+    _note(vault, "work/projects/ux/ux-team.md", _ROSTER)
+
+    summary = migrate_vault_links(vault, apply=True)
+    text = (vault / "work/projects/ux/ux-team.md").read_text(encoding="utf-8")
+
+    assert summary["unresolved"] == []
+    # Same destination whether the pipe was escaped or not: the escape belongs
+    # to the table, not to the link.
+    assert text.count("[Tibor Kranjc](../../../People/Tibor.md)") == 2
+    assert "\\.md" not in text
+    assert "(./People/" not in text
+    # The cell boundaries survive, so the row still renders as a row.
+    assert "| [Tibor Kranjc](../../../People/Tibor.md) | Lead |" in text
+
+
+def test_an_inline_flow_list_keeps_the_full_ref(tmp_path: Path) -> None:
+    """A flow-sequence item is a reference, not prose.
+
+    `related: ["[[a]]", "[[b]]"]` has two whole values on one line, and the
+    old emptiness test called both of them prose — so each was replaced by its
+    *display text* and the path was thrown away. Two refs that share a stem
+    collapsed into the same ambiguous value, silently: the rewrite resolved, so
+    nothing was reported as unresolved.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(vault, "work/products/slc.md", "---\ntype: product\n---\n# SLC\n")
+    _note(vault, "work/products/legacy/slc.md", "---\ntype: product\n---\n# Old\n")
+    _note(vault, "People/Mo.md", "---\ntype: person\n---\n# Mo\n")
+    _note(
+        vault,
+        "Notes/a.md",
+        '---\ntype: note\n'
+        'related: ["[[work/products/slc]]", "[[work/products/legacy/slc]]"]\n'
+        'people: [[[People/Mo]]]\n'
+        'description: asked [[People/Mo|Mo Salah]] to help\n'
+        '---\n# A\n',
+    )
+
+    migrate_vault_links(vault, apply=True)
+    text = (vault / "Notes/a.md").read_text(encoding="utf-8")
+
+    # Both paths kept, both distinguishable, quoting untouched.
+    assert 'related: ["work/products/slc", "work/products/legacy/slc"]' in text
+    assert "slc\", \"slc" not in text
+    # An unquoted flow item is a reference too.
+    assert "people: [People/Mo]" in text
+    # Prose is still prose: the label, not the path.
+    assert "description: asked Mo Salah to help" in text
+    assert "[[" not in text
+
+
+def _nested_vault(tmp_path: Path) -> Path:
+    """A vault whose workspace subtree links out to shared root notes."""
+    vault = tmp_path / "memory-vault"
+    _note(vault, "People/Michal.md", "---\ntype: person\n---\n# Michal\n")
+    _note(
+        vault,
+        "work/projects/cuj.md",
+        "---\ntype: project\n---\n# CUJ\n\nOwner [[People/Michal]].\n",
+    )
+    return vault
+
+
+def test_the_cli_refuses_a_root_nested_inside_the_configured_vault(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`--vault-root memory-vault/work` is not a vault, and the tool cannot tell.
+
+    Refs resolve against a filename index built from whatever root is passed, so
+    a workspace subtree makes every link into the vault's shared `People/` and
+    root notes unresolvable. They were converted anyway — to `./People/Michal.md`,
+    relative to a directory that has no `People/` — and reported as links that
+    were already dead. The refusal covers the dry run too: the preview itself is
+    what is wrong here, not just the write.
+    """
+    from ciao import cli
+
+    vault = _nested_vault(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    code = cli.main(["vault-migrate-links", "--vault-root", str(vault / "work")])
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "not a vault of its own" in out.err
+    assert "resolves nowhere" in out.err
+    # Nothing was previewed, so nothing was described as dead.
+    assert "already dead" not in out.out
+    assert "Would rewrite" not in out.out
+
+
+def test_force_still_allows_a_nested_root(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The rail is a rail, not a wall — the other two are overridable too."""
+    from ciao import cli
+
+    vault = _nested_vault(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    code = cli.main(
+        ["vault-migrate-links", "--vault-root", str(vault / "work"), "--force"]
+    )
+
+    out = capsys.readouterr()
+    assert code == 0
+    assert "Would rewrite" in out.out
+
+
+def test_the_vault_root_is_accepted_and_resolves_across_subtrees(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The same vault at its own root: the link resolves, nothing is unresolved."""
+    from ciao import cli
+
+    vault = _nested_vault(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    code = cli.main(["vault-migrate-links", "--vault-root", str(vault)])
+
+    out = capsys.readouterr()
+    assert code == 0
+    assert "../../People/Michal.md" in out.out
+    assert "resolving to nothing" not in out.out
+
+
+def test_an_unresolved_ref_is_not_called_a_link_that_was_already_dead(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The CLI cannot know a ref was dead before the migration touched it.
+
+    Unresolved means "no note under the root this run was given", which is also
+    what a working link looks like at a too-narrow root or behind a parse bug.
+    Asserting pre-existing rot is how the tool got to label its own broken
+    output as damage it had merely found.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    _note(vault, "Root.md", "---\ntype: doc\n---\n# R\n\nSee [[Nowhere]].\n")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    code = cli.main(["vault-migrate-links", "--vault-root", str(vault)])
+
+    out = capsys.readouterr()
+    assert code == 0
+    assert "already dead" not in out.out
+    assert "resolving to nothing" in out.out
+    assert "the root is" in out.out
+
+
+def test_unmigrating_from_the_wrong_root_names_the_recorded_one(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A receipt's paths are relative to the root the migration ran against.
+
+    Reversing from anywhere else reads no file and restores nothing, and the
+    failures were printed under "changed since the migration" — a cause nobody
+    had established, sending the reader to look for edits that never happened.
+    """
+    from ciao import cli
+
+    vault = _nested_vault(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    runtime = tmp_path / ".runtime"
+
+    assert (
+        cli.main(
+            [
+                "vault-migrate-links",
+                "--apply",
+                "--force",
+                "--vault-root",
+                str(vault),
+                "--runtime-root",
+                str(runtime),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    code = cli.main(
+        [
+            "vault-unmigrate-links",
+            "--apply",
+            "--vault-root",
+            str(vault / "work"),
+            "--runtime-root",
+            str(runtime),
+        ]
+    )
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "changed since the migration" not in out.err
+    assert str(vault) in out.err
+    assert "--vault-root" in out.err
+
+
+def test_prose_followed_by_a_comma_is_still_prose(tmp_path: Path) -> None:
+    """The guard on how a flow sequence is recognised.
+
+    Reading it off the trailing comma rather than the leading bracket looks
+    equivalent and is not: the comma in `asked [[People/Mo|Mo]], then left`
+    belongs to the sentence, and treating it as a value delimiter rewrites the
+    sentence to carry a path where a name was meant to be read.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(vault, "People/Mo.md", "---\ntype: person\n---\n# Mo\n")
+    _note(
+        vault,
+        "Notes/a.md",
+        "---\ntype: note\n"
+        "description: asked [[People/Mo|Mo Salah]], then left\n"
+        "---\n# A\n",
+    )
+
+    migrate_vault_links(vault, apply=True)
+    text = (vault / "Notes/a.md").read_text(encoding="utf-8")
+
+    assert "description: asked Mo Salah, then left" in text

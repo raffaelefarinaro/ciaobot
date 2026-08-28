@@ -1260,13 +1260,18 @@ def chat_store_file(runtime_root: Path) -> Path:
 
 
 def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
-    """Mark every open chat's provider session as needing a handover.
+    """Mark every open chat's provider session as needing a context handover.
 
     Every live chat's provider session is keyed by the cwd it was started in, and
     the migration changes that cwd, so the session cannot be found again. The
     honest response is to carry a context capsule into a fresh session rather
     than let the next turn silently forget: ``handover_context_pending`` is
     exactly the flag the fork and provider-switch paths already use for this.
+
+    "Handover" here is provider-SESSION context carry-over, not the multi-device
+    host/client role handover in ``ciao/node_state.py`` — the flag predates the
+    role rename and is persisted, so only the wording can be clarified, not the
+    key renamed.
 
     Considered and rejected: symlinking the old ``~/.claude/projects/<slug>`` to
     the new one. It is an undocumented SDK layout outside the workspace, it would
@@ -1778,7 +1783,6 @@ def rebuild_search_index(
 # all. Measured on the reference install: 21 skill entries and 3 commands.
 _CATALOG_PATHS: tuple[str, ...] = (
     "skills",
-    "skills-lock.json",
     "commands",
     "subagents",
 )
@@ -1849,17 +1853,8 @@ class SkillsTriage:
 def plan_skills_triage(install_root: Path, primary: str) -> SkillsTriage:
     """What the skill catalog does at migration time. Never writes.
 
-    Two things move, and both go to the primary root:
-
     ``skills/`` is the custom catalog, mirrored into ``.claude/skills`` by
     ``sync_skills._rebuild_custom_skill_links`` from whichever root it sits in.
-
-    ``skills-lock.json`` is the other half of the same non-stock catalog.
-    ``_refresh_upstream_skills`` reads it from the root it is syncing, so leaving
-    it at the install root would strand every upstream skill at a path no root
-    ever reads. Moving it is also self-healing: the upstream copies live under
-    the old ``.claude/skills`` and are not moved, so the primary's next sync sees
-    them as missing and refetches them from the lock.
     """
     install_root = Path(install_root).resolve()
     triage = SkillsTriage(primary=primary)
@@ -1952,7 +1947,7 @@ def _skill_triage_entries(install_root: Path) -> list[SkillTriageEntry]:
         entries.append(
             SkillTriageEntry(
                 name=name,
-                origin=str(skill.get("source") or "skills-lock.json"),
+                origin=str(skill.get("source") or "skills/"),
                 description=str(skill.get("description") or ""),
                 note="",
             )
@@ -2008,15 +2003,9 @@ def format_skill_triage(triage: SkillsTriage, workspaces: list[str]) -> str:
             f"or to `{_SKILLS_SRC}/<name>` when it genuinely applies everywhere."
         ),
         (
-            "3. Run a skill sync for both roots. The links under "
+            "3. Run `ciao sync-skills` for both roots. The links under "
             "`.claude/skills` are rebuilt from `skills/`, so nothing else needs "
             "editing."
-        ),
-        (
-            "4. Upstream rows (anything not sourced from `skills/`) are pinned in "
-            "`skills-lock.json`, which moved with the catalog. Move the lock "
-            "entry, not the directory: the copy under `.claude/skills` is "
-            "refetched."
         ),
         "",
         "## Catalog",
@@ -2095,6 +2084,16 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     an engine that does not understand the result. Which is exactly what happened
     once already on the reference install.
 
+    Retirement posture: once the receipt reads ``migrated`` — a real migration or
+    a born-per-root install, which writes ``status: "migrated"`` with no moves —
+    this is a NO-OP that touches nothing but the receipt file. The receipt check
+    runs before any registry or vault-path work, so a migrated install never
+    pays for planning, rehearsal, or even a full config read here. The module
+    itself stays because installs migrated by earlier releases may still exist;
+    deleting it before receipts can be assumed universal would strand them. The
+    manual ``ciao workspace-reroot`` subcommands (rehearse/apply/undo/repair)
+    remain available for recovery regardless of this gate.
+
     Never raises. A migration that cannot run is a condition to SURFACE, not a
     reason to fail an upgrade and leave the install half-started — the refusal is
     already recorded in the receipt, and the `workspace-unmigrated` action reads
@@ -2113,15 +2112,20 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         runtime_root = (
             Path(state_path).parent if state_path else install_root / ".runtime"
         )
-        vault_root = Path(config.vault_root)
-        names = sorted(n for n in config.workspace_names() if n)
-        primary = config.primary_workspace()
     except Exception as exc:  # noqa: BLE001 — a broken config is not our error
         logger.exception("re-root: could not read the install layout")
         return {"status": "error", "reason": str(exc)}
 
     if read_receipt(runtime_root) is not None:
         return {"status": "already_migrated"}
+
+    try:
+        vault_root = Path(config.vault_root)
+        names = sorted(n for n in config.workspace_names() if n)
+        primary = config.primary_workspace()
+    except Exception as exc:  # noqa: BLE001 — a broken config is not our error
+        logger.exception("re-root: could not read the install layout")
+        return {"status": "error", "reason": str(exc)}
     if not names or not primary:
         # Nothing registered yet: a fresh install still in setup. There is no
         # root to create and nothing to move.
@@ -2157,7 +2161,7 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         logger.exception("re-root: rebuilding derived state failed")
         outcome["derived_error"] = str(exc)
     logger.info(
-        "re-root: migrated %d workspace(s); %d session(s) flagged for handover",
+        "re-root: migrated %d workspace(s); %d chat(s) will start fresh provider sessions",
         len(names),
         len((outcome.get("stranded_sessions") or {}).get("flagged") or []),
     )

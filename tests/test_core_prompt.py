@@ -25,7 +25,7 @@ def test_system_prompt_points_to_gws_wrapper() -> None:
     assert payload is not None
     append = payload["append"]
     assert "Google Workspace calls go through" in append
-    assert "scripts/gws-profile.sh" in append
+    assert "ciao gws" in append
     assert "GWS_PROFILE" in append
     assert "supportsAllDrives" not in append
 

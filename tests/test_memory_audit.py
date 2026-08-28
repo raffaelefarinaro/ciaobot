@@ -495,3 +495,93 @@ def test_parse_verified_date_accepts_only_iso_dates() -> None:
     assert parse_verified_date("2026-13-01") is None
     assert parse_verified_date("August 2026") is None
     assert parse_verified_date("") is None
+
+
+# --- CLI output -------------------------------------------------------------
+
+
+def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
+    tmp_path: Path,
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    """Over-cap findings must name the region and the actions that shrink it.
+
+    The report is the only surface many users see; "over cap" without a fix
+    reads as a dead end.
+    """
+    import argparse
+
+    from ciao.cli import _memory_audit_command
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    write_region(
+        guide,
+        "memory",
+        [f"Durable lesson {index}: " + "x" * 500 for index in range(7)],
+    )
+
+    # _memory_audit_command reads the whole process environment, and several
+    # code paths under test elsewhere (_load_env_file, from_env()'s dotenv
+    # load, the setup wizard) write os.environ directly, so leaks survive
+    # their tests. Anything that redirects the audit — a runtime root holding
+    # a workspaces.json, raised caps — flips this test's outcome, so scrub
+    # every variable it consumes instead of just the workspace trio.
+    for name in (
+        "CIAO_WORKSPACES",
+        "CIAO_VAULT_ROOT",
+        "CIAO_WORKSPACE",
+        "CIAO_VAULT_MODE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_MEMORY_CHAR_LIMIT",
+        "CIAO_USER_CHAR_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    exit_code = _memory_audit_command(
+        argparse.Namespace(
+            workspace=tmp_path,
+            vault_root=tmp_path / "memory-vault",
+            json=False,
+            with_vault=False,
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "ciao:memory over cap: " in out
+    assert 'consolidate the region (e.g. "consolidate my ciao:memory' in out
+    assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in out
+
+
+def test_memory_audit_command_stays_quiet_when_under_cap(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    """No over-cap findings, no fix hint: the hint must track the finding."""
+    import argparse
+
+    from ciao.cli import _memory_audit_command
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    write_region(guide, "memory", ["one small durable lesson"])
+
+    exit_code = _memory_audit_command(
+        argparse.Namespace(
+            workspace=tmp_path,
+            vault_root=tmp_path / "memory-vault",
+            json=False,
+            with_vault=False,
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "over cap" not in out
+    assert "consolidate" not in out

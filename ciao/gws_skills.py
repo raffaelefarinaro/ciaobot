@@ -40,7 +40,7 @@ _PREREQUISITE_OLD = re.compile(
     r"and security rules\. If missing, run `gws generate-skills` to create it\.\n+",
 )
 _PREREQUISITE_NEW = (
-    "> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), "
+    "> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), "
     "global flags, and security rules.\n\n"
 )
 
@@ -50,15 +50,26 @@ Install `gws` from Settings → Workspaces (or see the Ciaobot README). The bina
 
 ## Authentication (Ciaobot)
 
-Run every Google API call through the profile wrapper — never bare `gws`:
+Run every Google API call through the `ciao` CLI — never bare `gws`:
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" <service> <subcommand> [flags]
+ciao gws "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-`GWS_PROFILE` names the Google account linked to this chat's workspace; pass a different account name only if the user asks for one. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+`GWS_PROFILE` names the Google account linked to this chat's workspace; pass a different account name only if the user asks for one. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
 OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
+
+## Connection status
+
+Before promising a Google call will work, check whether the active workspace's
+Google account is connected and its token is valid with the `gws_status` MCP
+tool. It reports the linked profile, whether credentials are present, the last
+health-monitor token reading, and whether a re-login is needed. It is read-only
+and never runs `gws auth status` itself. If `needs_relogin` is true, tell the
+user to re-authenticate in Settings → Workspaces (Google Workspace card) — the
+one-click "Sign in with Google" flow there restores Gmail, Calendar, Drive, and
+scheduled Google tasks.
 
 """
 
@@ -141,7 +152,7 @@ def strip_see_also(text: str) -> str:
 
 
 def rewrite_gws_commands(text: str) -> str:
-    """Prefix bare ``gws `` CLI examples with the Ciaobot profile wrapper."""
+    """Prefix bare ``gws `` CLI examples with the Ciaobot ``ciao gws`` wrapper."""
     frontmatter, body = _split_frontmatter(text)
 
     def _rewrite_codeblock(match: re.Match[str]) -> str:
@@ -150,12 +161,12 @@ def rewrite_gws_commands(text: str) -> str:
         if "scripts/gws-profile.sh" in code:
             code = re.sub(
                 r"scripts/gws-profile\.sh <profile> ",
-                'scripts/gws-profile.sh "$GWS_PROFILE" ',
+                'ciao gws "$GWS_PROFILE" ',
                 code,
             )
         code = re.sub(
             r"(?m)^(\s*)gws ",
-            r'\1scripts/gws-profile.sh "$GWS_PROFILE" ',
+            r'\1ciao gws "$GWS_PROFILE" ',
             code,
         )
         return f"```{lang}\n{code}```"

@@ -218,12 +218,9 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("turn_count", "expected"), [(1, False), (2, True)])
-async def test_archive_postprocess_runs_insights_for_multiturn_chats(
+async def test_archive_postprocess_runs_insights_for_all_chats(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    turn_count: int,
-    expected: bool,
 ) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("insights-project", workspace="work")
@@ -240,7 +237,7 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
         ArchiveOutcome(
             path=tmp_path / "archive.md",
             session_id="session-1",
-            turn_count=turn_count,
+            turn_count=1,
             filtered_jsonl="filtered transcript",
         ),
         chat,
@@ -248,7 +245,7 @@ async def test_archive_postprocess_runs_insights_for_multiturn_chats(
     )
     await asyncio.sleep(0)
 
-    assert bool(calls) is expected
+    assert bool(calls) is True
 
 
 @pytest.mark.asyncio

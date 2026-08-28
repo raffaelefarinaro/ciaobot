@@ -701,4 +701,29 @@ def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["error"] == "desktop drop grant expired"
+    assert response.json()["error"] == "desktop drop grant expired: grant is too old"
+
+
+def test_native_desktop_drop_rejects_future_grant(tmp_path: Path) -> None:
+    """A grant timestamp in the future is a distinct bug and must be reported
+    as such, not conflated with an expired grant."""
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    dropped_file = tmp_path / "future.md"
+    dropped_file.write_text("future", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(
+        config,
+        [dropped_file],
+        created_at=time.time() + 60,
+    )
+
+    response = _make_client(pcm, config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": "", "chat_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["error"]
+        == "desktop drop grant expired: grant timestamp is in the future"
+    )

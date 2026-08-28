@@ -42,6 +42,33 @@ describe('error toast Fix action', () => {
     expect(store.toasts).toHaveLength(0)
   })
 
+  it('does not capture the pointer when the press starts on the toast link', async () => {
+    // Capturing on the toast div retargets the compatibility click, so the
+    // update toast's "What's new" anchor would never open its release notes.
+    const { wrapper, store } = mountToast()
+    store.pushToast({
+      chat_id: '',
+      title: 'Update available',
+      body: 'v1.2.3 is ready to install.',
+      linkUrl: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
+      linkLabel: 'What’s new',
+    })
+    await wrapper.vm.$nextTick()
+
+    const toast = wrapper.find('.toast')
+    const capture = vi.fn()
+    ;(toast.element as HTMLElement).setPointerCapture = capture
+
+    await wrapper.find('a.toast-link').trigger('pointerdown')
+    expect(capture).not.toHaveBeenCalled()
+    expect(wrapper.find('.toast-swiping').exists()).toBe(false)
+
+    // The toast body itself still starts a swipe.
+    await wrapper.find('.toast-body').trigger('pointerdown')
+    expect(capture).toHaveBeenCalled()
+    expect(wrapper.find('.toast-swiping').exists()).toBe(true)
+  })
+
   it('still seeds a fix chat for errors without a settings route', async () => {
     const { wrapper, store } = mountToast()
     const fixError = vi.spyOn(store, 'fixError').mockResolvedValue(undefined)

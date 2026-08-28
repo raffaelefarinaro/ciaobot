@@ -7,14 +7,14 @@ metadata:
 
 # drive +upload
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Upload a file with automatic metadata
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" drive +upload <file>
+ciao gws "$GWS_PROFILE" drive +upload <file>
 ```
 
 ## Flags
@@ -28,9 +28,9 @@ scripts/gws-profile.sh "$GWS_PROFILE" drive +upload <file>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./report.pdf
-scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./report.pdf --parent FOLDER_ID
-scripts/gws-profile.sh "$GWS_PROFILE" drive +upload ./data.csv --name 'Sales Data.csv'
+ciao gws "$GWS_PROFILE" drive +upload ./report.pdf
+ciao gws "$GWS_PROFILE" drive +upload ./report.pdf --parent FOLDER_ID
+ciao gws "$GWS_PROFILE" drive +upload ./data.csv --name 'Sales Data.csv'
 ```
 
 ## Tips

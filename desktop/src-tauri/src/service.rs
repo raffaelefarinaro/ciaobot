@@ -89,6 +89,60 @@ pub fn spawn_bootstrap(binary: &Path, workspace: Option<&Path>) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
+/// The LaunchAgent label the installer and `ciao desktop-service` both use.
+pub const SERVER_LABEL: &str = "com.ciao.server";
+
+/// Re-register the engine's existing LaunchAgent without resolving a `ciao`
+/// binary. `start_engine_if_needed` reaches this when the running bundle has
+/// no bundled runtime (a repo-built `target/release/bundle` app, for one), so
+/// `resolve_ciao` returns `None` — and used to give up, leaving an unloaded
+/// `com.ciao.server` unloaded forever even though the plist on disk still
+/// names the installed engine. launchd alone is enough to bring it back.
+pub fn bootstrap_existing_service(server_plist: &Path) -> Result<(), String> {
+    let uid_output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|error| format!("could not read the user id: {error}"))?;
+    if !uid_output.status.success() {
+        return Err("could not read the user id".to_string());
+    }
+    let uid = String::from_utf8_lossy(&uid_output.stdout)
+        .trim()
+        .to_string();
+    let domain = format!("gui/{uid}");
+    // Same sequence as `ciao desktop-service start`: enable, bootstrap,
+    // kickstart. Bootstrap fails when the job is already registered, which is
+    // not an error here — kickstart -k restarts a registered job either way,
+    // so only its result decides.
+    let _ = Command::new("/bin/launchctl")
+        .args(["enable", &format!("{domain}/{SERVER_LABEL}")])
+        .output();
+    let bootstrap = Command::new("/bin/launchctl")
+        .args(["bootstrap", &domain])
+        .arg(server_plist)
+        .output()
+        .map_err(|error| format!("launchctl bootstrap failed: {error}"))?;
+    let kickstart = Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", &format!("{domain}/{SERVER_LABEL}")])
+        .output()
+        .map_err(|error| format!("launchctl kickstart failed: {error}"))?;
+    if !kickstart.status.success() {
+        let mut detail = String::from_utf8_lossy(&kickstart.stderr)
+            .trim()
+            .to_string();
+        if detail.is_empty() {
+            detail = String::from_utf8_lossy(&bootstrap.stderr)
+                .trim()
+                .to_string();
+        }
+        if detail.is_empty() {
+            detail = "launchctl reported failure".to_string();
+        }
+        return Err(detail);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

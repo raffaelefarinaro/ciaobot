@@ -706,7 +706,23 @@ watch(
   () => route.params.chatId,
   (chatId) => {
     const id = chatId as string
-    if (!id) return
+    if (!id) {
+      // The sidebar's "chats" nav tab (and any other plain link to `/` or
+      // `/chat`) navigates here without going through closeChat(), so
+      // activeChatId - and the ChatPanel/keyboard-shortcut logic keyed off
+      // it - stayed on the chat the user left. Only bare chat routes mean
+      // "go home": project/settings/schedules routes deliberately leave
+      // activeChatId populated underneath them (see the Esc handler above),
+      // so this only fires when chatId itself changed away from a real id -
+      // not on a settings/schedules -> `/` transition, where chatId was
+      // already undefined and the retained chat is meant to resurface.
+      // Route through the local closeChat() wrapper, not store.closeChat()
+      // directly, so a failed close (e.g. the DELETE request itself erroring
+      // out) surfaces the same toast the close button and Esc already show,
+      // instead of an unhandled rejection with no explanation.
+      if (viewMode.value === 'chat' && store.activeChatId) closeChat()
+      return
+    }
     if (!store.chats.find(c => c.chat_id === id)) return
     if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
     else void store.markRead(id)
@@ -753,6 +769,24 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  // Option+Arrow switches top-level sections without commandeering the
+  // browser's native Tab focus traversal.
+  if (!e.metaKey && !e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    const sections = ['/', '/schedules', '/memory', '/settings']
+    const current = viewMode.value === 'chat' || viewMode.value === 'project'
+      ? 0
+      : viewMode.value === 'schedules'
+        ? 1
+        : viewMode.value === 'memory' || viewMode.value === 'proposals'
+          ? 2
+          : 3
+    const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
+    e.preventDefault()
+    void router.push(sections[next])
+    return
+  }
+
   const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
 
   // Workspace navigation is also useful from the automations view, where the

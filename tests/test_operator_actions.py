@@ -69,6 +69,8 @@ class _Entry:
         self.timezone_name = kw.get("timezone_name", "UTC")
         self.schedule_id = kw.get("schedule_id", "sched-1")
         self.title = kw.get("title", "")
+        self.prompt = kw.get("prompt", "")
+        self.daily_time_utc = kw.get("daily_time_utc", "00:00")
 
 
 class _Store:
@@ -91,6 +93,19 @@ def _context(tmp_path: Path, **overrides) -> DetectionContext:
     return DetectionContext(config=config, runtime_dir=runtime, **overrides)
 
 
+def _starred(tmp_path: Path) -> None:
+    """Write a star receipt so the GitHub-star nudge stays silent.
+
+    A configured install that has not starred (or dismissed) the ask would
+    otherwise surface the nudge, which is not what these tests are about.
+    """
+    runtime = _runtime(tmp_path)
+    (runtime / "star-receipt.json").write_text(
+        json.dumps({"status": "starred", "at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+
 def test_empty_on_a_healthy_install(tmp_path: Path) -> None:
     """A conformant install with no receipts and a shallow review queue is empty."""
     config = _FakeConfig(tmp_path)
@@ -102,10 +117,12 @@ def test_empty_on_a_healthy_install(tmp_path: Path) -> None:
     context = DetectionContext(
         config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store()
     )
+    _starred(tmp_path)
     assert detect_actions(context) == []
 
 
 def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
+    _starred(tmp_path)
     context = _context(tmp_path, package_status=lambda: {"update_available": False})
     assert detect_actions(context) == []
     context = _context(
@@ -118,6 +135,117 @@ def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
     )
     ids = [a.id for a in detect_actions(context)]
     assert "package-update" in ids
+
+
+def test_github_star_silent_while_bootstrapping(tmp_path: Path) -> None:
+    """The first-run wizard is not the moment to ask for a star."""
+    config = _FakeConfig(tmp_path)
+    config.bootstrap_mode = True
+    context = _context(tmp_path, config=config)
+    assert [a.id for a in detect_actions(context)] == []
+
+
+def test_github_star_fires_on_a_configured_install(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    actions = [a for a in detect_actions(context) if a.id == "github-star"]
+    assert len(actions) == 1
+    tile = actions[0]
+    assert tile.link_label == "Star on GitHub"
+    assert tile.link_url == "https://github.com/raffaelefarinaro/ciaobot"
+    assert tile.dismiss_label == "Later"
+    assert tile.glyph == "★"
+
+
+def test_github_star_silent_after_starred(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    context = _context(tmp_path)
+    assert "github-star" not in [a.id for a in detect_actions(context)]
+
+
+def test_github_star_snoozed_by_later(tmp_path: Path) -> None:
+    from ciao.operator_actions import dismiss_action
+
+    context = _context(tmp_path)
+    result, _summary = dismiss_action("github-star", context)
+    assert result["status"] == "later"
+    assert "github-star" not in [a.id for a in detect_actions(context)]
+
+
+def test_github_star_resurfaces_after_snooze_expires(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from ciao.operator_actions import _STAR_SNOOZE_DAYS, dismiss_action
+
+    context = _context(tmp_path)
+    dismiss_action("github-star", context)
+    # Freeze "now" past the snooze window: the ask may surface once more.
+    context.now = datetime.now(UTC) + timedelta(days=_STAR_SNOOZE_DAYS + 1)
+    assert "github-star" in [a.id for a in detect_actions(context)]
+
+
+async def test_github_star_run_records_starred(tmp_path: Path) -> None:
+    from ciao.operator_actions import run_action
+
+    context = _context(tmp_path)
+    result, _summary = await run_action("github-star", context)
+    assert result["status"] == "starred"
+    assert "github-star" not in [a.id for a in detect_actions(context)]
+
+
+def test_dismiss_unknown_action_is_404(tmp_path: Path) -> None:
+    from ciao.operator_actions import dismiss_action
+
+    with pytest.raises(ValueError):
+        dismiss_action("not-a-real-action", _context(tmp_path))
+
+
+def test_locked_skills_orphaned_fires_when_lock_has_no_custom_copy(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    tmp_path.joinpath("skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "brainstorming": {"source": "owner/repo", "sourceType": "github"},
+                    "airtable-projects": {"source": "owner/repo", "sourceType": "github"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = _context(tmp_path)
+    actions = [a for a in detect_actions(context) if a.id == "locked-skills-orphaned"]
+    assert len(actions) == 1
+    assert "brainstorming" in actions[0].detail
+    assert "airtable-projects" in actions[0].detail
+    assert actions[0].chat_label == "Recover them"
+
+
+def test_locked_skills_orphaned_silent_when_custom_copy_exists(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    tmp_path.joinpath("skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "brainstorming": {"source": "owner/repo", "sourceType": "github"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "skills" / "brainstorming").mkdir(parents=True)
+    (tmp_path / "skills" / "brainstorming" / "SKILL.md").write_text(
+        "---\nname: brainstorming\ndescription: Demo\n---\n", encoding="utf-8"
+    )
+    context = _context(tmp_path)
+    assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
+
+
+def test_locked_skills_orphaned_silent_without_lock(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    context = _context(tmp_path)
+    assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
 
 
 def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
@@ -148,6 +276,7 @@ def test_unrehomed_people_gated_on_two_workspaces(tmp_path: Path) -> None:
         config=_FakeConfig(tmp_path, workspaces=("personal",)),
         runtime_dir=runtime,
     )
+    _starred(tmp_path)
     assert [a.id for a in detect_actions(single)] == []
 
     # Two workspaces, no receipt yet: the tile fires.
@@ -175,6 +304,7 @@ def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     config = _FakeConfig(tmp_path)
     context = DetectionContext(config=config, runtime_dir=runtime)
+    _starred(tmp_path)
     assert [a.id for a in detect_actions(context)] == []
 
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -257,6 +387,55 @@ def test_missed_schedules_fires_collapsed_tile(tmp_path: Path) -> None:
     )
     tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
     assert tiles == []
+
+
+def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
+    """A once reminder due later today is not missed, and not fired early.
+
+    The target is ``daily_time_utc`` on ``run_at_date`` in the entry's
+    timezone, not midnight of ``run_at_date``. At 09:00 a reminder due at
+    23:00 today must stay out of the strip (and out of "Fire now"), or it
+    would be dispatched — and deleted — hours early.
+    """
+    now = datetime(2026, 1, 20, 9, 0, tzinfo=UTC)
+    store = _Store(
+        [
+            _Entry(
+                frequency="once",
+                run_at_date="2026-01-20",
+                daily_time_utc="23:00",
+                schedule_id="sched-later-today",
+            ),
+        ]
+    )
+    context = DetectionContext(
+        config=_FakeConfig(tmp_path, workspaces=("personal",)),
+        runtime_dir=_runtime(tmp_path),
+        schedule_store=store,
+        now=now,
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
+    assert tiles == []
+
+    # The same reminder is missed once its fire time has passed.
+    store = _Store(
+        [
+            _Entry(
+                frequency="once",
+                run_at_date="2026-01-20",
+                daily_time_utc="23:00",
+                schedule_id="sched-later-today",
+            ),
+        ]
+    )
+    context = DetectionContext(
+        config=_FakeConfig(tmp_path, workspaces=("personal",)),
+        runtime_dir=_runtime(tmp_path),
+        schedule_store=store,
+        now=datetime(2026, 1, 20, 23, 30, tzinfo=UTC),
+    )
+    tiles = [a for a in detect_actions(context) if a.kind == "missed-schedules"]
+    assert len(tiles) == 1
 
 
 def test_review_queue_depth_counts_skill_proposal_files(tmp_path: Path) -> None:
@@ -397,8 +576,8 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     actions = detect_actions(context)
     assert actions, "expected at least some actions to fire"
     for action in actions:
-        assert action.run_label or action.chat_prompt, (
-            f"action {action.id} offers neither run nor chat"
+        assert action.run_label or action.chat_prompt or action.link_url, (
+            f"action {action.id} offers neither run, chat, nor an external link"
         )
 
 
@@ -468,9 +647,9 @@ def test_scan_vault_is_never_touched(tmp_path: Path) -> None:
     spy.assert_not_called()
 
 
-def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
+async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
+        await run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
 
 
 def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(

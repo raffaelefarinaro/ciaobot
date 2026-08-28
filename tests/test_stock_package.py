@@ -60,6 +60,86 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
 
 
+def test_stock_curation_prompt_consolidation_contract() -> None:
+    """The nightly curator consolidates regions itself, with guardrails.
+
+    It used to be forbidden from touching regions, so an over-cap region
+    dead-ended at "needs a human pass" and the user was always in the loop.
+    The contract now: consolidate at/above ~85%, log every removal to the
+    undo file, queue uncertain removals as [review] yes/no questions, never
+    promote NEW facts unattended.
+    """
+    stock = resources.files("ciao.stock")
+    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
+    prompt = next(
+        entry["prompt"]
+        for entry in schedules["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    # Consolidation is allowed, bounded by the undo log.
+    assert "consolidate that region now" in prompt
+    assert "Workspace/Memory-Consolidations.md" in prompt
+    # Uncertain removals become reviewable questions, not deletions.
+    assert "[review] Keep" in prompt
+    assert "Memory-Proposals.md" in prompt
+    # Promotion of new facts stays user-reviewed; over-cap has named options.
+    assert "Do not promote new facts into the bounded" in prompt
+    assert "CIAO_MEMORY_CHAR_LIMIT" in prompt
+
+
+def test_stock_curation_prompt_files_discovered_bounded_facts() -> None:
+    """A bounded-region fact found by reading transcripts must enter the queue.
+
+    Chats without a session-insights section never ran archive-time routing,
+    so the curator is the first to see their facts. Naming them only in the
+    nightly reply left them with no review path: nothing to promote or
+    dismiss, re-derived from scratch every run. The command example must
+    keep both hazard sources out of the shell: the fact travels by file,
+    and the source label is a plain chat id — $(), backticks, and quotes
+    interpolate even inside double quotes.
+    """
+    stock = resources.files("ciao.stock")
+    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
+    prompt = next(
+        entry["prompt"]
+        for entry in schedules["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in prompt
+    assert "<chat title>" not in prompt
+    assert "--text-file <fact-file>" in prompt
+    assert "no review path" in prompt
+    assert "dedupes" in prompt
+
+
+def test_stock_memory_agent_role_matches_curator_contract() -> None:
+    """The spawned memory agent must allow the same guarded consolidation.
+
+    The curation schedule says \"Use the memory agent\", so if the role still
+    forbade region writes the two instructions would cancel out.
+    """
+    role = resources.files("ciao.stock").joinpath("agents/memory.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "~3000 memory / ~1375 profile" in role
+    assert "Workspace/Memory-Consolidations.md" in role
+    assert "[review] Keep" in role
+    # New-fact promotion stays reviewed even though consolidation is allowed.
+    assert "Promoting NEW facts into a region is a reviewed action" in role
+
+
+def test_stock_workspace_guide_carries_default_caps() -> None:
+    """Seeded guides must carry the shipped default caps, not stale ones."""
+    stock = resources.files("ciao.stock")
+    guide = stock.joinpath("workspace", "CLAUDE.md").read_text(encoding="utf-8")
+
+    assert "<!-- ciao:memory:start cap=3000 -->" in guide
+    assert "<!-- ciao:profile:start cap=1375 -->" in guide
+
+
 def test_stock_schedules_are_read_only_system_entries() -> None:
     stock = resources.files("ciao.stock")
     schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))

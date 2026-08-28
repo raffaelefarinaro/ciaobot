@@ -159,6 +159,10 @@ export interface ChatInfo {
   archived: boolean
   last_activity_at?: string
   last_read_at?: string
+  // Truncated text of the last assistant reply, persisted alongside
+  // `last_activity_at`. Backs the sidebar unread tile's preview on initial
+  // load, before any live `chat_result_ready` WS event has arrived.
+  last_snippet?: string
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
@@ -386,6 +390,7 @@ export type EventsWsMessage =
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
+  | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
@@ -419,6 +424,10 @@ export interface InAppToast {
   fixRoute?: string
   // Button label for the Fix action when fixRoute is set.
   fixLabel?: string
+  // An external link shown as a small action on an info toast (e.g. "What's
+  // new" on the update-available toast). Opens in a new tab.
+  linkUrl?: string
+  linkLabel?: string
   // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
   // draft in `projectId` (falling back to General if that project is gone)
   // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
@@ -626,7 +635,6 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
-  auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
 }
@@ -643,8 +651,6 @@ export interface GwsIntegrationProfile {
   workspaces: string[]
   setup_command: string
   headless_auth_command: string
-  wrapper_available: boolean
-  helper_available: boolean
   email: string
   // Cached token-health snapshot from the periodic monitor (issue #145).
   // `token_valid` is null when no health check has run yet for this profile.
@@ -661,8 +667,7 @@ export interface GwsIntegrationSettings {
   installed: boolean
   binary_path: string
   default_profile: string
-  wrapper_path: string
-  headless_helper_path: string
+  cli_available: boolean
   profiles: GwsIntegrationProfile[]
 }
 
@@ -729,7 +734,7 @@ export interface CliStats {
 
 export interface SkillInventoryItem {
   name: string
-  label: 'custom' | 'github' | 'stock'
+  label: 'custom' | 'stock'
   source: string
   source_type: string
   description: string
@@ -741,7 +746,6 @@ export interface SkillInventoryItem {
 export interface SkillInventory {
   counts: {
     custom: number
-    github: number
     stock: number
   }
   skills: SkillInventoryItem[]
@@ -835,6 +839,30 @@ export interface AutomationStats {
   success_rate: number | null
   avg_duration_ms: number
   last_error: { error: string; ts: string } | null
+}
+
+export interface ProposalOutcomeCounts {
+  promoted: number
+  dismissed: number
+}
+
+// Memory-proposal resolutions (promoted vs dismissed), the honest health
+// measure for the extraction pipeline. Served by GET /api/automation with
+// `?include=outcomes`, next to the job stats it sits beside in Settings →
+// Automation.
+export interface ProposalOutcomes {
+  promoted: number
+  dismissed: number
+  by_workspace: Record<string, ProposalOutcomeCounts>
+  recent_30d: ProposalOutcomeCounts
+}
+
+// GET /api/automation answers `?include=outcomes` with this envelope instead
+// of the bare job list; older servers ignore the hint and still answer with
+// the array.
+export interface AutomationPayload {
+  jobs: AutomationProcess[]
+  proposal_outcomes?: ProposalOutcomes
 }
 
 export interface AutomationProcess {
@@ -1032,6 +1060,8 @@ export interface PackageStatus {
   update_available?: boolean
   mode?: string
   error?: string
+  /** Public URL that redirects to the latest release page. */
+  source?: string
 }
 
 /** One home-screen operator action (see `ciao/operator_actions.py`). */
@@ -1049,6 +1079,12 @@ export interface OperatorAction {
   /** A purpose-built surface for this action, when one already exists. */
   view_label: string
   view_route: string
+  /** An external page this action links to (release notes, the repository).
+   *  Rendered like a run button but opens a new tab. */
+  link_label?: string
+  link_url?: string
+  /** A "not now" button for ask-style actions; records a suppression receipt. */
+  dismiss_label?: string
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean
@@ -1059,6 +1095,15 @@ export interface HousekeepingResponse {
 }
 
 export interface HousekeepingRunResponse {
+  ok: boolean
+  action_id: string
+  error?: string
+  summary: string
+  result?: Record<string, unknown>
+  actions: OperatorAction[]
+}
+
+export interface HousekeepingDismissResponse {
   ok: boolean
   action_id: string
   error?: string

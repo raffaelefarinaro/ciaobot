@@ -937,7 +937,13 @@ def repair_workspace_health(config: Any) -> dict:
         for asset_dir in ("subagents", "commands"):
             (root / asset_dir).mkdir(parents=True, exist_ok=True)
         merged_agents_guide = _merge_agents_into_claude(root) or merged_agents_guide
-        sync_workspace_skills(root, refresh_upstream=False)
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        sync_workspace_skills(
+            root,
+            refresh_upstream=False,
+            gws_profile=workspace_gws_profile(config, ws_name),
+        )
     health = workspace_health(config)
     if merged_agents_guide:
         health["merged_agents_guide"] = True

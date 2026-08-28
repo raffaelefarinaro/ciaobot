@@ -32,6 +32,7 @@ queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -70,6 +71,18 @@ _DESTINATION_RE = re.compile(
 )
 
 _IDX_TAG_RE = re.compile(r"\s*\[idx\s*=\s*[\d,\s]+\]\s*$")
+
+
+def _one_line(value: str) -> str:
+    """Collapse every whitespace run (newlines included) into a single space.
+
+    The proposals queue is line-oriented Markdown: one bullet is one line. A
+    field carrying an embedded newline would otherwise split into a truncated
+    bullet plus a continuation the parser reads as its own spurious proposal,
+    and the original value would never appear as one parsed bullet, so
+    re-filing it would dodge the text dedupe.
+    """
+    return " ".join(value.split())
 
 
 def _peel_trailing_metadata(text: str) -> tuple[str, str, str]:
@@ -111,8 +124,15 @@ class MemoryProposal:
         # Deliberately total: an unknown target is written through rather than
         # raising, so one odd proposal cannot fail a whole archive batch.
         target = "profile" if self.target == "user" else self.target
-        head = f"[{target} {self.payload}]" if self.payload else f"[{target}]"
-        return f"- {head} {self.text}  _(from: {self.source_section})_"
+        # Every field is forced onto one line and kept clear of the delimiter
+        # that closes its own slot: a `]` inside the payload would end the
+        # destination head early, and a `)` inside the source would break the
+        # `_(from: ...)_` tail so the whole bullet stops parsing — invisible
+        # to the review UI and to dedupe alike.
+        payload = _one_line(self.payload).replace("]", "")
+        source = _one_line(self.source_section).replace(")", "")
+        head = f"[{target} {payload}]" if payload else f"[{target}]"
+        return f"- {head} {_one_line(self.text)}  _(from: {source})_"
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────
@@ -481,8 +501,11 @@ def append_proposals(
     else:
         existing = _STUB_HEADER
 
-    already = _existing_proposal_texts(existing)
-    fresh = [p for p in proposals if p.text.strip() not in already]
+    already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
+    # Compare the text exactly as ``as_bullet`` will write it, or a proposal
+    # whose text is only whitespace-different from a queued/dismissed one
+    # slips past dedupe and lands as a visually identical duplicate row.
+    fresh = [p for p in proposals if _one_line(p.text) not in already]
     if not fresh:
         return None
 
@@ -508,6 +531,89 @@ def _existing_proposal_texts(file_text: str) -> set[str]:
     return out
 
 
+_DISMISSED_LOG_SUFFIX = ".dismissed.jsonl"
+_DISMISSED_LOG_LEGACY_SUFFIXES = (".dismissed.log",)
+
+
+def dismissed_log_path(proposals_path: Path) -> Path:
+    """Sidecar that holds the texts of already-decided proposals.
+
+    ``.jsonl`` rather than ``.log`` because setup writes ``*.log`` into the
+    workspace gitignore: the history only prevents re-filing while it stays
+    put, so it must be tracked and sync like the queue itself.
+    """
+    return proposals_path.with_suffix(_DISMISSED_LOG_SUFFIX)
+
+
+def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+    """Record a decided proposal so the queue stops re-asking about it.
+
+    ``append_proposals`` dedupes against bullets still in the queue file, so
+    removing a dismissed row erases the only evidence of the decision: the
+    next curator pass that re-reads the same transcript would re-file the
+    fact verbatim. The decision therefore has to outlive the row itself, in
+    a sidecar this module owns rather than in the outcomes ledger (which
+    counts by kind and is trimmed).
+
+    Accepted rows need the same treatment (``record_decision``): the nightly
+    curator dedupes against the live queue and this sidecar, never against
+    the promoted destination, so a promotion must record the text too or the
+    same fact comes back the next time the transcript is re-read.
+    """
+    return _record_decision(proposals_path, text=text, kind=kind, key="dismissed_at")
+
+
+def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+    """Record an accepted proposal in the same decision history.
+
+    Same sidecar and the same reason as :func:`record_dismissal`: the dedupe
+    in ``append_proposals`` reads only the queue file and this log, never the
+    region/doc the promotion wrote to, so without this entry the curator
+    re-queues the accepted fact on its next pass over the same transcript.
+    Mirrors the CLI's promote-then-dismiss flow, which records the text for
+    every removal regardless of the outcome action.
+    """
+    return _record_decision(proposals_path, text=text, kind=kind, key="promoted_at")
+
+
+def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    log_path = dismissed_log_path(proposals_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        key: datetime.now(UTC).isoformat(timespec="seconds"),
+        "kind": kind,
+        "text": cleaned,
+    }
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return True
+
+
+def _dismissed_texts(proposals_path: Path) -> set[str]:
+    """Texts of previously decided proposals, from the sidecar log."""
+    out: set[str] = set()
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            text = str(entry.get("text", "")).strip()
+            if text:
+                out.add(text)
+    return out
+
+
 _STUB_HEADER = (
     "---\n"
     "tags: [ciao, memory, proposals]\n"
@@ -518,7 +624,8 @@ _STUB_HEADER = (
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
-    "first, then dismiss with `ciao memory-proposal-dismiss <text>`); "
+    "first, then dismiss with `ciao memory-proposal-dismiss <text> "
+    "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
     "`Workspace/Learnings.md`; `[review]` has no known destination yet — "
@@ -710,25 +817,26 @@ def list_proposals(
     return rows
 
 
-def dismiss_proposal_by_substring(
+def remove_proposal_by_substring(
     proposals_path: Path,
     needle: str,
-) -> bool:
+) -> tuple[str, str] | None:
     """Remove the single proposal whose bullet matches ``needle``.
 
     Matches a unique substring case-insensitively across the pending bullets
-    (the same contract the removed MCP resolve tool used). Returns True when
-    exactly one proposal was removed, False when the file is missing or no
-    match exists. An ambiguous match (more than one) is left unresolved and
-    returns False so the caller can ask for a longer substring.
+    (the same contract the removed MCP resolve tool used). Returns the removed
+    bullet's ``(kind, text)`` so the caller can record the decision, or None
+    when the file is missing or no match exists. An ambiguous match (more
+    than one) is left unresolved and returns None so the caller can ask for a
+    longer substring.
     """
     from ciao.proposal_kinds import parse_bullet
 
     if not proposals_path.exists():
-        return False
+        return None
     needle = needle.strip()
     if not needle:
-        return False
+        return None
     lines = proposals_path.read_text(encoding="utf-8").splitlines()
     candidates: list[int] = []
     for index, line in enumerate(lines):
@@ -737,7 +845,22 @@ def dismiss_proposal_by_substring(
         if needle.casefold() in line.casefold():
             candidates.append(index)
     if len(candidates) != 1:
-        return False
+        return None
+    bullet = parse_bullet(lines[candidates[0]])
+    if bullet is None:
+        return None
     del lines[candidates[0]]
     proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return True
+    return bullet.kind, bullet.text
+
+
+def dismiss_proposal_by_substring(
+    proposals_path: Path,
+    needle: str,
+) -> bool:
+    """Remove one matching proposal, answering in booleans.
+
+    Thin view over :func:`remove_proposal_by_substring` for callers that only
+    need to know whether anything was removed.
+    """
+    return remove_proposal_by_substring(proposals_path, needle) is not None

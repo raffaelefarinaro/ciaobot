@@ -966,6 +966,18 @@ class CiaoMcpService:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
+        @tool(name="gws_status", annotations=_READ, structured_output=True)
+        async def gws_status() -> dict[str, Any]:
+            """Report whether the active workspace's Google Workspace account is
+            connected and its token is valid.
+
+            Returns the linked profile name, whether credentials are present,
+            the last health-monitor token reading, and whether a re-login is
+            needed. Read-only: never runs ``gws auth status``. Use this before
+            promising a Google call will work, and to tell the user their Google
+            login has expired."""
+            return await self._invoke("gws_status", lambda cp, p: cp.gws_status(p))
+
         # vault_index_refresh -> `ciao index`; vault_lint -> `ciao lint`.
 
         @tool(name="projects_list", annotations=_READ, structured_output=True)
@@ -1772,7 +1784,7 @@ class CiaoMcpService:
         # method remains for the CLI skill path.
 
         # agent_context_get / workspace_health_* -> `ciao health get|fix`;
-        # skills_list -> `ciao skills list`; skills_sync -> `ciao skills-sync`.
+        # skills_list -> `ciao skills list`; sync_skills -> `ciao sync-skills`.
         # local_session_* (status/preflight/handback/resync) are dropped: shell
         # agents commit/push with git directly, and the PWA "Sync to Remote"
         # feature drives the control plane through its own REST route.

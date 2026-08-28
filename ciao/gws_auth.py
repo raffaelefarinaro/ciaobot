@@ -26,6 +26,7 @@ Security invariants (see issue #145):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Workspace services gws supports, so the in-process re-login flow can mint
 # tokens that cover any feature the user turns on later (Forms, Contacts, etc.)
 # without a re-consent round-trip. Keep this list in sync with
-# `FULL_SCOPES` in `scripts/gws-auth-helper.py` (both ciao and ciaobot copies).
+# `FULL_SCOPES` in the old `scripts/gws-auth-helper.py` (now `ciao/gws_auth_helper.py`).
 # Extra/enterprise services (admin-reports, keep, classroom, chat, meet) are
 # omitted because they need admin grants or extra API enablement; pass a
 # custom scope set to `GwsReloginManager.start` when one is required.
@@ -72,7 +73,7 @@ _WORK_SCOPES = _PERSONAL_SCOPES
 
 # These names are positional commands to ``gws``.  Profile slugs using one of
 # them would be indistinguishable from the service argument in
-# ``scripts/gws-profile.sh <profile> <service> ...``.
+# ``ciao gws <profile> <service> ...``.
 GWS_SERVICE_NAMES = frozenset(
     {
         "gmail",
@@ -95,6 +96,11 @@ _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
 _KEYRING_BANNER = re.compile(r"^\s*Using keyring backend:.*$", re.MULTILINE)
 
 HEALTH_CACHE_NAME = "gws_health.json"
+
+
+def fingerprint(value: str) -> str:
+    """Short irreversible digest so client_secret.json contents never hit stdout."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 # ── Path + client_secret helpers ─────────────────────────────────────────
@@ -217,6 +223,46 @@ def known_profiles(config) -> list[str]:
     return names
 
 
+def workspace_gws_profile(config, workspace_name: str | None) -> str:
+    """The Google account a workspace actually uses, or "" when none is linked.
+
+    An explicit per-workspace link and the operator-level default both only
+    count when they name an account that actually exists: pointing a chat at a
+    credential directory nobody ever created just produces confusing auth
+    errors mid-task. The explicit link is validated against the same
+    ``known_profiles()`` set as the default, because on an install without a
+    persisted registry the bootstrap registry assigns ``gws_profile``
+    synthetically (e.g. ``"personal"``) even before any account is connected.
+    A workspace with no resolvable account gets "" — which is exactly the
+    "no profile connected to this workspace" case skill sync must recognise.
+    """
+    if not config:
+        return ""
+    known: set[str] | None = None
+
+    def _known() -> set[str]:
+        nonlocal known
+        if known is None:
+            try:
+                known = set(known_profiles(config))
+            except Exception:
+                known = set()
+        return known
+
+    workspace_config = getattr(config, "workspace", lambda _name: None)(workspace_name)
+    explicit = str(getattr(workspace_config, "gws_profile", "") or "")
+    if explicit and explicit in _known():
+        return explicit
+    if explicit:
+        # A synthetic or stale explicit link (no account actually exists).
+        # Fall through to the default rather than treating it as connected.
+        pass
+    default = getattr(config, "gws_default_profile", "")
+    if default and default in _known():
+        return default
+    return ""
+
+
 def load_client_secret(config_dir: Path) -> dict[str, Any]:
     """Return the ``installed``/``web`` section of a profile's client secret.
 
@@ -330,6 +376,10 @@ def exchange_code(
     Blocking (uses ``urllib``); call from a worker thread. Raises
     :class:`ValueError` with a secret-free message on failure. The returned
     dict is the raw token response and MUST NOT be logged.
+
+    The socket timeout matters: the exchange runs inside the single-threaded
+    callback server's ``do_GET``, so an unbounded request would hang the
+    listener and keep ``shutdown()`` from ever returning, leaking the socket.
     """
     data = urllib.parse.urlencode(
         {
@@ -346,7 +396,7 @@ def exchange_code(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
             return payload
     except urllib.error.HTTPError as exc:
@@ -535,10 +585,6 @@ def exchange_and_store(
 # ── Token health (cheap ``auth status`` ping) ─────────────────────────────
 
 
-def wrapper_path(config) -> Path:
-    return Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-
-
 def auth_status(
     config,
     profile: str,
@@ -546,7 +592,11 @@ def auth_status(
     timeout: float = 30.0,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> dict[str, Any]:
-    """Run ``scripts/gws-profile.sh <profile> auth status`` and parse the JSON.
+    """Run ``gws auth status`` for a profile and parse the JSON.
+
+    Computes the profile's environment in-process and invokes ``gws`` directly
+    (no bash wrapper dependency), so the check works on an installed app where
+    ``scripts/gws-profile.sh`` does not ship.
 
     Returns a dict with ``available`` (whether the check could run at all) and,
     when available, ``token_valid`` / ``token_error`` / ``has_refresh_token``.
@@ -554,17 +604,16 @@ def auth_status(
     """
     from ciao.tool_path import login_shell_path, resolve_tool
 
-    script = wrapper_path(config)
-    if not script.is_file():
-        return {"available": False, "reason": "wrapper script not found"}
     if not resolve_tool("gws"):
         return {"available": False, "reason": "gws CLI not installed"}
 
-    env = dict(os.environ)
+    env = _profile_env_for_status(config, profile)
+    if env is None:
+        return {"available": False, "reason": "invalid profile"}
     env["PATH"] = login_shell_path()
     try:
         result = runner(
-            ["bash", str(script), profile, "auth", "status"],
+            ["gws", "auth", "status"],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -590,6 +639,20 @@ def auth_status(
         "token_error": str(payload.get("token_error") or ""),
         "has_refresh_token": bool(payload.get("has_refresh_token")),
     }
+
+
+def _profile_env_for_status(config, profile: str) -> dict[str, str] | None:
+    """Environment for a profile-aware ``gws`` status check (or None if invalid)."""
+    config_dir = profile_config_dir(config, profile)
+    if config_dir is None:
+        return None
+    env = dict(os.environ)
+    env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
+    # The workspace .env stores GOOGLE_APPLICATION_CREDENTIALS as a base64 string
+    # meant for the BigQuery runner; gws expects a file path and must use its own
+    # OAuth token cache, not a service account.
+    env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    return env
 
 
 def read_health_cache(runtime_root: Path) -> dict[str, dict[str, Any]]:
@@ -831,14 +894,22 @@ class GwsReloginManager:
     def start(self, profile: str) -> dict[str, Any]:
         """Begin a re-login: bind a loopback listener and return the consent URL.
 
-        Raises :class:`ValueError` (secret-free) if the profile is unknown or
-        has no ``client_secret.json``.
+        Raises :class:`ValueError` (secret-free) if the profile is unknown,
+        has no ``client_secret.json``, or uses a *web* OAuth client — a web
+        client requires an exact authorized redirect URI, so the random-port
+        loopback redirect would be rejected by Google. That check is enforced
+        here, not only in the UI, so direct API callers get the same gate.
         """
         if profile not in known_profiles(self._config):
             raise ValueError(f"Invalid profile: {profile}")
         config_dir = profile_config_dir(self._config, profile)
         if config_dir is None:
             raise ValueError("Could not determine config directory")
+        if not client_uses_loopback(config_dir):
+            raise ValueError(
+                "This OAuth client is a web app and does not support one-click "
+                "sign-in; use manual connect (paste the authorization code)."
+            )
         installed = load_client_secret(config_dir)
         client_id = installed.get("client_id")
         if not client_id:
@@ -925,6 +996,15 @@ class GwsReloginManager:
         session = self._sessions.pop(profile, None)
         if session is None:
             return False
+        # Invalidate BEFORE tearing the listener down, exactly as the timeout
+        # path does: `shutdown()` lets an in-flight `do_GET` run to completion,
+        # so a callback that started before this cancel would otherwise pass
+        # the pending check in `_finish` and still exchange the code + write
+        # credentials for a session the operator just cancelled.
+        if session.status == "pending":
+            session.status = "error"
+            session.error = "cancelled"
+            session._done.set()
         self._shutdown_server(session)
         return True
 

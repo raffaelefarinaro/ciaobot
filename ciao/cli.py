@@ -17,11 +17,11 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, package_smoke, public_release, release
+from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 
@@ -847,7 +847,11 @@ def setup_workspace(
         # wrong — it just had not synced yet. Local only: no upstream refresh, so
         # setup still does not touch the network.
         try:
-            sync_workspace_skills(asset_root, refresh_upstream=False)
+            sync_workspace_skills(
+                asset_root,
+                refresh_upstream=False,
+                workspace_name=_name or None,
+            )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
 
@@ -1426,14 +1430,40 @@ def _print_link_migration_skip(summary: dict) -> int:
     return 1
 
 
+def _enclosing_vault_root(vault_root: Path) -> Path | None:
+    """The configured vault, when ``vault_root`` is a directory *inside* it.
+
+    A workspace subtree looks enough like a vault to run on — it has notes and
+    folders — but it is not one, and the migration has no way to notice. Refs
+    resolve against a filename index built from the root it is handed, so
+    pointing it at `memory-vault/work` makes every link into the vault's shared
+    `People/` and root notes unresolvable. Those get converted anyway, to a
+    destination relative to a root that does not contain them, and reported as
+    links that were already dead — so the run both corrupts working links and
+    describes the corruption as pre-existing.
+    """
+    configured = _resolve_vault_root(None)
+    if not configured.is_dir() or vault_root == configured:
+        return None
+    return configured if configured in vault_root.parents else None
+
+
 def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     """Convert a vault's `[[wikilinks]]` to relative markdown links.
 
     Dry-run by default, like ``vault-migrate``: this rewrites the prose of the
-    user's own notes, so applying is opt-in. Two extra rails, because unlike a
+    user's own notes, so applying is opt-in. Three extra rails, because unlike a
     frontmatter type swap this touches every line — it refuses on an existing
-    receipt (whose reverse map a second pass would overwrite) and on a vault with
-    uncommitted changes (so `git checkout` stays a working undo).
+    receipt (whose reverse map a second pass would overwrite), on a vault with
+    uncommitted changes (so `git checkout` stays a working undo), and on a root
+    nested inside the configured vault.
+
+    The nesting rail gates the *preview* too, unlike the other two. They protect
+    a write, so gating the dry run would have meant reaching for `--force` just
+    to look. This one is different: a too-narrow root does not make the write
+    unsafe and the preview fine, it makes the preview itself wrong — working
+    links are listed as dead — so a report nobody should act on is not worth
+    printing.
     """
     from ciao.vault_migrate_links import migrate_links
 
@@ -1441,6 +1471,21 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if not vault_root.is_dir():
         print(
             f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+
+    enclosing = _enclosing_vault_root(vault_root)
+    if enclosing is not None and not args.force:
+        print(
+            f"`{vault_root}` is a directory inside the vault at `{enclosing}`, "
+            "not a vault of its own. Refs resolve against the root passed here, "
+            "so every link to a note outside it would be reported as dead and "
+            "rewritten to a path that resolves nowhere.\n"
+            "Re-run without `--vault-root` to convert the whole vault. The "
+            "receipt is per install, so a partial run would also mark the vault "
+            "migrated and stop the app from offering the rest.\n"
+            "Pass `--force` if you really mean this root.",
             file=sys.stderr,
         )
         return 1
@@ -1482,9 +1527,16 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
 
     if summary["unresolved"]:
+        # Deliberately not "these were already dead wikilinks". Nothing here
+        # establishes that: unresolved means the ref matched no note *under the
+        # root this run was given*, which is also what a perfectly good link
+        # looks like when the root is too narrow. Asserting pre-existing rot let
+        # the tool label its own broken output as damage it had found.
         print(
-            "\nConverted but pointing at nothing — these were already dead "
-            "wikilinks and now report as broken markdown links:"
+            f"\nConverted but resolving to nothing — no note under `{vault_root}` "
+            "matches these refs, so they now report as broken markdown links. "
+            "A link that works in Obsidian and appears here means the root is "
+            "too narrow, not that the link was dead:"
         )
         for item in summary["unresolved"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}]]")
@@ -1553,9 +1605,20 @@ def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
         print("Nothing to restore.")
 
     if summary["failed"]:
-        print("\nLeft untouched (changed since the migration):", file=sys.stderr)
+        # Not "changed since the migration" unconditionally: a wrong root fails
+        # every file with a read error, and naming a cause we have not
+        # established sent the reader looking for edits nobody made.
+        print("\nLeft untouched:", file=sys.stderr)
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+        recorded = summary.get("receipt_vault_root", "")
+        if recorded and recorded != str(vault_root) and not summary["restored"]:
+            print(
+                f"\nNothing was restored, and the migration ran against "
+                f"`{recorded}`. The receipt's paths are relative to that root — "
+                f"re-run with `--vault-root {recorded}`.",
+                file=sys.stderr,
+            )
 
     if not args.apply and summary["restored"]:
         print("\nRe-run with --apply to write these changes.")
@@ -1941,6 +2004,138 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     }.get(report["status"], 2)
 
 
+def _print_vault_relocate_result(payload: dict[str, Any], *, applied: bool) -> None:
+    verb = "Moved" if applied and payload.get("status") == "relocated" else "Would move"
+    print(f"{payload.get('workspace', '')}: {payload.get('source', '')} -> {payload.get('destination', '')}")
+    entries = payload.get("entries") or []
+    moves = [e for e in entries if e.get("action") == "move"]
+    skips = [e for e in entries if e.get("action") == "skip"]
+    unclassified = [e for e in entries if e.get("action") == "unclassified"]
+    if payload.get("whole_directory"):
+        print(f"{verb} the whole vault directory.")
+    elif moves:
+        print(f"{verb} {len(moves)} item(s):")
+        for entry in moves:
+            print(f"  {entry['name']}")
+    if skips:
+        print(f"Left in place ({len(skips)}):")
+        for entry in skips:
+            print(f"  {entry['name']} — {entry['reason']}")
+    if unclassified:
+        print("\nCould not classify — resolve by hand, or ask the operator only about these:")
+        for entry in unclassified:
+            print(f"  {entry['name']} — {entry['reason']}")
+    if payload.get("refusals"):
+        print("\nRefused:", file=sys.stderr)
+        for reason in payload["refusals"]:
+            print(f"  {reason}", file=sys.stderr)
+    if applied and payload.get("status") == "relocated":
+        print(f"\nReceipt: {payload.get('receipt_path', '')}")
+        print(f"Reverse it exactly with `ciao vault-relocate {payload.get('workspace', '')} --undo`.")
+        if payload.get("restart_note"):
+            print(f"\nRestart required: {payload['restart_note']}")
+    elif not applied and not payload.get("refused") and (moves or payload.get("whole_directory")):
+        print("\nRe-run with --apply to write this change.")
+
+
+def _vault_relocate_command(args: argparse.Namespace) -> int:
+    """Move one workspace's vault to its standard folder.
+
+    Dry-run by default: prints the plan and changes nothing. --apply moves the
+    vault and repoints that workspace's registry entry. --undo reverses the
+    last completed relocation from its receipt.
+
+    Distinct from `workspace-reroot`, which migrates EVERY registered
+    workspace into its own agent root in one shot. This fixes one workspace
+    whose vault sits at a non-standard path — the case the "vault is not in
+    its standard folder" housekeeping card flags — and touches only that
+    workspace. It moves this workspace's own content automatically and
+    refuses on anything it cannot classify (a symlink, most often) rather than
+    guessing, so the operator or an agent only has to resolve those, not the
+    move as a whole.
+    """
+    from ciao import vault_relocate
+    from ciao.config import CiaoConfig
+
+    workspace = Path(args.workspace or os.environ.get("CIAO_WORKSPACE") or ".").expanduser().resolve()
+    config_source = {}
+    dotenv_path = workspace / ".env"
+    if dotenv_path.is_file():
+        from dotenv import dotenv_values
+
+        config_source.update(
+            {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
+        )
+    if args.workspace is None:
+        config_source.update(os.environ)
+    # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
+    # ambient-env base: an explicit --workspace must win over CIAO_WORKSPACE the
+    # same way `_workspace_reroot_command` insists on, or a relative
+    # CIAO_RUNTIME_ROOT (or the bare ".runtime" default) would resolve against
+    # the wrong install when the two disagree. Still honors CIAO_RUNTIME_ROOT
+    # when --runtime-root is not passed, matching the CLI help text.
+    if args.runtime_root is not None:
+        runtime = Path(args.runtime_root).expanduser()
+    else:
+        env_runtime = config_source.get("CIAO_RUNTIME_ROOT", "").strip()
+        runtime = Path(env_runtime).expanduser() if env_runtime else Path(".runtime")
+    if not runtime.is_absolute():
+        runtime = workspace / runtime
+    runtime = runtime.resolve()
+    effective_source = {
+        **config_source,
+        "CIAO_WORKSPACE": str(workspace),
+        # Must match `runtime` exactly: vault_relocate reads/writes
+        # workspaces.json under `runtime`, and if CiaoConfig loaded its own
+        # `self.workspaces` from a different runtime root the two would
+        # silently disagree about what is registered.
+        "CIAO_RUNTIME_ROOT": str(runtime),
+        "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
+    }
+    config = CiaoConfig.from_env(effective_source)
+    # Whether workspaces.json is what `config` actually sourced its workspaces
+    # from, per CiaoConfig.from_env's own precedence — read off the SAME
+    # merged environment that built `config` (target .env, then ambient env
+    # only when --workspace was not explicit), not the raw process
+    # environment, which can disagree with it when CIAO_WORKSPACES is set
+    # only in the target install's .env.
+    registry_authoritative = not effective_source.get("CIAO_WORKSPACES", "").strip()
+
+    if args.name not in set(config.workspace_names()):
+        print(f"No registered workspace named '{args.name}'.", file=sys.stderr)
+        return 1
+
+    if args.undo:
+        result = vault_relocate.undo(
+            config, args.name, runtime, registry_authoritative=registry_authoritative
+        )
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
+
+    plan_result = vault_relocate.plan(config, args.name)
+
+    if args.apply:
+        result = vault_relocate.apply(
+            config,
+            args.name,
+            runtime,
+            plan_result=plan_result,
+            registry_authoritative=registry_authoritative,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            _print_vault_relocate_result(result, applied=True)
+        return 0 if result["status"] == "relocated" else 1
+
+    payload = plan_result.as_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        _print_vault_relocate_result(payload, applied=False)
+    return 1 if payload["refused"] else 0
+
+
 def _workspace_reroot_command(args: argparse.Namespace) -> int:
     """Plan, rehearse, apply, or undo the per-workspace agent-root migration.
 
@@ -2212,8 +2407,16 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         for finding in report["over_cap"]:
             where = f"[{finding['workspace']}] " if finding.get("workspace") else ""
             print(
-                f"  {where}{finding['region']} over cap: "
+                f"  {where}ciao:{finding['region']} over cap: "
                 f"{finding['used']}/{finding['limit']} chars"
+            )
+        if report["over_cap"]:
+            print(
+                "  Fix: open a chat in that workspace and ask the agent to "
+                'consolidate the region (e.g. "consolidate my ciao:memory '
+                'region under its cap"), or raise CIAO_MEMORY_CHAR_LIMIT / '
+                "CIAO_USER_CHAR_LIMIT in .env and restart Ciaobot if every "
+                "entry is high-signal."
             )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
@@ -2251,7 +2454,33 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Shared workspace/vault resolution for the memory-proposal commands."""
+    """Shared workspace/vault resolution for the memory-proposal commands.
+
+    A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
+    name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
+    shared vault on layouts that have not re-rooted yet. Appending to that
+    raw value would file every workspace's proposals into one stray queue
+    the review UI never reads, so an active workspace name is resolved
+    through the workspace registry instead — the same authority the PWA's
+    ``workspace_vault_root`` reads with. Explicit arguments still win for
+    manual invocations.
+    """
+    active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
+        if active:
+            try:
+                from ciao.config import CiaoConfig
+
+                # A read-only resolution must not mint a session secret just
+                # because the CLI runs outside the server env (same rule as
+                # the memory-audit command).
+                env_source = dict(os.environ)
+                env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+                config = CiaoConfig.from_env(env_source)
+                if config.workspace(active) is not None:
+                    return config.workspace_root, Path(config.workspace_vault_root(active))
+            except Exception:  # noqa: BLE001 — fall through to the legacy path
+                pass
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
     vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
@@ -2286,6 +2515,90 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _memory_proposal_add_command(args: argparse.Namespace) -> int:
+    """File a fact into a workspace's memory-proposal review queue.
+
+    The nightly curator discovers durable facts by reading archived chats that
+    never grew a ``## Session insights`` section, so archive-time routing never
+    saw them. Filing here puts the fact in the machine queue (``ciao
+    memory-proposals``, the PWA review panel) where it can be promoted or
+    dismissed like any queued item, instead of surviving only as prose in one
+    nightly report. Re-filing an identical fact is a no-op; the queue dedupes
+    by text.
+    """
+    from ciao.memory_proposals import DESTINATIONS, MemoryProposal, append_proposals
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    text_file = (getattr(args, "text_file", "") or "").strip()
+    text = (args.text or "").strip()
+    if text and text_file:
+        print(
+            "pass the fact either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        fact_path = Path(text_file)
+        try:
+            text = fact_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
+    if not text:
+        print("a proposal text is required", file=sys.stderr)
+        return 2
+    # One bullet = one line: the queue file is line-oriented Markdown, so an
+    # embedded newline would parse as a truncated bullet, strand the
+    # continuation lines, and dodge text dedupe. Flatten every whitespace run
+    # (newlines included) into a single space.
+    text = " ".join(text.split())
+    kind = args.kind.strip().lower()
+    if kind not in DESTINATIONS:
+        print(
+            f"unknown kind {kind!r}; expected one of: {', '.join(DESTINATIONS)}",
+            file=sys.stderr,
+        )
+        return 2
+    payload = args.payload.strip()
+    if kind in {"people", "project"} and not payload:
+        # The PWA accept handlers refuse these bullets ("the bullet names no
+        # person" / "...no project doc"), so queueing one would create a row
+        # nobody can ever promote.
+        print(
+            f"kind {kind!r} requires a --payload naming its target "
+            "(person name for people, doc path for project)",
+            file=sys.stderr,
+        )
+        return 2
+    proposal = MemoryProposal(
+        target=kind,
+        text=text,
+        source_section=args.source.strip() or "curation",
+        payload=payload,
+    )
+    path = append_proposals([proposal], vault)
+    if args.json:
+        json.dump(
+            {
+                "queued": path is not None,
+                "duplicate": path is None,
+                "path": str(path) if path else None,
+                "text": text,
+                # argparse supplies a Path when --workspace is explicit, and
+                # json.dump cannot serialize one; report the resolved root.
+                "workspace": str(workspace),
+            },
+            sys.stdout,
+            ensure_ascii=False,
+        )
+        sys.stdout.write("\n")
+    elif path is None:
+        print(f"Already in the queue; nothing added for {text!r}.")
+    else:
+        print(f"Queued [{kind}] proposal in {path}.")
+    return 0
+
+
 def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     """Dismiss (delete) one memory proposal from the review queue.
 
@@ -2295,7 +2608,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
-    from ciao.memory_proposals import dismiss_proposal_by_substring
+    from ciao import proposal_outcomes
+    from ciao.memory_proposals import record_dismissal, remove_proposal_by_substring
 
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
@@ -2303,19 +2617,52 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
-    removed = dismiss_proposal_by_substring(path, needle)
-    if not removed:
+    removed = remove_proposal_by_substring(path, needle)
+    if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
             "(the text may be ambiguous or absent).",
             file=sys.stderr,
         )
         return 1
+    kind, removed_text = removed
+    # Preserve what was decided, not just that something was: append-time
+    # dedupe consults this history, so without it the next curator pass that
+    # re-reads the same transcript re-files the fact the user just rejected.
+    record_dismissal(path, text=removed_text, kind=kind)
+    # Pin the outcome log to the same .runtime the server uses before
+    # recording: a CLI run from an arbitrary cwd must not scatter events into
+    # a .runtime beside the shell. Precedence: explicit --runtime-root, then
+    # CIAO_RUNTIME_ROOT, then this workspace's own .runtime.
+    proposal_outcomes.configure(
+        _resolve_runtime_root(
+            args.runtime_root
+            or os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+            or workspace / ".runtime"
+        )
+    )
+    # The curator files a fact first and dismisses second, so that flow is a
+    # PROMOTION; only a bare rejection is a dismissal. The logical workspace
+    # name rides in CIAO_ACTIVE_WORKSPACE on scheduled runs (same convention
+    # as os-audit --workspace-name); a manual run without it lands in the
+    # shared bucket rather than recording a filesystem path as a name.
+    # Rehome rows are vault-hygiene decisions, not extraction outcomes.
+    if proposal_outcomes.is_extraction_kind(kind):
+        proposal_outcomes.record(
+            kind=kind,
+            action="promoted" if args.promoted else "dismissed",
+            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+            via="agent",
+        )
     if args.json:
-        json.dump({"removed": True, "text": needle, "workspace": args.workspace or ""}, sys.stdout)
+        json.dump(
+            {"removed": True, "text": needle, "workspace": str(workspace)},
+            sys.stdout,
+        )
         sys.stdout.write("\n")
     else:
-        print(f"Dismissed memory proposal matching {needle!r}.")
+        verb = "Promoted" if args.promoted else "Dismissed"
+        print(f"{verb} memory proposal matching {needle!r}.")
     return 0
 
 
@@ -2461,12 +2808,6 @@ def _health_command(args: argparse.Namespace) -> int:
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
-
-
-def _skills_sync_command(args: argparse.Namespace) -> int:
-    from ciao import skills_sync
-
-    return skills_sync.main(args.args)
 
 
 def _sync_skills_command(args: argparse.Namespace) -> int:
@@ -3295,6 +3636,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
 
+    relocate_parser = subparsers.add_parser(
+        "vault-relocate",
+        help="Move one workspace's vault to its standard folder.",
+        description=(
+            "Fix one workspace whose vault sits at a non-standard path — the "
+            "case the 'vault is not in its standard folder' housekeeping card "
+            "flags — by moving it to its standard location and repointing the "
+            "registry. Prints the plan by default and changes nothing; --apply "
+            "performs the move; --undo reverses the last completed relocation "
+            "from its receipt. Distinct from workspace-reroot, which migrates "
+            "every registered workspace into its own agent root at once — this "
+            "touches only the named workspace."
+        ),
+    )
+    relocate_parser.add_argument("name", help="The registered workspace name.")
+    relocate_parser.add_argument("--workspace", type=Path, default=None, help="Install root.")
+    relocate_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the relocation receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    relocate_parser.add_argument("--apply", action="store_true", help="Perform the move.")
+    relocate_parser.add_argument("--undo", action="store_true", help="Reverse a completed relocation.")
+    relocate_parser.add_argument("--json", action="store_true", help="Output the raw result as JSON.")
+    relocate_parser.set_defaults(func=_vault_relocate_command)
+
     census_parser = subparsers.add_parser(
         "workspace-census",
         help="Survey a vault root into migration fixture shapes.",
@@ -3389,6 +3760,74 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
 
+    memory_proposal_add_parser = subparsers.add_parser(
+        "memory-proposal-add",
+        help="File a fact into a workspace's memory-proposal review queue.",
+        description=(
+            "Appends one destination-addressed fact to a workspace's "
+            "`Workspace/Memory-Proposals.md`. This is how the nightly curator "
+            "queues a durable fact it discovered by reading a chat that never "
+            "grew a session-insights section, so the fact becomes reviewable "
+            "and promotable like any archive-time proposal. Re-filing "
+            "identical text is a no-op."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="The durable fact to queue. Omit when --text-file supplies it.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--text-file",
+        default="",
+        help=(
+            "Read the fact verbatim from this file instead of the positional "
+            "text. Transcript-derived facts routinely contain $(), backticks, "
+            "or quotes; writing them to a file first keeps the shell from "
+            "interpreting them before the CLI sees them."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--kind",
+        default="memory",
+        help=(
+            "Destination kind: memory, profile, project, people, learnings, "
+            "review. Defaults to memory."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--payload",
+        default="",
+        help=(
+            "Kind payload: person name for people, doc path for project. "
+            "Required for those two kinds."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--source",
+        default="curation",
+        help="Provenance label recorded on the bullet. Defaults to curation.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
+
     memory_proposal_dismiss_parser = subparsers.add_parser(
         "memory-proposal-dismiss",
         help="Dismiss one memory proposal from the review queue.",
@@ -3420,6 +3859,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--promoted",
+        action="store_true",
+        help=(
+            "The fact was already filed into its destination (the "
+            "promote-then-dismiss flow); record the outcome as promoted "
+            "instead of dismissed."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help="Runtime root for the outcome log. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 
@@ -3529,13 +3983,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     label_hygiene_parser.set_defaults(func=_label_hygiene_command)
 
-    skills_sync_parser = subparsers.add_parser(
-        "skills-sync",
-        help="Plan or write the upstream skill update cache.",
-    )
-    skills_sync_parser.add_argument("args", nargs=argparse.REMAINDER)
-    skills_sync_parser.set_defaults(func=_skills_sync_command)
-
     skills_parser = subparsers.add_parser(
         "skills",
         help="Inspect skills (stock, custom, installed) with provider availability.",
@@ -3579,7 +4026,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_skills_parser.add_argument(
         "--skip-upstream",
         action="store_true",
-        help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
+        help="Deprecated: no-op. Skills are local folders under skills/.",
     )
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)
@@ -3605,6 +4052,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scaffold_parser.set_defaults(func=_scaffold_command)
 
+    # Help-only stub: `main()` intercepts `gws` before build_parser() runs, so
+    # this parser is never parsed against. It exists so `ciao --help` still
+    # lists the subcommand; the interception is what makes `ciao gws --version`
+    # reach the real CLI instead of being eaten by argparse. Do not give it a
+    # `func` — nothing can dispatch through it.
+    subparsers.add_parser(
+        "gws",
+        help="Profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).",
+        add_help=False,
+    )
+
+    gws_helper_parser = subparsers.add_parser(
+        "gws-auth-helper",
+        help="Interactive headless GWS OAuth re-auth (replaces scripts/gws-auth-helper.py).",
+    )
+    gws_helper_parser.add_argument("profile", help="GWS profile (Google account name) to authenticate")
+    gws_helper_parser.add_argument(
+        "--redirect-url",
+        help="Full redirect URL from the browser; skip the interactive prompt.",
+    )
+    gws_helper_parser.add_argument(
+        "--scopes",
+        help="Space-separated OAuth scopes to request instead of the full default set.",
+    )
+    gws_helper_parser.set_defaults(func=_gws_auth_helper_command)
+
     return parser
 
 
@@ -3623,6 +4096,16 @@ def _scaffold_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gws_auth_helper_command(args: argparse.Namespace) -> int:
+    from ciao import gws_auth_helper
+
+    argv = [args.profile]
+    if getattr(args, "redirect_url", None):
+        argv += ["--redirect-url", args.redirect_url]
+    if getattr(args, "scopes", None):
+        argv += ["--scopes", args.scopes]
+    return gws_auth_helper.main_entry(argv)
+
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
@@ -3634,6 +4117,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["gws"]:
+        # Passthrough: forward everything (including leading gws options such as
+        # `--version`) untouched, keeping argparse out of the way.
+        return gws_wrapper.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

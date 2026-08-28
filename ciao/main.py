@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -323,8 +322,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # route finished startup phases (sync, vault index, rebuild, ...) into it
     # so the Automation page can show system-task status.
     from ciao import job_runs
+    from ciao import proposal_outcomes
 
     job_runs.configure(config.state_path.parent)
+    proposal_outcomes.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
     # Live job events reach the PWA through the chat manager's event bus, so a
     # surface can show background work as it happens rather than only after it
@@ -335,12 +336,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     async def check_claude_code():
         try:
-            # Use the bundled Claude Code CLI (the same binary the provider
-            # spawns) rather than a bare ``claude`` on PATH: under launchd
-            # PATH omits ~/.local/bin, and the canonical CLI is the SDK's
-            # bundled one anyway.
+            # Prefer the SDK's bundled Claude CLI when present; otherwise fall
+            # back to an external ``claude`` resolved against the login-shell
+            # PATH, since launchd omits ~/.local/bin and other tool dirs.
             from ciao.providers.claude import get_bundled_claude_path
-            cli = get_bundled_claude_path() or shutil.which("claude")
+            from ciao.tool_path import resolve_tool
+            cli = get_bundled_claude_path() or resolve_tool("claude")
             if not cli:
                 tracker.fail(
                     "connect_claude_code",
@@ -464,8 +465,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # stale `.agents/skills` links, reporting 17 tracked deletions for
             # mirrors nothing reads any more.
             targets = config.agent_root_targets()
-            for root, _name in targets:
-                update_skills(str(root))
+            for root, name in targets:
+                update_skills(str(root), workspace_name=name)
             tracker.done("update_skills")
         except Exception:
             tracker.fail("update_skills", "skill install failed")

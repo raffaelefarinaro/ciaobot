@@ -7,14 +7,14 @@ metadata:
 
 # docs +write
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Append text to a document
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" docs +write --document <ID> --text <TEXT>
+ciao gws "$GWS_PROFILE" docs +write --document <ID> --text <TEXT>
 ```
 
 ## Flags
@@ -27,7 +27,7 @@ scripts/gws-profile.sh "$GWS_PROFILE" docs +write --document <ID> --text <TEXT>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" docs +write --document DOC_ID --text 'Hello, world!'
+ciao gws "$GWS_PROFILE" docs +write --document DOC_ID --text 'Hello, world!'
 ```
 
 ## Tips

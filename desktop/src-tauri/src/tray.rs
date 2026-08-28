@@ -206,6 +206,9 @@ pub fn build_menu(
         .build(app)?,
     )?;
     advanced.append(
+        &MenuItemBuilder::with_id("notification-settings", "Notification Settings…").build(app)?,
+    )?;
+    advanced.append(
         &CheckMenuItemBuilder::with_id("start-at-login", "Start at Login")
             .checked(start_at_login)
             .build(app)?,

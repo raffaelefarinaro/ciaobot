@@ -1,0 +1,815 @@
+"""Tests for vocabulary promotion/merge proposals (step 5).
+
+Covers the three cases the plan requires:
+
+* A non-canonical type or emerging tag that crosses the promotion threshold
+  becomes a proposal, not an automatic CANONICAL_TYPES change.
+* A singleton tag with an obvious near-duplicate produces a merge proposal;
+  a singleton with no near-duplicate does not.
+* The hygiene routine still applies alias-target renames (existing step-4
+  behavior) and does not regress when proposals are added — verified via
+  os_audit integration.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from ciao import vault_index as vi
+from ciao.vocabulary_proposals import (
+    generate_vocabulary_proposals,
+    is_near_duplicate,
+)
+
+
+def _write(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def _note_body(*, type_: str = "note", tags: list[str] | None = None, title: str = "Note") -> str:
+    tag_line = ""
+    if tags:
+        tag_line = f"tags: [{', '.join(tags)}]\n"
+    return f"---\ntype: {type_}\n{tag_line}---\n# {title}\n"
+
+
+# ---- is_near_duplicate ----------------------------------------------------
+
+
+def test_is_near_duplicate_shared_prefix_with_separator():
+    # Plan's canonical example: ai-analysis / ai-adoption / ai-practice alongside ai.
+    # A value under a bare parent is always a near-duplicate...
+    assert is_near_duplicate("ai-analysis", "ai") is True
+    assert is_near_duplicate("ai", "ai-analysis") is True
+    # ...and two sibling values merge only when the bare stem is established.
+    assert is_near_duplicate("ai-analysis", "ai-adoption", known_tags={"ai"}) is True
+    assert is_near_duplicate("ai-practice", "ai-analysis", known_tags={"ai"}) is True
+
+
+def test_is_near_duplicate_edit_distance():
+    assert is_near_duplicate("analysis", "analysys") is True  # typo distance 1
+    assert is_near_duplicate("alfa", "alpa") is True  # distance 1
+    # Very different tags are not near-duplicates.
+    assert is_near_duplicate("zebra-unique-xyz", "project") is False
+    assert is_near_duplicate("unrelated", "banana") is False
+
+
+def test_is_near_duplicate_short_tags_need_tighter_distance():
+    # `ai` and `hr` are distance 2 apart, but both are short and unrelated;
+    # an unconditional distance-2 test would propose aliasing every pair of
+    # distinct two-character tags. Short tags get a stricter edit-distance cap.
+    assert is_near_duplicate("ai", "hr") is False
+    # A genuinely longer near-miss still matches: distance 1 on 5+ chars.
+    assert is_near_duplicate("brain", "brsin") is True
+
+
+def test_is_near_duplicate_short_tags_integration(tmp_path: Path):
+    # An established `ai` and a singleton `hr` must NOT produce a merge.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "Hr.md", _note_body(tags=["hr"], title="Hr"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert not any(m["tag"] == "hr" for m in proposals["tag_merges"])
+
+
+def test_is_near_duplicate_identical_is_not_duplicate():
+    assert is_near_duplicate("ai", "ai") is False
+    assert is_near_duplicate("project", "project") is False
+
+
+def test_is_near_duplicate_case_only_variant_is_duplicate():
+    # `ai` and `AI` are the same tag spelled differently; the singleton is a
+    # merge candidate, not a distinct fragmented tag.
+    assert is_near_duplicate("ai", "AI") is True
+    assert is_near_duplicate("AI", "ai") is True
+    assert is_near_duplicate("Project", "project") is True
+
+
+def test_is_near_duplicate_normalized_prefix_is_not_duplicate():
+    # `ai` and `airline` share a normalized prefix but are unrelated; the
+    # bare-prefix branch must not propose aliasing them.
+    assert is_near_duplicate("ai", "airline") is False
+    assert is_near_duplicate("airline", "ai") is False
+
+
+def test_is_near_duplicate_project_namespace():
+    # Two values in the same namespace are near-duplicates ONLY when the bare
+    # stem is itself an established tag (project exists, used > once).
+    assert is_near_duplicate("project/active", "project/draft", known_tags={"project"}) is True
+    assert is_near_duplicate("product/barcode-capture", "product/barcode-scan", known_tags={"product"}) is True
+
+
+def test_is_near_duplicate_namespace_without_established_parent():
+    # project/active vs project/draft share a stem, but if `project` is NOT an
+    # established tag, they are distinct values that coexist — no merge.
+    assert is_near_duplicate("project/active", "project/draft") is False
+    assert is_near_duplicate("project/active", "project/draft", known_tags=set()) is False
+    assert is_near_duplicate("ai-analysis", "ai-adoption") is False
+
+
+def test_namespace_values_without_established_parent_do_not_merge(tmp_path: Path):
+    # project/active and project/draft, neither with an established bare
+    # `project` tag, must NOT produce a merge proposal.
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "A.md", _note_body(tags=["project/active"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["project/draft"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["tag_merges"] == []
+
+
+# ---- Promotion: type crossing threshold produces proposal -------------------
+
+
+def test_type_promotion_at_threshold(tmp_path: Path):
+    # A non-canonical type with 5 uses crosses the default threshold and
+    # becomes a promotion proposal. It must not mutate CANONICAL_TYPES.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(type_="brainstorm", title=f"Note{i}"))
+    before = set(vi.CANONICAL_TYPES)
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert len(proposals["type_promotions"]) == 1
+    promo = proposals["type_promotions"][0]
+    assert promo["type"] == "brainstorm"
+    assert promo["count"] == 5
+    assert promo["suggested"] == ""
+    assert len(promo["paths"]) == 5
+    # Not an automatic canonical change.
+    assert set(vi.CANONICAL_TYPES) == before
+    assert "brainstorm" not in vi.CANONICAL_TYPES
+
+
+def test_type_below_threshold_not_promoted(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(type_="brainstorm", title=f"Note{i}"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["type_promotions"] == []
+
+
+def test_aliased_type_not_promoted(tmp_path: Path):
+    # An aliased type (e.g. doc -> document) has a safe rename target; it
+    # should be handled as drift/rename, not as a promotion proposal.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="doc", title=f"Note{i}"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    # No promotion: drift with suggested target is the low-risk fix.
+    assert proposals["type_promotions"] == []
+    # But vault_index still reports it as drift with alias target.
+    report = vi.vocabulary_report(entries)
+    assert "doc" in report["type_drift"]
+    assert report["type_drift"]["doc"]["suggested"] == "document"
+
+
+def test_tag_promotion_at_threshold(tmp_path: Path):
+    # An emerging tag reaching 5 uses becomes a promotion proposal.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert len(proposals["tag_promotions"]) == 1
+    assert proposals["tag_promotions"][0]["tag"] == "research"
+    assert proposals["tag_promotions"][0]["count"] == 5
+
+
+def test_tag_below_threshold_not_promoted(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(2):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["tag_promotions"] == []
+
+
+def test_tag_promotion_carries_workspaces(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["shared-tag"], title=f"Note{i}"))
+    entries = vi.scan_vault(vault, workspace="personal")
+    # Stamp half the entries as work to verify per-workspace attribution.
+    for e in entries[:3]:
+        e.workspace = "personal"
+    for e in entries[3:]:
+        e.workspace = "work"
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    promo = next(p for p in proposals["tag_promotions"] if p["tag"] == "shared-tag")
+    assert "personal" in promo["workspaces"]
+    assert "work" in promo["workspaces"]
+
+
+# ---- Merge: singleton near-duplicate --------------------------------------
+
+
+def test_singleton_tag_with_near_duplicate_produces_merge(tmp_path: Path):
+    # ai appears 5 times (established), ai-analysis appears once (singleton
+    # near-duplicate) — should produce a merge proposal.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "Singleton.md", _note_body(tags=["ai-analysis"], title="Singleton"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = proposals["tag_merges"]
+    # ai-analysis should be in merges, pointing at ai.
+    match = next((m for m in merges if m["tag"] == "ai-analysis"), None)
+    assert match is not None, f"expected merge for ai-analysis, got {merges}"
+    assert "ai" in match["near_duplicates"]
+
+
+def test_singleton_tag_without_near_duplicate_no_merge(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "Lonely.md", _note_body(tags=["zebra-unique-xyz"], title="Lonely"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = proposals["tag_merges"]
+    assert not any(m["tag"] == "zebra-unique-xyz" for m in merges)
+
+
+def test_singleton_near_duplicate_among_singletons(tmp_path: Path):
+    # Two singletons sharing the bare `ai` stem merge only when `ai` is itself
+    # an ESTABLISHED tag (the plan's canonical example: ai-analysis /
+    # ai-adoption / ai-practice alongside ai). With ai established, both
+    # singleton values alias to it.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "A.md", _note_body(tags=["ai-analysis"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["ai-adoption"], title="B"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = proposals["tag_merges"]
+    assert any(m["tag"] == "ai-analysis" for m in merges)
+    assert any(m["tag"] == "ai-adoption" for m in merges)
+
+
+def test_tag_merge_carries_workspaces(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(tags=["ai"], title=f"Note{i}"))
+    _write(vault / "Singleton.md", _note_body(tags=["ai-analysis"], title="Singleton"))
+    entries = vi.scan_vault(vault, workspace="work")
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    match = next(m for m in proposals["tag_merges"] if m["tag"] == "ai-analysis")
+    assert "work" in match["workspaces"]
+
+
+# ---- os_audit integration ---------------------------------------------------
+
+
+def test_os_audit_vocabulary_proposals_are_informational_not_defects(tmp_path: Path):
+    """Vocabulary proposals must not raise the audit status or defect_count."""
+    from ciao.os_audit import run_os_audit
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    # Vault with a non-canonical type that crosses the threshold (5 uses).
+    # Without proposals this would be 5 frontmatter_errors defects; with the
+    # new section the proposals are informational and must not add to defects.
+    # To isolate, use a clean vault plus vocabulary proposals.
+    for i in range(5):
+        _write(vault / f"Note{i}.md", _note_body(type_="brainstorm", title=f"Note{i}"))
+
+    report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime")
+    vocab = report["vocabulary_proposals"]
+    assert len(vocab["type_promotions"]) == 1
+    assert vocab["type_promotions"][0]["type"] == "brainstorm"
+    # Proposals are informational: they do not raise defect_count beyond the
+    # existing frontmatter_errors those same notes already incur.
+    # The audit status is driven by defects; vocabulary proposals alone must
+    # not turn a clean vault into needs_attention when there are no other defects.
+    # Here the vault DOES have defects (unknown_type frontmatter_errors), so
+    # defect_count includes them, but the proposals add zero on top.
+    assert report["vocabulary_proposals"]["errors"] == []
+    # Verify the markdown renders the section.
+    from ciao.os_audit import format_audit_markdown
+
+    md = format_audit_markdown(report)
+    assert "Vocabulary Proposals" in md
+    assert "brainstorm" in md
+
+
+def test_os_audit_clean_vault_no_proposals_still_healthy(tmp_path: Path):
+    from ciao.memory_tool import ensure_regions
+    from ciao.os_audit import run_os_audit
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    # Empty vault is the canonical "healthy" shape; a non-empty vault without
+    # a search index reports a search_index defect, which would mask the
+    # vocabulary-proposals assertion. The guide must carry its bounded-region
+    # markers or the audit reports marker_errors as defects.
+    report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime")
+    assert report["status"] == "healthy"
+    assert report["vocabulary_proposals"]["type_promotions"] == []
+    assert report["vocabulary_proposals"]["tag_merges"] == []
+
+
+def test_os_audit_alias_rename_still_reported_as_drift_not_promotion(tmp_path: Path):
+    """Aliased types (doc -> document) report as frontmatter_errors/drift
+    and have a safe rename; they must not surface as promotion proposals."""
+    from ciao.os_audit import run_os_audit
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="doc", title=f"Note{i}"))
+
+    report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime")
+    # Aliased types surface as frontmatter_errors (existing step-4 behavior).
+    assert any(e["kind"] == "unknown_type" for e in report["vault_hygiene"]["frontmatter_errors"])
+    # But not as promotion proposals.
+    assert report["vocabulary_proposals"]["type_promotions"] == []
+    # Migration still reports planned renames.
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    summary = migrate_vault_vocabulary(vault, apply=False)
+    assert any(c["from"] == "doc" and c["to"] == "document" for c in summary["planned"])
+
+
+def test_os_audit_vocabulary_scope_workspace_vs_global(tmp_path: Path):
+    from ciao.os_audit import run_os_audit
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    _write(vault / "Note.md", _note_body(type_="note", title="Note"))
+
+    ws_report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime", scope="workspace")
+    assert "vocabulary_proposals" in ws_report
+    gl_report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime", scope="global")
+    assert "vocabulary_proposals" not in gl_report
+
+
+def test_audit_vocabulary_proposals_aggregates_across_workspace_vaults(tmp_path: Path, monkeypatch):
+    """Usage must be counted globally, so a non-canonical type split across
+    two workspace vaults reaches the threshold when summed, and the proposal
+    carries both workspaces."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    personal = tmp_path / "personal" / "memory-vault"
+    work = tmp_path / "work" / "memory-vault"
+    for root in (personal, work):
+        root.mkdir(parents=True)
+    # 3 uses in personal, 3 in work = 6 total, above the default 5 threshold.
+    for i in range(3):
+        _write(personal / f"P{i}.md", _note_body(type_="brainstorm", title=f"P{i}"))
+    for i in range(3):
+        _write(work / f"W{i}.md", _note_body(type_="brainstorm", title=f"W{i}"))
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            return [
+                (personal, "personal", Path("personal") / "memory-vault"),
+                (work, "work", Path("work") / "memory-vault"),
+            ]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    promos = result["type_promotions"]
+    assert len(promos) == 1
+    assert promos[0]["type"] == "brainstorm"
+    assert promos[0]["count"] == 6
+    assert set(promos[0]["workspaces"]) == {"personal", "work"}
+    assert result["errors"] == []
+
+
+def test_audit_vocabulary_proposals_without_config_scans_one_root(tmp_path: Path):
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="brainstorm", title=f"Note{i}"))
+    result = audit_vocabulary_proposals(vault, "personal")
+    assert len(result["type_promotions"]) == 1
+    assert result["type_promotions"][0]["count"] == 6
+    assert result["errors"] == []
+
+
+def test_audit_vocabulary_proposals_reports_skipped_vaults(tmp_path: Path):
+    """A configured vault that is missing must be reported as a scan error, not
+    silently dropped from the aggregation."""
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    personal = tmp_path / "personal" / "memory-vault"
+    personal.mkdir(parents=True)
+    for i in range(6):
+        _write(personal / f"P{i}.md", _note_body(type_="brainstorm", title=f"P{i}"))
+    missing = tmp_path / "work" / "memory-vault"  # never created
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            return [
+                (personal, "personal", Path("personal") / "memory-vault"),
+                (missing, "work", Path("work") / "memory-vault"),
+            ]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    # The present vault's usage is still counted.
+    assert len(result["type_promotions"]) == 1
+    assert result["type_promotions"][0]["count"] == 6
+    # But the missing root is surfaced as a scan error, not a clean aggregation.
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["type"] == "vocabulary_proposal_scan_failed"
+    assert "work" in result["errors"][0]["message"]
+
+
+def test_case_variant_of_canonical_type_is_safe_rename_not_promotion(tmp_path: Path):
+    """`type: Note` with `note` canonical is a case variant -> a safe rename,
+    so it must NOT be proposed as a promotion."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="Note", title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    # Case-insensitive canonical match: Note -> note.
+    assert vi_mod.canonical_type("Note") == "note"
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["type_promotions"] == []
+
+
+def test_case_variant_of_alias_type_is_safe_rename_not_promotion(tmp_path: Path):
+    """`type: Doc` maps to the alias target `document`, so it is a safe rename,
+    not a promotion."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    assert vi_mod.canonical_type("Doc") == "document"
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["type_promotions"] == []
+
+
+def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypatch):
+    """VOCAB_PROMOTION_THRESHOLD must drive the established-tag tier in
+    VOCABULARY.md, not just the promotion proposals — one value classifies
+    both, so a six-use tag with threshold 10 is neither established in the
+    vocabulary nor a promotion candidate."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    assert vi_mod.promotion_threshold() == 10
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    rendered = vi_mod.format_vocabulary(entries)
+    # Six uses is below the threshold of 10: not established, not promoted,
+    # but still visible in the emerging tier (2..9).
+    assert "Tags (established)" not in rendered
+    assert "Tags (emerging)" in rendered
+    assert "research" in rendered
+
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    proposals = generate_vocabulary_proposals(entries)
+    assert proposals["tag_promotions"] == []
+
+
+def test_emerging_tier_upper_bound_tracks_configured_threshold(tmp_path: Path, monkeypatch):
+    """When the threshold is raised, tags between the old 5 and the new
+    threshold must stay visible in the emerging tier, not vanish from
+    VOCABULARY.md entirely."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(6):
+        _write(vault / f"Note{i}.md", _note_body(tags=["research"], title=f"Note{i}"))
+    entries = vi_mod.scan_vault(vault)
+    rendered = vi_mod.format_vocabulary(entries)
+    # Six uses with threshold 10: still emerging (2..9), so it must appear.
+    assert "Tags (emerging)" in rendered
+    assert "research" in rendered
+    assert "Two to 9 uses" in rendered
+
+
+def test_migration_renames_case_variant_of_alias(tmp_path: Path):
+    """`type: Doc` (alias -> document) must be a planned safe rename in
+    vault-migrate, not left unresolved."""
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+    summary = migrate_vault_vocabulary(vault, apply=False)
+    assert summary["unresolved"] == {}
+    assert any(c["from"] == "Doc" and c["to"] == "document" for c in summary["planned"])
+
+
+def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
+    """`type: Note` (canonical note) must be a planned safe rename, not
+    unresolved."""
+    from ciao.vault_migration import migrate_vault_vocabulary
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"Note{i}.md", _note_body(type_="Note", title=f"Note{i}"))
+    summary = migrate_vault_vocabulary(vault, apply=False)
+    assert summary["unresolved"] == {}
+    assert any(c["from"] == "Note" and c["to"] == "note" for c in summary["planned"])
+
+
+def test_promotion_threshold_rejects_one(tmp_path: Path, monkeypatch):
+    """A threshold of 1 would classify every one-use tag as both candidate and
+    established and describe an impossible emerging range; it must be rejected
+    in favor of the default."""
+    from ciao import vault_index as vi_mod
+
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "1")
+    assert vi_mod.promotion_threshold() == vi_mod.DEFAULT_PROMOTION_THRESHOLD
+    # A threshold of 2 is accepted.
+    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "2")
+    assert vi_mod.promotion_threshold() == 2
+
+
+def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):
+    """On a pre-re-rooting install vault_scan_targets() returns an EMPTY
+    workspace stamp so scan_vault() infers each note's workspace from its first
+    path segment. The audit must pass that empty stamp through unchanged rather
+    than coercing it to 'personal'."""
+    from ciao.vocabulary_proposals import audit_vocabulary_proposals
+
+    shared = tmp_path / "memory-vault"
+    (shared / "work" / "People").mkdir(parents=True)
+    (shared / "personal" / "People").mkdir(parents=True)
+    # A tag used once in each workspace's subtree of the shared vault.
+    _write(shared / "work" / "People" / "A.md", _note_body(tags=["ai-analysis"], title="A"))
+    _write(shared / "personal" / "People" / "B.md", _note_body(tags=["ai"], title="B"))
+
+    class FakeConfig:
+        def vault_scan_targets(self):
+            # Empty stamp: the shared-vault layout, workspace inferred from path.
+            return [(shared, "", Path("memory-vault"))]
+
+    result = audit_vocabulary_proposals(tmp_path, "personal", config=FakeConfig())
+    # The empty stamp is preserved, so the merge proposal carries the inferred
+    # workspace (work), not a coerced 'personal'. With two singletons (ai in
+    # personal, ai-analysis in work) the reciprocal-alias guard emits only one
+    # direction — the lexicographically-smaller singleton (ai) points at the
+    # other (ai-analysis).
+    assert result["errors"] == []
+    merges = {m["tag"]: m for m in result["tag_merges"]}
+    assert "ai" in merges, f"expected a merge for ai, got {list(merges)}"
+    assert "ai-analysis" in merges["ai"]["near_duplicates"]
+
+
+def test_namespace_parent_must_meet_threshold_to_enable_merge(tmp_path: Path, monkeypatch):
+    """A bare namespace tag with two uses must NOT enable sibling merges when
+    the promotion threshold is 5: project/active and project/draft should not
+    be reported as near-duplicates unless project is established."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(2):
+        _write(vault / f"P{i}.md", _note_body(tags=["project"], title=f"P{i}"))
+    _write(vault / "A.md", _note_body(tags=["project/active"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["project/draft"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    # project (2 uses) is below threshold 5, so sibling values must NOT merge
+    # with each other (project/active vs project/draft). A value merging to its
+    # bare parent (project/active -> project) is fine and still reported.
+    sibling_merges = [
+        m for m in proposals["tag_merges"] if "project" in m["near_duplicates"]
+        and len(m["near_duplicates"]) > 1
+    ]
+    assert all("project/draft" not in m["near_duplicates"] for m in sibling_merges)
+    assert not any(
+        m["tag"] == "project/active" and "project/draft" in m["near_duplicates"]
+        for m in proposals["tag_merges"]
+    )
+    assert not any(
+        m["tag"] == "project/draft" and "project/active" in m["near_duplicates"]
+        for m in proposals["tag_merges"]
+    )
+    # With threshold 2, project IS established, so the siblings merge into each
+    # other.
+    proposals2 = generate_vocabulary_proposals(entries, threshold=2)
+    assert any(
+        m["tag"] == "project/active" and "project/draft" in m["near_duplicates"]
+        for m in proposals2["tag_merges"]
+    )
+
+
+def test_repeated_case_variants_produce_merge(tmp_path: Path):
+    """ai (3 uses) + AI (2 uses): combined usage reaches the threshold but the
+    exact spellings stay fragmented; the less-used spelling must be proposed as
+    a merge into the dominant one."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(2):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    # Neither spelling is a singleton, but AI must still be proposed to merge
+    # into the dominant ai spelling.
+    merge = next((m for m in proposals["tag_merges"] if m["tag"] == "AI"), None)
+    assert merge is not None
+    assert "ai" in merge["near_duplicates"]
+
+
+def test_four_char_tags_need_tighter_edit_distance():
+    # data vs java are both 4 chars and distance 2 apart, but unrelated; they
+    # must NOT merge. Distance 2 is reserved for materially longer values.
+    assert is_near_duplicate("data", "java") is False
+    # A single-character difference on a 4-char tag still merges.
+    assert is_near_duplicate("data", "dato") is True
+    # A two-edit difference on a longer tag still merges.
+    assert is_near_duplicate("brainstorm", "brinstorm") is True
+
+
+def test_case_equivalent_unknown_types_aggregate_before_threshold(tmp_path: Path):
+    """type: brainstorm (3 uses) + type: Brainstorm (3 uses) are the same
+    semantic type; their combined usage must reach the threshold and produce
+    one promotion proposal."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(3):
+        _write(vault / f"L{i}.md", _note_body(type_="brainstorm", title=f"L{i}"))
+    for i in range(3):
+        _write(vault / f"U{i}.md", _note_body(type_="Brainstorm", title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert len(proposals["type_promotions"]) == 1
+    promo = proposals["type_promotions"][0]
+    assert promo["count"] == 6
+    assert promo["type"] in {"brainstorm", "Brainstorm"}
+
+
+def test_case_variant_merge_renders_without_calling_it_singleton(tmp_path: Path):
+    """A repeated case-only variant (ai 3x + AI 2x) must render in the audit
+    markdown as a case variant with its count, not as a 'Singleton tag'."""
+    from ciao import vault_index as vi_mod
+    from ciao.os_audit import format_audit_markdown, run_os_audit
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    from ciao.memory_tool import ensure_regions
+    ensure_regions(guide)
+    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    vault = workspace / "memory-vault"
+    vault.mkdir()
+    (workspace / ".runtime").mkdir()
+    for i in range(3):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(2):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+
+    proposals = generate_vocabulary_proposals(vi_mod.scan_vault(vault), threshold=5)
+    merge = next(m for m in proposals["tag_merges"] if m["tag"] == "AI")
+    assert merge["kind"] == "case_variant"
+    assert merge["count"] == 2
+
+    report = run_os_audit(
+        workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime"
+    )
+    report["vocabulary_proposals"] = proposals
+    md = format_audit_markdown(report)
+    # The repeated variant is not labeled a singleton.
+    assert "Singleton tag `AI`" not in md
+    assert "case variant of `ai`" in md
+    assert "(2 uses" in md
+
+
+def test_case_variant_not_promoted_while_merge_eliminates_it(tmp_path: Path):
+    """When ai and AI each meet the threshold, the audit must promote only the
+    dominant spelling and propose merging the other — not both establish AND
+    eliminate the same spelling."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(5):
+        _write(vault / f"A{i}.md", _note_body(tags=["ai"], title=f"A{i}"))
+    for i in range(5):
+        _write(vault / f"U{i}.md", _note_body(tags=["AI"], title=f"U{i}"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    promoted = [p["tag"] for p in proposals["tag_promotions"]]
+    merges = {m["tag"]: m["near_duplicates"] for m in proposals["tag_merges"]}
+    # Exactly one spelling of the case group is promoted, and the other is
+    # proposed to merge into it — never both establish AND eliminate the same
+    # spelling.
+    case_promoted = [t for t in promoted if t.casefold() == "ai"]
+    assert len(case_promoted) == 1
+    dominant = case_promoted[0]
+    variant = "AI" if dominant == "ai" else "ai"
+    assert variant not in promoted
+    assert variant in merges
+    assert dominant in merges[variant]
+
+
+def test_no_reciprocal_aliases_between_singleton_tags(tmp_path: Path):
+    """analysis vs analysys are both singletons; only one merge direction is
+    proposed, so the recommendations cannot contradict each other."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "A.md", _note_body(tags=["analysis"], title="A"))
+    _write(vault / "B.md", _note_body(tags=["analysys"], title="B"))
+    entries = vi_mod.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = {m["tag"]: m["near_duplicates"] for m in proposals["tag_merges"]}
+    # Exactly one direction is emitted.
+    assert ("analysis" in merges) != ("analysys" in merges)
+    if "analysis" in merges:
+        assert "analysys" in merges["analysis"]
+    else:
+        assert "analysis" in merges["analysys"]
+
+
+def test_tag_repeated_in_one_note_counts_once(tmp_path: Path):
+    """A tag repeated within one note's frontmatter is one use of that tag by
+    that note, not independent usage: it must not inflate the count to a
+    promotion or stop being a singleton merge candidate."""
+    from ciao import vault_index as vi_mod
+    from ciao.vocabulary_proposals import generate_vocabulary_proposals
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # One note repeating 'research' five times in its tag list.
+    _write(
+        vault / "A.md",
+        "---\ntype: note\ntags: [research, research, research, research, research]\n---\n# A\n",
+    )
+    entries = vi_mod.scan_vault(vault)
+    # Counted once, so the tag is a singleton, not a five-use promotion.
+    assert vi_mod.vocabulary_report(entries)["tags"] == {"research": 1}
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    assert proposals["tag_promotions"] == []

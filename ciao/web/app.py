@@ -48,6 +48,7 @@ from ciao.web.routes_api import (
     admin_snapshot,
     admin_skills,
     admin_status,
+    skill_import,
     chat_archive,
     chat_continue,
     chat_detail,
@@ -55,6 +56,7 @@ from ciao.web.routes_api import (
     chat_handover,
     chat_images,
     chat_mark_read,
+    chat_mark_unread,
     chat_messages,
     chat_message_part,
     chat_reentry_summary,
@@ -87,7 +89,6 @@ from ciao.web.routes_api import (
     list_models,
     delete_workspace_setting,
     gws_integration_settings,
-    gws_install,
     gws_save_client_secret,
     gws_auth_url,
     gws_exchange_code,
@@ -112,6 +113,7 @@ from ciao.web.routes_api import (
     list_proposals,
     list_housekeeping,
     run_housekeeping_action,
+    dismiss_housekeeping_action,
     list_loops,
     list_schedules,
     list_workspaces,
@@ -120,7 +122,6 @@ from ciao.web.routes_api import (
     project_detail,
     reorder_projects,
     libreoffice_status_endpoint,
-    libreoffice_install_endpoint,
     project_restore,
     project_files_list,
     project_files_upload,
@@ -251,6 +252,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/retry-insights", chat_retry_insights, methods=["POST"]),
         Route("/api/chats/{chat_id}/continue", chat_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/read", chat_mark_read, methods=["POST"]),
+        Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
@@ -278,7 +280,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
-        Route("/api/libreoffice-install", libreoffice_install_endpoint, methods=["POST"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),
         Route("/api/file-content", file_content, methods=["GET"]),
@@ -312,6 +313,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Home-screen operator-action strip.
         Route("/api/housekeeping", list_housekeeping, methods=["GET"]),
         Route("/api/housekeeping/{action_id}/run", run_housekeeping_action, methods=["POST"]),
+        Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
@@ -330,7 +332,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             methods=["POST"],
         ),
         Route("/api/integrations/gws", gws_integration_settings, methods=["GET"]),
-        Route("/api/integrations/gws/install", gws_install, methods=["POST"]),
         Route("/api/integrations/gws/client-secret", gws_save_client_secret, methods=["POST"]),
         Route("/api/integrations/gws/auth-url", gws_auth_url, methods=["POST"]),
         Route("/api/integrations/gws/exchange", gws_exchange_code, methods=["POST"]),
@@ -393,6 +394,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/status", admin_status, methods=["GET"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
+        Route("/api/skills/import", skill_import, methods=["POST"]),
         # WebSocket
         WebSocketRoute("/ws/chat/{chat_id}", ws_chat),
         WebSocketRoute("/ws/events", ws_events),
@@ -421,6 +423,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     @asynccontextmanager
     async def _lifespan(_app):
         from ciao.node_proxy import close_shared_client
+        from ciao.setup_status import warm_claude_discovery_cache
+
+        # `claude mcp list` health-checks every connector and can take ~12s;
+        # warm the discovery cache at startup so the first Settings -> Providers
+        # visit serves a populated list instead of blocking on the probe.
+        warm_claude_discovery_cache(getattr(config, "workspace_root", None))
 
         try:
             if mcp_service is not None:

@@ -1283,3 +1283,31 @@ def test_the_cli_does_not_claim_a_clean_vault_when_every_move_failed(
     assert "No tag-obvious misfiled people" not in out.out
     assert "Moved nothing" in out.out
     assert "did NOT finish" in out.out
+
+
+def test_a_table_cells_escaped_alias_pipe_survives_a_move(tmp_path: Path) -> None:
+    """A repointed wikilink has to keep the pipe spelling it arrived with.
+
+    Inside a table cell the alias pipe is `\\|`, because a bare one closes the
+    cell. Re-emitting the repointed link with a bare `|` would break the row —
+    and this went unnoticed while `_parse_wikilink` read the backslash as part
+    of the ref, because resolution then failed and the link was skipped
+    entirely: a roster table's edges were silently left pointing at the old
+    path.
+    """
+    vault = _vault(tmp_path)
+    _note(
+        vault,
+        "personal/Projects/Roster.md",
+        "---\ntype: project\n---\n"
+        "# Roster\n\n"
+        "| Person | Role |\n|---|---|\n"
+        "| [[personal/People/Mo\\|Mo]] | Lead |\n",
+    )
+
+    rehome_vault_people(vault, apply=True)
+
+    text = (vault / "personal/Projects/Roster.md").read_text(encoding="utf-8")
+    # Repointed at the new path, and still one cell rather than two.
+    assert "| [[work/People/Mo\\|Mo]] | Lead |" in text
+    assert "[[personal/People/Mo" not in text

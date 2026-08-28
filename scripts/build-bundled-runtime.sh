@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-# Build the two architecture-specific Python runtimes that live inside the
-# universal Ciaobot.app. The caller supplies pinned python-build-standalone
-# URLs and SHA-256 values; keeping those inputs explicit makes the release
-# workflow auditable and prevents a moving "latest" runtime from entering a
-# release unnoticed.
+# Build the arm64 Python runtime that lives inside the Apple Silicon-only
+# Ciaobot.app. The caller supplies pinned python-build-standalone URLs and
+# SHA-256 values; keeping those inputs explicit makes the release workflow
+# auditable and prevents a moving "latest" runtime from entering a release
+# unnoticed.
 
 if [ "$#" -ne 1 ]; then
     echo "usage: $0 <desktop/runtime-output>" >&2
@@ -19,8 +19,6 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 : "${CIAO_PYTHON_ARM64_URL:?CIAO_PYTHON_ARM64_URL is required}"
 : "${CIAO_PYTHON_ARM64_SHA256:?CIAO_PYTHON_ARM64_SHA256 is required}"
-: "${CIAO_PYTHON_X86_64_URL:?CIAO_PYTHON_X86_64_URL is required}"
-: "${CIAO_PYTHON_X86_64_SHA256:?CIAO_PYTHON_X86_64_SHA256 is required}"
 
 command -v uv >/dev/null 2>&1 || {
     echo "uv is required to export the checked-in uv.lock for the bundled runtime" >&2
@@ -116,6 +114,13 @@ download_runtime() {
     # Sorts after any .pth the interpreter ships, so those run first.
     echo 'import ciao_bundled_site' >"$purelib/zz-ciao-bundled-site.pth"
 
+    # The claude-agent-sdk wheel bundles a ~325MB standalone Claude CLI binary
+    # (_bundled/claude) so the SDK has a guaranteed CLI. Bundling it doubles the
+    # app's download size, so strip it here and rely on an external `claude` on
+    # PATH instead. ciao's provider code already falls back to the external CLI
+    # when no bundled binary is present.
+    "$python_bin" -c 'from pathlib import Path; import claude_agent_sdk; Path(claude_agent_sdk.__file__).parent.joinpath("_bundled", "claude").unlink(missing_ok=True)' >/dev/null 2>&1 || true
+
     # Probe with no PYTHONPATH at all: this is what the launcher now relies on.
     if ! (unset PYTHONPATH; "$python_bin" -c \
         'import pydantic_core, ciao; from pydantic_core import core_schema') >/dev/null 2>&1; then
@@ -125,7 +130,6 @@ download_runtime() {
 }
 
 download_runtime arm64 "$CIAO_PYTHON_ARM64_URL" "$CIAO_PYTHON_ARM64_SHA256"
-download_runtime x86_64 "$CIAO_PYTHON_X86_64_URL" "$CIAO_PYTHON_X86_64_SHA256"
 
 cat > "$output/bin/ciao" <<'LAUNCHER'
 #!/bin/sh
@@ -133,14 +137,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
-case "$(uname -m)" in
-    arm64) arch=arm64 ;;
-    x86_64) arch=x86_64 ;;
-    *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-python="$root/python/$arch/bin/python3.12"
-site="$root/site-packages/$arch"
+python="$root/python/arm64/bin/python3.12"
+site="$root/site-packages/arm64"
 if [ ! -x "$python" ] || [ ! -d "$site" ]; then
     echo "Ciaobot's bundled Python runtime is incomplete" >&2
     exit 1

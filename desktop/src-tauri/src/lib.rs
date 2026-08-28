@@ -818,6 +818,24 @@ async fn try_apply_pending_navigation(app: AppHandle) {
                 Ok(destination) => destination,
                 Err(_) => return,
             };
+            // Navigating is only meaningful once the engine is up: on a cold
+            // start the main window shows the bundled recovery page, so
+            // confirming the WebKit navigation would clear the intent before
+            // the PWA is reachable. Keep it pending until the engine answers so
+            // the runtime watcher retries and lands on the route.
+            if !engine_reachable(&runtime) {
+                return;
+            }
+            main.navigate(destination).is_ok()
+        }
+        NavigationIntent::Notifications => {
+            let destination = match url_with_segments(&runtime, &["settings", "notifications"]) {
+                Ok(destination) => destination,
+                Err(_) => return,
+            };
+            if !engine_reachable(&runtime) {
+                return;
+            }
             main.navigate(destination).is_ok()
         }
     };
@@ -1338,6 +1356,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     maybe_request_notification_permission(app, enabled);
                     let _ = refresh_tray(app);
                 }
+                "notification-settings" => {
+                    queue_navigation(app, NavigationIntent::Notifications);
+                }
                 "hide-dock-icon" => {
                     let model = app.state::<DesktopModel>();
                     let mut hide = true;
@@ -1471,10 +1492,16 @@ fn start_engine_if_needed(app: AppHandle, runtime: RuntimeConfig) {
     }
     thread::spawn(move || {
         let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
-            tray_log(
-                &app,
-                "engine start FAILED: the ciao executable was not found",
-            );
+            // The running bundle has no resolvable engine (a repo-built
+            // `target/release/bundle` app, for one), but the server plist on
+            // disk still names the installed engine. Re-register it through
+            // launchd instead of giving up — giving up left the splash stuck
+            // on "Waiting for the engine" for the whole session.
+            match service::bootstrap_existing_service(&runtime.server_plist) {
+                Ok(()) => tray_log(&app, "engine start: re-registered the existing LaunchAgent"),
+                Err(error) => tray_log(&app, &format!("engine start FAILED: {error}")),
+            }
+            let _ = refresh_tray(&app);
             return;
         };
         // Same reason as the bootstrap path: without this, an engine that fails

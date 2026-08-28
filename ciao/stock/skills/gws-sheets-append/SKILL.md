@@ -7,14 +7,14 @@ metadata:
 
 # sheets +append
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Append a row to a spreadsheet
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet <ID>
+ciao gws "$GWS_PROFILE" sheets +append --spreadsheet <ID>
 ```
 
 ## Flags
@@ -28,8 +28,8 @@ scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet <ID>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet ID --values 'Alice,100,true'
-scripts/gws-profile.sh "$GWS_PROFILE" sheets +append --spreadsheet ID --json-values '[["a","b"],["c","d"]]'
+ciao gws "$GWS_PROFILE" sheets +append --spreadsheet ID --values 'Alice,100,true'
+ciao gws "$GWS_PROFILE" sheets +append --spreadsheet ID --json-values '[["a","b"],["c","d"]]'
 ```
 
 ## Tips

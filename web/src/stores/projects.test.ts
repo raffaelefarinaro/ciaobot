@@ -40,7 +40,8 @@ vi.mock('../router', () => ({
     push: routerPush,
     currentRoute: {
       value: {
-        params: {}
+        params: {},
+        path: '/',
       }
     }
   }
@@ -436,9 +437,13 @@ describe('unacknowledged send recovery', () => {
     store.activeChatId = chatId
     apiGet.mockImplementation((path: string) => {
       if (path.includes('/messages')) {
-        // Current servers answer with the paginated envelope; an empty one
-        // adopts-wholesale over the optimistic timeline, wiping the bubble
-        // exactly like the production reload does.
+        // Current servers answer with the paginated envelope. The reload no
+        // longer wipes the optimistic bubble on an empty window (see
+        // 'optimistic user bubble reconciliation' above), so this exercises
+        // the resend path on its own terms: the send is simply never
+        // acknowledged (no user_echo, no server-indexed row), so the
+        // unacked-send timer fires and resends it regardless of what the
+        // history reload rendered in the meantime.
         return Promise.resolve({
           items: [],
           total: 0,
@@ -1392,6 +1397,183 @@ describe('chat closing and re-entry orientation', () => {
     expect(routerPush).toHaveBeenCalledWith('/')
   })
 
+  test('does not clobber a different chat opened while the draft delete is in flight', async () => {
+    // closeChat() clears activeChatId synchronously so the close gesture
+    // feels immediate, then awaits the DELETE. If the user opens a different
+    // chat during that window, the delayed cleanup must leave it alone.
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    const otherId = 'chat-other'
+    store.chats = [
+      {
+        chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+        provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+      },
+      {
+        chat_id: otherId, project_id: 'p1', title: 'Another chat', model: 'sonnet',
+        provider: 'claude', mode: 'auto', session_id: 'session-1', created_at: '', archived: false,
+      },
+    ] as unknown as typeof store.chats
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    // closeChat() awaits a dynamic router import before calling deleteChat();
+    // wait for the actual DELETE call so resolveDelete is the real resolver.
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    // The user opens a different chat before the DELETE resolves.
+    store.activeChatId = otherId
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.activeChatId).toBe(otherId)
+  })
+
+  test('leaves a newly opened chat route alone when the draft delete lands late', async () => {
+    // Selecting a chat navigates first and sets activeChatId only once the
+    // async open (workspace switch, history fetch) finishes, so the stale
+    // cleanup can run with activeChatId still null while the router is
+    // already on the new chat. Keying the `/` push off "any chat route"
+    // bounced the user straight back home.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    router.currentRoute.value.path = '/chat/chat-other'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
+  test('clears the reopened draft once its own delete succeeds', async () => {
+    // Same race, but the user reopens the *same* draft. Once the delete
+    // lands it is gone server-side, so the view must not stay pointed at it.
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    store.activeChatId = draftId
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  test('clears the reopened draft without ejecting the user from Settings', async () => {
+    // The user reopens the same draft, then leaves for Settings (which
+    // retains activeChatId, so reopening plus that navigation leaves it
+    // still equal to draftId). Once the delete lands the dangling id must
+    // still be cleared, but the user must not be yanked out of Settings.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    store.activeChatId = draftId
+    router.currentRoute.value.path = '/settings'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(store.chats).toHaveLength(0)
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
+  test('does not force navigation home when the user left for Settings mid-delete', async () => {
+    // activeChatId is null here too (Settings retains it, but this draft
+    // close already cleared it before the DELETE started) - the stale
+    // cleanup must not use that to yank the user back to `/`.
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    expect(store.activeChatId).toBeNull()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    // The user navigates to Settings before the DELETE resolves.
+    router.currentRoute.value.path = '/settings'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
+  // /device lives entirely outside ChatLayout (the escape hatch when a
+  // remote host is unreachable), so it can never appear in a list of
+  // "routes that retain the chat" - the fix has to be route-agnostic.
+  test('does not force navigation home when the user left for the device page mid-delete', async () => {
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    const draftId = 'chat-draft'
+    store.chats = [{
+      chat_id: draftId, project_id: 'p1', title: 'New Chat', model: 'sonnet',
+      provider: 'claude', mode: 'auto', session_id: '', created_at: '', archived: false,
+    }]
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    let resolveDelete: (value: { ok: boolean; deleted: boolean }) => void = () => {}
+    apiDel.mockImplementation(() => new Promise(resolve => { resolveDelete = resolve }))
+    routerPush.mockClear()
+
+    const closing = store.closeChat()
+    await vi.waitFor(() => expect(apiDel).toHaveBeenCalled())
+    router.currentRoute.value.path = '/device'
+    resolveDelete({ ok: true, deleted: true })
+    await closing
+
+    expect(routerPush).not.toHaveBeenCalledWith('/')
+    router.currentRoute.value.path = '/'
+  })
+
   test('starts the summary when a completed chat closes and reuses it on reopen', async () => {
     const store = useProjectStore()
     const chatId = 'chat-reentry'
@@ -1837,6 +2019,27 @@ describe('optimistic user bubble reconciliation', () => {
     )
     expect(userMsgs.length).toBe(1)
     expect(userMsgs[0].turn_index).toBe(1)
+  })
+
+  test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
+    // Regression for "first message can vanish on new chats": a background
+    // reload (the 15s poll, say) landing before the first turn persisted
+    // server-side used to wholesale-adopt the still-empty envelope, wiping
+    // the just-sent optimistic bubble until the next reload.
+    const store = useProjectStore()
+    const chatId = 'chat-new-empty-window'
+    store.messages[chatId] = [
+      { role: 'user', content: 'first message', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [], total: 0, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId, { background: true })
+
+    expect(
+      store.messages[chatId].some(m => m.role === 'user' && m.content === 'first message'),
+    ).toBe(true)
   })
 
   test('loadMessages discards trailing optimistic user bubbles when server has settled without them', async () => {
@@ -4023,6 +4226,297 @@ describe('envelope history window', () => {
       'one', 'local activity', 'two',
     ])
   })
+
+  test('mid-turn refresh reconciles the live user bubble instead of appending the server copy', async () => {
+    // Repro: a send renders an optimistic bubble, the echo upgrades it with a
+    // turn_index, and a refresh lands mid-turn (WS reconnect, chat switch
+    // back). The server session already holds the user row, the window is
+    // truncated to it by the streaming guard, and the index merge appended
+    // that copy below the live one — the same user turn rendered twice.
+    const store = useProjectStore()
+    const chatId = 'chat-echo-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn: optimistic bubble, then the echo upgrade.
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'follow up',
+      timestamp: '2026-08-25T09:23:00Z',
+    })
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'follow up',
+        turn_index: 1,
+        sent_at: '2026-08-25T09:23:00Z',
+      }),
+    })
+    expect(store.messages[chatId].filter(m => m.content === 'follow up').length).toBe(1)
+
+    // Mid-turn refresh: the session file already holds the user turn, and the
+    // streaming guard truncates the window to end at it.
+    store.projectStreaming[chatId] = true
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'follow up'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:23:00Z' },
+      { ...row(3, 'Read file.md'), role: 'system', tool_name: '_activity' },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'follow up',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(userMsgs[0].turn_index).toBe(1)
+    // The bubble stays ahead of the live trace, not appended after it.
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'follow up',
+    ])
+  })
+
+  test('settled-turn refresh reconciles the whole live turn instead of appending its server copy', async () => {
+    // Repro: a turn streams live (user bubble, activity group, final answer
+    // with usage) and the post-result refresh lands once the events socket
+    // already cleared projectStreaming, so nothing truncates the window. The
+    // index merge appended every server row of that turn below the live
+    // copies — the answer rendered twice, each under its own Activity group.
+    const store = useProjectStore()
+    const chatId = 'chat-turn-dup'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 5,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // The turn renders live: optimistic bubble, streamed activity group, and
+    // the final answer bubble carrying result-event metadata.
+    store.messages[chatId].push(
+      { role: 'user', content: 'do the thing', timestamp: '2026-08-25T09:24:00Z', turn_index: 1 },
+      { role: 'system', content: '⚙️ Read notes.md', timestamp: '2026-08-25T09:24:10Z', tool_name: '_activity' },
+      {
+        role: 'assistant',
+        content: 'Done — the thing is done.',
+        timestamp: '2026-08-25T09:24:55Z',
+        phase: 'final_answer',
+        usage: { input_tokens: '4', output_tokens: '3513' },
+        effective_model: 'claude-opus-5',
+        duration_ms: 55000,
+      },
+    )
+
+    // Settled refresh: projectStreaming already cleared, so the window holds
+    // the full turn with server indices and no usage.
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'do the thing'), role: 'user', turn_index: 1, sent_at: '2026-08-25T09:24:00Z' },
+      { ...row(3, '⚙️ Read notes.md'), role: 'system', tool_name: '_activity' },
+      row(4, 'Done — the thing is done.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'do the thing', '⚙️ Read notes.md', 'Done — the thing is done.',
+    ])
+    // The surviving answer is the live copy: result metadata survives the
+    // reconcile, only the server index is adopted.
+    const answer = store.messages[chatId][4]
+    expect(answer.i).toBe(4)
+    expect(answer.phase).toBe('final_answer')
+    expect(answer.usage).toEqual({ input_tokens: '4', output_tokens: '3513' })
+    expect(answer.effective_model).toBe('claude-opus-5')
+  })
+
+  test('wire-pruned lazy thinking row reconciles with the live full-text copy', async () => {
+    // The server elides an oversized _thinking row's middle (head + marker +
+    // tail) while the live copy still holds the full text, so exact-content
+    // matching can never pair them. Without lazy-aware matching the pruned
+    // copy appended after the final answer: duplicated reasoning, out of
+    // order.
+    const store = useProjectStore()
+    const chatId = 'chat-lazy-thinking'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 4,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    // Live turn with a large reasoning trace (1200 chars — over the 2×512
+    // keep + 64 gap threshold the server prunes at).
+    const fullThinking = 'a'.repeat(600) + 'b'.repeat(600)
+    store.messages[chatId].push(
+      { role: 'user', content: 'think hard', timestamp: '2026-08-25T09:30:00Z', turn_index: 1 },
+      { role: 'system', content: fullThinking, timestamp: '2026-08-25T09:30:10Z', tool_name: '_thinking' },
+      { role: 'assistant', content: 'Answer.', timestamp: '2026-08-25T09:31:00Z', phase: 'final_answer' },
+    )
+
+    // Settled refresh: the thinking row arrives pruned, the rest verbatim.
+    const pruned = fullThinking.slice(0, 512)
+      + '\n… (176 chars hidden, expand to load)\n'
+      + fullThinking.slice(-512)
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'think hard'), role: 'user', turn_index: 1 },
+      { ...row(3, pruned), role: 'system', tool_name: '_thinking', lazy: true, full_length: 1200 },
+      row(4, 'Answer.'),
+    ]))
+    await store.loadMessages(chatId)
+
+    expect(store.messages[chatId].map(m => m.content)).toEqual([
+      'prior question', 'prior reply', 'think hard', fullThinking, 'Answer.',
+    ])
+    // The surviving copy keeps the full text — no lazy marker needed.
+    const thinking = store.messages[chatId][3]
+    expect(thinking.i).toBe(3)
+    expect(thinking.content).toBe(fullThinking)
+    expect(thinking.lazy).toBeUndefined()
+  })
+
+  test('reconciled user bubble keeps the unattended marker on an older server', async () => {
+    // A loop/schedule turn observed live carries unattended on the echo
+    // bubble. A server row without the field (older backend) must not strip
+    // it during the reconcile, or the ↻ marker disappears on the first
+    // refresh and the automated turn reads as user-authored.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-reconcile'
+    store.activeChatId = chatId
+
+    const row = (i: number, content: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      role: 'assistant',
+      content,
+      i,
+      sent_at: '2026-08-25T09:00:00Z',
+      ...extra,
+    })
+    const envelope = (items: ReturnType<typeof row>[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({
+            items,
+            total: 3,
+            offset: 0,
+            limit: 50,
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve([])
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+    ]))
+    await store.loadMessages(chatId)
+
+    store.messages[chatId].push({
+      role: 'user',
+      content: 'nightly check',
+      timestamp: '2026-08-25T09:30:00Z',
+      turn_index: 1,
+      unattended: true,
+    })
+
+    apiGet.mockImplementation(envelope([
+      { ...row(0, 'prior question'), role: 'user' },
+      row(1, 'prior reply'),
+      { ...row(2, 'nightly check'), role: 'user', turn_index: 1 },
+    ]))
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'nightly check',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].unattended).toBe(true)
+    expect(userMsgs[0].i).toBe(2)
+  })
+
+  test('hydrated user rows map the unattended marker from the server', async () => {
+    // Reload path: the backend records unattended per turn, so history rows
+    // must carry it or every automated turn reads as user-authored after a
+    // reload.
+    const store = useProjectStore()
+    const chatId = 'chat-unattended-hydrate'
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'nightly check', sent_at: '2026-08-25T09:30:00Z', turn_index: 0, unattended: true },
+      { role: 'assistant', content: 'done', sent_at: '2026-08-25T09:31:00Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs[0].unattended).toBe(true)
+    expect(msgs[1].unattended).toBeUndefined()
+  })
 })
 
 describe('older history pages', () => {
@@ -4129,5 +4623,187 @@ describe('older history pages', () => {
       'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
     ])
     expect(store.canLoadOlder(chatId)).toBe(false)
+  })
+})
+
+describe('mark unread', () => {
+  test('markUnread clears the read stamp locally and posts to the server', async () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Read',
+      archived: false,
+      local: true,
+      created_at: '2026-07-31T00:00:00Z',
+      last_activity_at: '2026-07-31T01:00:00Z',
+      last_read_at: '2026-07-31T01:00:00Z',
+    }] as unknown as ChatInfo[]
+
+    await store.markUnread('c1')
+
+    expect(store.chats[0].last_read_at).toBe('')
+    expect(store.chatUnread('c1')).toBe(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/unread', {})
+  })
+
+  test('a chat_unread event from another device raises the dot here', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Read',
+      archived: false,
+      local: true,
+      created_at: '2026-07-31T00:00:00Z',
+      last_activity_at: '2026-07-31T01:00:00Z',
+      last_read_at: '2026-07-31T01:00:00Z',
+    }] as unknown as ChatInfo[]
+    store.activeChatId = 'other'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'chat_unread', chat_id: 'c1', last_read_at: '' }),
+    })
+
+    expect(store.chats[0].last_read_at).toBe('')
+    expect(store.chatUnread('c1')).toBe(1)
+  })
+})
+
+describe('chatLastSnippet', () => {
+  test('reads the persisted last_snippet before any WS event, and a live snippet overrides it', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'A finished chat',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      last_snippet: 'Persisted from the last server response.',
+    }] as unknown as ChatInfo[]
+
+    // No WS event has arrived this session — falls back to the persisted value.
+    expect(store.chatLastSnippet('c1')).toBe('Persisted from the last server response.')
+
+    // A live chat_result_ready snippet takes priority over the persisted one:
+    // the event fired after the record was fetched, so its stamp is newer
+    // than the (stale) last_activity_at the store still holds.
+    store.lastResultSnippet = { c1: 'Fresh snippet from a turn that just finished.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:01Z' }
+    expect(store.chatLastSnippet('c1')).toBe('Fresh snippet from a turn that just finished.')
+
+    // No snippet in either place: no preview.
+    expect(store.chatLastSnippet('unknown-chat')).toBeNull()
+  })
+
+  test('a persisted snippet newer than the cached one wins after a missed event', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'A chat that moved on',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      last_activity_at: '2026-08-27T03:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      // Result B: the server record reconciled after this tab missed the
+      // chat_result_ready event that carried it.
+      last_snippet: 'Newer response B.',
+    }] as unknown as ChatInfo[]
+    // Result A: cached before the WS gap; the chat's activity time as of
+    // that event was 01:00.
+    store.lastResultSnippet = { c1: 'Stale response A.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
+
+    // B is newer than the cached A: the persisted record must win.
+    expect(store.chatLastSnippet('c1')).toBe('Newer response B.')
+  })
+
+  test('keeps the cached snippet while the record still reflects the previous turn', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Live turn, stale record',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      // The record has not reconciled yet: its activity time still names the
+      // PREVIOUS turn, older than the event that just landed.
+      last_activity_at: '2026-08-27T00:30:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      last_snippet: 'Persisted, previous turn.',
+    }] as unknown as ChatInfo[]
+    store.lastResultSnippet = { c1: 'Live snippet.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
+    expect(store.chatLastSnippet('c1')).toBe('Live snippet.')
+
+    // A record with no activity time cannot claim to be newer either.
+    store.chats[0].last_activity_at = ''
+    expect(store.chatLastSnippet('c1')).toBe('Live snippet.')
+  })
+
+  test('prefers the persisted snippet on a tied activity timestamp', () => {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Two responses in one second',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      // The backend truncates to whole seconds, so the second response
+      // reconciles with the same activity time the first event recorded.
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      // Response B: newer on the server, event missed while the WS was down.
+      last_snippet: 'Newer response B.',
+    }] as unknown as ChatInfo[]
+    // Response A: caught live, stamped 01:00 before the record refreshed.
+    store.lastResultSnippet = { c1: 'Older response A.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00Z' }
+
+    // Equality must defer to the persisted record: it carries the newer
+    // response, and a same-turn persisted snippet is equivalent to a live
+    // one, so the tie can only ever be the stale case.
+    expect(store.chatLastSnippet('c1')).toBe('Newer response B.')
+  })
+
+  test('rebases a receipt-time stamp when an unknown chat first reconciles', () => {
+    const store = useProjectStore()
+    // The event arrived for a chat this tab has never seen (created on
+    // another client), so the fallback stamped it with receipt time.
+    store.lastResultSnippet = { c1: 'Response A.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00.123Z' }
+    store.lastResultSnippetNeedsRebase.add('c1')
+
+    // The chat reconciles with an activity time EARLIER than the receipt
+    // stamp (delayed event delivery). Before the rebase, the cached snippet
+    // would stay authoritative for the rest of the session.
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Created elsewhere',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      // Response B: the fresher response the record carries.
+      last_snippet: 'Response B.',
+    }] as unknown as ChatInfo[]
+    store.reconcileChatList(store.chats as ChatInfo[])
+
+    // The stamp was rebased to the server time, so the persisted record
+    // (same second, tie) wins over the stale cached snippet.
+    expect(store.lastResultSnippetAt.c1).toBe('2026-08-27T01:00:00Z')
+    expect(store.chatLastSnippet('c1')).toBe('Response B.')
+    expect(store.lastResultSnippetNeedsRebase.has('c1')).toBe(false)
   })
 })

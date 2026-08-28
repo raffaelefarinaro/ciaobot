@@ -7,14 +7,14 @@ metadata:
 
 # gmail +send
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Send an email
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
+ciao gws "$GWS_PROFILE" gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
 ```
 
 ## Flags
@@ -35,13 +35,13 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to <EMAILS> --subject <SUBJE
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!'
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --cc bob@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body '<b>Bold</b> text' --html
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from alias@example.com
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Report' --body 'See attached' -a report.pdf
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Files' --body 'Two files' -a a.pdf -a b.csv
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!'
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --cc bob@example.com
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body '<b>Bold</b> text' --html
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from alias@example.com
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Report' --body 'See attached' -a report.pdf
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Files' --body 'Two files' -a a.pdf -a b.csv
+ciao gws "$GWS_PROFILE" gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 ```
 
 ## Tips

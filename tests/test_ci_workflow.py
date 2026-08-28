@@ -37,7 +37,9 @@ def test_runtime_resolution_uses_checked_in_pins() -> None:
         workflow = (root / name).read_text(encoding="utf-8")
         assert ". scripts/pinned-python-runtime.env" in workflow
         assert "CIAO_PYTHON_ARM64_SHA256" in workflow
-        assert "CIAO_PYTHON_X86_64_SHA256" in workflow
+        assert "CIAO_PYTHON_X86_64_SHA256" not in workflow
+        assert "aarch64-apple-darwin" in workflow
+        assert "x86_64-apple-darwin" not in workflow
 
 
 def test_cold_start_uses_the_embedded_engine_for_launchagent_setup() -> None:

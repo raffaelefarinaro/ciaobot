@@ -84,40 +84,7 @@ async def run_upgrade(
     )
 
 
-async def upgrade_libreoffice() -> UpgradeResult:
-    """Install LibreOffice via Homebrew Cask on macOS."""
-    brew_bin = shutil.which("brew")
-    if brew_bin is None:
-        return UpgradeResult(
-            command=["brew", "install", "--cask", "libreoffice"],
-            changed=False, success=False,
-            stdout="", stderr="brew not found (Homebrew is required for LibreOffice on macOS)",
-            before_version="", after_version="",
-        )
-    
-    from pathlib import Path
-    libreoffice_installed = False
-    for cmd in ("soffice", "libreoffice", "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
-        if shutil.which(cmd) or Path(cmd).exists():
-            libreoffice_installed = True
-            break
-
-    if libreoffice_installed:
-        return UpgradeResult(
-            command=["brew", "install", "--cask", "libreoffice"],
-            changed=False, success=True,
-            stdout="LibreOffice already installed", stderr="",
-            before_version="installed", after_version="installed",
-        )
-
-    soffice_path = shutil.which("soffice") or "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-    return await run_upgrade(
-        install_command=[brew_bin, "install", "--cask", "libreoffice"],
-        version_command=[soffice_path, "--version"],
-    )
-
-
-def install_custom_skills(cwd: str) -> int:
+def install_custom_skills(cwd: str, workspace_name: str | None = None) -> int:
     """Install and mirror Ciaobot skills through the packaged sync command.
 
     Returns the number of skills installed.
@@ -125,20 +92,22 @@ def install_custom_skills(cwd: str) -> int:
     try:
         from ciao.sync_skills import sync_workspace_skills
 
-        result = sync_workspace_skills(cwd)
+        result = sync_workspace_skills(cwd, workspace_name=workspace_name)
         return result.custom_installed
     except Exception:
         logger.exception("Custom skills install failed")
         return 0
 
 
-def update_skills(cwd: str) -> str | None:
-    """Install the curated skill set from ``skills-lock.json`` + ``skills/``.
+def update_skills(cwd: str, workspace_name: str | None = None) -> str | None:
+    """Install the curated skill set from ``skills/``.
 
-    The package command performs upstream refresh when possible, then mirrors
-    skills, commands, and agents into the Claude catalog.
+    The package command mirrors skills, commands, and agents into the Claude
+    catalog. Skills are local folders under ``skills/<name>/SKILL.md``.
+    ``workspace_name`` lets the caller tie a root to its registered workspace so
+    the ``gws-*`` stock skills are gated on that workspace's Google account.
     """
-    n_custom = install_custom_skills(cwd)
+    n_custom = install_custom_skills(cwd, workspace_name=workspace_name)
     if n_custom:
         logger.info("Installed %d custom skill(s).", n_custom)
     return None

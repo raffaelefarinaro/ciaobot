@@ -13,22 +13,11 @@ def _write(path: Path, text: str = "content\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def test_update_upstream_skills_passes_timeout(tmp_path: Path) -> None:
-    calls: list[dict] = []
-
-    def runner(args, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(returncode=0)
-
-    assert sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
-    assert calls[0]["timeout"] == sync_skills.SKILLS_NPX_TIMEOUT
-
-
-def test_update_upstream_skills_survives_timeout(tmp_path: Path) -> None:
-    def runner(args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
-
-    assert not sync_skills._update_upstream_skills(tmp_path, ["upstream"], runner=runner)
+def test_upstream_skills_removed(tmp_path: Path) -> None:
+    # GitHub/upstream sync surface has been removed per the simplification plan.
+    assert not hasattr(sync_skills, "_update_upstream_skills")
+    assert not hasattr(sync_skills, "_refresh_upstream_skills")
+    assert not hasattr(sync_skills, "SKILLS_NPX_TIMEOUT")
 
 
 def test_sync_links_agents_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
@@ -71,6 +60,102 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     assert claude_skill.is_symlink()
     assert claude_skill.resolve() == (workspace / "skills" / "demo").resolve()
     assert result.custom_installed == 1
+
+
+def test_sync_restamps_stale_cap_markers(tmp_path: Path) -> None:
+    """Sync migrates a former-default cap stamp to the shipped default."""
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    stamped = re.sub(
+        r"(<!-- ciao:memory:start cap=)\d+( -->)",
+        r"\g<1>2200\g<2>",
+        guide.read_text(encoding="utf-8"),
+    )
+    guide.write_text(stamped, encoding="utf-8")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = guide.read_text(encoding="utf-8")
+    assert "cap=2200" not in text
+    assert "<!-- ciao:memory:start cap=3000 -->" in text
+
+
+def test_sync_honors_dotenv_cap_override_over_stale_stamp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A limit that lives only in <root>/.env must win over the stamp.
+
+    Standalone sync never loads the dotenv, so without reading it here a
+    `CIAO_MEMORY_CHAR_LIMIT=2200` override would be restamped to 3000 and a
+    later server start would enforce 2200 against a guide advertising 3000.
+    """
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # export prefix + quotes: valid python-dotenv syntax the server accepts
+    # and a hand-rolled line parser does not.
+    (workspace / ".env").write_text(
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    stamped = re.sub(
+        r"(<!-- ciao:memory:start cap=)\d+( -->)",
+        r"\g<1>2200\g<2>",
+        guide.read_text(encoding="utf-8"),
+    )
+    guide.write_text(stamped, encoding="utf-8")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    # The .env override says 2200: the marker is already correct and
+    # must be left byte-identical.
+    assert guide.read_text(encoding="utf-8") == stamped
+
+
+def test_sync_reads_install_dotenv_for_nested_agent_root(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Setup scaffolds per-workspace agent roots under an install root whose
+    ``.env`` sits one level up and is never exported; the walk-up must find
+    it or a freshly seeded 3000 stamp gets left contradicting the enforced
+    2200.
+    """
+    import re
+
+    from ciao.memory_tool import ensure_regions
+
+    install = tmp_path / "install"
+    workspace = install / "personal"
+    workspace.mkdir(parents=True)
+    (install / ".env").write_text(
+        "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+    guide = workspace / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    # Fresh seeding stamped the shipped default; effective limit is 2200.
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = guide.read_text(encoding="utf-8")
+    assert "<!-- ciao:memory:start cap=2200 -->" in text
+    assert re.search(r"ciao:memory:start cap=3000", text) is None
 
 
 def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
@@ -190,10 +275,8 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     assert result.stock_pruned == 1
 
 
-def test_disabled_auto_update_restores_missing_locked_skill(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
+    # skills-lock.json is now inert; sync must not touch .agents/skills for lock entries
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "skills-lock.json").write_text(
@@ -211,74 +294,13 @@ def test_disabled_auto_update_restores_missing_locked_skill(
         ),
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
-
-    def runner(args, **kwargs):
-        calls.append(args)
-        canonical = workspace / ".agents" / "skills" / "upstream"
-        _write(canonical / "SKILL.md", "# Restored\n")
-        claude_link = workspace / ".claude" / "skills" / "upstream"
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-
-    result = sync_skills._refresh_upstream_skills(workspace, runner=runner)
-
-    assert result == (1, 0)
-    assert calls == [[
-        "npx", "-y", "skills", "add", "owner/repo", "--skill", "upstream",
-        "--agent", "claude-code", "-y",
-    ]]
-    assert (workspace / ".agents" / "skills" / "upstream" / "SKILL.md").is_file()
-
-
-def test_upstream_refresh_prunes_only_previous_locked_packages(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {"kept": {"source": "owner/kept", "sourceType": "github"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    cache = workspace / ".runtime" / "skills-sync-cache.json"
-    cache.parent.mkdir(parents=True)
-    cache.write_text(
-        json.dumps({
-            "heads": {"owner/kept": "same"},
-            "skills": {"kept": "owner/kept", "removed": "owner/removed", "stock": "owner/old-stock"},
-        }),
-        encoding="utf-8",
-    )
-    for name in ("kept", "removed"):
-        canonical = workspace / ".agents" / "skills" / name
-        _write(canonical / "SKILL.md", f"# {name}\n")
-        claude_link = workspace / ".claude" / "skills" / name
-        claude_link.parent.mkdir(parents=True, exist_ok=True)
-        claude_link.symlink_to(canonical)
-    stock = workspace / ".claude" / "skills" / "stock"
-    _write(stock / "SKILL.md", "# Stock\n")
-    (stock / sync_skills.STOCK_SKILL_MARKER).touch()
-
-    monkeypatch.setenv("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true")
-    monkeypatch.setattr(sync_skills.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(sync_skills.skills_sync, "remote_heads", lambda _repos: {"owner/kept": "same"})
-
-    result = sync_skills._refresh_upstream_skills(workspace)
-
-    assert result == (0, 1)
-    assert not (workspace / ".agents" / "skills" / "removed").exists()
-    assert not (workspace / ".claude" / "skills" / "removed").exists()
-    assert (stock / "SKILL.md").is_file()
+    canonical = workspace / ".agents" / "skills" / "upstream"
+    _write(canonical / "SKILL.md", "# Upstream\n")
+    result = sync_skills.sync_workspace_skills(workspace)
+    # Upstream still present (not auto-pruned via lock), but no npx called
+    assert (canonical / "SKILL.md").is_file()
+    assert result.upstream_updated == 0
+    assert result.upstream_pruned == 0
 
 
 def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
@@ -345,3 +367,29 @@ def test_subagent_shadows_stock_agent(tmp_path: Path) -> None:
     assert link.is_symlink()
     assert link.resolve() == custom.resolve()
     assert custom.read_text(encoding="utf-8") == "# Custom memory\n"
+
+
+def test_configured_cap_requires_the_exact_key_and_handles_comments(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The dotenv read must match CIAO_MEMORY_CHAR_LIMIT exactly.
+
+    A hand-rolled prefix match treats CIAO_MEMORY_CHAR_LIMIT_BACKUP as the
+    real setting and trips over an inline comment, either of which restamps
+    a guide with a cap the server never enforces. python-dotenv parses both
+    the way the server's own load_dotenv does.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
+
+    (workspace / ".env").write_text(
+        "CIAO_MEMORY_CHAR_LIMIT_BACKUP=9999\n", encoding="utf-8"
+    )
+    assert sync_skills._configured_memory_char_limit(workspace) is None
+
+    (workspace / ".env").write_text(
+        "CIAO_MEMORY_CHAR_LIMIT=2200  # keep the old budget\n", encoding="utf-8"
+    )
+    assert sync_skills._configured_memory_char_limit(workspace) == 2200

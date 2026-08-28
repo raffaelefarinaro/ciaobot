@@ -754,22 +754,6 @@ def _catalog(install: Path) -> None:
     (skills / "adversarial-review" / "scripts").mkdir(parents=True)
     (skills / "adversarial-review" / "scripts" / "run.py").write_text("x\n", encoding="utf-8")
     (skills / "README.md").write_text("catalog\n", encoding="utf-8")
-    (install / "skills-lock.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "skills": {
-                    "defuddle": {
-                        "source": "kepano/obsidian-skills",
-                        "sourceType": "github",
-                        "skillPath": "skills/defuddle/SKILL.md",
-                    }
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 def _install_hashes(install: Path) -> dict[str, str]:
@@ -793,7 +777,7 @@ def test_triage_lists_every_catalog_directory_including_one_without_a_skill_md(
     triage = plan_skills_triage(install, "personal")
 
     names = [entry.name for entry in triage.entries]
-    assert names == ["adversarial-review", "jira-tickets", "linkedin-writing", "defuddle"]
+    assert names == ["adversarial-review", "jira-tickets", "linkedin-writing"]
     husk = next(entry for entry in triage.entries if entry.name == "adversarial-review")
     assert husk.note, "a directory with no SKILL.md must be reported, not silently moved"
     described = next(entry for entry in triage.entries if entry.name == "jira-tickets")
@@ -851,10 +835,8 @@ def test_apply_moves_the_catalog_to_the_primary_and_copies_it_nowhere(
 
     assert result["status"] == "migrated", result.get("refusals")
     assert (install / "personal" / "skills" / "jira-tickets" / "SKILL.md").is_file()
-    assert (install / "personal" / "skills-lock.json").is_file()
     assert not (install / "skills").exists()
     assert not (install / "work" / "skills").exists()
-    assert not (install / "work" / "skills-lock.json").exists()
     # The husk's untracked content comes along, because the move is a rename.
     assert (install / "personal" / "skills" / "adversarial-review" / "scripts" / "run.py").is_file()
 
@@ -872,7 +854,7 @@ def test_apply_writes_a_triage_sheet_with_every_destination_blank(tmp_path: Path
     assert str(sheet.relative_to(install)) in result["created_files"]
     text = sheet.read_text(encoding="utf-8")
     rows = [line for line in text.splitlines() if line.startswith("| `")]
-    assert len(rows) == 4, rows
+    assert len(rows) == 3, rows
     for row in rows:
         cells = [cell.strip() for cell in row.strip("|").split("|")]
         assert cells[2] == "", f"destination must be blank, got {cells[2]!r}"
@@ -1613,13 +1595,13 @@ def test_the_dry_run_shows_every_move_the_apply_would_make(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["primary"] == "personal"
-    assert payload["total_moves"] == 9
+    assert payload["total_moves"] == 8
     sources = (
         [m["source"] for m in payload["moves"]]
         + [m["source"] for m in payload["skills_triage"]["moves"]]
         + [m["source"] for m in payload["guide_moves"]]
     )
-    assert "skills" in sources and "skills-lock.json" in sources
+    assert "skills" in sources
     assert "CLAUDE.md" in sources and "AGENTS.md" in sources
 
 
@@ -2413,3 +2395,83 @@ def test_a_fresh_install_receipt_says_born(tmp_path: Path) -> None:
     receipt = read_receipt(runtime)
     assert receipt["origin"] == "born"
     assert receipt["born_per_root"] is True
+
+
+# -- engine retirement: the startup gate is a no-op once migrated -------------
+
+
+class _MigratedOnlyConfig:
+    """A config that answers ONLY what locating a receipt needs.
+
+    Any other attribute access raises, so a pass proves the migration gate read
+    the receipt instead of falling back into registry or vault-path work.
+    """
+
+    def __init__(self, install_root: Path, runtime_root: Path) -> None:
+        self.workspace_root = install_root
+        self.state_path = runtime_root / "state.json"
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - test double
+        raise AssertionError(
+            f"migrate_if_needed touched config.{name} on a migrated install"
+        )
+
+
+def test_migrate_if_needed_is_a_receipt_read_noop_once_migrated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Retirement posture: on a migrated (or born-per-root) install the startup
+    auto-migration must cost one receipt file read and nothing else.
+
+    The whole point of keeping `workspace_reroot.py` while retiring its engine is
+    that an all-migrated install never pays for planning or rehearsal again — and
+    never depends on registry or vault-path resolution being healthy to skip it.
+    """
+    from ciao.workspace_reroot import mark_born_per_root
+
+    def _must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the migration ran on an all-migrated install")
+
+    install = tmp_path / "install"
+    install.mkdir()
+    runtime = install / ".runtime"
+    mark_born_per_root(install, runtime, ["personal"])
+    before = _tree_hashes(tmp_path)
+    for name in ("apply", "rehearse", "plan"):
+        monkeypatch.setattr(workspace_reroot, name, _must_not_run)
+
+    result = workspace_reroot.migrate_if_needed(_MigratedOnlyConfig(install, runtime))
+
+    assert result == {"status": "already_migrated"}
+    assert _tree_hashes(tmp_path) == before
+
+
+def test_an_unmigrated_install_still_runs_the_real_migration(tmp_path: Path) -> None:
+    """The cheap gate must not become a lockout: a shared-layout install with no
+    migrated receipt still gets the full plan-and-apply path."""
+    from types import SimpleNamespace
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    config = SimpleNamespace(
+        workspace_root=install,
+        state_path=runtime / "state.json",
+        vault_root=vault,
+        workspace_names=lambda: ["personal", "work"],
+        primary_workspace=lambda: "personal",
+    )
+
+    result = workspace_reroot.migrate_if_needed(config)
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert not (install / "memory-vault").exists()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+    assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
+    # The next start is the no-op.
+    assert workspace_reroot.migrate_if_needed(config) == {"status": "already_migrated"}

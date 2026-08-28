@@ -102,6 +102,19 @@ def test_cli_prepare_release_dispatches_module(monkeypatch: pytest.MonkeyPatch) 
     assert called == [["--version", "0.3.0"]]
 
 
+def test_cli_gws_passthrough_forwards_leading_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ciao gws --version` must forward the option untouched, not reject it."""
+    called = []
+
+    monkeypatch.setattr(cli.gws_wrapper, "main", lambda argv: called.append(argv) or 0)
+
+    assert cli.main(["gws", "--version"]) == 0
+    assert called == [["--version"]]
+
+    assert cli.main(["gws", "--profile", "work", "calendar", "list"]) == 0
+    assert called[-1] == ["--profile", "work", "calendar", "list"]
+
+
 def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -155,6 +168,18 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert cli.main(["vault-lint", "--vault-root", "/tmp/vault"]) == 0
     assert str(called[0].vault_root) == "/tmp/vault"
+
+
+def test_cli_gws_auth_helper_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_gws_auth_helper_command", lambda args: called.append(args) or 0
+    )
+
+    assert cli.main(["gws-auth-helper", "work", "--redirect-url", "http://x"]) == 0
+    assert called[0].profile == "work"
+    assert called[0].redirect_url == "http://x"
 
 
 def test_cli_workspace_census_dispatches_command(
@@ -358,13 +383,14 @@ def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatc
     assert called[0].apply is True
 
 
-def test_cli_skills_sync_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(cli, "_skills_sync_command", lambda args: called.append(args) or 0)
-
-    assert cli.main(["skills-sync", "write-cache", "lock.json", "heads.json", "cache.json"]) == 0
-    assert called[0].args == ["write-cache", "lock.json", "heads.json", "cache.json"]
+def test_cli_skills_sync_removed() -> None:
+    # skills-sync command has been removed per simplification plan.
+    try:
+        cli.main(["skills-sync", "write-cache", "lock.json", "heads.json", "cache.json"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        assert False, "skills-sync should exit with code 2"
 
 
 def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1008,7 +1034,7 @@ def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
 
     assert cli.main(["auth", "claude"]) == 0
 
-    assert calls == [["/opt/ciao/claude", "login"]]
+    assert calls == [["/opt/ciao/claude", "auth", "login"]]
 
 
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:

@@ -2,33 +2,19 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
 // (no workspace sandbox; relative paths anchor to config.workspace_root).
 //
-// Three "tabs" the modal exposes:
-//   - preview: current on-disk content (current contract; default)
-//   - history: snapshot list from /api/file-history, drives the diff selector
-//   - diff:    side-by-side comparison of two snapshots (or current vs prior)
-//
-// Plus an editing mode that POSTs to /api/workspace-file to save user edits
-// and snapshot them via the active chat's history.
+// The viewer has one reading surface: the current on-disk preview (which also
+// becomes the editing surface when editing is available).
 
 export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
-export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
 export type HtmlArtifactView = 'preview' | 'code'
-
-export interface SnapshotMeta {
-  seq: number
-  ts: string
-  action: string
-  tool: string
-  size: number
-  truncated?: boolean
-}
 
 export function fileViewerKindForPath(filePath: string): FileViewerKind {
   const cleaned = filePath.replace(/:\d+$/, '').toLowerCase()
@@ -38,6 +24,7 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
 }
 
 export const useFileViewerStore = defineStore('fileViewer', () => {
+  const projectStore = useProjectStore()
   const isOpen = ref(false)
   const kind = ref<FileViewerKind>('text')
   const path = ref('')
@@ -54,25 +41,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // can then be saved back over the current file.
   let fetchSeq = 0
 
-  // Snapshot-related state. `chatId` is set by callers that have a chat
-  // context (the inline file card) so we can fetch history. When omitted
-  // we still render the Preview tab but History/Diff are unavailable.
+  // `chatId` is kept for pin/open context (inline card).
   const chatId = ref('')
-  const tab = ref<FileViewerTab>('preview')
-  const snapshots = ref<SnapshotMeta[]>([])
-  const snapshotsLoading = ref(false)
-  const snapshotsError = ref('')
-
-  // Diff tab state: `diffSeqA` is the "before", `diffSeqB` is the "after".
-  // 0 means "current on-disk content" — useful when you want to diff a
-  // snapshot against where the file is right now (e.g. after an external
-  // edit). Defaults are wired in `setTab('diff')`.
-  const diffSeqA = ref(0)
-  const diffSeqB = ref(0)
-  const diffContentA = ref('')
-  const diffContentB = ref('')
-  const diffLoading = ref(false)
-  const diffError = ref('')
 
   // Edit state. When `editing` is true the modal swaps the read-only viewer
   // for a textarea pre-filled with `content`. `editBuffer` holds the in-flight
@@ -84,11 +54,24 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const isDirty = computed(() => editing.value && editBuffer.value !== content.value)
 
   // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
-  // Checked proactively so a missing install shows a real "Install" button
-  // instead of the iframe silently failing to load with a browser-level error.
+  // Checked proactively so a missing install shows guidance instead of the
+  // iframe silently failing to load with a browser-level error.
   const pptxNeedsLibreoffice = ref(false)
-  const libreofficeInstalling = ref(false)
   const libreofficeInstallError = ref('')
+
+  async function installLibreofficeInChat(): Promise<void> {
+    try {
+      await projectStore.fixError({
+        errorText:
+          'LibreOffice (soffice) is not installed, so PowerPoint files cannot be previewed in the Ciaobot file viewer.',
+        context:
+          'Previewing a .pptx from the Ciaobot file viewer. Install LibreOffice (e.g. `brew install --cask libreoffice` on macOS) so soffice can render slides; Ciaobot never runs package installs on its own.',
+        title: 'Install LibreOffice',
+      })
+    } catch (e) {
+      libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
 
   // Markdown vault-link resolution uses a vault-wide path index from the API.
   const markdownPaths = ref<string[]>([])
@@ -112,14 +95,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     content.value = ''
     error.value = ''
     loading.value = false
-    tab.value = 'preview'
-    snapshots.value = []
-    snapshotsError.value = ''
-    diffSeqA.value = 0
-    diffSeqB.value = 0
-    diffContentA.value = ''
-    diffContentB.value = ''
-    diffError.value = ''
     editing.value = false
     editBuffer.value = ''
     editError.value = ''
@@ -133,24 +108,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       pptxNeedsLibreoffice.value = !res.available
     } catch {
       pptxNeedsLibreoffice.value = false
-    }
-  }
-
-  async function installLibreoffice(): Promise<void> {
-    libreofficeInstalling.value = true
-    libreofficeInstallError.value = ''
-    try {
-      const res = await api.post<{ ok: boolean; error?: string }>('/api/libreoffice-install', {})
-      if (res.ok) {
-        await checkLibreofficeStatus()
-        if (!pptxNeedsLibreoffice.value) loadToken.value++
-      } else {
-        libreofficeInstallError.value = res.error || 'Installation failed.'
-      }
-    } catch (e) {
-      libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
-    } finally {
-      libreofficeInstalling.value = false
     }
   }
 
@@ -308,94 +265,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
-  // ── Tabs / history / diff ──────────────────────────────────────────────
-
-  async function setTab(t: FileViewerTab): Promise<void> {
-    tab.value = t
-    if (t === 'history' || t === 'diff') {
-      await loadHistory()
-    }
-    if (t === 'diff' && snapshots.value.length >= 2) {
-      // Default to comparing the last two snapshots.
-      diffSeqA.value = snapshots.value[snapshots.value.length - 2].seq
-      diffSeqB.value = snapshots.value[snapshots.value.length - 1].seq
-      await loadDiff()
-    } else if (t === 'diff' && snapshots.value.length === 1) {
-      // Only one snapshot: compare against current on-disk content.
-      diffSeqA.value = snapshots.value[0].seq
-      diffSeqB.value = 0  // 0 → "current"
-      await loadDiff()
-    }
-  }
-
-  async function loadHistory(): Promise<void> {
-    if (!chatId.value || !path.value) {
-      snapshots.value = []
-      snapshotsError.value = chatId.value ? 'No file selected.' : 'No chat context — open the file from an inline card.'
-      return
-    }
-    snapshotsLoading.value = true
-    snapshotsError.value = ''
-    try {
-      const url = `/api/file-history?chat_id=${encodeURIComponent(chatId.value)}&file_path=${encodeURIComponent(path.value)}`
-      const resp = await fetch(url, { credentials: 'same-origin' })
-      if (!resp.ok) {
-        snapshotsError.value = `Failed to load history (HTTP ${resp.status}).`
-        snapshots.value = []
-        return
-      }
-      const body = await resp.json()
-      snapshots.value = Array.isArray(body.snapshots) ? body.snapshots : []
-    } catch (e) {
-      snapshotsError.value = e instanceof Error ? e.message : String(e)
-      snapshots.value = []
-    } finally {
-      snapshotsLoading.value = false
-    }
-  }
-
-  async function loadDiff(): Promise<void> {
-    diffLoading.value = true
-    diffError.value = ''
-    try {
-      const [a, b] = await Promise.all([
-        _fetchSeq(diffSeqA.value),
-        _fetchSeq(diffSeqB.value),
-      ])
-      diffContentA.value = a
-      diffContentB.value = b
-    } catch (e) {
-      diffError.value = e instanceof Error ? e.message : String(e)
-    } finally {
-      diffLoading.value = false
-    }
-  }
-
-  async function _fetchSeq(seq: number): Promise<string> {
-    if (seq === 0) {
-      // Current on-disk content. Reuse the open() text path: we already have
-      // it in `content` for the active preview, but it might be stale by the
-      // time the user opens Diff, so refetch.
-      const resp = await fetch(
-        `/api/workspace-file?path=${encodeURIComponent(path.value)}`,
-        { credentials: 'same-origin' },
-      )
-      if (!resp.ok) throw new Error(`current content HTTP ${resp.status}`)
-      return resp.text()
-    }
-    const url = `/api/file-content?chat_id=${encodeURIComponent(chatId.value)}&file_path=${encodeURIComponent(path.value)}&seq=${seq}`
-    const resp = await fetch(url, { credentials: 'same-origin' })
-    if (!resp.ok) throw new Error(`snapshot ${seq} HTTP ${resp.status}`)
-    const body = await resp.json()
-    return typeof body.content === 'string' ? body.content : ''
-  }
-
-  async function setDiffSeqs(a: number, b: number): Promise<void> {
-    diffSeqA.value = a
-    diffSeqB.value = b
-    await loadDiff()
-  }
-
   // ── Edit mode ──────────────────────────────────────────────────────────
 
   function startEditing(): void {
@@ -435,15 +304,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         editError.value = `Save failed (HTTP ${resp.status}).`
         return false
       }
-      // Adopt the saved buffer as the new preview content. Refresh history
-      // so the new snapshot (if any) shows up immediately in the History tab.
       content.value = editBuffer.value
       editing.value = false
       editBuffer.value = ''
       // Artifacts render from a URL, so adopting the buffer is not enough:
       // bump the token or Preview keeps showing the pre-save page.
       if (kind.value === 'html') loadToken.value++
-      if (chatId.value) await loadHistory()
       return true
     } catch (e) {
       editError.value = e instanceof Error ? e.message : String(e)
@@ -451,32 +317,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     } finally {
       editSaving.value = false
     }
-  }
-
-  async function restoreSnapshot(seq: number): Promise<boolean> {
-    if (!chatId.value || !path.value || seq <= 0) return false
-    const resp = await fetch('/api/file-restore', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId.value,
-        file_path: path.value,
-        seq,
-      }),
-    })
-    if (!resp.ok) return false
-    // Reload content + history so the modal reflects the new state.
-    await Promise.all([
-      (async () => {
-        const r = await fetch(`/api/workspace-file?path=${encodeURIComponent(path.value)}`, { credentials: 'same-origin' })
-        if (r.ok) content.value = await r.text()
-      })(),
-      loadHistory(),
-    ])
-    // Same reason as saveEdits: the artifact frame reloads from its URL.
-    if (kind.value === 'html') loadToken.value++
-    return true
   }
 
   return {
@@ -490,23 +330,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     error,
     loadToken,
     chatId,
-    tab,
-    snapshots,
-    snapshotsLoading,
-    snapshotsError,
-    diffSeqA,
-    diffSeqB,
-    diffContentA,
-    diffContentB,
-    diffLoading,
-    diffError,
     editing,
     isDirty,
     editBuffer,
     editSaving,
     editError,
     pptxNeedsLibreoffice,
-    libreofficeInstalling,
     libreofficeInstallError,
     markdownPaths,
     htmlView,
@@ -520,13 +349,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     setHtmlView,
     close,
     loadMarkdownPaths,
-    setTab,
-    loadHistory,
-    setDiffSeqs,
     startEditing,
     cancelEditing,
     saveEdits,
-    restoreSnapshot,
-    installLibreoffice,
+    installLibreofficeInChat,
   }
 })

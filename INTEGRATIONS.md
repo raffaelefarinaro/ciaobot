@@ -40,6 +40,30 @@ archived, deleted, or reset, Ciaobot disconnects its server and then calls
 `DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
 fail-open if the provider is unavailable.
 
+### Auto mode (automatic permission review)
+
+Ciaobot's opencode chats run in auto mode: the session permission ruleset is
+`allow` for routine tools, with `bash` (every shell command) and Ciaobot's
+destructive control-plane tools routed to `ask`. Each `ask` surfaces an
+approval card in the chat that the operator approves or denies.
+
+To get a Claude-Code/Codex-style **automatic** approval classifier instead of
+manual cards, install the [`opencode-auto-permissions`](https://github.com/hueyexe/opencode-auto-permissions)
+plugin into opencode's global config:
+
+```bash
+opencode plugin -g opencode-auto-permissions
+```
+
+The plugin answers each `permission.asked` with a reviewer model (your
+session's model by default) that auto-approves routine work and denies
+destructive or out-of-scope calls, so `rm`/`sudo`/`git push`/shell pipelines
+are reviewed rather than prompting you. It is designed for opencode's Auto
+mode; keep chats in Auto and opt into the plugin deliberately. See the
+plugin's README and opencode's
+[permissions docs](https://opencode.ai/docs/permissions/#auto-mode) for
+configuration.
+
 ### Live eval provider access
 
 `ciao eval` uses the selected provider's existing CLI authentication and the
@@ -61,17 +85,17 @@ GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws-personal gws auth login   # person
 gws auth login                                                           # work
 ```
 
-Use `scripts/gws-profile.sh <profile> <gws-args>` to switch between accounts (`$GWS_PROFILE` holds the chat's own account). Never source the wrapper: it ends with `exec`.
+Use `ciao gws <profile> <gws-args>` to switch between accounts (`$GWS_PROFILE` holds the chat's own account). Never source the wrapper: it ends with `exec`. (`scripts/gws-profile.sh` remains as a thin back-compat shim that forwards to `ciao gws`.)
 
-**PWA-native OAuth (no terminal required).** The Settings → Workspaces Google Workspace card can upload a GCP `client_secret.json` and drive the full OAuth code-exchange from the browser. The server generates the Google authorization URL, opens it in a new tab, and exchanges the returned authorization code for a refresh token. Accounts are added in that card (there are no built-in ones); credentials are written to `<workspace>/secrets/gws-<account>/`, except the two pre-registry names, which keep `<workspace>/secrets/gws-personal/` (personal) and `<workspace>/secrets/gws/` (work). Scopes granted: personal = Gmail + Calendar + Tasks; work also adds Drive, Docs, Sheets, and Slides. Use `Disconnect` to delete the stored credential files from the same panel. Note: these paths (`<workspace>/secrets/gws-*/`) are separate from `~/.config/gws-*/`, which the `gws` CLI uses by default when invoked via `scripts/gws-profile.sh`.
+**PWA-native OAuth (no terminal required).** The Settings → Workspaces Google Workspace card can upload a GCP `client_secret.json` and drive the full OAuth code-exchange from the browser. The server generates the Google authorization URL, opens it in a new tab, and exchanges the returned authorization code for a refresh token. Accounts are added in that card (there are no built-in ones); credentials are written to `<workspace>/secrets/gws-<account>/`, except the two pre-registry names, which keep `<workspace>/secrets/gws-personal/` (personal) and `<workspace>/secrets/gws/` (work). Scopes granted: personal = Gmail + Calendar + Tasks; work also adds Drive, Docs, Sheets, and Slides. Use `Disconnect` to delete the stored credential files from the same panel. Note: these paths (`<workspace>/secrets/gws-*/`) are separate from `~/.config/gws-*/`, which the `gws` CLI uses by default when invoked directly via `ciao gws`.
 
 **Getting `client_secret.json`.** In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials): create or pick a project, enable the APIs you need (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks), then create an OAuth 2.0 client ID (Desktop app, or Web application with redirect URI `http://localhost`). Download the JSON credentials file and upload it in Settings → Workspaces (Google Workspace card). The PWA ⓘ panel on that card repeats these steps for end users. Stock `gws-*` skills ship with the app once `gws` is installed and authenticated.
 
-**Auth + scope gotchas.** Use `gws auth login --full` for complete scopes. `gws auth login --services calendar` has produced tokens that still lack the calendar scope. The wrapper already execs `gws`, so `scripts/gws-profile.sh personal gws calendar ...` doubles the command and fails with `Unknown service 'gws'`; pass the subcommand directly: `scripts/gws-profile.sh personal calendar ...`. If auth fails despite a fresh login, `credentials.enc` (AES-256-GCM) may hold the valid refresh token while `credentials.json` carries a stale one. The work gcloud account only has `openid`/`cloud-platform` scopes and returns 403 on Drive uploads, so do not substitute `gcloud auth print-access-token` for `gws` auth in Drive flows.
+**Auth + scope gotchas.** Use `gws auth login --full` for complete scopes. `gws auth login --services calendar` has produced tokens that still lack the calendar scope. `ciao gws` already execs `gws`, so `ciao gws personal gws calendar ...` doubles the command and fails with `Unknown service 'gws'`; pass the subcommand directly: `ciao gws personal calendar ...`. If auth fails despite a fresh login, `credentials.enc` (AES-256-GCM) may hold the valid refresh token while `credentials.json` carries a stale one. The work gcloud account only has `openid`/`cloud-platform` scopes and returns 403 on Drive uploads, so do not substitute `gcloud auth print-access-token` for `gws` auth in Drive flows.
 
-**Headless re-auth.** When `gws auth login` fails on a headless server, run `python3 scripts/gws-auth-helper.py <profile>`. It prints the auth URL, waits for the redirect URL to be pasted back, and saves fresh credentials.
+**Headless re-auth.** When `gws auth login` fails on a headless server, run `ciao gws-auth-helper <profile>`. It prints the auth URL, waits for the redirect URL to be pasted back, and saves fresh credentials.
 
-**Token expiry.** Symptom: `"token_error": "Token has been expired or revoked."`. Fix: `scripts/gws-profile.sh <profile> auth login` (or the headless helper above). If `GOOGLE_WORKSPACE_CLI_CLIENT_ID` is set in `.env`, it can override the OAuth client to a wrong project; comment it out, or run `env -u GOOGLE_WORKSPACE_CLI_CLIENT_ID gws auth login --profile <profile>`.
+**Token expiry.** Symptom: `"token_error": "Token has been expired or revoked."`. Fix: `ciao gws <profile> auth login` (or the headless helper above). If `GOOGLE_WORKSPACE_CLI_CLIENT_ID` is set in `.env`, it can override the OAuth client to a wrong project; comment it out, or run `env -u GOOGLE_WORKSPACE_CLI_CLIENT_ID gws auth login --profile <profile>`.
 
 **Token-health monitoring (automatic).** A background loop checks each configured profile's token validity on a fixed interval (`CIAO_GWS_HEALTH_INTERVAL`, default 900s). On a transition to invalid it sends one PWA notification and publishes an in-app `gws_health` status event naming the profile, so a revoked login surfaces instead of GWS-dependent schedules failing silently. The alert is debounced (one notification per breakage) and re-arms after the token recovers. The result also appears per profile in `GET /api/integrations/gws` as `token_valid` / `token_error` / `needs_relogin`, which Settings → Workspaces renders on the Google Workspace card.
 
@@ -304,11 +328,10 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_LOG_LEVEL`: root log level for the server (default `info`). Accepts standard names (`debug`, `info`, `warning`, `error`) or numeric values. Setting it to `debug` also attaches a rotating `.runtime/server_debug.log` (10 MB × 2 backups) capturing every DEBUG+ record — provider stderr noise, lifecycle events, uvicorn request logs — which the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail so failures can be traced beyond their final error line.
 - `CIAO_CLAUDE_MAX_BUFFER_BYTES`: max bytes the Claude Agent SDK buffers for a single JSON message from the `claude` CLI subprocess stdout. Raises the SDK's 1 MiB default (Ciaobot default 32 MiB) so one large tool result or content block doesn't abort the turn. If even this is exceeded the turn ends with a recoverable error instead of a crash. Set higher only for unusually large payloads.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
-- `CIAO_GWS_HEALTH_INTERVAL`: seconds between Google Workspace token-health checks (default `900`). Each cycle runs a cheap `scripts/gws-profile.sh <profile> auth status` per configured profile; when a refresh token is revoked/expired it fires one PWA notification plus an in-app status event (debounced until the token recovers). Set to `0` to disable the periodic check.
+- `CIAO_GWS_HEALTH_INTERVAL`: seconds between Google Workspace token-health checks (default `900`). Each cycle runs a cheap `gws auth status` per configured profile; when a refresh token is revoked/expired it fires one PWA notification plus an in-app status event (debounced until the token recovers). Set to `0` to disable the periodic check.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
-- `scripts/gws-auth-helper.py`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
+- `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
-- `CIAO_INSIGHTS_MIN_TURNS`: minimum number of turns in a session before insights extraction runs. Default `2` (single-shot chats are skipped, multi-turn chats are included). Override with any positive integer; set to `1` to include single-shot chats too.
 - `CIAO_INSIGHTS_MODEL`: model ID for insights extraction. Default `sonnet` — a tier alias, resolved by whichever provider runs the routine. Set it to `apple` (or choose Apple in Settings) to use the on-device Foundation Model; if Apple Intelligence is unavailable, Ciaobot falls back to the configured automatic model.
 - `CIAO_INSIGHTS_BACKFILL_ON_STARTUP`: set to `true`/`yes`/`on` to asynchronously scan for and backfill missing session insights on server startup. Default is disabled (false). Helps regenerate missing insights if the model call failed during chat archive due to budget or network issues.
 - `CIAO_INSIGHTS_TIMEOUT_S`: per-call timeout (seconds) for the insights and text-fallback model calls. Default `600`. The insights model is operator-selectable, and a slow local or cloud GGUF can take 214–253s end to end; the previous flat 120s budget turned tail latency into a `TimeoutError` and failed the job. Lower it if you route insights at a fast model and want to fail sooner.
@@ -317,12 +340,12 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_TRAJECTORIES_DISABLED`: set to `true`/`yes`/`on` to disable structured trajectory capture after a chat is archived (skills loaded, tools used, errors, decisions). Default enabled. Trajectories are written to `~/.ciao/trajectories/YYYY-MM/<session-id>.json` and mined by the weekly skill-evolution pass.
 - `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the `adversarial_review` MCP tool (`ciao.critique`). Overrides the default panel. An entry may name the provider that runs it: `opencode:<tier>` routes to that provider's app-server, and a bare tier alias runs through Claude Code. The default panel lists one voice per signed-in vendor. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
 - `CIAO_ADVERSARIAL_MODELS`: legacy alias for `CIAO_REVIEW_MODELS`.
-- `CIAO_MEMORY_CHAR_LIMIT`: advisory cap (chars) on the `ciao:memory` region in the workspace `CLAUDE.md`. Default `2200`. Nothing refuses a write at edit time — `memory_update` writes over the cap and reports `over_cap` with `used_chars` — and `os_audit` plus nightly memory curation report and consolidate when over cap. It was enforced as a hard refusal until 2026-08-20, which made accepting a queued proposal impossible once the region filled up, without shrinking the region.
+- `CIAO_MEMORY_CHAR_LIMIT`: advisory cap (chars) on the `ciao:memory` region in the workspace `CLAUDE.md`. Default `3000`. Nothing refuses a write at edit time — `memory_update` writes over the cap and reports `over_cap` with `used_chars` — and `os_audit` plus nightly memory curation report and consolidate when over cap. It was enforced as a hard refusal until 2026-08-20, which made accepting a queued proposal impossible once the region filled up, without shrinking the region.
 - `CIAO_USER_CHAR_LIMIT`: advisory cap (chars) on the `ciao:profile` region. Default `1375`. Same advisory flow as `CIAO_MEMORY_CHAR_LIMIT`.
+- `VOCAB_PROMOTION_THRESHOLD`: the usage threshold (a minimum of 2) above which a non-canonical `type:` or a tag becomes a candidate for the canonical/established set in the workspace-hygiene vocabulary proposals. Default `5`, matching the established-tag tier boundary. Raising it delays promotions and merges; it is shared by the proposal audit (`ciao/vocabulary_proposals.py`) and the generated `VOCABULARY.md` tiers (`ciao/vault_index.py`). Not a `CIAO_*` variable, so it is not covered by the env-var documentation test; it is documented here for operator discoverability.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `default_model` and `disallowed_tools` on the workspace in `.runtime/workspaces.json` (or `CIAO_WORKSPACES`), which works for any name. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
 - `CIAO_AUTO_VAULT_INDEX`: set to `false` to disable automatic vault index regeneration on server startup. Default `true`.
-- `CIAO_AUTO_UPDATE_GITHUB_SKILLS`: set to `true` to check/update locked package skills from GitHub on boot. Default `false` (skills update via the app release pipeline instead).
 - `CIAO_GITHUB_REPO`: `owner/name` of the GitHub repository used to fetch the changelog (commits between the installed and latest release tags) shown in the Settings update prompt. Default `raffaelefarinaro/ciaobot`.
 - `CIAO_GITHUB_TOKEN` (also honors `GITHUB_TOKEN` / `GH_TOKEN`): personal access token used to authenticate on-demand GitHub REST API calls when fetching the changelog for an available update. Optional; when set it raises GitHub's API rate limit from 60 to 5000 requests/hour. The recurring update check does not use the API at all (it follows the public `releases/latest` redirect), so a token is not needed just to check for updates. No scopes are required (public read only).
 - **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only opencode is consulted — it is bring-your-own-provider, and its catalog states each model's `capabilities.input.image`. An unstated answer counts as capable, so a cold catalog or an older opencode build never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models opencode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
@@ -340,7 +363,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_PUBLIC_PRIVATE_PATTERNS`: comma-separated private string patterns used by `ciao public-preflight scan` when a `--private-patterns` file is not supplied. Intended for public extraction checks, not normal runtime.
 
-**Note:** `scripts/gws-auth-helper.py` is the helper for headless `gws` auth when the keyring backend fails.
+**Note:** `ciao gws-auth-helper` is the helper for headless `gws` auth when the keyring backend fails.
 
 ### Injected CLI context variables
 

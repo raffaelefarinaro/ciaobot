@@ -7,14 +7,14 @@ metadata:
 
 # gmail +read
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Read a message and extract its body or headers
 
 ## Usage
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id <ID>
+ciao gws "$GWS_PROFILE" gmail +read --id <ID>
 ```
 
 ## Flags
@@ -30,9 +30,9 @@ scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id <ID>
 ## Examples
 
 ```bash
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --headers
-scripts/gws-profile.sh "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --format json | jq '.body'
+ciao gws "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d
+ciao gws "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --headers
+ciao gws "$GWS_PROFILE" gmail +read --id 18f1a2b3c4d --format json | jq '.body'
 ```
 
 ## Tips

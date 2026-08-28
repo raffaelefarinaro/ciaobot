@@ -289,6 +289,9 @@
                 <p v-if="changelog.compare_url" class="hint hint--spaced">
                   <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
                 </p>
+                <p v-if="packageStatus.source" class="hint hint--spaced">
+                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
+                </p>
               </template>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
@@ -303,53 +306,10 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications — the desktop app owns this in the tray. -->
-        <div v-if="!inDesktopApp" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">notifications</p>
-              <p class="hint">
-                Get a notification when a chat replies and the app is not focused.
-              </p>
-            </div>
-            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
-          </div>
-          <div v-if="needsIosInstall" class="hint hint--warn">
-            On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-          </div>
-          <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-          </div>
-          <div v-else-if="!pushSupportedFlag" class="loading">
-            Push notifications are not supported here. On macOS, install Ciaobot as an app
-            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-          </div>
-          <template v-else>
-            <!-- On macOS the menu-bar agent already posts chat-reply notifications
-                 out of the box (menubar_prefs defaults on, launchd RunAtLoad), so
-                 don't present web-push as a required action here — lead with the
-                 reassurance and offer the app-install path as an optional upgrade. -->
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              You're covered — the menu bar already shows a notification when a chat
-              replies and the app isn't focused. Nothing to enable.
-            </p>
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-              open the exact chat (and keep working even if you quit the menu bar), install
-              Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-              &ldquo;Add to Dock&rdquo;), then enable it here.
-            </p>
-          </template>
-          <div v-if="pushError" class="action-result">{{ pushError }}</div>
-        </div>
+        <!-- Notifications — the desktop app owns this in the tray, so the
+             card drops out there rather than showing web-push controls the
+             tray already supersedes. Same card as the Notifications tab. -->
+        <SettingsNotifications hide-in-desktop-app />
 
         <!-- Appearance -->
         <div class="card">
@@ -461,6 +421,11 @@
             </p>
           </div>
         </div>
+      </template>
+
+      <!-- NOTIFICATIONS TAB -->
+      <template v-if="currentTab === 'notifications'">
+        <SettingsNotifications />
       </template>
 
 
@@ -753,6 +718,36 @@
                     </template>
                   </div>
                 </div>
+                <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
+                  <label class="settings-field">
+                    <span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-if="getProviderSection(String(connKey))?.configurable"
+                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                    />
+                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Default thinking</span>
+                    <select
+                      class="routine-select"
+                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option
+                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
                 <div class="action-row provider-connection-actions">
                   <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
                     {{ conn.ok ? 'Reconnect' : 'Connect' }}
@@ -764,104 +759,23 @@
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
 
-            <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">{{ meta.label }}</span>
-                  <p class="hint hint--compact">{{ meta.description }}</p>
-                </div>
-                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
-                  {{ meta.configured ? 'Configured' : 'Unconfigured' }}
-                </span>
-              </div>
-              <input
-                type="password"
-                class="routine-input"
-                v-model="providerKeyInputs[key]"
-                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
-                :disabled="providerKeysSaving"
-              />
-            </div>
+            <p
+              v-if="providerKeys.connections?.opencode"
+              class="hint provider-auto-mode-hint"
+            >
+              To get a Claude-Code-style automatic approval classifier in opencode chats,
+              install the <code>opencode-auto-permissions</code> plugin from a terminal:
+              <code>opencode plugin -g opencode-auto-permissions</code>. It reviews each
+              permission request with your session's model instead of showing an approval
+              card. See <a
+                href="https://opencode.ai/docs/permissions/#auto-mode"
+                target="_blank"
+                rel="noopener noreferrer"
+              >opencode permissions docs ↗</a>.
+            </p>
 
-            <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">{{ meta.label }}</span>
-                  <p class="hint hint--compact">{{ meta.description }}</p>
-                </div>
-                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
-                  {{ meta.configured ? (meta.auth_method === 'oauth' ? 'OAuth' : 'Configured') : 'Unconfigured' }}
-                </span>
-              </div>
-              <input
-                type="password"
-                class="routine-input"
-                v-model="providerKeyInputs[key]"
-                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
-                :disabled="providerKeysSaving"
-              />
-            </div>
-
-
-            <div class="action-row settings-actions">
-              <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
-                {{ providerKeysSaving ? 'Saving...' : 'Save Keys' }}
-              </button>
-            </div>
-            <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
-          </div>
-
-
-          <!-- Per-provider default model and thinking for new chats. Moved
-               here from the removed model-routing card; these are the
-               per-provider knobs that used to be four tier pins each. -->
-          <div v-if="aliasProviderSections.length" class="card">
-            <div class="settings-card-header">
-              <p class="section-title">defaults per provider</p>
-              <p class="hint">
-                Choose the default model and thinking level new chats start on
-                for each provider. "Automatic" uses that provider's own default.
-              </p>
-            </div>
-            <div class="provider-defaults">
-              <div
-                v-for="section in aliasProviderSections"
-                :key="section.key"
-                class="provider-defaults-row"
-              >
-                <span class="provider-defaults-title ws-label">{{ section.label }}</span>
-                <label class="settings-field">
-                  <span class="ws-label">Default model</span>
-                  <ModelSelector
-                    v-if="section.configurable"
-                    :model-value="providerDefaultModelSelectorValue(section.key)"
-                    :sections="providerDefaultModelSectionsFor(section.key)"
-                    :disabled="routinesSaving || !section.available"
-                    @update:model-value="saveProviderDefaultModel(section.key, $event)"
-                  />
-                  <span v-else class="hint hint--compact">Automatic — Claude Code picks its own default.</span>
-                </label>
-                <label class="settings-field">
-                  <span class="ws-label">Default thinking</span>
-                  <select
-                    class="routine-select"
-                    :value="providerDefaultThinkingValue(section.key)"
-                    :disabled="routinesSaving || !section.available"
-                    @change="saveProviderDefaultThinking(section.key, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option
-                      v-for="option in providerThinkingOptions(section.key)"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-              </div>
-            </div>
-          </div>
-        </template>
+           </div>
+         </template>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -871,6 +785,7 @@
           :automation-loaded="automationLoaded"
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
+          :proposal-outcomes="proposalOutcomes"
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
@@ -1113,7 +1028,7 @@
                           <strong>gcloud (no console needed):</strong> install the
                           <a href="https://cloud.google.com/sdk/docs/install" target="_blank" rel="noopener noreferrer">gcloud CLI</a>,
                           authenticate once, then run
-                          <code>scripts/gws-profile.sh &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
+                          <code>ciao gws &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
                         </li>
                         <li>
                           <strong>Bring your own client:</strong> in
@@ -1155,15 +1070,9 @@
                   Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
                 </p>
                 <div class="action-row">
-                  <button
-                    class="btn-primary btn-small"
-                    :disabled="gwsInstalling"
-                    @click="installGws"
-                  >
-                    {{ gwsInstalling ? 'Installing…' : 'Install gws' }}
-                  </button>
+                  <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
                 </div>
-                <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
+                <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
@@ -1267,7 +1176,7 @@
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
                         First, create an OAuth client. Easiest: run
-                        <code>scripts/gws-profile.sh {{ profile.name }} auth setup</code>
+                        <code>ciao gws {{ profile.name }} auth setup</code>
                         in a terminal with the
                         <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>
                         installed — it creates the client for you. Or upload one you made in
@@ -1457,39 +1366,59 @@
             <div>
               <p class="section-title">skills</p>
               <p class="hint">
-                Manage Ciaobot's stock skills, custom skills, and locked GitHub/package skills.
+                Skills are local folders: place <code>skills/&lt;name&gt;/SKILL.md</code> (or upload a validated zip) then <code>ciao sync-skills</code>. Workspace git sync propagates to other operators. No GitHub fetch.
               </p>
             </div>
             <div class="settings-card-header-actions">
               <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
-              <button class="btn-small" @click="toggleAddGithubSkill">
-                {{ showAddGithubSkill ? 'Cancel' : '+ Add from GitHub' }}
+              <button class="btn-primary btn-small" @click="toggleAddSkill">
+                {{ showAddSkill ? 'Cancel' : '+ Add skill' }}
               </button>
             </div>
           </div>
 
           <p class="hint hint--info skill-scope-note">
-             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock, custom, and GitHub/package skills — see
+             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
             <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
-          <!-- Add Github Skill Form -->
-          <div
-            v-if="showAddGithubSkill"
-            class="settings-form-panel"
-          >
-            <label class="settings-field"><span class="ws-label">GitHub URL / owner/repo</span>
-              <input class="routine-input" v-model="githubSource" :disabled="addingGithubSkill" placeholder="e.g. owner/repo or github URL" />
-            </label>
-            <label class="settings-field"><span class="ws-label">Skill name (optional)</span>
-              <input class="routine-input" v-model="githubSkillName" :disabled="addingGithubSkill" placeholder="(inferred from URL if omitted)" />
-            </label>
+          <!-- Add Skill Form: folder note + zip upload -->
+          <div v-if="showAddSkill" class="settings-form-panel">
+            <div class="gws-account-add" style="margin-bottom: 12px;">
+              <p class="ws-label">Add a skill</p>
+              <p class="hint hint--compact">
+                Place a folder <code>skills/&lt;name&gt;/SKILL.md</code> in the workspace, then run <code>ciao sync-skills</code>. Or upload a zip containing exactly one top-level folder with <code>SKILL.md</code>. Validated before extract.
+              </p>
+            </div>
+            <div class="settings-field-grid">
+              <div class="settings-field settings-field--wide">
+                <span class="ws-label">Upload zip</span>
+                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Max 15 KB SKILL.md, frontmatter <code>name</code> must match folder.</p>
+                <input
+                  ref="skillZipInput"
+                  type="file"
+                  accept=".zip"
+                  style="display: none;"
+                  @change="onSkillZipSelected"
+                  :disabled="addingSkill"
+                />
+                <button class="btn-small" @click="triggerSkillZipPicker" :disabled="addingSkill">
+                  {{ addingSkill ? 'Uploading…' : 'Choose zip' }}
+                </button>
+                <span v-if="skillZipFileName" class="hint hint--compact" style="margin-left: 8px;">{{ skillZipFileName }}</span>
+              </div>
+            </div>
             <div class="action-row settings-actions">
-              <button class="btn-primary" @click="addGithubSkill" :disabled="addingGithubSkill || !githubSource.trim()">
-                {{ addingGithubSkill ? 'Adding...' : 'Add skill' }}
+              <button class="btn-primary" @click="uploadSkillZip" :disabled="addingSkill || !skillZipFile">
+                {{ addingSkill ? 'Uploading…' : 'Upload zip' }}
               </button>
             </div>
-            <div v-if="addGithubSkillResult" class="action-result" :class="{ '--error': addGithubSkillError }">{{ addGithubSkillResult }}</div>
+            <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--fg3);">
+              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code>, ≤15 KB</li>
+              <li>Discoverable immediately: <code>.claude/skills</code> + <code>.agents/skills</code> symlink</li>
+              <li>Sync between operators = workspace git (no npx)</li>
+            </ul>
+            <div v-if="addSkillResult" class="action-result" :class="{ '--error': addSkillError }" role="alert">{{ addSkillResult }}</div>
           </div>
 
           <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
@@ -1497,40 +1426,10 @@
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
-            <!-- Stock Skills Section -->
-            <div class="skill-section">
-              <p class="subsection-title subsection-title--spaced">stock skills</p>
-              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
-              <div v-else class="skill-list skill-list--section">
-                <div
-                  v-for="skill in stockSkills"
-                  :key="skill.name"
-                  class="skill-row"
-                  :class="{ expanded: isSkillExpanded(skill.name) }"
-                  @click="toggleSkill(skill.name)"
-                >
-                  <div class="skill-main">
-                    <div class="skill-title-row">
-                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
-                      <span class="skill-name">{{ skill.name }}</span>
-                    </div>
-                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
-                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
-                      <p v-if="skill.path" class="skill-meta">
-                        <span class="skill-meta-label">Path</span>
-                        <button class="inline-path-button" @click.stop="openAssetPath(skill.path)">{{ skill.path }}</button>
-                      </p>
-                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
             <!-- Custom Skills Section -->
-            <div class="skill-section skill-section--spaced">
+            <div class="skill-section">
               <p class="subsection-title subsection-title--spaced">custom skills</p>
-              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
+              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills yet. Add a folder <code>skills/&lt;name&gt;/SKILL.md</code> or upload a zip.</p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in customSkills"
@@ -1557,34 +1456,13 @@
               </div>
             </div>
 
-            <!-- Auto-update GitHub skills -->
-            <div class="setting-row setting-row--inline setting-row--toggle">
-              <div class="routine-info">
-                <span class="routine-name">Auto-update GitHub skills</span>
-                <p class="hint hint--compact">
-                  If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
-                </p>
-              </div>
-              <label class="settings-checkbox-hit">
-                <input
-                  type="checkbox"
-                  class="settings-checkbox"
-                  v-model="autoUpdateGithubSkills"
-                  :disabled="autoUpdateSaving"
-                  aria-label="Auto-update GitHub skills"
-                  @change="saveAutoUpdateGithubSkills"
-                />
-              </label>
-            </div>
-            <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
-
-            <!-- GitHub Skills Section -->
+            <!-- Stock Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">github / package skills</p>
-              <p v-if="!githubSkills.length" class="hint hint--section-empty">No GitHub/package skills installed yet.</p>
-              <div v-else class="skill-list">
+              <p class="subsection-title subsection-title--spaced">stock skills</p>
+              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <div v-else class="skill-list skill-list--section">
                 <div
-                  v-for="skill in githubSkills"
+                  v-for="skill in stockSkills"
                   :key="skill.name"
                   class="skill-row"
                   :class="{ expanded: isSkillExpanded(skill.name) }"
@@ -1593,16 +1471,7 @@
                   <div class="skill-main">
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
-                      <a
-                        v-if="skill.source && skill.source !== 'skills-lock.json'"
-                        :href="'https://github.com/' + skill.source"
-                        target="_blank"
-                        class="skill-name skill-link"
-                        @click.stop
-                      >
-                        {{ skill.name }}
-                      </a>
-                      <span v-else class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-name">{{ skill.name }}</span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -2120,6 +1989,7 @@ import {
 } from '../composables/useFontScale'
 import type {
   AgentAssetsResponse,
+  AutomationPayload,
   AutomationProcess,
   CommandAsset,
   CommandsResponse,
@@ -2135,6 +2005,7 @@ import type {
   McpProjectServer,
   McpEnvKey,
   ProviderConfigSettings,
+  ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2149,7 +2020,6 @@ import type {
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
@@ -2157,6 +2027,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsNotifications from './settings/SettingsNotifications.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
@@ -2758,6 +2629,10 @@ const aliasProviderLabels = computed<Record<string, string>>(() => {
   return labels
 })
 
+function getProviderSection(provider: string): AliasProviderSection | undefined {
+  return aliasProviderSections.value.find((s) => s.key === provider)
+}
+
 // ── Per-provider default model / thinking (Models tab) ─────────────────
 const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
 
@@ -2964,18 +2839,12 @@ function routineModelSummary(key: RoutineModelKey): string {
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
-const providerKeysSaving = ref(false)
-const providerKeysResult = ref('')
 const mcpStatus = ref<McpStatus | null>(null)
 const mcpUsage = ref<McpUsage | null>(null)
 const mcpUsageLoaded = ref(false)
 const mcpUsageError = ref('')
-const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
-const autoUpdateGithubSkills = ref(false)
-const autoUpdateSaving = ref(false)
-const autoUpdateResult = ref('')
 const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
 const gwsIntegrationLoaded = ref(false)
 const gwsIntegrationError = ref('')
@@ -3079,27 +2948,17 @@ async function removeGwsProfile(profile: GwsProfile) {
   }
 }
 
-const gwsInstalling = ref(false)
-const gwsInstallResult = ref('')
-
-async function installGws() {
-  gwsInstalling.value = true
-  gwsInstallResult.value = 'Installing @googleworkspace/cli via npm…'
+async function installGwsInChat() {
   try {
-    const res = await api.post<{ ok: boolean; output?: string; error?: string; integration?: GwsIntegrationSettings }>(
-      '/api/integrations/gws/install',
-      {},
-    )
-    if (res.ok) {
-      if (res.integration) gwsIntegration.value = res.integration
-      gwsInstallResult.value = 'gws installed successfully.'
-    } else {
-      gwsInstallResult.value = res.error || 'Installation failed.'
-    }
+    await projectStore.fixError({
+      errorText:
+        'The @googleworkspace/cli (gws) is not installed on this machine, so Google Workspace tools are unavailable.',
+      context:
+        'Installing @googleworkspace/cli from Settings → Google Workspace → Install in Chat. Run `npm install -g @googleworkspace/cli` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). Walk the operator through the install; Ciaobot never runs package installs on its own.',
+      title: 'Install gws',
+    })
   } catch (e) {
-    gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
-  } finally {
-    gwsInstalling.value = false
+    notifyFailed('Could not open install chat', errorMessage(e))
   }
 }
 
@@ -3114,6 +2973,11 @@ const gwsRedirectUrls = ref<Record<string, string>>({})
 const gwsReloginPending = ref<Record<string, boolean>>({})
 const gwsReloginError = ref<Record<string, string>>({})
 let gwsReloginTimer: ReturnType<typeof setInterval> | null = null
+// A tick can outlast its own interval: the completed branch awaits
+// fetchGwsIntegration(), which runs a health check that shells out per profile
+// with a 30s timeout. Without this, every 2s tick in that window starts another
+// round of status polls and another concurrent health scan.
+let gwsReloginPolling = false
 
 function gwsReloginHelpUrl(): string {
   return 'https://cloud.google.com/sdk/docs/install'
@@ -3178,6 +3042,7 @@ function gwsClearRelogin(profileName: string) {
 function gwsPollRelogin(profileName: string) {
   if (gwsReloginTimer) return
   gwsReloginTimer = setInterval(async () => {
+    if (gwsReloginPolling) return
     const pending = Object.entries(gwsReloginPending.value)
       .filter(([, p]) => p)
       .map(([name]) => name)
@@ -3188,30 +3053,35 @@ function gwsPollRelogin(profileName: string) {
       }
       return
     }
-    for (const name of pending) {
-      try {
-        const status = await api.get<{ status: string; email?: string; error?: string }>(
-          `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
-        )
-        if (status.status === 'completed') {
-          gwsClearRelogin(name)
-          await fetchGwsIntegration()
-          notifySaved('Google account connected.')
-        } else if (status.status === 'error' || status.status === 'none') {
-          const msg =
-            status.error ||
-            (status.status === 'none'
-              ? 'The sign-in timed out before you finished it. Try again.'
-              : 'The sign-in failed.')
+    gwsReloginPolling = true
+    try {
+      for (const name of pending) {
+        try {
+          const status = await api.get<{ status: string; email?: string; error?: string }>(
+            `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
+          )
+          if (status.status === 'completed') {
+            gwsClearRelogin(name)
+            await fetchGwsIntegration()
+            notifySaved('Google account connected.')
+          } else if (status.status === 'error' || status.status === 'none') {
+            const msg =
+              status.error ||
+              (status.status === 'none'
+                ? 'The sign-in timed out before you finished it. Try again.'
+                : 'The sign-in failed.')
+            gwsClearRelogin(name)
+            gwsReloginError.value[name] = msg
+            await fetchGwsIntegration()
+          }
+        } catch (e) {
+          const msg = errorMessage(e, 'Could not check the sign-in status.')
           gwsClearRelogin(name)
           gwsReloginError.value[name] = msg
-          await fetchGwsIntegration()
         }
-      } catch (e) {
-        const msg = errorMessage(e, 'Could not check the sign-in status.')
-        gwsClearRelogin(name)
-        gwsReloginError.value[name] = msg
       }
+    } finally {
+      gwsReloginPolling = false
     }
   }, 2000)
 }
@@ -3320,41 +3190,10 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
   }
 }
 
-async function saveAutoUpdateGithubSkills() {
-  autoUpdateSaving.value = true
-  autoUpdateResult.value = ''
-  try {
-    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', {
-      auto_update_github_skills: autoUpdateGithubSkills.value,
-    })
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
-    if (providerKeys.value) {
-      providerKeys.value = res
-    }
-    notifySaved('Saved.')
-  } catch (e) {
-    autoUpdateResult.value = `Error: ${errorMessage(e)}`
-    autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
-  } finally {
-    autoUpdateSaving.value = false
-  }
-}
-
 async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
-    for (const key in res.keys) {
-      providerKeyInputs.value[key] = ''
-    }
-    for (const key in res.service_keys || {}) {
-      providerKeyInputs.value[key] = ''
-    }
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
   } catch (e) {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
@@ -3418,60 +3257,6 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   }
 }
 
-async function saveProviderKeys() {
-  if (!providerKeys.value) return
-  providerKeysSaving.value = true
-  providerKeysResult.value = ''
-  
-  const patchKeys: Record<string, string> = {}
-  for (const key in providerKeys.value.keys) {
-    const val = providerKeyInputs.value[key]
-    if (val !== '') {
-      patchKeys[key] = val
-    }
-  }
-  for (const key in providerKeys.value.service_keys || {}) {
-    const val = providerKeyInputs.value[key]
-    if (val !== '') {
-      patchKeys[key] = val
-    }
-  }
-  
-  if (!Object.keys(patchKeys).length) {
-    providerKeysResult.value = 'No changes to save.'
-    providerKeysSaving.value = false
-    setTimeout(() => { providerKeysResult.value = '' }, 2000)
-    return
-  }
-  
-  try {
-    const res = await api.patch<ProviderConfigSettings>(
-      '/api/settings/providers',
-      { keys: patchKeys },
-    )
-    providerKeys.value = res
-    for (const key in res.keys) {
-      providerKeyInputs.value[key] = ''
-    }
-    for (const key in res.service_keys || {}) {
-      providerKeyInputs.value[key] = ''
-    }
-    if (res.auto_update_github_skills !== undefined) {
-      autoUpdateGithubSkills.value = res.auto_update_github_skills
-    }
-    providerKeysResult.value = ''
-    // A service key only reaches the process env on startup, so a change here
-    // always needs a restart. There is nothing else this save can change.
-    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-  } catch (e) {
-    providerKeysResult.value = `Error: ${errorMessage(e)}`
-  } finally {
-    providerKeysSaving.value = false
-  }
-}
-
-
-
 async function fetchSkills() {
   try {
     skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
@@ -3530,10 +3315,6 @@ const stockSkills = computed(() => {
 
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
-})
-
-const githubSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
 /** Shared origin labels: Ciaobot-shipped vs user-authored. */
@@ -3833,47 +3614,62 @@ async function deleteCommand(command: CommandAsset) {
   }
 }
 
-const showAddGithubSkill = ref(false)
-const githubSource = ref('')
-const githubSkillName = ref('')
-const addingGithubSkill = ref(false)
-const addGithubSkillResult = ref('')
-const addGithubSkillError = ref(false)
+const showAddSkill = ref(false)
+const addingSkill = ref(false)
+const addSkillResult = ref('')
+const addSkillError = ref(false)
+const skillZipFile = ref<File | null>(null)
+const skillZipFileName = ref('')
+const skillZipInput = ref<HTMLInputElement | null>(null)
 
-function toggleAddGithubSkill() {
-  showAddGithubSkill.value = !showAddGithubSkill.value
-  githubSource.value = ''
-  githubSkillName.value = ''
-  addGithubSkillResult.value = ''
-  addGithubSkillError.value = false
+function toggleAddSkill() {
+  showAddSkill.value = !showAddSkill.value
+  addSkillResult.value = ''
+  addSkillError.value = false
+  skillZipFile.value = null
+  skillZipFileName.value = ''
 }
 
-async function addGithubSkill() {
-  if (!githubSource.value.trim()) return
-  addingGithubSkill.value = true
-  addGithubSkillResult.value = 'Adding skill...'
-  addGithubSkillError.value = false
+function triggerSkillZipPicker() {
+  skillZipInput.value?.click()
+}
+
+function onSkillZipSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] || null
+  skillZipFile.value = file
+  skillZipFileName.value = file ? file.name : ''
+  addSkillResult.value = ''
+  addSkillError.value = false
+}
+
+async function uploadSkillZip() {
+  if (!skillZipFile.value) return
+  addingSkill.value = true
+  addSkillResult.value = 'Uploading...'
+  addSkillError.value = false
   try {
-    const res = await api.post<{ ok: boolean; message?: string; error?: string }>('/api/admin/skills/add', {
-      source: githubSource.value.trim(),
-      skill: githubSkillName.value.trim() || undefined,
-    })
+    const form = new FormData()
+    form.append('file', skillZipFile.value)
+    form.append('workspace', projectStore.activeWorkspace)
+    const res = await api.postForm<{ ok: boolean; name?: string; message?: string; error?: string }>('/api/skills/import', form)
     if (res.ok) {
-      addGithubSkillResult.value = ''
-      notifySaved(res.message || 'Skill added successfully.', 'Skills')
-      githubSource.value = ''
-      githubSkillName.value = ''
-      showAddGithubSkill.value = false
+      addSkillResult.value = ''
+      notifySaved(res.message || `Skill ${res.name} added — available to all operators after next sync.`, 'Skills')
+      skillZipFile.value = null
+      skillZipFileName.value = ''
+      if (skillZipInput.value) skillZipInput.value.value = ''
+      showAddSkill.value = false
       await fetchSkills()
     } else {
-      addGithubSkillError.value = true
-      addGithubSkillResult.value = res.error || 'Failed to add skill.'
+      addSkillError.value = true
+      addSkillResult.value = res.error || 'Failed to add skill.'
     }
   } catch (e) {
-    addGithubSkillError.value = true
-    addGithubSkillResult.value = `Error: ${errorMessage(e)}`
+    addSkillError.value = true
+    addSkillResult.value = `Error: ${errorMessage(e)}`
   } finally {
-    addingGithubSkill.value = false
+    addingSkill.value = false
   }
 }
 
@@ -3906,6 +3702,7 @@ async function createSkillViaChat() {
 const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
+const proposalOutcomes = ref<ProposalOutcomes | null>(null)
 
 function getJobTelemetry(job: string): AutomationProcess | undefined {
   return automationItems.value.find((i) => i.job === job)
@@ -3952,32 +3749,20 @@ function lastError(item: AutomationProcess): string {
 async function fetchAutomation() {
   automationError.value = ''
   try {
-    automationItems.value = await api.get<AutomationProcess[]>('/api/automation')
+    const data = await api.get<AutomationPayload | AutomationProcess[]>('/api/automation?include=outcomes')
+    if (Array.isArray(data)) {
+      // An older server ignores the include hint and answers with the bare
+      // job list; the outcomes line simply stays hidden.
+      automationItems.value = data
+    } else {
+      automationItems.value = data.jobs
+      proposalOutcomes.value = data.proposal_outcomes ?? null
+    }
   } catch (e) {
     automationError.value = `Failed to load automation: ${errorMessage(e)}`
   } finally {
     automationLoaded.value = true
   }
-}
-
-const pushSupportedFlag = ref(false)
-const pushEnabledFlag = ref(false)
-const pushPending = ref(false)
-const pushError = ref('')
-const permissionDenied = ref(false)
-const needsIosInstall = ref(false)
-
-function isIos(): boolean {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent)
-}
-function isMacDesktop(): boolean {
-  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
-}
-function isStandalone(): boolean {
-  return (
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as Navigator & { standalone?: boolean }).standalone === true
-  )
 }
 
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
@@ -4287,52 +4072,8 @@ onMounted(async () => {
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
-  pushSupportedFlag.value = pushSupported()
-  if (isIos() && !isStandalone()) {
-    needsIosInstall.value = true
-  }
-  if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
-    permissionDenied.value = true
-  }
-  if (pushSupportedFlag.value) {
-    pushEnabledFlag.value = await isPushEnabled()
-    // Self-heal: if the browser thinks it has a subscription but the server
-    // forgot it (state file moved, fresh deploy), silently re-register so
-    // pushes actually arrive without making the user click anything.
-    if (pushEnabledFlag.value && Notification.permission === 'granted') {
-      try {
-        const sub = await currentSubscription()
-        if (sub) {
-          const r = await api.get<{ registered: boolean }>(
-            `/api/push/subscription?endpoint=${encodeURIComponent(sub.endpoint)}`
-          )
-          if (!r.registered) {
-            await api.post('/api/push/subscribe', { subscription: sub.toJSON() })
-          }
-        }
-      } catch { /* best-effort */ }
-    }
-  }
 })
 
-
-async function togglePush() {
-  pushPending.value = true
-  pushError.value = ''
-  try {
-    if (pushEnabledFlag.value) {
-      await disablePush()
-      pushEnabledFlag.value = false
-    } else {
-      await enablePush()
-      pushEnabledFlag.value = true
-    }
-  } catch (e) {
-    pushError.value = errorMessage(e)
-  } finally {
-    pushPending.value = false
-  }
-}
 
 async function doSnapshot(confirmWarnings = false) {
   actionPending.value = 'snapshot'
@@ -6022,6 +5763,19 @@ a.btn-secondary {
 .provider-defaults-title {
   font-weight: 600;
   color: var(--fg);
+}
+.provider-inline-defaults {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  margin-bottom: var(--space-3);
+}
+@media (max-width: 720px) {
+  .provider-inline-defaults { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
   .provider-defaults {

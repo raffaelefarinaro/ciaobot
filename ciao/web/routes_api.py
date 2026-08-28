@@ -36,6 +36,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_kinds
+from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
@@ -883,12 +884,46 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     created = workspace.name not in config.workspaces
+    profile_changed = (
+        not created
+        and existing is not None
+        and str(getattr(existing, "gws_profile", "") or "")
+        != str(getattr(workspace, "gws_profile", "") or "")
+    )
     config.workspaces[workspace.name] = workspace
     _persist_workspaces(config)
     _refresh_project_manager_workspaces(request)
     payload = _workspaces_payload(config)
     if created:
         payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+    elif profile_changed:
+        # Linking a workspace to its first account (or unlinking it) changes
+        # which `gws-*` stock skills it should get, and skill sync only runs at
+        # startup/repair. Resync now so the catalog matches the new linkage
+        # instead of waiting for a restart. On a pre-re-root install the target
+        # root is shared by every workspace, so the gate aggregates all of them
+        # (unlinking one must not prune the shared catalog while another still
+        # links an account).
+        from ciao.sync_skills import (  # noqa: PLC0415
+            resolve_workspace_skills_gws_gate,
+            sync_workspace_skills,
+        )
+
+        try:
+            root = Path(config.agent_root(workspace.name))
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=resolve_workspace_skills_gws_gate(
+                    config, root, workspace.name
+                ),
+            )
+        except Exception:  # noqa: BLE001 - the update already succeeded
+            logger.exception(
+                "Could not resync skills for workspace %s after profile change",
+                workspace.name,
+            )
     return JSONResponse(payload, status_code=201 if created else 200)
 
 
@@ -916,7 +951,14 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     try:
         # `refresh_upstream=False`: this is a local seeding on a user-facing
         # request, not the periodic upstream regeneration.
-        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
+
+        await asyncio.to_thread(
+            sync_workspace_skills,
+            root,
+            refresh_upstream=False,
+            gws_profile=workspace_gws_profile(config, name),
+        )
     except Exception:  # noqa: BLE001 - creation already succeeded
         logger.exception("Could not seed agent root for new workspace %s", name)
         return False
@@ -971,6 +1013,31 @@ async def delete_workspace_setting(request: Request) -> JSONResponse:
         "notes": len(vault["moved"]),
         "refused": vault["refused"],
     }
+    # On a pre-re-root install the shared catalog serves every workspace, so
+    # deleting the only one with a GWS profile must prune the now-unusable
+    # gws-* skills (and deleting an unlinked workspace is a no-op). Resync the
+    # shared root through the aggregate gate. After re-rooting the active
+    # catalogs live under each <install>/<workspace> root and the install root
+    # is retired, so syncing it would recreate CLAUDE.md/.claude/skills there —
+    # skip the resync entirely in that layout.
+    if not getattr(config, "_rerooted", lambda: False)():
+        try:
+            from ciao.sync_skills import (  # noqa: PLC0415
+                resolve_workspace_skills_gws_gate,
+                sync_workspace_skills,
+            )
+
+            root = Path(config.workspace_root)
+            await asyncio.to_thread(
+                sync_workspace_skills,
+                root,
+                refresh_upstream=False,
+                gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
+            )
+        except Exception:  # noqa: BLE001 - the delete already succeeded
+            logger.exception(
+                "Could not resync shared skills after deleting workspace %s", name
+            )
     return JSONResponse(payload)
 
 
@@ -1114,39 +1181,31 @@ def _read_env_value(path: Path, key: str) -> str:
     return ""
 
 
-def _claude_oauth_ready() -> bool:
-    """True when Claude Code OAuth credentials are present on disk."""
-    from ciao.setup_status import _claude_oauth_account
+def _provider_key_auth_method(config, key: str, providers: dict) -> str:
+    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'.
 
-    raw = os.environ.get("CLAUDE_CREDENTIALS_PATH", "").strip()
-    credentials_path = (
-        Path(raw).expanduser() if raw else Path.home() / ".claude" / ".credentials.json"
-    )
-    if credentials_path.is_file():
-        return True
-    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
-    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
-    return bool(_claude_oauth_account(config_path))
-
-
-def _provider_key_auth_method(config, key: str) -> str:
-    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'."""
+    ``providers`` is the already-computed ``setup_status()`` result for this
+    request; reusing it avoids re-running the Claude CLI credential probe a
+    second time per request.
+    """
     env_value = os.environ.get(key, "").strip()
     if env_value:
         return "api_key"
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
+    if key == "ANTHROPIC_API_KEY" and providers.get("claude", {}).get("auth") == "oauth":
         return "oauth"
     return "missing"
 
 
 def _provider_config_payload(config) -> dict:
+    providers = setup_status(config, env=os.environ).get("providers", {})
+
     def key_payload(meta_by_key: dict) -> dict:
         keys = {}
         for key, meta in meta_by_key.items():
-            auth_method = _provider_key_auth_method(config, key)
+            auth_method = _provider_key_auth_method(config, key, providers)
             keys[key] = {
                 **meta,
                 "configured": auth_method != "missing",
@@ -1154,11 +1213,9 @@ def _provider_config_payload(config) -> dict:
             }
         return keys
 
-    providers = setup_status(config, env=os.environ).get("providers", {})
     return {
         "keys": key_payload(_PROVIDER_KEY_META),
         "service_keys": key_payload(_SERVICE_KEY_META),
-        "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
         # Each row carries its own labels so the Settings card does not have to
@@ -1229,7 +1286,11 @@ async def provider_connection_action(request: Request) -> JSONResponse:
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
-            logout_command = _auth_command_for_provider(provider)[:1] + ["logout"]
+            # auth_command is `[binary, "auth", "login"]`, so dropping the last
+            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+            # would run the obsolete top-level `claude logout`, which prints a
+            # "did you mean" hint and exits 0 without signing out.
+            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
             run = await asyncio.to_thread(
                 subprocess.run,
                 logout_command,
@@ -1286,10 +1347,6 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 status_code=400,
             )
         updates.update(key_updates)
-    if "auto_update_github_skills" in body:
-        val = bool(body["auto_update_github_skills"])
-        updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
-        config.auto_update_github_skills = val
 
     _write_env_values(_env_path(config), updates)
     provider_key_changes = {
@@ -1400,12 +1457,10 @@ def _gws_profile_payload(
     config_dir = _gws_profile_config_dir(config, profile)
     credentials_present = _gws_file_present(config_dir, _GWS_AUTH_FILES)
     client_secret_present = _gws_file_present(config_dir, ("client_secret.json",))
-    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
-    # The wrapper and helper take the profile name, so every account — not just
-    # the two legacy ones — gets a working terminal alternative.
-    setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
-    headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
+    # These go through the `ciao` CLI that ships inside the installed app, so
+    # the same commands work on a dev checkout and on an installed Ciaobot.app.
+    setup_command = f"ciao gws {profile} auth login --full"
+    headless_auth_command = f"ciao gws-auth-helper {profile}"
 
     from ciao import gws_auth
 
@@ -1457,8 +1512,6 @@ def _gws_profile_payload(
         "workspaces": usage.get(profile, []),
         "setup_command": setup_command,
         "headless_auth_command": headless_auth_command,
-        "wrapper_available": wrapper_path.is_file(),
-        "helper_available": helper_path.is_file(),
         "email": email,
         "token_valid": token_valid,
         "token_error": token_error,
@@ -1472,8 +1525,6 @@ def _gws_integration_payload(config) -> dict:
 
     usage = _gws_profile_usage(config)
     binary_path = resolve_tool("gws") or ""
-    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
-    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
     try:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
@@ -1493,8 +1544,7 @@ def _gws_integration_payload(config) -> dict:
         "installed": bool(binary_path),
         "binary_path": binary_path,
         "default_profile": default_profile,
-        "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
-        "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
+        "cli_available": bool(binary_path),
         "profiles": [
             _gws_profile_payload(config, profile, usage, health.get(profile), labels)
             for profile in names
@@ -1508,72 +1558,6 @@ async def gws_integration_settings(request: Request) -> JSONResponse:
 
 GWS_CLI_PACKAGE = "@googleworkspace/cli"
 
-
-async def gws_install(request: Request) -> JSONResponse:
-    """Install the Google Workspace CLI globally via npm.
-
-    Runs ``npm install -g @googleworkspace/cli`` so the ``gws`` binary becomes
-    available on PATH. Returns the refreshed integration payload so the UI can
-    reflect the new status without a restart (unlike the local voice engine, no
-    Python import changes, so no server restart is needed).
-    """
-    config = request.app.state.config
-
-    if resolve_tool("gws"):
-        return JSONResponse(
-            {
-                "ok": True,
-                "output": "gws is already installed.",
-                "integration": _gws_integration_payload(config),
-            }
-        )
-
-    npm = resolve_tool("npm")
-    if not npm:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": (
-                    "npm was not found on PATH. Install Node.js/npm, then run "
-                    f"'npm install -g {GWS_CLI_PACKAGE}' manually."
-                ),
-            },
-            status_code=500,
-        )
-
-    cmd = [npm, "install", "-g", GWS_CLI_PACKAGE]
-    env = dict(os.environ)
-    env["PATH"] = login_shell_path()
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
-    output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-    if result.returncode != 0:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": f"npm exited with code {result.returncode}",
-                "output": output,
-            },
-            status_code=500,
-        )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "output": output,
-            "integration": _gws_integration_payload(config),
-        }
-    )
 
 
 async def gws_save_client_secret(request: Request) -> JSONResponse:
@@ -2199,7 +2183,24 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise ValueError("invalid desktop drop grant")
     age = datetime.now(UTC).timestamp() - float(created_at)
     if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
-        raise ValueError("desktop drop grant expired")
+        # The two failure modes are different bugs and must not be reported
+        # identically. Log the grant id, timestamp, age and reason so a 400
+        # leaves evidence even though the grant file is already consumed.
+        reason = (
+            "grant timestamp is in the future"
+            if age < -30
+            else "grant is too old"
+        )
+        logger.warning(
+            "Rejecting desktop drop grant %s: %s "
+            "(created_at=%s, age=%.1fs, ttl=%ds)",
+            grant_id,
+            reason,
+            created_at,
+            age,
+            _DESKTOP_DROP_GRANT_TTL_SECONDS,
+        )
+        raise ValueError(f"desktop drop grant expired: {reason}")
     if (
         not isinstance(raw_paths, list)
         or not raw_paths
@@ -2683,6 +2684,19 @@ async def chat_mark_read(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     chat = pcm.mark_read(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "last_read_at": chat.last_read_at})
+
+
+async def chat_mark_unread(request: Request) -> JSONResponse:
+    """Mark a chat as unread on purpose ("come back to this"). Clears the
+    server-side read stamp and emits a chat_unread event so other tabs and
+    devices raise their unread state too.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.mark_unread(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True, "last_read_at": chat.last_read_at})
@@ -4553,18 +4567,6 @@ async def libreoffice_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"available": _find_soffice() is not None})
 
 
-async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
-    """Install LibreOffice via Homebrew Cask. No server restart needed —
-    workspace_binary probes for soffice fresh on every request."""
-    from ciao.upgrade import upgrade_libreoffice
-
-    result = await upgrade_libreoffice()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
-
-
 async def workspace_binary(request: Request) -> Response:
     """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
@@ -5035,6 +5037,11 @@ async def list_automation(request: Request) -> JSONResponse:
     run, recent history, and aggregate stats. Scheduled jobs whose schedule is
     not installed here are omitted — nothing would ever trigger them.
     Read-only.
+
+    ``?include=outcomes`` answers ``{"jobs": [...], "proposal_outcomes":
+    {...}}`` instead of the bare list, adding the memory-proposal
+    promoted-vs-dismissed tally the page renders next to the job stats. The
+    default stays a bare list so existing consumers keep working unchanged.
     """
     from ciao import job_runs
 
@@ -5045,7 +5052,13 @@ async def list_automation(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
         installed = None
 
-    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
+    summary = job_runs.automation_summary(installed_schedules=installed)
+    if request.query_params.get("include", "") != "outcomes":
+        return JSONResponse(summary)
+    return JSONResponse({
+        "jobs": summary,
+        "proposal_outcomes": proposal_outcomes.tally_cached(),
+    })
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
@@ -5852,7 +5865,7 @@ async def open_chat_endpoint(request: Request) -> JSONResponse:
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
-    return JSONResponse(setup_status(request.app.state.config))
+    return JSONResponse(await asyncio.to_thread(setup_status, request.app.state.config))
 
 
 
@@ -6622,55 +6635,153 @@ async def admin_skills(request: Request) -> JSONResponse:
 
 
 async def admin_add_skill(request: Request) -> JSONResponse:
-    """Add an upstream skill from GitHub."""
+    """Deprecated: GitHub skill install removed.
+
+    Kept as a 410 for old clients that still POST to this route.
+    """
+    return JSONResponse(
+        {"ok": False, "error": "GitHub skill install removed. Add a local folder under skills/<name>/ or upload a zip via POST /api/skills/import."},
+        status_code=410,
+    )
+
+
+async def skill_import(request: Request) -> JSONResponse:
+    """Import a skill from a validated zip archive.
+
+    Accepts multipart/form-data with a ``file`` field containing the zip.
+    Validates zip-slip, exactly one top-level folder with SKILL.md,
+    frontmatter name/description, size ≤ 15KB, and name equals folder.
+    On success extracts to ``skills/<name>/`` and syncs the catalog.
+    """
     config = request.app.state.config
+    # Reject oversized bodies before multipart parsing. `request.form()` fully
+    # consumes and spools the multipart file, so a very large upload would
+    # exhaust temporary disk (and, in client mode, the proxy buffers the body in
+    # memory) before the per-file cap below is ever applied. A missing or
+    # malformed Content-Length (chunked/HTTP2 clients) is rejected too: without
+    # it there is no cheap pre-parse bound, and a legitimate zip upload always
+    # carries the header.
+    max_zip_bytes = 10 * 1024 * 1024
+    content_length = request.headers.get("content-length")
     try:
-        body = await request.json()
-        source = body.get("source", "").strip()
-        skill = body.get("skill", "").strip() or None
-        agent = body.get("agent", "claude-code").strip() or "claude-code"
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"Invalid request body: {e}"}, status_code=400)
-
-    if not source:
-        return JSONResponse({"ok": False, "error": "GitHub URL or owner/repo is required"}, status_code=400)
-
+        declared = int(content_length) if content_length else -1
+    except ValueError:
+        declared = -1
+    if declared < 0 or declared > max_zip_bytes:
+        return JSONResponse(
+            {"ok": False, "error": "Zip too large (max 10 MB)."}, status_code=400
+        )
+    # Parse multipart
     try:
-        import sys
-        
-        script_path = Path(config.workspace_root) / "scripts" / "skills_add.py"
-        if not script_path.exists():
-            return JSONResponse({"ok": False, "error": f"Script {script_path} does not exist"}, status_code=500)
-
-        cmd = [sys.executable, str(script_path), source]
-        if skill:
-            cmd.extend(["--skill", skill])
-        cmd.extend(["--agent", agent])
-
-        # Run script to add the skill to skills-lock.json
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
+        form = await request.form()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"Invalid form: {exc}"}, status_code=400)
+    # Resolve destination skills root: per-root installs keep skills per
+    # workspace. The client passes the active workspace so an upload lands in
+    # the workspace the operator is actually working in, not always the primary.
+    workspace_name = str(form.get("workspace") or "").strip()
+    if workspace_name and workspace_name not in config.workspace_names():
+        # `config.agent_root` accepts any single-segment name, so an unvalidated
+        # form value would scaffold `<install>/<name>/skills` and a whole
+        # orphan agent root on the next sync — reachable from a stale client
+        # after a workspace was deleted, or a typo in a direct API request.
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown workspace: {workspace_name}"}, status_code=400
         )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-            return JSONResponse({"ok": False, "error": err}, status_code=500)
-        
-        # Run sync-skills immediately so it mirrors custom/locked skills to the local Claude catalog
-        sync_result = await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "ciao.cli", "sync-skills", "--workspace", str(config.workspace_root)],
-            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
+    dest_skills: Path
+    try:
+        if workspace_name:
+            dest_skills = Path(config.agent_root(workspace_name)) / "skills"  # type: ignore[attr-defined]
+        elif getattr(config, "_rerooted", lambda: False)() if callable(getattr(config, "_rerooted", None)) else bool(getattr(config, "_rerooted", False)):
+            # Use primary workspace's agent root when re-rooted
+            try:
+                primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else ""
+                if primary:
+                    dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
+                else:
+                    dest_skills = Path(config.workspace_root) / "skills"
+            except Exception:
+                dest_skills = Path(config.workspace_root) / "skills"
+        else:
+            # Shared layout: workspace_root holds skills/
+            # Also check if agent_root_targets exists and is per-root
+            targets = getattr(config, "agent_root_targets", None)
+            if callable(targets):
+                try:
+                    roots = list(targets())  # type: ignore[no-untyped-call]
+                    if len(roots) == 1:
+                        # Single root (shared) – that root is the skills holder
+                        dest_skills = Path(roots[0][0]) / "skills"
+                    elif roots:
+                        # Multiple roots (re-rooted) – use primary
+                        primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else roots[0][1]
+                        try:
+                            dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
+                        except Exception:
+                            dest_skills = Path(roots[0][0]) / "skills"
+                    else:
+                        dest_skills = Path(config.workspace_root) / "skills"
+                except Exception:
+                    dest_skills = Path(config.workspace_root) / "skills"
+            else:
+                dest_skills = Path(config.workspace_root) / "skills"
+    except Exception:
+        dest_skills = Path(getattr(config, "workspace_root", ".")) / "skills"
+
+    upload = form.get("file")
+    # Fallback: allow any file field
+    if upload is None:
+        for key in form:
+            val = form[key]
+            if hasattr(val, "read"):
+                upload = val
+                break
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"ok": False, "error": "Missing file field 'file' (multipart zip upload required)."}, status_code=400)
+    # Optional force flag
+    force_raw = form.get("force")
+    force = str(force_raw).strip().lower() in {"1", "true", "yes"} if force_raw is not None else False
+    # Also check query param
+    if not force and request.query_params.get("force", "").lower() in {"1", "true", "yes"}:
+        force = True
+
+    # Read upload with size limit (zip + slack). Allow up to 5MB, but validator will enforce 15KB SKILL.md
+    try:
+        data = await _read_upload_limited(upload, max_zip_bytes)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Zip too large (max 10 MB)."}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"Failed to read upload: {exc}"}, status_code=400)
+
+    # Basic content-type check (accept zip or octet-stream)
+    filename = getattr(upload, "filename", "") or ""
+    if filename and not filename.lower().endswith(".zip"):
+        # Still allow; some clients may send octet-stream without .zip, but warn if clearly not zip
+        if filename.lower().endswith((".tar.gz", ".tgz", ".tar")):
+            return JSONResponse({"ok": False, "error": "Only .zip is supported (zip only for v1)."}, status_code=400)
+
+    from ciao.skill_import import extract_skill_zip
+
+    dest_skills.mkdir(parents=True, exist_ok=True)
+    name, errors = await asyncio.to_thread(extract_skill_zip, data, dest_skills, overwrite=force)
+    if errors:
+        return JSONResponse({"ok": False, "error": "; ".join(errors)}, status_code=400)
+    assert name is not None
+    # Sync catalog
+    try:
+        from ciao.sync_skills import sync_workspace_skills
+
+        # Sync the root that owns the skills folder
+        # If dest_skills is under an agent root, sync that root; otherwise sync workspace_root
+        sync_root = dest_skills.parent
+        await asyncio.to_thread(sync_workspace_skills, sync_root)
+    except Exception as exc:  # noqa: BLE001 — sync failure should not hide successful import
+        logger.warning("skill import sync failed for %s: %s", dest_skills, exc)
+        return JSONResponse(
+            {"ok": True, "name": name, "message": f"Skill '{name}' imported (sync warning: {exc})."},
+            status_code=200,
         )
-        if sync_result.returncode != 0:
-            err = sync_result.stderr.strip() or sync_result.stdout.strip() or f"sync exit code {sync_result.returncode}"
-            return JSONResponse({"ok": False, "error": f"Skill added but sync failed: {err}"}, status_code=500)
-
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-    return JSONResponse({"ok": True, "message": "Skill added and synchronized successfully."})
+    return JSONResponse({"ok": True, "name": name, "message": f"Skill '{name}' added — available to all operators after next sync."})
 
 
 
@@ -7320,19 +7431,38 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         keep = []
         section_date = None
         changed = False
+        # Swept rows are collected and recorded only AFTER the rewrite lands:
+        # a failed write must not leave phantom dismissals in the tally.
+        swept_kinds: list[str] = []
+        swept_texts: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
                 section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
                 keep.append(raw_line)
                 continue
-            if proposal_kinds.parse_bullet(raw_line) is not None and section_date is not None and section_date < cutoff:
+            bullet = proposal_kinds.parse_bullet(raw_line)
+            if bullet is not None and section_date is not None and section_date < cutoff:
                 removed += 1
                 changed = True
+                swept_kinds.append(bullet.kind)
+                swept_texts.append(bullet.text)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+            from ciao.memory_proposals import record_dismissal
+
+            for swept_kind, swept_text in zip(swept_kinds, swept_texts):
+                # Expiry is a decision too: without the text in the dedupe
+                # history, a curator pass that re-reads the same transcript
+                # re-files the fact the operator just let expire.
+                record_dismissal(queue, text=swept_text, kind=swept_kind)
+            for kind in swept_kinds:
+                if proposal_outcomes.is_extraction_kind(kind):
+                    proposal_outcomes.record(
+                        kind=kind, action="dismissed", workspace=workspace, via="pwa",
+                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
@@ -7433,6 +7563,13 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry["lines"].add(ctx["line"])
         entry["rows"].append(ctx["row"])
 
+    # Rows whose bullet THIS request actually dropped. A concurrent resolver
+    # may have removed a row between this request's scan and its write; the
+    # loser reports success to the client (the row is gone either way) but
+    # records no outcome - the winner already did.
+    self_request_removed: set[str] = set()
+    recorded: set[str] = set()
+
     for path, entry in by_file.items():
         queue = Path(path)
         # Write every promotion BEFORE dropping any bullet, and only drop the
@@ -7468,13 +7605,51 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # Highest index first so the lower ones stay valid, and each removal
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
+        removed_here: set[str] = set()
         for row in sorted(
             entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
         ):
             if int(row.get("line", -1)) in keep_lines:
                 continue
-            _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or ""))
+            if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
+                removed_here.add(row["id"])
         queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        self_request_removed.update(removed_here)
+        # Record THIS queue's outcomes immediately after its rewrite lands: a
+        # later file failing to persist must not take already-persisted
+        # resolutions out of the tally — their ids are gone, so a retry can
+        # never re-record them. Rows whose bullet this request did not remove
+        # (a concurrent resolver won) record nothing; the winner already did.
+        for row in entry["rows"]:
+            pid = row["id"]
+            if pid not in removed_here or pid in recorded:
+                continue
+            recorded.add(pid)
+            if action == "dismiss":
+                # Same contract as the single-row route: the decision's text
+                # must outlive the row, or the nightly curator re-files it.
+                from ciao.memory_proposals import record_dismissal
+
+                record_dismissal(
+                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                )
+            elif action == "accept":
+                from ciao.memory_proposals import record_promotion
+
+                record_promotion(
+                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                )
+            if not proposal_outcomes.is_extraction_kind(row["kind"]):
+                # Not recorded: this ledger measures the MEMORY extraction
+                # pipeline. Skill proposals come from skill evolution and
+                # rehome rows from vault hygiene.
+                continue
+            proposal_outcomes.record(
+                kind=row["kind"],
+                action="promoted" if action == "accept" else "dismissed",
+                workspace=entry["workspace"],
+                via="pwa",
+            )
         for row in entry["rows"]:
             if action == "accept":
                 accept = proposal_kinds.accept_for(row["kind"])
@@ -7528,7 +7703,7 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
 
     region = _resolve(row.get("region") or row["kind"])
     limit = int(
-        getattr(config, "memory_char_limit", 2200)
+        getattr(config, "memory_char_limit", 3000)
         if region == "memory"
         else getattr(config, "user_char_limit", 1375)
     )
@@ -7672,6 +7847,8 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
+        # Not recorded: this ledger measures the MEMORY extraction pipeline;
+        # skill proposals come from the separate skill-evolution pipeline.
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
@@ -7742,8 +7919,12 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     queue = Path(ctx["path"])
     lines = queue.read_text(encoding="utf-8").splitlines()
-    _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
-    queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    # A concurrent request or the CLI may have removed this bullet first; the
+    # loser must not rewrite the file around the winner's deletion, and only
+    # the request that actually removed the row records its outcome.
+    removed_ours = _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
+    if removed_ours:
+        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
@@ -7764,7 +7945,35 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = False
             result["destination"] = row.get("rehome", {}).get("destination", "")
             result["justified"] = row.get("rehome", {}).get("justified", False)
+        if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
+            proposal_outcomes.record(
+                kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+            )
+        if removed_ours:
+            # Preserve the accepted row's text in the same decision history a
+            # dismissal uses: append-time dedupe consults the live queue and
+            # that sidecar — never the promoted destination — so the nightly
+            # curator would otherwise re-read the transcript and queue the
+            # already-accepted fact again.
+            from ciao.memory_proposals import record_promotion
+
+            record_promotion(
+                queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+            )
         return JSONResponse({"ok": True, "result": result})
+    if removed_ours and action == "dismiss":
+        # Preserve the decided row's text: append-time dedupe consults this
+        # history, so without it the nightly curator re-files the fact the
+        # operator just rejected while its transcript is still recent.
+        from ciao.memory_proposals import record_dismissal
+
+        record_dismissal(
+            queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+        )
+    if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
+        proposal_outcomes.record(
+            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
+        )
     return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
 
 
@@ -7816,7 +8025,7 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
     action_id = request.path_params["action_id"]
     context = _housekeeping_context(request)
     try:
-        result, summary = operator_actions.run_action(action_id, context)
+        result, summary = await operator_actions.run_action(action_id, context)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:  # noqa: BLE001 — a failed run is a tile, not a crash
@@ -7843,6 +8052,34 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
                 ],
             }
         )
+    actions = operator_actions.detect_actions(context)
+    return JSONResponse(
+        {
+            "ok": True,
+            "action_id": action_id,
+            "result": result,
+            "summary": summary,
+            "actions": [action.as_dict() for action in actions],
+        }
+    )
+
+
+async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
+    """Record a "not now" for one action, then re-detect and return the list.
+
+    Only ask-style actions (e.g. the GitHub star nudge) accept a dismissal; it
+    writes a suppression receipt so the tile stops surfacing for a while. The
+    response shape mirrors ``run_housekeeping_action`` so the client re-renders
+    the strip the same way. Unknown id is 404, never 500.
+    """
+    from ciao import operator_actions
+
+    action_id = request.path_params["action_id"]
+    context = _housekeeping_context(request)
+    try:
+        result, summary = operator_actions.dismiss_action(action_id, context)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     actions = operator_actions.detect_actions(context)
     return JSONResponse(
         {

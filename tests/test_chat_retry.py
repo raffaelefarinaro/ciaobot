@@ -366,9 +366,13 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     credits_err = "Title generation failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
     spend_limit_err = "You've hit your org's monthly spend limit"
     rate_limit_err = "API Error: Request rejected (429): rate limit exceeded"
+    claude_code_session_limit = (
+        "You've hit your session limit - resets 2:20pm (Europe/Zurich)"
+    )
     assert _is_retryable_quota_error(credits_err) is True
     assert _is_retryable_quota_error(spend_limit_err) is True
     assert _is_retryable_quota_error(rate_limit_err) is True
+    assert _is_retryable_quota_error(claude_code_session_limit) is True
 
 
 async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:
