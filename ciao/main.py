@@ -1168,8 +1168,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         if services:
             await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
 
-    app.add_event_handler("shutdown", _shutdown_providers)
-
     async def _shutdown_background_runs() -> None:
         # Terminate every live background command before the loop closes. This
         # is what makes "a restart does not leak orphan processes" true on the
@@ -1181,7 +1179,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
-    app.add_event_handler("shutdown", _shutdown_background_runs)
+    app.state.shutdown_callbacks = [_shutdown_providers, _shutdown_background_runs]
 
     try:
         await server.serve()

@@ -440,6 +440,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             else:
                 yield
         finally:
+            for callback in getattr(_app.state, "shutdown_callbacks", ()):
+                await callback()
             # Release the client-mode keep-alive pool. A no-op on a host node,
             # which never opens it.
             await close_shared_client()
