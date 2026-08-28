@@ -183,18 +183,7 @@ _FORK_MAX_CHARS = 60_000
 _PROVIDER_HANDOVER_MAX_MESSAGES = 12
 _PROVIDER_HANDOVER_MAX_CHARS = 12_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
-# How long a finished delegate waits for its siblings before waking the
-# supervisor. Long enough that a batch dispatched together reports as one turn,
-# short enough that a lone delegate is not left sitting on a finished result.
-_DELEGATE_WAKE_WINDOW_SECONDS = 5.0
-# Per-delegate excerpt budget in the wake prompt. The supervisor is told to read
-# the child's real transcript with chat_get, so this only has to be enough to
-# decide whether that is worth doing.
-_DELEGATE_WAKE_EXCERPT_CHARS = 600
-# Ceiling on live delegates per supervisor. A runaway fan-out spends real money
-# on provider turns, so the control plane refuses past this.
-_MAX_ACTIVE_DELEGATES = 6
-# Same coalescing idea for background command runs (ciao/background.py): a
+# Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
 # Log-tail budget per finished run in the wake prompt. The full log path is
@@ -974,15 +963,6 @@ class ChatInfo:
     # only on the automation side). Empty for interactive chats.
     schedule_id: str = ""
     schedule_title: str = ""
-    # Delegation lineage. A delegate is a normal chat spawned by another chat's
-    # agent to do writable work (its own model, its own worktree, its own
-    # session), whose result wakes the parent when it finishes — see
-    # _wake_parent_for_delegates. Unlike a fork, the link is live: the parent is
-    # notified. The child is a real resumable chat the user
-    # can open. Empty for chats the user created.
-    spawned_from_chat_id: str = ""
-    # Groups delegates dispatched as one batch so a wake can say "3 of 4 done".
-    delegation_id: str = ""
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
     # off insights extraction, a project-doc fold, a trajectory and memory
     # proposals (ciao/insights.py:extract_and_append), and until now none of
@@ -1021,8 +1001,6 @@ class ChatInfo:
             "fork_base_title": self.fork_base_title,
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
-            "spawned_from_chat_id": self.spawned_from_chat_id,
-            "delegation_id": self.delegation_id,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1053,59 +1031,6 @@ class ArchiveOutcome:
     session_id: str
     turn_count: int
     filtered_jsonl: str | None
-
-
-@dataclass(slots=True)
-class DelegateArchiveResult:
-    """What the archive cascade did to one delegate subchat.
-
-    Archiving a supervisor tears its delegates down immediately, so each row
-    has to be reportable: the caller turns these into the API response the PWA
-    uses to decide which children it may mark archived, which running turns to
-    tell the user about, and which children are still live because they failed.
-    """
-
-    chat_id: str
-    archived: bool = False
-    # True when the delegate had a live broker stream that we stopped. The
-    # user is told about these: archiving discarded whatever that turn had
-    # not finished, and that must never be a silent side effect.
-    stopped_mid_turn: bool = False
-    # Non-empty when archiving this delegate raised. The supervisor and the
-    # remaining delegates still archive; this row is how the failure reaches
-    # the user instead of being absorbed into a bare "ok".
-    error: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "chat_id": self.chat_id,
-            "archived": self.archived,
-            "stopped_mid_turn": self.stopped_mid_turn,
-            "error": self.error,
-        }
-
-
-@dataclass(slots=True)
-class ChatArchiveResult:
-    """Whole-cascade result: the supervisor's outcome plus one row per delegate.
-
-    ``outcome`` is None for a chat with nothing to write (an empty transcript);
-    the chat is still archived in that case, which is why the delegate rows live
-    out here rather than on ``ArchiveOutcome`` — an empty supervisor must still
-    report what it did to its subchats.
-    """
-
-    outcome: ArchiveOutcome | None
-    delegates: list[DelegateArchiveResult] = field(default_factory=list)
-
-    def archived_ids(self) -> list[str]:
-        return [row.chat_id for row in self.delegates if row.archived]
-
-    def stopped_ids(self) -> list[str]:
-        return [row.chat_id for row in self.delegates if row.stopped_mid_turn]
-
-    def failed_ids(self) -> list[str]:
-        return [row.chat_id for row in self.delegates if row.error]
 
 
 @dataclass(slots=True)
@@ -1274,16 +1199,10 @@ class ProjectChatManager:
         # the /ws/events connect snapshot so a fresh client can paint the
         # "N agents running" indicator without waiting for the next change.
         self._background_agents_last: dict[str, int] = {}
-        # Delegate completions waiting to wake their supervisor, keyed by
-        # parent chat id. Held for _DELEGATE_WAKE_WINDOW seconds so a batch
-        # that finishes together produces one parent turn, not four.
-        self._delegate_wake_pending: dict[str, list[dict[str, Any]]] = {}
-        # At most one in-flight flush task per parent; later completions inside
-        # the window join the pending list the running task will drain.
-        self._delegate_wake_tasks: dict[str, asyncio.Task] = {}
-        # Same pair for finished background command runs. Kept as siblings
-        # rather than one shared map so a slow script cannot delay a delegate
-        # report (and vice versa) by riding the other's coalescing window.
+        # Finished background command runs waiting to wake the chat that
+        # started them, keyed by chat id. Held for
+        # _BACKGROUND_WAKE_WINDOW_SECONDS so a batch of scripts that finishes
+        # together produces one wake turn, not four.
         self._background_wake_pending: dict[str, list[dict[str, Any]]] = {}
         self._background_wake_tasks: dict[str, asyncio.Task] = {}
         # Bound by main.py so a wake dropped by the restart drain can mark its
@@ -1424,8 +1343,6 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
-                spawned_from_chat_id=cd.get("spawned_from_chat_id", ""),
-                delegation_id=cd.get("delegation_id", ""),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1521,8 +1438,6 @@ class ProjectChatManager:
                     "fork_base_title": c.fork_base_title,
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
-                    "spawned_from_chat_id": c.spawned_from_chat_id,
-                    "delegation_id": c.delegation_id,
                     "postprocess": c.postprocess,
                 }
                 for cid, c in self._chats.items()
@@ -3148,8 +3063,6 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
-        spawned_from_chat_id: str = "",
-        delegation_id: str = "",
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -3195,8 +3108,6 @@ class ProjectChatManager:
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
             created_at=_now_iso(),
-            spawned_from_chat_id=spawned_from_chat_id,
-            delegation_id=delegation_id,
         )
         self._chats[cid] = chat
         self._save()
@@ -3770,163 +3681,6 @@ class ProjectChatManager:
 
     # ── Session management ───────────────────────────────────────────────
 
-    async def archive_chat(self, chat_id: str) -> ChatArchiveResult | None:
-        """Archive a chat's transcript and mark it as archived.
-
-        Also disconnects any live provider and reclaims provider-side session
-        storage (Claude SDK JSONL blob or an opencode session). The markdown
-        transcript in the vault is the durable record. Active delegate
-        subchats are archived as part of the same operation, so a supervisor
-        cannot leave its nested work chats running or visible on their own.
-
-        A delegate that is mid-turn is stopped *before* its transcript is
-        snapshotted. Archiving deletes the provider session and consumes the
-        in-progress transcript, so anything the turn emitted afterwards used to
-        be written into a chat nobody could reopen. Stopping first keeps the
-        archive honest about where the turn ended. The archive is still
-        immediate — it is not deferred until the delegate finishes — so the
-        result records which delegates were running and the caller warns the
-        user that their unfinished work was discarded.
-
-        Returns a ChatArchiveResult wrapping the primary chat's ArchiveOutcome
-        (archive path plus a pre-filtered JSONL string captured before blob
-        deletion, so the caller can dispatch post-archive insights extraction
-        without racing against the disk reclaim) and one row per delegate.
-        None means the chat does not exist.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        # Delegates are intentionally not allowed to nest today, but walking
-        # descendants keeps the archive invariant safe for older/corrupt
-        # registries and for any future relaxation of that rule.
-        delegate_ids = self._delegate_descendant_ids(chat_id)
-        outcome = await self._archive_single_chat(chat_id)
-        result = ChatArchiveResult(outcome=outcome)
-
-        # The route/control-plane caller runs post-processing for the primary
-        # chat. Do the same for each automatically archived subchat here so
-        # its insights, trajectory, and FTS indexing are not skipped.
-        for delegate_id in delegate_ids:
-            delegate = self._chats.get(delegate_id)
-            if delegate is None or delegate.archived:
-                continue
-            row = DelegateArchiveResult(chat_id=delegate_id)
-            result.delegates.append(row)
-            # Stop first, then archive. Both steps await, so re-read the row
-            # afterwards: another archive, a delete, or the delegate finishing
-            # on its own can all land while we are suspended.
-            row.stopped_mid_turn = await self._stop_delegate_for_archive(delegate_id)
-            delegate = self._chats.get(delegate_id)
-            if delegate is None:
-                continue
-            if delegate.archived:
-                row.archived = True
-                continue
-            delegate_project = self._projects.get(delegate.project_id)
-            try:
-                delegate_outcome = await self._archive_single_chat(
-                    delegate_id, save=False
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad subchat must not strand the rest
-                # The supervisor is already archived and saved at this point.
-                # Letting this propagate would 500 the caller, skip the
-                # supervisor's own post-processing, and leave the remaining
-                # subchats running, so absorb it and keep going. The error is
-                # recorded on the row so the caller can still report it: this
-                # delegate may be half-archived (MCP grant revoked, `archived`
-                # never set) and _reconcile_half_archived_chats cannot heal it,
-                # because that only repairs rows with an archive on disk.
-                logger.exception(
-                    "Archiving delegate subchat %s of %s failed",
-                    delegate_id,
-                    chat_id,
-                )
-                row.error = str(exc) or exc.__class__.__name__
-                continue
-            row.archived = True
-            if delegate_outcome is None:
-                continue
-            try:
-                self.run_archive_postprocess(
-                    delegate_id,
-                    delegate_outcome,
-                    delegate,
-                    delegate_project,
-                )
-            except Exception:  # noqa: BLE001 — child cleanup must not undo parent archive
-                logger.exception(
-                    "Archive postprocess failed for delegate subchat %s",
-                    delegate_id,
-                )
-        # One write for every delegate archived above, which each deferred it.
-        # Unconditional: a subchat that raised out of _archive_single_chat may
-        # still have mutated the registry before it failed, and leaving that
-        # unsaved is what makes a half-archived row unrecoverable.
-        if delegate_ids:
-            self._save()
-        return result
-
-    # How long to let a stopped delegate's stream actually wind down before
-    # snapshotting its transcript. This is not "wait until the delegate is
-    # done" — the stop has already been requested and the turn is over; this
-    # only covers the round trip for the provider to acknowledge it, so the
-    # final chunk lands in the archive instead of after it. Bounded so a
-    # wedged provider cannot hold the archive (or the request) open.
-    _DELEGATE_STOP_GRACE_S = 2.0
-    _DELEGATE_STOP_POLL_S = 0.05
-
-    async def _stop_delegate_for_archive(self, chat_id: str) -> bool:
-        """End a delegate's in-flight turn ahead of archiving it.
-
-        Returns True when the delegate actually had a live stream, which is the
-        fact the user is warned about — not whether the stop call succeeded. A
-        failed stop still leaves a chat that was running when we archived it.
-        """
-        if self._broker.get(chat_id) is None:
-            return False
-        try:
-            await self.stop_chat(chat_id)
-        except Exception:  # noqa: BLE001 — a failed stop must not block the archive
-            logger.exception(
-                "Stopping delegate subchat %s before archive failed", chat_id
-            )
-            return True
-        deadline = time.monotonic() + self._DELEGATE_STOP_GRACE_S
-        while self._broker.get(chat_id) is not None:
-            if time.monotonic() >= deadline:
-                logger.warning(
-                    "Delegate subchat %s was still streaming %.1fs after stop; "
-                    "archiving anyway",
-                    chat_id,
-                    self._DELEGATE_STOP_GRACE_S,
-                )
-                break
-            await asyncio.sleep(self._DELEGATE_STOP_POLL_S)
-        return True
-
-    def _delegate_descendant_ids(self, parent_chat_id: str) -> list[str]:
-        """Return active delegate descendants in parent-before-child order."""
-        descendants: list[str] = []
-        pending = [parent_chat_id]
-        seen = {parent_chat_id}
-        while pending:
-            current_parent = pending.pop(0)
-            for child in self.delegates_for_chat(current_parent):
-                if child.chat_id in seen:
-                    continue
-                seen.add(child.chat_id)
-                # Traverse through an already-archived delegate rather than
-                # stopping at it: pruning here left its own active children
-                # running and orphaned, which is the exact case this walk
-                # exists to cover in legacy or corrupt registries. Only the
-                # returned list skips archived rows; the walk does not.
-                pending.append(child.chat_id)
-                if child.archived:
-                    continue
-                descendants.append(child.chat_id)
-        return descendants
-
     def _read_archive_inputs(
         self, chat_id: str, ctx: ChatContext, chat: ChatInfo
     ) -> tuple[int, str | None, Path | None]:
@@ -3935,8 +3689,8 @@ class ProjectChatManager:
         Everything here is file I/O keyed by this chat's own context and session
         id — read the turn count and the filtered JSONL, then render and write
         the markdown archive. It touches no shared in-memory state and no
-        asyncio primitives, which is what lets ``_archive_single_chat`` hand it
-        to a worker thread.
+        asyncio primitives, which is what lets ``archive_chat`` hand it to a
+        worker thread.
 
         Ordering matters: the turn count has to be taken before
         ``archive_session`` consumes the in-progress transcript, and the
@@ -3968,29 +3722,28 @@ class ProjectChatManager:
         )
         return turn_count, filtered_jsonl, result
 
-    async def _archive_single_chat(
-        self, chat_id: str, *, save: bool = True
-    ) -> ArchiveOutcome | None:
-        """Archive one chat without cascading to its delegate children.
+    async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
+        """Archive a chat's transcript and mark it as archived.
 
-        ``save=False`` lets the cascade defer the registry write: archiving a
-        supervisor with six delegates otherwise rewrote the whole registry seven
-        times, which is wasted IO and widens the window for a partial write to
-        land mid-cascade. The caller must ``_save()`` once when the loop ends.
-        The ``chat_archived`` event still fires per chat so the PWA updates as
-        each one completes.
+        Also disconnects any live provider and reclaims provider-side session
+        storage (Claude SDK JSONL blob or an opencode session). The markdown
+        transcript in the vault is the durable record.
+
+        Returns the archive path plus a pre-filtered JSONL string captured
+        before blob deletion, so the caller can dispatch post-archive insights
+        extraction without racing against the disk reclaim. None means the chat
+        does not exist, or had nothing to write.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
-        # Reading a large session JSONL and rendering the markdown transcript is
-        # the expensive part, and a supervisor cascade does it once per chat. On
-        # the loop that froze every other request and every streaming turn for
-        # the whole cascade, so it runs in a worker thread. Awaited before
-        # anything else happens, so archive order and the chat_archived event
-        # sequence are unchanged.
+        # Reading a large session JSONL and rendering the markdown transcript
+        # is the expensive part. On the loop that froze every other request and
+        # every streaming turn until it finished, so it runs in a worker
+        # thread. Awaited before anything else happens, so the chat_archived
+        # event still fires in the same place it always did.
         turn_count, filtered_jsonl, result = await asyncio.to_thread(
             self._read_archive_inputs, chat_id, ctx, chat
         )
@@ -4014,8 +3767,7 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
-        if save:
-            self._save()
+        self._save()
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,
@@ -4977,12 +4729,6 @@ class ProjectChatManager:
         env["CIAO_MODEL"] = chat.model
         env["CIAO_PROVIDER"] = chat.provider
         env["CIAO_CHAT_ID"] = chat.chat_id
-        if chat.spawned_from_chat_id:
-            # Depth marker for the delegate recursion guard. Present means "you
-            # are a delegate", which delegate_spawn refuses to nest under; see
-            # CiaoControlPlane.delegate_spawn. Carrying the parent id (not just
-            # a flag) also lets a delegate's own tooling name its supervisor.
-            env["CIAO_DELEGATE_OF"] = chat.spawned_from_chat_id
         # Disable Claude Code's auto memory to avoid double memory layers
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
@@ -6698,26 +6444,9 @@ class ProjectChatManager:
                     # the chat on any device in the window (via /api/chats/
                     # {id}/read), the pending task is cancelled and no push
                     # fires. New replies to the same chat cancel and restart
-                    # the timer (see _schedule_push). Delegates skip both —
-                    # they wake the supervisor instead.
+                    # the timer (see _schedule_push).
                     self._announce_result_ready(
                         chat_id, project_id, title, snippet
-                    )
-
-                # A delegate that just went idle should wake its supervisor.
-                # Deliberately outside the `not had_error` gate above: a
-                # delegate that failed is exactly the news the parent needs,
-                # and staying silent would leave the supervisor waiting on a
-                # child that is never coming back.
-                delegate = self._chats.get(chat_id)
-                if delegate is not None and delegate.spawned_from_chat_id:
-                    self._queue_delegate_wake(
-                        delegate.spawned_from_chat_id,
-                        child_chat_id=chat_id,
-                        child_title=delegate.title,
-                        delegation_id=delegate.delegation_id,
-                        reply=last_assistant_text,
-                        had_error=had_error,
                     )
 
         asyncio.create_task(_drive())
@@ -6853,23 +6582,7 @@ class ProjectChatManager:
     def _announce_result_ready(
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> None:
-        """Publish ``chat_result_ready`` and queue a delayed result push.
-
-        Skips both for delegate chats (``spawned_from_chat_id`` set). Delegates
-        already wake their supervisor on completion; a toast / unread / OS push
-        for the child is duplicate noise because the user follows the parent.
-        AskUserQuestion pushes still fire for delegates because that is an
-        explicit question for the human. Permission requests stay internal to
-        the delegated run and do not create a second user-facing alert.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is not None and chat.spawned_from_chat_id:
-            logger.debug(
-                "Skipping result announce for delegate %s (parent %s)",
-                chat_id,
-                chat.spawned_from_chat_id,
-            )
-            return
+        """Publish ``chat_result_ready`` and queue a delayed result push."""
         self._events.publish({
             "type": "chat_result_ready",
             "chat_id": chat_id,
@@ -7151,117 +6864,16 @@ class ProjectChatManager:
             )
             return False
 
-    # ── Delegate completion wakes ────────────────────────────────────────
-
-    def delegates_for_chat(self, parent_chat_id: str) -> list[ChatInfo]:
-        """Chats spawned as delegates of ``parent_chat_id``, oldest first."""
-        return sorted(
-            (
-                c
-                for c in self._chats.values()
-                if c.spawned_from_chat_id == parent_chat_id
-            ),
-            key=lambda c: c.created_at,
-        )
-
-    def active_delegate_count(self, parent_chat_id: str) -> int:
-        """Delegates of this chat with a turn currently in flight.
-
-        Counts concurrent spend, not outstanding review: a delegate that has
-        finished and reported no longer occupies a slot even if the supervisor
-        has not looked at it yet.
-        """
-        running = set(self.active_chat_ids())
-        return sum(
-            1
-            for c in self.delegates_for_chat(parent_chat_id)
-            if not c.archived and c.chat_id in running
-        )
-
-    def _queue_delegate_wake(
-        self,
-        parent_chat_id: str,
-        *,
-        child_chat_id: str,
-        child_title: str,
-        delegation_id: str,
-        reply: str,
-        had_error: bool,
-    ) -> None:
-        """Record a finished delegate and arm the coalescing window.
-
-        Called from a delegate's own turn teardown, so it must stay cheap and
-        never raise: the child's turn is already done and a failure here would
-        surface as an unrelated error in the wrong chat.
-        """
-        parent = self._chats.get(parent_chat_id)
-        if parent is None or parent.archived:
-            # Supervisor is gone or read-only. The delegate's own chat still
-            # holds the full result, so nothing is lost by not waking.
-            logger.info(
-                "Delegate %s finished but parent %s is missing or archived; no wake",
-                child_chat_id,
-                parent_chat_id,
-            )
-            return
-        self._delegate_wake_pending.setdefault(parent_chat_id, []).append({
-            "chat_id": child_chat_id,
-            "title": child_title,
-            "delegation_id": delegation_id,
-            "reply": reply or "",
-            "had_error": had_error,
-        })
-        existing = self._delegate_wake_tasks.get(parent_chat_id)
-        if existing is not None and not existing.done():
-            # A window is already open; this completion rides along with it.
-            return
-        self._delegate_wake_tasks[parent_chat_id] = asyncio.create_task(
-            self._flush_delegate_wake(parent_chat_id)
-        )
-
-    async def _flush_delegate_wake(self, parent_chat_id: str) -> None:
-        """Wait out the coalescing window, then deliver one wake turn."""
-        try:
-            await asyncio.sleep(_DELEGATE_WAKE_WINDOW_SECONDS)
-            finished = self._delegate_wake_pending.pop(parent_chat_id, [])
-            if not finished:
-                return
-            parent = self._chats.get(parent_chat_id)
-            if parent is None or parent.archived:
-                return
-            prompt = self._build_delegate_wake_prompt(parent_chat_id, finished)
-            self._deliver_wake(
-                parent, prompt, kind="delegate", count=len(finished)
-            )
-        except RestartDrainingError:
-            # Server is shutting down; the delegate results live on in their
-            # own chats and the supervisor can be re-prompted by hand.
-            logger.info(
-                "Delegate wake for %s dropped: server is draining for restart",
-                parent_chat_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
-            logger.exception("Delegate wake failed for parent chat %s", parent_chat_id)
-        finally:
-            current = self._delegate_wake_tasks.get(parent_chat_id)
-            if current is asyncio.current_task():
-                self._delegate_wake_tasks.pop(parent_chat_id, None)
-
-    def _deliver_wake(
-        self, parent: ChatInfo, prompt: str, *, kind: str, count: int
-    ) -> str:
-        """Deliver one wake turn into *parent* and announce it. Shared by the
-        delegate and background-run flushes so both behave identically.
+    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
+        """Deliver one background-run wake turn into *parent* and announce it.
 
         queue_message covers the two live cases in one call: it appends to the
         in-flight stream when the chat is mid-turn (so we never interrupt the
         user), and returns False when the chat is idle. start_stream then
         handles the idle case, including a cold chat whose provider session
         died in a restart — the reason the subagent synthesis nudge's
-        steer-only approach is not enough here, since a delegate or a script
-        can finish hours later.
+        steer-only approach is not enough here, since a script can finish hours
+        after the turn that launched it.
         """
         if self.queue_message(parent.chat_id, prompt):
             delivery = "queued"
@@ -7272,15 +6884,11 @@ class ProjectChatManager:
             self.start_stream(parent.chat_id, prompt)
             delivery = "started"
         self._events.publish({
-            "type": "chat_delegates_reported",
+            "type": "chat_runs_reported",
             "chat_id": parent.chat_id,
             "project_id": parent.project_id,
             "count": count,
             "delivery": delivery,
-            # "delegate" | "background". The event name predates background
-            # runs; both are "the work you dispatched has reported back", so
-            # they share one event and discriminate on this field.
-            "kind": kind,
         })
         return delivery
 
@@ -7301,9 +6909,9 @@ class ProjectChatManager:
         """Record a finished background run and arm the coalescing window.
 
         Called from ``BackgroundRunner``'s supervisor task (and from its
-        restart-orphan sweep), so like ``_queue_delegate_wake`` it must stay
-        cheap and never raise: the run is already over and a failure here would
-        surface as an unrelated error in the wrong place.
+        restart-orphan sweep), so it must stay cheap and never raise: the run
+        is already over and a failure here would surface as an unrelated error
+        in the wrong place.
         """
         parent = self._chats.get(parent_chat_id)
         if parent is None or parent.archived:
@@ -7348,9 +6956,7 @@ class ProjectChatManager:
             if parent is None or parent.archived:
                 return
             prompt = self._build_background_wake_prompt(finished)
-            self._deliver_wake(
-                parent, prompt, kind="background", count=len(finished)
-            )
+            self._deliver_wake(parent, prompt, count=len(finished))
         except RestartDrainingError:
             # The server is draining for restart and providers are already
             # gone, so this wake can never be delivered. Mark its runs so the
@@ -7434,78 +7040,6 @@ class ProjectChatManager:
             "Continue the work this run was part of, and report to the user "
             "only once you have checked the log rather than assuming the tail "
             "tells the whole story."
-        )
-        return "\n".join(lines)
-
-    def _build_delegate_wake_prompt(
-        self, parent_chat_id: str, finished: list[dict[str, Any]]
-    ) -> str:
-        """Compose the supervisor's wake turn from finished delegates.
-
-        Each entry carries the child's chat id so the supervisor can read the
-        full transcript with chat_get rather than trusting the excerpt, which
-        is truncated and may have dropped the part that matters.
-        """
-        still_running = [
-            c.chat_id
-            for c in self._chats.values()
-            if c.spawned_from_chat_id == parent_chat_id
-            and not c.archived
-            and c.chat_id not in {e["chat_id"] for e in finished}
-            and c.chat_id in self.active_chat_ids()
-        ]
-        lines = [
-            f"[Ciaobot] {len(finished)} delegate"
-            f"{'s' if len(finished) != 1 else ''} finished."
-        ]
-        if still_running:
-            lines.append(
-                f"{len(still_running)} still running: {', '.join(still_running)}."
-            )
-        deferred = False
-        for entry in finished:
-            child = self._chats.get(entry["chat_id"])
-            # A provider quota rejection sets had_error AND arms a deferred
-            # retry, so reporting it as FAILED tells the supervisor the work is
-            # dead when it is actually going to resume on its own. A supervisor
-            # that believes "failed" re-dispatches and duplicates the work.
-            if child is not None and child.retry_status == "pending":
-                status = (
-                    f"DEFERRED, retrying at {child.retry_next_at}"
-                    if child.retry_next_at
-                    else "DEFERRED, retry pending"
-                )
-                deferred = True
-            elif entry["had_error"]:
-                status = "FAILED"
-            else:
-                status = "done"
-            lines.append("")
-            lines.append(
-                f"— {entry['title']} ({entry['chat_id']}, {status})"
-            )
-            excerpt = self._result_snippet(
-                entry["reply"], limit=_DELEGATE_WAKE_EXCERPT_CHARS
-            ) if entry["reply"].strip() else "(no final message)"
-            lines.append(excerpt)
-        lines.append("")
-        if deferred:
-            lines.append(
-                "A DEFERRED delegate hit a provider limit and will resume by "
-                "itself at the time shown — it is not dead. Do not re-dispatch "
-                "its work or report it as failed; you will be woken again when "
-                "it finishes. Use chat_retry to run it sooner, or chat_stop to "
-                "abandon it."
-            )
-            lines.append("")
-        lines.append(
-            "Review this against what you asked each delegate to do. The "
-            "excerpt above is truncated and is the delegate's own account, so "
-            "verify the claimed work yourself: re-run its commands, read the "
-            "diff, run the tests. To read a delegate's real transcript, take "
-            "its session_id from chat_get and read that provider session's "
-            "JSONL (chat_get returns metadata only, never messages). Report to "
-            "the user only once you have checked."
         )
         return "\n".join(lines)
 
@@ -7649,13 +7183,6 @@ class ProjectChatManager:
         the in-app bubble on their current device).
         """
         chat = self._chats.get(chat_id)
-        if chat is not None and chat.spawned_from_chat_id:
-            logger.debug(
-                "Skipping permission notification for delegate %s (parent %s)",
-                chat_id,
-                chat.spawned_from_chat_id,
-            )
-            return
         if chat is not None:
             payload = json.dumps(
                 {
@@ -8504,10 +8031,7 @@ class ProjectChatManager:
                 self._projects.get(chat_meta.project_id) if chat_meta else None
             )
             try:
-                archive_result = await self.archive_chat(target_id)
-                archive_outcome = (
-                    archive_result.outcome if archive_result is not None else None
-                )
+                archive_outcome = await self.archive_chat(target_id)
             except Exception:  # noqa: BLE001
                 logger.exception("Auto-archive failed for schedule chat %s", target_id)
                 archive_outcome = None

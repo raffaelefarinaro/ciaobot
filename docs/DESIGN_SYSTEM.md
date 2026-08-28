@@ -301,7 +301,8 @@ shape recurs:
 1. **`ChatSignals` was adopted in 2 of 4 call sites.** `ProjectView.vue` kept its
    own `spinner-dot` / `needs-input-badge` / `badge` chain (and printed
    `chatUnread` as a digit, violating Rule S5); `ChatPanel.vue` rendered the chain
-   as *prose* in the subchat banner. Both now use the component. A half-adopted L2
+   as *prose* in its subchat banner (since removed with the delegate concept).
+   Both were moved onto the component. A half-adopted L2
    component is worse than none — the same chat renders two ways depending on the
    view.
 2. **Two relative-time dialects coexisted.** `lib/relativeTime.ts` was created
@@ -309,8 +310,8 @@ shape recurs:
    helper now takes `{ suffix, absoluteAfterDays }` so prose and file-listing
    forms come from one implementation, and the private copy is gone.
 
-**Current state:** all five `ChatSignals` call sites migrated (HomeRecentChats,
-ProjectSidebar ×2, ProjectView, ChatPanel). The unified opts-based
+**Current state:** every `ChatSignals` call site is migrated (HomeRecentChats,
+ProjectSidebar ×2, ProjectView; ChatPanel's went away with its subchat banner). The unified opts-based
 `formatRelative` lives in `lib/relativeTime.ts`; one prose-only dialect remains
 in `lib/time.ts` (the settings automation rows), which predates the unification
 and has not been folded in. `ChatPanel.vue` and `ProjectView.vue` are otherwise

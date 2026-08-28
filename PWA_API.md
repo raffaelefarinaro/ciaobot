@@ -58,6 +58,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | POST | `/api/chats/{chat_id}/reentry-summary` | Return an ephemeral Apple Intelligence orientation summary for a reopened chat |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
+| GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
 | POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
@@ -336,18 +337,30 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
   -H 'content-type: application/json' \
   -d '{"turn_index":0,"messages":[{"role":"user","content":"Question"},{"role":"assistant","content":"Answer"}]}'
 
-# Archive — finalises the chat and writes a Markdown transcript. If this chat
-# supervises delegate subchats, their active chats are archived too: a subchat
-# that is mid-turn is stopped first, so its unfinished output is discarded
-# rather than written past the archive. Returns
-# {ok, archived_to, archived_chat_ids, stopped_chat_ids, failed_chat_ids,
-# subchats}; one `chat_archived` event is emitted for each chat.
-# The cascade can partly fail, and `ok` only covers the requested chat, so
-# treat `archived_chat_ids` as the authority on what is actually archived —
-# anything absent from it is still live. `stopped_chat_ids` are the subchats
-# whose running turn was cut short (tell the user); `failed_chat_ids` are the
-# ones left active and needing a direct archive.
+# Archive — finalises the chat and writes a Markdown transcript. Returns
+# {ok, archived_to, postprocess}; a `chat_archived` event is emitted too.
+# `postprocess` is the post-archive pipeline's opening state, returned in the
+# response as well as published, so the client that archived cannot miss it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
+
+# Subagent transcripts — one entry per subagent this chat's session ever
+# spawned: {agent_id, messages, description, subagent_type, status, turn_index}.
+# `messages` shares the /messages shape; both provider renderers omit
+# `timestamp` on these, so a reader must tolerate it being absent. The PWA's
+# read-only subagent view (/chat/{chat_id}/subagent/{agent_id}) reads this.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/subagents"
+
+# Subagents working right now, across every chat the server considers active:
+# {"chats": {chat_id: [{agent_id, description, subagent_type, is_async,
+# status, turn_index}]}}. Metadata only — no transcripts — so it is cheap
+# enough to poll for the sidebar. Chats with nothing running are omitted
+# entirely, which is how a finished agent's row disappears; poll it only while
+# something is working, and replace your whole map with each response rather
+# than merging. For Claude chats this is what the parent session can name:
+# background `Agent` dispatches. A foreground Task is recorded there by its
+# own completion, so it is never listed as running; that work is visible in
+# the chat's live trace while its turn streams.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/subagents/running"
 
 # Mark read — returns {ok, last_read_at}.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/read"
@@ -654,7 +667,7 @@ Global `/ws/events` payloads the PWA reacts to:
 
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
-- `chat_delegates_reported`: emitted on the *supervisor* chat once finished delegates (chats carrying `spawned_from_chat_id`) have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (supervisor was mid-turn, so the wake was appended as a follow-up) or `"started"` (supervisor was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
+- `chat_runs_reported`: emitted on a chat once finished background command runs have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.

@@ -1105,12 +1105,7 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
 
     async def _archive_chat(cid: str) -> SimpleNamespace:
         archived_calls.append(cid)
-        return SimpleNamespace(
-            outcome=SimpleNamespace(path=Path("/tmp/chat.md")),
-            delegates=[],
-            stopped_ids=lambda: [],
-            failed_ids=lambda: [],
-        )
+        return SimpleNamespace(path=Path("/tmp/chat.md"))
 
     fake_pcm = SimpleNamespace(
         archive_chat=_archive_chat,

@@ -38,6 +38,13 @@
             @close="closeProject"
             @open-sidebar="sidebarCollapsed = false"
           />
+          <SubagentChatView
+            v-else-if="subagentRoute"
+            :key="subagentRoute.agentId"
+            :chat-id="subagentRoute.chatId"
+            :agent-id="subagentRoute.agentId"
+            @open-sidebar="sidebarCollapsed = false"
+          />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
@@ -156,6 +163,13 @@
           @close="closeProject"
           @open-sidebar="sidebarCollapsed = false"
         />
+        <SubagentChatView
+          v-else-if="subagentRoute"
+          :key="subagentRoute.agentId"
+          :chat-id="subagentRoute.chatId"
+          :agent-id="subagentRoute.agentId"
+          @open-sidebar="sidebarCollapsed = false"
+        />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
@@ -260,6 +274,7 @@ import ChatPanel from './ChatPanel.vue'
 // cache-first in the service worker after that), so the first switch is not
 // perceptibly slower.
 const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
+const SubagentChatView = defineAsyncComponent(() => import('./SubagentChatView.vue'))
 const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
@@ -485,6 +500,15 @@ const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
+// /chat/:chatId/subagent/:agentId — a read-only view of one subagent's own
+// conversation. It replaces the chat pane rather than opening beside it: the
+// parent chat is one click away in the header, and the sidebar row stays
+// selected so the relationship is still visible.
+const subagentRoute = computed(() => {
+  const chatId = (route.params.chatId as string) || ''
+  const agentId = (route.params.agentId as string) || ''
+  return chatId && agentId ? { chatId, agentId } : null
+})
 const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
@@ -880,6 +904,15 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
+      return
+    }
+    // A subagent view is a mode within the chat, not a separate chat: the
+    // first Esc goes back to the chat that spawned it, and only the next one
+    // closes that chat. Closing outright would disconnect a chat the user
+    // never left.
+    if (subagentRoute.value) {
+      e.preventDefault()
+      void router.push(`/chat/${subagentRoute.value.chatId}`)
       return
     }
     if (store.activeChat) {

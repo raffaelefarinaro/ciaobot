@@ -31,7 +31,7 @@ from ciao.fts_search import (
 from ciao.loops import publish_loops_changed
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import resolve_region, update_region
-from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
+from ciao.web.project_chats import UnknownModelError
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
@@ -946,23 +946,13 @@ class CiaoControlPlane:
         project = self._project(principal, chat.project_id)
 
         async def _archive() -> dict[str, Any]:
-            result = await self.pcm.archive_chat(target_id)
-            outcome = result.outcome if result is not None else None
+            outcome = await self.pcm.archive_chat(target_id)
             if outcome is not None:
                 self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
-            payload: dict[str, Any] = {
+            return {
                 "chat_id": target_id,
                 "archived_to": str(outcome.path) if outcome else None,
             }
-            # Delegate subchats are archived with their supervisor, and a
-            # mid-turn one is stopped to get there. Report that to the agent
-            # for the same reason the PWA gets it: a discarded turn and a
-            # subchat left running are both things the caller must know.
-            if result is not None and result.delegates:
-                payload["subchats"] = [row.to_dict() for row in result.delegates]
-                payload["stopped_chat_ids"] = result.stopped_ids()
-                payload["failed_chat_ids"] = result.failed_ids()
-            return payload
 
         if target_id == principal.chat_id:
             # Archiving the calling chat tears down its own tool caller, so it
@@ -988,103 +978,6 @@ class CiaoControlPlane:
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
-
-    # ---- delegates -----------------------------------------------------
-
-    def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
-        return {
-            "chat_id": chat.chat_id,
-            "title": chat.title,
-            "provider": chat.provider,
-            "model": chat.model,
-            "delegation_id": chat.delegation_id,
-            "archived": chat.archived,
-            "running": streaming,
-            "created_at": chat.created_at,
-            "last_activity_at": chat.last_activity_at,
-        }
-
-    def delegate_spawn(
-        self,
-        principal: McpPrincipal,
-        *,
-        prompt: str,
-        title: str = "",
-        provider: str | None = None,
-        model: str | None = None,
-        mode: str | None = None,
-        delegation_id: str = "",
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Spawn a writable delegate chat that wakes this chat when it finishes."""
-        parent = self._chat(principal, "")
-        # Server-side recursion guard. CIAO_DELEGATE_OF tells a delegate what it
-        # is, but a child could unset its own env, so the authoritative check is
-        # the calling chat's own lineage.
-        if parent.spawned_from_chat_id:
-            raise ControlPlaneError(
-                "nested_delegate_forbidden",
-                "A delegate cannot spawn delegates. Report back to your "
-                "supervisor instead.",
-            )
-        if not prompt.strip():
-            raise ControlPlaneError("empty_prompt", "prompt is required.")
-        requested_mode = mode
-        mode = self._child_mode(principal, mode)
-        active = self.pcm.active_delegate_count(parent.chat_id)
-        if active >= _MAX_ACTIVE_DELEGATES:
-            raise ControlPlaneError(
-                "delegate_limit_reached",
-                f"{active} delegates are already running (limit "
-                f"{_MAX_ACTIVE_DELEGATES}). Wait for one to report before "
-                f"spawning another.",
-            )
-        project = self._resolve_project(principal, project_id)
-        try:
-            chat = self.pcm.create_chat(
-                project.project_id,
-                title=title.strip() or "Delegate",
-                provider=provider,
-                model=model,
-                mode=mode,
-                spawned_from_chat_id=parent.chat_id,
-                delegation_id=delegation_id.strip(),
-            )
-        except UnknownModelError as exc:
-            # Only the model failure is a model problem; an unknown provider
-            # or bucket raises ValueError before model validation and must
-            # keep its own identity at the MCP boundary (invalid_request)
-            # instead of being relabeled invalid_model (#259).
-            raise ControlPlaneError("invalid_model", str(exc)) from exc
-        # Same start/queue split as chat_send: a brand-new chat is never
-        # streaming, so this normally starts immediately.
-        if self.pcm.queue_message(chat.chat_id, prompt.strip()):
-            send_status = "queued"
-        else:
-            self.pcm.start_stream(chat.chat_id, prompt.strip())
-            send_status = "started"
-        result = chat.to_dict(local=True)
-        result["send_status"] = send_status
-        result["active_delegates"] = active + 1
-        if requested_mode and requested_mode != mode:
-            result["mode_clamped"] = True
-            result["requested_mode"] = requested_mode
-        return _ok(result)
-
-    def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
-        """List delegates spawned by a chat, with which ones are still running."""
-        parent_id = self._chat_id(principal, chat_id)
-        running = set(self.pcm.active_chat_ids())
-        rows = [
-            self._delegate_payload(c, streaming=c.chat_id in running)
-            for c in self.pcm.delegates_for_chat(parent_id)
-        ]
-        return _ok({
-            "chat_id": parent_id,
-            "delegates": rows,
-            "active": sum(1 for r in rows if r["running"] and not r["archived"]),
-            "limit": _MAX_ACTIVE_DELEGATES,
-        })
 
     # ---- background command runs ----------------------------------------
 

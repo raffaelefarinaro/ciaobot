@@ -1604,6 +1604,22 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(config))
 
 
+def _gws_manual_pkce_store(request: Request):
+    """Return the app's manual-flow PKCE verifier store, creating one on first use.
+
+    Mirrors :func:`_gws_relogin_manager`: lazily attached so a bare test app
+    (only ``config`` on ``app.state``) still works, while ``main.py`` wires
+    the shared instance at startup. See ``ManualPkceStore`` (issue #354).
+    """
+    store = getattr(request.app.state, "gws_manual_pkce_store", None)
+    if store is None:
+        from ciao.gws_auth import ManualPkceStore
+
+        store = ManualPkceStore()
+        request.app.state.gws_manual_pkce_store = store
+    return store
+
+
 async def gws_auth_url(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -1629,12 +1645,19 @@ async def gws_auth_url(request: Request) -> JSONResponse:
             return JSONResponse({"error": "client_secret.json missing client_id"}, status_code=400)
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
+        # PKCE (issue #354): this manual/paste flow cannot validate `state` on
+        # paste-back (the user, not the browser, carries the code across the
+        # trust boundary), so a code_challenge is the RFC 8252 remedy. The
+        # verifier is held server-side, keyed by profile, until the matching
+        # exchange call.
+        flow_id, code_verifier = _gws_manual_pkce_store(request).start(profile)
         auth_url = gws_auth.build_auth_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scopes=gws_auth.scopes_for_profile(profile),
+            code_challenge=gws_auth.code_challenge_s256(code_verifier),
         )
-        return JSONResponse({"auth_url": auth_url})
+        return JSONResponse({"auth_url": auth_url, "flow_id": flow_id})
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -1647,6 +1670,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         body = await request.json()
         profile = body.get("profile")
         code_or_url = body.get("code")
+        flow_id = body.get("flow_id")
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
@@ -1656,6 +1680,8 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
 
     if not code_or_url:
         return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
+    if flow_id is not None and not isinstance(flow_id, str):
+        return JSONResponse({"error": "Invalid flow ID"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
@@ -1668,6 +1694,35 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
         code = gws_auth.extract_code_from_input(code_or_url)
+        # The flow ID binds this exchange to the exact auth URL that produced
+        # the pasted code. Without it, an old client must not accidentally use
+        # another tab's verifier.
+        pkce_store = _gws_manual_pkce_store(request)
+        if flow_id:
+            pkce_status = pkce_store.status(flow_id, profile)
+        else:
+            pkce_status = "none"
+            if pkce_store.status_for_profile(profile) == "active":
+                return JSONResponse(
+                    {"error": "This sign-in flow needs a flow ID. Start manual connect again."},
+                    status_code=400,
+                )
+        if pkce_status == "expired":
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in link expired before the code was pasted "
+                        "back. Start manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
+        if pkce_status == "superseded":
+            return JSONResponse(
+                {"error": "This sign-in flow was replaced. Start manual connect again."},
+                status_code=400,
+            )
+        code_verifier = pkce_store.peek(flow_id, profile) if pkce_status == "active" else None
         # Token exchange + credential write happen off the event loop; the
         # helper never logs the code, tokens, or secret.
         await asyncio.to_thread(
@@ -1676,6 +1731,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             profile,
             code=code,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
@@ -2702,25 +2758,12 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    result = await pcm.archive_chat(chat_id)
-    outcome = result.outcome if result is not None else None
+    outcome = await pcm.archive_chat(chat_id)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
-    # Report the cascade per subchat rather than a bare ok. The client marks
-    # only what `archived_chat_ids` confirms — a delegate the server skipped is
-    # still live, and hiding it from the sidebar while it streams and spends
-    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
-    # the user is warned about; `failed_chat_ids` are the subchats they may
-    # still need to deal with by hand.
-    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
-        # A chat with an empty transcript yields no ArchiveOutcome but is still
-        # archived, so this is keyed off the cascade running at all.
-        "archived_chat_ids": (
-            ([chat_id] + result.archived_ids()) if result is not None else []
-        ),
         # The initiating client clears the active pane as soon as this response
         # arrives. Return the lifecycle record as well as publishing it over
         # /ws/events, so that client cannot miss the first "running" state in
@@ -2730,9 +2773,6 @@ async def chat_archive(request: Request) -> JSONResponse:
             if chat_meta and chat_meta.postprocess
             else None
         ),
-        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
-        "failed_chat_ids": result.failed_ids() if result is not None else [],
-        "subchats": [row.to_dict() for row in delegates],
     })
 
 
@@ -3734,6 +3774,105 @@ async def chat_subagents(request: Request) -> JSONResponse:
         )
 
     return _finalize(result)
+
+
+async def running_subagents(request: Request) -> JSONResponse:
+    """Subagents working right now, per chat, for the sidebar's subagent rows.
+
+    ``/api/chats/{id}/subagents`` is the transcript endpoint: it renders every
+    subagent a chat ever spawned, which is far too much to poll for a sidebar
+    that only shows live work. This returns dispatch metadata alone (no
+    messages) and only for chats the manager already considers active, so the
+    cost is one JSONL parse per working chat rather than one per chat in the
+    registry.
+
+    Shape: ``{"chats": {chat_id: [{agent_id, description, subagent_type,
+    status, is_async, turn_index}]}}``. Chats with nothing running are omitted
+    entirely, which is what lets the client drop their rows.
+
+    For Claude chats this is the set the parent session can name — in practice
+    background dispatches, because a foreground Task only appears in the parent
+    file once it has already finished (see
+    ``subagent_tracking.running_agents``). Foreground work is visible in the
+    chat's own live trace instead, since the turn that spawned it is still
+    streaming.
+    """
+    pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
+    out: dict[str, list[dict]] = {}
+    for chat_id in pcm.active_chat_ids():
+        chat = pcm.get_chat(chat_id)
+        if chat is None or chat.archived or not chat.session_id:
+            continue
+        try:
+            rows = await _running_subagent_rows(pcm, config, chat)
+        except Exception:  # noqa: BLE001 — one unreadable session must not
+            # blank the whole sidebar, so log it and move on.
+            logger.exception("running-subagent scan failed for chat %s", chat_id)
+            continue
+        if rows:
+            out[chat_id] = rows
+    return JSONResponse({"chats": out})
+
+
+async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
+    """Live subagents for one chat, without loading any transcript."""
+    provider = getattr(chat, "provider", "claude")
+    if provider == "opencode":
+        provider_service = pcm._providers.get(chat.chat_id)
+        live_provider = provider_service.provider if provider_service is not None else None
+        if (
+            isinstance(live_provider, OpencodeProvider)
+            and live_provider.has_live_server
+            and live_provider.current_session_id == chat.session_id
+        ):
+            collab_tree = await live_provider.read_live_collab_tree()
+        else:
+            collab_tree = await OpencodeProvider.read_collab_tree(
+                config.workspace_root, chat.session_id
+            )
+        rows: list[dict] = []
+        for item in collab_tree:
+            info = item.get("info")
+            info = info if isinstance(info, dict) else {}
+            agent_id = str(info.get("id") or "")
+            if not agent_id:
+                continue
+            messages = item.get("messages")
+            messages = messages if isinstance(messages, list) else []
+            if _opencode_child_status(messages) != "running":
+                continue
+            rows.append({
+                "agent_id": agent_id,
+                "description": str(info.get("title") or ""),
+                "subagent_type": "opencode",
+                "is_async": True,
+                "status": "running",
+                "turn_index": _opencode_child_turn_index(info, chat),
+            })
+        return rows
+
+    if provider != "claude":
+        return []
+    resolver = getattr(pcm, "_agent_root_for_chat", None)
+    agent_root = resolver(chat.chat_id) if resolver is not None else None
+    path = subagent_tracking.find_parent_session_file(
+        chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    )
+    if path is None:
+        return []
+    state = await asyncio.to_thread(subagent_tracking.parse_session_subagents, path)
+    return [
+        {
+            "agent_id": info.agent_id,
+            "description": info.description,
+            "subagent_type": info.subagent_type,
+            "is_async": info.is_async,
+            "status": info.status,
+            "turn_index": info.turn_index,
+        }
+        for info in subagent_tracking.running_agents(path, state)
+    ]
 
 
 def _merge_subagent_dispatch_meta(
@@ -5776,17 +5915,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"chats": [], "attention_count": 0})
 
     chats = pcm.list_chats()
-    # Delegate completion is internal model-to-model traffic: it wakes the
-    # supervisor, so the PWA deliberately does not report a nested delegate as
-    # a second unread chat. Keep the tray feed on the same rule. An archived or
-    # missing supervisor makes the delegate an orphan, which remains a normal
-    # visible chat and may be unread.
-    active_chat_ids = {
-        candidate.chat_id
-        for candidate in chats
-        if not candidate.archived
-    }
-
     rows: list[dict[str, object]] = []
     attention_count = 0
     for chat in chats:
@@ -5797,11 +5925,7 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        nested_delegate = bool(
-            getattr(chat, "spawned_from_chat_id", "")
-            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
-        )
-        unread = not nested_delegate and bool(activity) and activity > read
+        unread = bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(
             chat.pending_question, getattr(chat, "pending_permission", "")
         )
