@@ -221,6 +221,7 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 **Ciaobot agent control plane:**
 
 - The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
+- `CIAO_MCP_LAZY_TOOLS`: lists only the core and destructive Ciaobot tools in `tools/list` and defers the rest to the `tools_search` / `tools_call` pair, so the full catalog (~9k tokens of JSON schema) is not injected into every chat. Set to `0` to list the whole catalog eagerly. Default `true`.
 - `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).

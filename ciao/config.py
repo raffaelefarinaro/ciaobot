@@ -509,6 +509,13 @@ class CiaoConfig:
     # See ``ciao/memory_tool.py``.
     memory_char_limit: int = 3000
     user_char_limit: int = 1375
+    # Lazy MCP tool discovery. Every tool schema in ``tools/list`` is injected
+    # into every chat's context window whether the turn uses it or not; the
+    # full catalog costs ~9k tokens. With this on, only a small core plus the
+    # destructive tools are listed and the rest are reached through
+    # ``tools_search`` / ``tools_call``. Set ``CIAO_MCP_LAZY_TOOLS=0`` to list
+    # the whole catalog again. See ``ciao/mcp_server.py``.
+    mcp_lazy_tools: bool = True
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1400,6 +1407,8 @@ class CiaoConfig:
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
             ),
+            mcp_lazy_tools=source.get("CIAO_MCP_LAZY_TOOLS", "true").strip().lower()
+            not in {"0", "false", "no", "off"},
         )
 
 
