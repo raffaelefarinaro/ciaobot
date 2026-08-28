@@ -254,7 +254,7 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
-    cutoff = reference - timedelta(days=RECENT_DAYS)
+    cutoff = cutoff_ts(reference)
 
     by_workspace: dict[str, dict[str, int]] = {}
     recent = {"promoted": 0, "dismissed": 0}
@@ -298,7 +298,7 @@ def tally(*, now: datetime | None = None) -> dict[str, Any]:
         action_totals[action] += 1
         bucket(workspace)[action] += 1
         ts = _parsed_ts(event.get("ts"))
-        if ts is not None and ts.astimezone(UTC) >= cutoff_ts(reference):
+        if ts is not None and ts.astimezone(UTC) >= cutoff:
             recent[action] += 1  # type: ignore[literal-required]
 
     return {
