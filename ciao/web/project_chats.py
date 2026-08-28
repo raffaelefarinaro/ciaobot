@@ -5981,7 +5981,13 @@ class ProjectChatManager:
                 self._retry_tasks.pop(chat_id, None)
 
     @staticmethod
-    def _result_snippet(text: str, limit: int = 140) -> str:
+    def _result_snippet(text: str, limit: int = 280) -> str:
+        """Flatten a reply to one line for the unread card and the push body.
+
+        The default is sized for the two-line clamp on the Home unread card
+        (`.home-chat-snippet`): at 140 the string ran out before the first line
+        did, so the card's second line was always blank.
+        """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if len(flat) > limit:
             flat = flat[: limit - 3] + "..."

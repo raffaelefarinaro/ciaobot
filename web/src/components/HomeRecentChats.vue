@@ -144,6 +144,17 @@
                     :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
                     :hue="colorOf(chat)"
                   />
+                  <!-- Project and time ride the title row in every density. On
+                       the compact rows they already did (the row is one line);
+                       on the cards this reclaims the third line, which is what
+                       lets the preview below run to its full two-line clamp. -->
+                  <span class="home-chat-meta">
+                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">
+                      {{ store.projectFor(chat.chat_id)?.name }}
+                    </span>
+                    <span v-if="chat.local === false" class="remote-chip">remote</span>
+                    <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+                  </span>
                 </span>
                 <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
                   {{ store.chatPendingQuestion(chat.chat_id) }}
@@ -153,13 +164,6 @@
                      finished earlier shows no preview until its next turn. -->
                 <span v-if="entry.key === 'unread' && store.chatLastSnippet(chat.chat_id)" class="home-chat-snippet">
                   {{ store.chatLastSnippet(chat.chat_id) }}
-                </span>
-                <span class="home-chat-meta">
-                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">
-                    {{ store.projectFor(chat.chat_id)?.name }}
-                  </span>
-                  <span v-if="chat.local === false" class="remote-chip">remote</span>
-                  <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
                 </span>
               </button>
             </div>
@@ -1289,17 +1293,25 @@ defineExpose({ onArrow })
   -webkit-line-clamp: 2;
 }
 
+/* Sits at the end of the title row in every density, so it shrinks to its
+   contents rather than spanning the card. `margin-left: auto` on the time is
+   inert here (there is no free space to absorb) - that is what puts the
+   project name directly next to the timestamp instead of at the far edge. */
 .home-chat-meta {
   display: flex;
-  align-items: center;
+  align-items: baseline;
+  flex: 0 1 auto;
   gap: 7px;
   min-width: 0;
+  max-width: 45%;
+  margin-left: auto;
   color: var(--fg2);
   font-size: var(--text-xs);
 }
 
 .home-chat-project {
   min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   color: var(--fg2);
   letter-spacing: 0.03em;
