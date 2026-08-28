@@ -56,7 +56,7 @@
 <!-- Column 3: Chats -->
 <rect x="504" y="16" width="200" height="168" rx="10" class="card"/>
 <text x="516" y="36" class="label" font-weight="700">Chat</text>
-<text x="516" y="50" class="sublabel">turns · delegates · loops</text>
+<text x="516" y="50" class="sublabel">turns · subagents · automations</text>
 <g>
   <rect x="516" y="62" width="176" height="26" rx="7" fill="#f4f4fa" stroke="#d2d4e3"/>
   <text x="526" y="79" class="label" font-size="11">↻ check PRs (loop)</text>

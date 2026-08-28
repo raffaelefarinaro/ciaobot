@@ -57,7 +57,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
 | GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | POST | `/api/chats/{chat_id}/reentry-summary` | Return an ephemeral Apple Intelligence orientation summary for a reopened chat |
-| GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
+| GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
 | GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
 | POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |

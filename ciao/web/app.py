@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -173,6 +174,8 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.security import SecurityHeadersMiddleware
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -441,7 +444,15 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
                 yield
         finally:
             for callback in getattr(_app.state, "shutdown_callbacks", ()):
-                await callback()
+                # One failing callback must not skip the ones after it, nor the
+                # client pool below. Shutdown is the last chance to terminate
+                # provider subprocesses and background runs; leaking them
+                # because an earlier hook raised is how a restart ends up with
+                # orphan processes.
+                try:
+                    await callback()
+                except Exception:
+                    logger.exception("Shutdown callback failed")
             # Release the client-mode keep-alive pool. A no-op on a host node,
             # which never opens it.
             await close_shared_client()

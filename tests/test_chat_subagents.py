@@ -529,6 +529,117 @@ def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     assert any("Progress entry survived" in msg["content"] for msg in by_id["progress-agent"])
 
 
+# --- ?agent_id= narrowing ----------------------------------------------------
+#
+# The read-only subagent view polls one transcript while its agent works. The
+# unfiltered response renders every subagent the chat ever spawned, so without
+# narrowing that poll re-fetched the whole set every few seconds to redraw one
+# of them.
+
+
+def _write_two_agent_session(tmp_path: Path) -> None:
+    for name, text in (("researcher", "Researcher output."), ("writer", "Writer output.")):
+        _write_jsonl(
+            tmp_path / ".claude" / "projects" / "-tmp-workspace" / "sess-1" / "subagents" / f"{name}.jsonl",
+            [
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                },
+            ],
+        )
+    _write_jsonl(tmp_path / ".claude" / "projects" / "-tmp-workspace" / "sess-1.jsonl", [])
+
+
+def test_agent_id_narrows_the_local_fallback_to_one_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    _write_two_agent_session(tmp_path)
+
+    resp = _client(tmp_path, "sess-1").get(
+        "/api/chats/chat-1/subagents", params={"agent_id": "researcher"}
+    )
+
+    assert resp.status_code == 200
+    assert [entry["agent_id"] for entry in resp.json()] == ["researcher"]
+
+
+def test_agent_id_matches_across_the_agent_prefix(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The route carries the bare id; the local fallback keys by file stem.
+
+    Whichever form the caller sends has to resolve, or the filter drops the
+    agent it was asked for and the view renders "not found".
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    _write_two_agent_session(tmp_path)
+
+    resp = _client(tmp_path, "sess-1").get(
+        "/api/chats/chat-1/subagents", params={"agent_id": "agent-researcher"}
+    )
+
+    assert resp.status_code == 200
+    assert [entry["agent_id"] for entry in resp.json()] == ["researcher"]
+
+
+def test_agent_id_skips_sdk_discovery_and_sibling_transcripts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The point of the narrowing: no enumeration, no sibling reads."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    listed: list[str] = []
+    fetched: list[str] = []
+
+    def _list_subagents(session_id: str, directory: str | None = None) -> list[str]:
+        listed.append(session_id)
+        return ["researcher", "writer"]
+
+    def _get_subagent_messages(
+        session_id: str, agent_id: str, directory: str | None = None
+    ) -> list:
+        fetched.append(agent_id)
+        return []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        SimpleNamespace(
+            list_subagents=_list_subagents,
+            get_subagent_messages=_get_subagent_messages,
+        ),
+    )
+    _write_two_agent_session(tmp_path)
+
+    resp = _client(tmp_path, "sess-1").get(
+        "/api/chats/chat-1/subagents", params={"agent_id": "researcher"}
+    )
+
+    assert resp.status_code == 200
+    assert listed == []
+    assert fetched == ["researcher"]
+
+
+def test_without_agent_id_every_subagent_is_returned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    _write_two_agent_session(tmp_path)
+
+    resp = _client(tmp_path, "sess-1").get("/api/chats/chat-1/subagents")
+
+    assert resp.status_code == 200
+    assert sorted(entry["agent_id"] for entry in resp.json()) == ["researcher", "writer"]
+
+
 # --- Empty / banner-only ResultEvent guards ----------------------------------
 
 

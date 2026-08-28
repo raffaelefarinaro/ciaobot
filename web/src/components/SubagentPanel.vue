@@ -23,6 +23,16 @@
           </span>
           <span v-if="sub.status" class="status-chip" :class="sub.status">{{ sub.status }}</span>
           <span class="meta">{{ agentMeta(sub) }}</span>
+          <!-- Same destination as the sidebar row, so the two ways of reaching
+               a subagent land in one place. Inline here (a rollup among the
+               parent's other trace blocks), full-pane there. -->
+          <RouterLink
+            v-if="chatId"
+            class="open-link"
+            :to="`/chat/${chatId}/subagent/${bareId(sub.agent_id)}`"
+            :title="`Open ${sub.description || shortId(sub.agent_id)} in a read-only view`"
+            @click.stop
+          >open</RouterLink>
         </div>
         <div v-if="openAgents[i]" class="subagent-turns">
           <div v-for="(m, j) in sub.messages" :key="j" class="sub-msg" :class="m.role">
@@ -56,10 +66,20 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import type { SubagentTranscript } from '../lib/types'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 
-const props = defineProps<{ subagents: SubagentTranscript[] }>()
+// `chatId` is optional so the panel still renders in isolation (tests, and any
+// caller that has no route to offer); the link is simply omitted then.
+const props = defineProps<{ subagents: SubagentTranscript[]; chatId?: string }>()
+const chatId = computed(() => props.chatId || '')
+
+// SDK ids are bare; the local-JSONL fallback uses the "agent-" file stem. The
+// route carries the bare form so both spellings resolve to one view.
+function bareId(id: string): string {
+  return id.replace(/^agent-/, '')
+}
 
 const subs = computed<SubagentTranscript[]>(() => props.subagents || [])
 const runningCount = computed(
@@ -198,6 +218,16 @@ function renderMarkdown(text: string): string {
   font-weight: 600;
   color: var(--fg);
 }
+.open-link {
+  flex: none;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.open-link:hover { text-decoration: underline; }
+
 .agent-id code {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;

@@ -2760,25 +2760,12 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    result = await pcm.archive_chat(chat_id)
-    outcome = result.outcome if result is not None else None
+    outcome = await pcm.archive_chat(chat_id)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
-    # Report the cascade per subchat rather than a bare ok. The client marks
-    # only what `archived_chat_ids` confirms — a delegate the server skipped is
-    # still live, and hiding it from the sidebar while it streams and spends
-    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
-    # the user is warned about; `failed_chat_ids` are the subchats they may
-    # still need to deal with by hand.
-    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
-        # A chat with an empty transcript yields no ArchiveOutcome but is still
-        # archived, so this is keyed off the cascade running at all.
-        "archived_chat_ids": (
-            ([chat_id] + result.archived_ids()) if result is not None else []
-        ),
         # The initiating client clears the active pane as soon as this response
         # arrives. Return the lifecycle record as well as publishing it over
         # /ws/events, so that client cannot miss the first "running" state in
@@ -2788,9 +2775,6 @@ async def chat_archive(request: Request) -> JSONResponse:
             if chat_meta and chat_meta.postprocess
             else None
         ),
-        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
-        "failed_chat_ids": result.failed_ids() if result is not None else [],
-        "subchats": [row.to_dict() for row in delegates],
     })
 
 
@@ -3693,6 +3677,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse([])
 
+    # ``?agent_id=`` narrows the response to one agent. The read-only subagent
+    # view shows a single transcript and polls it while the agent works;
+    # without this it re-fetched and re-rendered every subagent the chat ever
+    # spawned on every tick. Narrowing skips the sibling transcript reads
+    # entirely rather than filtering after the fact.
+    wanted_agent_id = (request.query_params.get("agent_id") or "").strip()
+
     config = request.app.state.config
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
@@ -3713,6 +3704,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
             if not agent_id:
+                continue
+            if wanted_agent_id and agent_id != wanted_agent_id:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
@@ -3741,6 +3734,18 @@ async def chat_subagents(request: Request) -> JSONResponse:
     agent_root = resolver(chat_id) if resolver is not None else None
 
     def _finalize(entries: list[dict]) -> JSONResponse:
+        # Catch-all for the local-transcript fallbacks, which read the whole
+        # session directory and cannot narrow at the source. Those entries are
+        # keyed by file stem ("agent-a319…") while the SDK and the route use
+        # the bare id, so compare on the bare form or the filter drops the
+        # agent it was asked for.
+        if wanted_agent_id:
+            bare_wanted = wanted_agent_id.removeprefix("agent-")
+            entries = [
+                e
+                for e in entries
+                if str(e.get("agent_id", "")).removeprefix("agent-") == bare_wanted
+            ]
         _merge_subagent_dispatch_meta(
             entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
@@ -3755,20 +3760,25 @@ async def chat_subagents(request: Request) -> JSONResponse:
             )
         )
 
-    try:
-        agent_ids = list_subagents(chat.session_id, directory=workspace)
-    except (FileNotFoundError, ValueError):
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    if wanted_agent_id:
+        # Skip discovery: the caller already knows the id, and list_subagents
+        # only exists to enumerate the siblings we are deliberately not reading.
+        agent_ids = [wanted_agent_id]
+    else:
+        try:
+            agent_ids = list_subagents(chat.session_id, directory=workspace)
+        except (FileNotFoundError, ValueError):
+            return _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
-    except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        except Exception:  # noqa: BLE001 — defensive against SDK surprises
+            return _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -3879,7 +3889,15 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     )
     if path is None:
         return []
-    state = await asyncio.to_thread(subagent_tracking.parse_session_subagents, path)
+    def _scan() -> list[subagent_tracking.SubagentInfo]:
+        # Both halves belong off the event loop. running_agents() is not a
+        # cheap filter over the parsed state: it stats and tail-reads each
+        # running agent's own transcript, and this endpoint is polled by the
+        # sidebar for every working chat.
+        state = subagent_tracking.parse_session_subagents(path)
+        return subagent_tracking.running_agents(path, state)
+
+
     return [
         {
             "agent_id": info.agent_id,
@@ -3889,7 +3907,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             "status": info.status,
             "turn_index": info.turn_index,
         }
-        for info in subagent_tracking.running_agents(path, state)
+        for info in await asyncio.to_thread(_scan)
     ]
 
 
@@ -5335,6 +5353,20 @@ async def create_schedule(request: Request) -> JSONResponse:
     target_project = pcm.get_project(web_project_id) if web_project_id else None
     if workspace not in known_workspaces and web_project_id:
         workspace = target_project.workspace if target_project else ""
+    if workspace not in known_workspaces and web_chat_id:
+        # A chat-bound entry has no project id to stamp from, but it still
+        # needs a workspace: `resolve_automation_project` is what lets an
+        # interval run continue in a replacement chat once the target chat is
+        # archived or deleted, and with neither field set it returns None and
+        # the entry is disabled instead of re-homed. Derive it from the chat's
+        # own project, which is what the loop routes always did.
+        target_chat = pcm.get_chat(web_chat_id)
+        chat_project = (
+            pcm.get_project(target_chat.project_id)
+            if target_chat is not None and target_chat.project_id
+            else None
+        )
+        workspace = getattr(chat_project, "workspace", "") or ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -5995,17 +6027,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"chats": [], "attention_count": 0})
     chats = pcm.list_chats()
-    # Delegate completion is internal model-to-model traffic: it wakes the
-    # supervisor, so the PWA deliberately does not report a nested delegate as
-    # a second unread chat. Keep the tray feed on the same rule. An archived or
-    # missing supervisor makes the delegate an orphan, which remains a normal
-    # visible chat and may be unread.
-    active_chat_ids = {
-        candidate.chat_id
-        for candidate in chats
-        if not candidate.archived
-    }
-
     rows: list[dict[str, object]] = []
     attention_count = 0
     for chat in chats:
@@ -6016,11 +6037,7 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        nested_delegate = bool(
-            getattr(chat, "spawned_from_chat_id", "")
-            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
-        )
-        unread = not nested_delegate and bool(activity) and activity > read
+        unread = bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(
             chat.pending_question, getattr(chat, "pending_permission", "")
         )
