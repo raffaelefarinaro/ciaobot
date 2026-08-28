@@ -306,53 +306,10 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications — the desktop app owns this in the tray. -->
-        <div v-if="!inDesktopApp" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">notifications</p>
-              <p class="hint">
-                Get a notification when a chat replies and the app is not focused.
-              </p>
-            </div>
-            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
-          </div>
-          <div v-if="needsIosInstall" class="hint hint--warn">
-            On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-          </div>
-          <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-          </div>
-          <div v-else-if="!pushSupportedFlag" class="loading">
-            Push notifications are not supported here. On macOS, install Ciaobot as an app
-            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-          </div>
-          <template v-else>
-            <!-- On macOS the menu-bar agent already posts chat-reply notifications
-                 out of the box (menubar_prefs defaults on, launchd RunAtLoad), so
-                 don't present web-push as a required action here — lead with the
-                 reassurance and offer the app-install path as an optional upgrade. -->
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              You're covered — the menu bar already shows a notification when a chat
-              replies and the app isn't focused. Nothing to enable.
-            </p>
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-              open the exact chat (and keep working even if you quit the menu bar), install
-              Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-              &ldquo;Add to Dock&rdquo;), then enable it here.
-            </p>
-          </template>
-          <div v-if="pushError" class="action-result">{{ pushError }}</div>
-        </div>
+        <!-- Notifications — the desktop app owns this in the tray, so the
+             card drops out there rather than showing web-push controls the
+             tray already supersedes. Same card as the Notifications tab. -->
+        <SettingsNotifications hide-in-desktop-app />
 
         <!-- Appearance -->
         <div class="card">
@@ -468,65 +425,7 @@
 
       <!-- NOTIFICATIONS TAB -->
       <template v-if="currentTab === 'notifications'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">notifications</p>
-              <p class="hint">
-                Get a notification when a chat replies and the app is not focused.
-              </p>
-            </div>
-            <div v-if="!inDesktopApp && !needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
-          </div>
-          <!-- In the desktop app the menu-bar companion owns notifications, so
-               the PWA web-push controls are not the surface here. Explain what
-               controls them instead of rendering nothing. -->
-          <template v-if="inDesktopApp">
-            <p class="hint">
-              In the Ciaobot desktop app, notifications are handled by the menu-bar
-              companion: a chat reply while the app isn't focused posts a banner, and
-              opening it takes you to the chat. Use <strong>Menu Bar &rarr; Advanced
-              &rarr; Native Notifications</strong> to turn them on or off.
-            </p>
-            <p class="hint">
-              If notifications are blocked at the OS level, re-enable them in
-              System Settings &rarr; Notifications &rarr; Ciaobot.
-            </p>
-          </template>
-          <template v-else>
-            <div v-if="needsIosInstall" class="hint hint--warn">
-              On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-            </div>
-            <div v-else-if="permissionDenied" class="hint hint--warn">
-              Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-            </div>
-            <div v-else-if="!pushSupportedFlag" class="loading">
-              Push notifications are not supported here. On macOS, install Ciaobot as an app
-              (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-            </div>
-            <template v-else>
-              <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-                You're covered — the menu bar already shows a notification when a chat
-                replies and the app isn't focused. Nothing to enable.
-              </p>
-              <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-                Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-                open the exact chat (and keep working even if you quit the menu bar), install
-                Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-                &ldquo;Add to Dock&rdquo;), then enable it here.
-              </p>
-            </template>
-          </template>
-          <div v-if="!inDesktopApp && pushError" class="action-result">{{ pushError }}</div>
-        </div>
+        <SettingsNotifications />
       </template>
 
 
@@ -2130,7 +2029,6 @@ import type {
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
@@ -2138,6 +2036,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsNotifications from './settings/SettingsNotifications.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
@@ -3921,26 +3820,6 @@ async function fetchAutomation() {
   }
 }
 
-const pushSupportedFlag = ref(false)
-const pushEnabledFlag = ref(false)
-const pushPending = ref(false)
-const pushError = ref('')
-const permissionDenied = ref(false)
-const needsIosInstall = ref(false)
-
-function isIos(): boolean {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent)
-}
-function isMacDesktop(): boolean {
-  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
-}
-function isStandalone(): boolean {
-  return (
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as Navigator & { standalone?: boolean }).standalone === true
-  )
-}
-
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
@@ -4248,52 +4127,8 @@ onMounted(async () => {
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
-  pushSupportedFlag.value = pushSupported()
-  if (isIos() && !isStandalone()) {
-    needsIosInstall.value = true
-  }
-  if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
-    permissionDenied.value = true
-  }
-  if (pushSupportedFlag.value) {
-    pushEnabledFlag.value = await isPushEnabled()
-    // Self-heal: if the browser thinks it has a subscription but the server
-    // forgot it (state file moved, fresh deploy), silently re-register so
-    // pushes actually arrive without making the user click anything.
-    if (pushEnabledFlag.value && Notification.permission === 'granted') {
-      try {
-        const sub = await currentSubscription()
-        if (sub) {
-          const r = await api.get<{ registered: boolean }>(
-            `/api/push/subscription?endpoint=${encodeURIComponent(sub.endpoint)}`
-          )
-          if (!r.registered) {
-            await api.post('/api/push/subscribe', { subscription: sub.toJSON() })
-          }
-        }
-      } catch { /* best-effort */ }
-    }
-  }
 })
 
-
-async function togglePush() {
-  pushPending.value = true
-  pushError.value = ''
-  try {
-    if (pushEnabledFlag.value) {
-      await disablePush()
-      pushEnabledFlag.value = false
-    } else {
-      await enablePush()
-      pushEnabledFlag.value = true
-    }
-  } catch (e) {
-    pushError.value = errorMessage(e)
-  } finally {
-    pushPending.value = false
-  }
-}
 
 async function doSnapshot(confirmWarnings = false) {
   actionPending.value = 'snapshot'
