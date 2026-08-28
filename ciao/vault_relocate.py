@@ -478,13 +478,21 @@ def apply(
 
     # git mv rejects directories containing only untracked files. Stage the
     # planned sources so new notes move through the same tracked, undoable path.
+    staged: list[str] = []
     for src_rel, _dst_rel in moves_to_apply:
         code, out = _run_git(install_root, "add", "-A", "--", src_rel)
         if code != 0:
+            # Reset only what THIS attempt staged: a refusal must not change
+            # the user's index — staging previously untracked notes would
+            # make the next commit include data the operator never meant to
+            # stage, even though nothing was moved.
+            if staged:
+                _run_git(install_root, "reset", "-q", "--", *set(staged))
             payload["status"] = "refused"
             payload["refusals"] = [f"could not stage {src_rel}: {out}"]
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
+        staged.append(src_rel)
 
     code, head = _run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""

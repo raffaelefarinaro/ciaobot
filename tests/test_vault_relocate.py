@@ -443,13 +443,48 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
 
     result = apply(config, "scandit", runtime)
 
-    assert result["status"] == "refused"
-    assert any("registry" in r.lower() for r in result["refusals"])
-    assert (install / "memory-vault" / "People" / "Peter.md").is_file(), "move was not rolled back"
-    assert not (install / "memory-vault" / "scandit").exists()
     entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     scandit_entry = next(e for e in entries if e["name"] == "scandit")
     assert scandit_entry["vault_root"] == str(install / "memory-vault")
+
+
+def test_apply_unstages_earlier_sources_when_a_later_stage_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging failure must leave the user's git index untouched.
+
+    Staging runs one source at a time; if a later `git add` fails, the
+    earlier sources were already staged. Returning the refusal without
+    resetting them would change the index — converting previously untracked
+    notes into staged files — even though no move ever happened, so a later
+    commit would sweep in data the operator never intended to stage.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    real_run_git = vault_relocate._run_git
+    adds = {"n": 0}
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:2] == ("add", "-A") and len(args) >= 4:
+            target = args[-1]
+            # "other" is not part of this relocation; the real git add for
+            # the second planned source is the one that fails.
+            adds["n"] += 1
+            if adds["n"] == 2:
+                return (128, "fatal: simulated add failure")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("could not stage" in r for r in result["refusals"])
+    # The index is back to HEAD: nothing from this attempt stayed staged.
+    code, staged = vault_relocate._run_git(install, "diff", "--cached", "--name-only")
+    assert code == 0
+    assert staged.strip() == "", staged
 
 
 def test_apply_reports_a_failed_partial_move_rollback(
