@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ develop, main ]
 
+# The suite only needs to check out code and run tests; the GITHUB_TOKEN never
+# needs to write anything.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-latest

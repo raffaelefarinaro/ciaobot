@@ -7,7 +7,7 @@ metadata:
 
 # gmail +triage
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Show unread inbox summary (sender, subject, date)
 

@@ -38,21 +38,34 @@ DEFAULT_TIMEOUT = 120  # seconds per model
 # run through Claude Code; prefixed entries route to their provider's app-server.
 OPENCODE_PREFIX = "opencode:"
 
+_ANTHROPIC_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _OPENCODE_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _PROVIDER_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
 
 def is_anthropic_available() -> bool:
-    """True when Anthropic API key or Claude Code reports an active login."""
+    """True when Anthropic API key or Claude Code reports an active login.
+
+    Cached on the shared TTL for the same reason as the opencode probe: panel
+    resolution is read-hot (every Settings → Models load resolves it) and
+    ``claude auth status`` is a subprocess.
+    """
     if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return True
+    global _ANTHROPIC_AVAILABLE_CACHE
+    now = time.monotonic()
+    cached = _ANTHROPIC_AVAILABLE_CACHE
+    if cached is not None and now - cached[0] < _PROVIDER_AVAILABLE_TTL:
+        return cached[1]
     try:
         from ciao.setup_status import claude_auth_status, claude_cli_path
 
         binary = claude_cli_path()
-        return bool(binary and claude_auth_status(binary, env=os.environ)["logged_in"])
+        ok = bool(binary and claude_auth_status(binary, env=os.environ)["logged_in"])
     except Exception:
         # Availability probing must never prevent critique resolution.
-        return False
+        ok = False
+    _ANTHROPIC_AVAILABLE_CACHE = (now, ok)
+    return ok
 
 
 def is_opencode_available() -> bool:

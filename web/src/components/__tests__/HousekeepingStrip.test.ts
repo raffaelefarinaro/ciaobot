@@ -130,6 +130,7 @@ describe('HousekeepingStrip', () => {
     const store = useHousekeepingStore()
     store.actions = [action({
       id: 'github-star',
+      run_label: 'I starred it',
       link_label: 'Star on GitHub',
       link_url: 'https://github.com/raffaelefarinaro/ciaobot',
     })]
@@ -140,8 +141,35 @@ describe('HousekeepingStrip', () => {
 
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    await wrapper.find('a.housekeeping-link').trigger('click')
+    // Only the strip's explicit run button records the star; the link click
+    // must not (issue: opening the repo confirms nothing).
+    await wrapper.findAll('button').find((b) => b.text() === 'I starred it')!.trigger('click')
     expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ title: '★ Starred — thank you!' }))
+    wrapper.unmount()
+  })
+
+  it('does not record a star when the repository link is merely opened', async () => {
+    // Clicking "Star on GitHub" used to record the star and dismiss the
+    // nudge permanently, but opening the page confirms nothing — the visitor
+    // may not be signed in or may just be inspecting. The link must only
+    // open the page; the tile clears through the explicit "Later" dismiss.
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'github-star',
+      link_label: 'Star on GitHub',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot',
+      dismiss_label: 'Later',
+    })]
+    const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
+    const { useProjectStore } = await import('../../stores/projects')
+    const projectStore = useProjectStore()
+    const toastSpy = vi.spyOn(projectStore, 'pushToast').mockImplementation(() => ({ id: 1 }) as never)
+
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await wrapper.find('a.housekeeping-link').trigger('click')
+    expect(runSpy).not.toHaveBeenCalled()
+    expect(toastSpy).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

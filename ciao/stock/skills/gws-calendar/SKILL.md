@@ -7,7 +7,7 @@ metadata:
 
 # calendar (v3)
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 ```bash
 ciao gws "$GWS_PROFILE" calendar <resource> <method> [flags]

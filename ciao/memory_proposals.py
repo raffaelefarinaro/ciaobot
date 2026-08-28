@@ -554,14 +554,36 @@ def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool
     fact verbatim. The decision therefore has to outlive the row itself, in
     a sidecar this module owns rather than in the outcomes ledger (which
     counts by kind and is trimmed).
+
+    Accepted rows need the same treatment (``record_decision``): the nightly
+    curator dedupes against the live queue and this sidecar, never against
+    the promoted destination, so a promotion must record the text too or the
+    same fact comes back the next time the transcript is re-read.
     """
+    return _record_decision(proposals_path, text=text, kind=kind, key="dismissed_at")
+
+
+def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+    """Record an accepted proposal in the same decision history.
+
+    Same sidecar and the same reason as :func:`record_dismissal`: the dedupe
+    in ``append_proposals`` reads only the queue file and this log, never the
+    region/doc the promotion wrote to, so without this entry the curator
+    re-queues the accepted fact on its next pass over the same transcript.
+    Mirrors the CLI's promote-then-dismiss flow, which records the text for
+    every removal regardless of the outcome action.
+    """
+    return _record_decision(proposals_path, text=text, kind=kind, key="promoted_at")
+
+
+def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) -> bool:
     cleaned = text.strip()
     if not cleaned:
         return False
     log_path = dismissed_log_path(proposals_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
-        "dismissed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        key: datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "text": cleaned,
     }

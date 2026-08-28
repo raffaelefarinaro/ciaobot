@@ -207,7 +207,20 @@ export const useProjectStore = defineStore('projects', () => {
   // `chat_result_ready` snippet already used for the toast body. Session-only
   // (not persisted, not backfilled from `/api/chats`): a chat that finished
   // before this tab loaded shows no preview until its next turn completes.
+  // Each entry is stamped with the chat's activity time as of the event, so
+  // chatLastSnippet can tell a live snippet from one that has since been
+  // superseded by a fresher server record (a missed event while the WS was
+  // down must not keep an old preview pinned over the newer persisted one).
   const lastResultSnippet = ref<Record<string, string>>({})
+  const lastResultSnippetAt = ref<Record<string, string>>({})
+  // Chats whose snippet was stamped with client receipt time (the event
+  // arrived before the chat existed in the local list, so its server
+  // activity time was unknown). Receipt time has millisecond precision and
+  // the backend truncates activity to whole seconds, so a delayed delivery
+  // would otherwise keep the stale cached snippet authoritative forever —
+  // the first reconcile of the chat rebases the stamp to its real
+  // last_activity_at.
+  const lastResultSnippetNeedsRebase = new Set<string>()
   // Per-chat "broker is running for this chat" flag, driven by /ws/events.
   // Distinct from `streaming` (which only fires for the chat whose per-chat
   // WS is open). projectStreaming is what powers sidebar dots on inactive
@@ -1533,11 +1546,26 @@ export const useProjectStore = defineStore('projects', () => {
   // value (see `lastResultSnippet` above) so a snippet that lands while this
   // tab is open always wins; falls back to the persisted `last_snippet` from
   // `/api/chats` so a chat that finished before this tab loaded still shows
-  // a preview.
+  // a preview. The persisted record wins when it is NEWER than the cached
+  // event snippet: this tab can miss a `chat_result_ready` (WS gap) and then
+  // reconcile a chat record whose `last_snippet` is the newer response — the
+  // stale session-only preview must not keep overriding it.
   function chatLastSnippet(chatId: string): string | null {
-    if (lastResultSnippet.value[chatId]) return lastResultSnippet.value[chatId]
     const chat = chats.value.find(c => c.chat_id === chatId)
-    return chat?.last_snippet || null
+    const cached = lastResultSnippet.value[chatId]
+    if (!chat?.last_snippet) return cached || null
+    if (!cached) return chat.last_snippet
+    const cachedAt = lastResultSnippetAt.value[chatId] || ''
+    const persistedAt = chat.last_activity_at || ''
+    // Persisted wins on ties too: the backend truncates activity timestamps
+    // to whole seconds, so two responses finishing in the same second leave
+    // persistedAt === cachedAt — and a tie with the refreshed record means
+    // the cached snippet is the OLDER response this tab caught live while
+    // missing the newer event. The same-turn persisted snippet is equivalent
+    // to the live one, so equality can only cost the stale case.
+    return persistedAt && cachedAt && persistedAt >= cachedAt
+      ? chat.last_snippet
+      : cached
   }
 
   function projectNeedsInput(projectId: string): number {
@@ -1667,11 +1695,10 @@ export const useProjectStore = defineStore('projects', () => {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
-        // Boot only. fetchAll is also a refresh — SchedulePanel and
-        // SchedulesView call it while the app is running — and clearing the
-        // selection there dropped the user's open chat just because the
-        // current route was /schedules, sending them to the home screen when
-        // they navigated back.
+        // Boot only. fetchAll is also a refresh — SchedulePanel calls it
+        // while the app is running — and clearing the selection there dropped
+        // the user's open chat just because the current route was /schedules,
+        // sending them to the home screen when they navigated back.
         activeChatId.value = null
       }
       persistState()
@@ -1740,6 +1767,17 @@ export const useProjectStore = defineStore('projects', () => {
 
   function reconcileChatList(nextChats: ChatInfo[]) {
     chats.value = applyPendingArchived(nextChats)
+
+    // Rebase any receipt-time snippet stamps now that the server's real
+    // activity times are available (see lastResultSnippetNeedsRebase).
+    if (lastResultSnippetNeedsRebase.size) {
+      for (const chat of nextChats) {
+        if (lastResultSnippetNeedsRebase.has(chat.chat_id) && chat.last_activity_at) {
+          lastResultSnippetAt.value[chat.chat_id] = chat.last_activity_at
+          lastResultSnippetNeedsRebase.delete(chat.chat_id)
+        }
+      }
+    }
 
     // Prune messages for deleted chats.
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
@@ -3766,7 +3804,23 @@ export const useProjectStore = defineStore('projects', () => {
           // Optimistic local flag: binary, hydrated by the server fetch below.
           unread.value[msg.chat_id] = 1
           persistUnread()
-          if (msg.snippet) lastResultSnippet.value[msg.chat_id] = msg.snippet
+          if (msg.snippet) {
+            lastResultSnippet.value[msg.chat_id] = msg.snippet
+            if (resultChat) {
+              // The chat record has not reconciled yet, so its current
+              // last_activity_at IS this turn's activity time. Once the
+              // reconciled record is newer, the persisted snippet wins.
+              lastResultSnippetAt.value[msg.chat_id] = resultChat.last_activity_at || ''
+            } else {
+              // Chat unknown locally (created on another client): stamp with
+              // receipt time and flag for rebase on the chat's first
+              // reconcile — receipt time is millisecond-precise while the
+              // server truncates to whole seconds, so without the rebase a
+              // delayed event would pin this snippet over a fresher record.
+              lastResultSnippetAt.value[msg.chat_id] = new Date().toISOString()
+              lastResultSnippetNeedsRebase.add(msg.chat_id)
+            }
+          }
           // In-app toast for the document-visible-but-different-chat case.
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
@@ -5549,7 +5603,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
@@ -5568,7 +5622,7 @@ export const useProjectStore = defineStore('projects', () => {
     createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
-    syncLatest,
+    syncLatest, reconcileChatList,
     sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,

@@ -140,9 +140,8 @@
               <span v-if="store.libreofficeInstallError"> {{ store.libreofficeInstallError }}</span>
               <button
                 class="btn-primary btn-small"
-                :disabled="store.libreofficeInstalling"
-                @click="store.installLibreoffice"
-              >{{ store.libreofficeInstalling ? 'Installing…' : 'Install LibreOffice' }}</button>
+                @click="store.installLibreofficeInChat"
+              >Install in Chat</button>
             </div>
             <iframe
               v-else-if="store.kind === 'pdf'"
@@ -322,9 +321,17 @@ const memoryPath = computed(() => {
 })
 
 async function openInMemoryMap(): Promise<void> {
-  if (!memoryPath.value) return
-  memoryMapStore.requestFocus(memoryPath.value)
-  if (await store.close()) await router.push('/memory')
+  // Read the path before closing: `close()` clears `store.path`, which
+  // `memoryPath` derives from.
+  const target = memoryPath.value
+  if (!target) return
+  // `close()` is false when the file has unsaved edits and the discard prompt
+  // is declined. The focus request outlives this modal, so recording it before
+  // that check would leave the map jumping to this note the next time /memory
+  // opens — after a navigation the user cancelled.
+  if (!(await store.close())) return
+  memoryMapStore.requestFocus(target)
+  await router.push('/memory')
 }
 
 // Chat transcripts archived to the vault live at

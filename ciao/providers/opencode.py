@@ -2405,8 +2405,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     "10 provider(s) authenticated" against an empty store.
 
     `~/.local/share/opencode/auth.json` is deliberately not read: parsing a
-    provider's cached credential file to determine identity is out of bounds
-    (see docs/plans/GEMINI_CLI_PROVIDER_PLAN.md).
+    provider's cached credential file to determine identity is out of bounds.
     """
     import subprocess
 

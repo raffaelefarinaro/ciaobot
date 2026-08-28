@@ -601,7 +601,6 @@
                 <span class="guide-card-foot-info" :title="guideContent ? `${guideContent.length} chars on disk` : ''">
                   {{ guideContent ? `${guideContent.length.toLocaleString()} chars` : '' }} · {{ guideStats.totalTokens }} tokens total
                 </span>
-                <button type="button" class="mm-link" @click="openGuideFile">Edit in viewer →</button>
               </div>
             </template>
             <template v-else-if="!guideLoading">

@@ -116,5 +116,7 @@ jobs:
     needs: build-desktop
     if: github.event_name == 'release'
     uses: ./.github/workflows/release-smoke.yml
+    permissions:
+      contents: read
     with:
       version: ${{ github.event.release.tag_name }}

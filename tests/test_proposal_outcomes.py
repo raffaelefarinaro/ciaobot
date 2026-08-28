@@ -340,12 +340,16 @@ def test_automation_include_outcomes_serves_the_envelope() -> None:
 
 def test_rotation_preserves_lifetime_totals(tmp_path: Path, monkeypatch) -> None:
     """Trimming the log must not make history disappear: the dropped lines are
-    folded into a sidecar, so promoted/dismissed (and the per-workspace split)
+    archived verbatim, so promoted/dismissed (and the per-workspace split)
     keep growing across rotations."""
     monkeypatch.setattr(po, "MAX_BYTES", 4 * 1024)  # force the trim on
-    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    base = datetime.now(UTC) - timedelta(days=90)
     with po._log_path().open("w", encoding="utf-8") as f:
         for n in range(po.KEEP_LINES + 25):  # enough rows that a trim drops some
+            # Distinct timestamps: byte-identical lines are what a crash
+            # duplicate looks like, and the fold de-duplicates those on
+            # purpose — so a fixture must not write the same ts twice.
+            old = (datetime.now(UTC) - timedelta(days=90, microseconds=n)).isoformat()
             f.write(json.dumps({
                 "ts": old, "workspace": "personal" if n % 2 else "work",
                 "kind": "memory", "action": "promoted", "via": "pwa",
@@ -357,18 +361,53 @@ def test_rotation_preserves_lifetime_totals(tmp_path: Path, monkeypatch) -> None
     assert report["promoted"] == po.KEEP_LINES + 25
     assert report["dismissed"] == 1
     # 2025 promoted events alternate work/personal; the trim drops only the
-    # oldest 25 (all work), and the sidecar carries them.
+    # oldest 25 (all work), and the archive carries them.
     assert report["by_workspace"]["work"]["promoted"] == 1013
     assert report["by_workspace"]["personal"]["promoted"] == 1012
     # The 30-day window is derived from the live file only: rotated events are
     # 90 days old, and the one fresh dismissal is a dismissal.
     assert report["recent_30d"] == {"promoted": 0, "dismissed": 1}
-    assert (tmp_path / po._TOTALS_NAME).is_file()
+    assert list(tmp_path.glob("proposal_outcomes.rotated-*.jsonl"))
 
 
-def test_tally_survives_a_corrupt_totals_sidecar(tmp_path: Path) -> None:
-    """A broken sidecar degrades to file-only counts, never a failed page."""
-    (tmp_path / po._TOTALS_NAME).write_text("{not json", encoding="utf-8")
+def test_rotation_archive_counts_once_after_a_crash_between_the_two_swaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The recoverable rotation: a crash after the archive write but before the
+    live-log swap leaves the dropped lines in BOTH files, and the fold must
+    count each of them once — never twice."""
+    monkeypatch.setattr(po, "MAX_BYTES", 4 * 1024)
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    with po._log_path().open("w", encoding="utf-8") as f:
+        for n in range(25):
+            f.write(json.dumps({
+                "ts": old, "workspace": "work",
+                "kind": "memory", "action": "promoted", "via": "pwa",
+                "n": n,
+            }) + "\n")
+
+    # Simulate the crash window: the archive got the dropped lines, but the
+    # live-log swap never ran, so the lines are still in the log too.
+    archive = tmp_path / "proposal_outcomes.rotated-20260101T000000000000Z.jsonl"
+    lines = po._log_path().read_text(encoding="utf-8").splitlines(keepends=True)
+    archive.write_text("".join(lines[:25]), encoding="utf-8")
+
+    report = po.tally()
+
+    # 25 events archived + still live → each counted once, not twice.
+    assert report["promoted"] == 25
+    # A later trim absorbs the leftover duplicated lines into a new archive;
+    # the fold still counts each event exactly once.
+    po.record("memory", "dismissed", workspace="personal")
+    report2 = po.tally()
+    assert report2["promoted"] == 25
+    assert report2["dismissed"] == 1
+
+
+def test_tally_survives_a_corrupt_rotation_archive(tmp_path: Path) -> None:
+    """A broken archive degrades to the live file's counts, never a failed page."""
+    archive = tmp_path / "proposal_outcomes.rotated-20260101T000000000000Z.jsonl"
+    archive.write_text("{not json\n", encoding="utf-8")
     po.record("memory", "promoted", workspace="personal")
 
     report = po.tally()
@@ -418,24 +457,28 @@ def test_rotation_keeps_still_recent_events_in_the_30d_window(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A trim that drops events younger than the window must not make the
-    30-day count fall: the sidecar carries per-day buckets that tally() adds
-    back."""
+    30-day count fall: the archive keeps the verbatim lines and the fold
+    counts them."""
     monkeypatch.setattr(po, "MAX_BYTES", 4 * 1024)
-    fresh = datetime.now(UTC).isoformat()
+    base = datetime.now(UTC)
     with po._log_path().open("w", encoding="utf-8") as f:
         # 2000 recent promoted events + one recent dismissal; the trim drops
-        # the oldest promoted lines.
-        for _ in range(po.KEEP_LINES):
+        # the oldest promoted lines. Timestamps derive from one synthetic base
+        # at distinct microsecond offsets — the wall clock can step backwards
+        # or tick coarsely, and a repeated ts is by definition a crash
+        # duplicate as far as the fold is concerned.
+        for n in range(po.KEEP_LINES):
+            fresh = (base - timedelta(microseconds=n)).isoformat()
             f.write(json.dumps({
                 "ts": fresh, "workspace": "personal",
                 "kind": "memory", "action": "promoted", "via": "pwa",
             }) + "\n")
         f.write(json.dumps({
-            "ts": fresh, "workspace": "work",
+            "ts": (base + timedelta(seconds=1)).isoformat(), "workspace": "work",
             "kind": "learnings", "action": "dismissed", "via": "pwa",
         }) + "\n")
         f.write(json.dumps({
-            "ts": (datetime.now(UTC) - timedelta(days=90)).isoformat(),
+            "ts": (base - timedelta(days=90)).isoformat(),
             "workspace": "personal",
             "kind": "memory", "action": "promoted", "via": "pwa",
         }) + "\n")

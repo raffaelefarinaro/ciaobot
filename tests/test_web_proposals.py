@@ -519,6 +519,36 @@ def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
 
 
+def test_accept_persists_the_text_against_refiling(tmp_path: Path) -> None:
+    """An accept must land in the same decision history a dismissal does.
+
+    Append-time dedupe consults the live queue and the decision sidecar —
+    never the promoted destination — so an accepted fact that leaves no
+    trace in the sidecar is re-read by the nightly curator from the same
+    transcript and queued again as if it were new.
+    """
+    from ciao.memory_proposals import MemoryProposal, append_proposals, dismissed_log_path
+
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+
+    queue = config.workspace_vault_root(row["workspace"]) / "Workspace" / "Memory-Proposals.md"
+    assert row["text"] in dismissed_log_path(queue).read_text(encoding="utf-8")
+
+    # The nightly pass re-reads the same transcript: refused as a dupe.
+    assert (
+        append_proposals(
+            [MemoryProposal(target="memory", text=row["text"], source_section="curation")],
+            config.workspace_vault_root(row["workspace"]),
+        )
+        is None
+    )
+
+
 def test_a_failed_write_keeps_the_bullet(tmp_path: Path) -> None:
     """Write-then-dismiss, never the reverse: the reverse loses the fact.
 

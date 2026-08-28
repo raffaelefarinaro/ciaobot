@@ -306,53 +306,10 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications — the desktop app owns this in the tray. -->
-        <div v-if="!inDesktopApp" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">notifications</p>
-              <p class="hint">
-                Get a notification when a chat replies and the app is not focused.
-              </p>
-            </div>
-            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
-          </div>
-          <div v-if="needsIosInstall" class="hint hint--warn">
-            On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-          </div>
-          <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-          </div>
-          <div v-else-if="!pushSupportedFlag" class="loading">
-            Push notifications are not supported here. On macOS, install Ciaobot as an app
-            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-          </div>
-          <template v-else>
-            <!-- On macOS the menu-bar agent already posts chat-reply notifications
-                 out of the box (menubar_prefs defaults on, launchd RunAtLoad), so
-                 don't present web-push as a required action here — lead with the
-                 reassurance and offer the app-install path as an optional upgrade. -->
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              You're covered — the menu bar already shows a notification when a chat
-              replies and the app isn't focused. Nothing to enable.
-            </p>
-            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-              Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-              open the exact chat (and keep working even if you quit the menu bar), install
-              Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-              &ldquo;Add to Dock&rdquo;), then enable it here.
-            </p>
-          </template>
-          <div v-if="pushError" class="action-result">{{ pushError }}</div>
-        </div>
+        <!-- Notifications — the desktop app owns this in the tray, so the
+             card drops out there rather than showing web-push controls the
+             tray already supersedes. Same card as the Notifications tab. -->
+        <SettingsNotifications hide-in-desktop-app />
 
         <!-- Appearance -->
         <div class="card">
@@ -468,65 +425,7 @@
 
       <!-- NOTIFICATIONS TAB -->
       <template v-if="currentTab === 'notifications'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">notifications</p>
-              <p class="hint">
-                Get a notification when a chat replies and the app is not focused.
-              </p>
-            </div>
-            <div v-if="!inDesktopApp && !needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
-          </div>
-          <!-- In the desktop app the menu-bar companion owns notifications, so
-               the PWA web-push controls are not the surface here. Explain what
-               controls them instead of rendering nothing. -->
-          <template v-if="inDesktopApp">
-            <p class="hint">
-              In the Ciaobot desktop app, notifications are handled by the menu-bar
-              companion: a chat reply while the app isn't focused posts a banner, and
-              opening it takes you to the chat. Use <strong>Menu Bar &rarr; Advanced
-              &rarr; Native Notifications</strong> to turn them on or off.
-            </p>
-            <p class="hint">
-              If notifications are blocked at the OS level, re-enable them in
-              System Settings &rarr; Notifications &rarr; Ciaobot.
-            </p>
-          </template>
-          <template v-else>
-            <div v-if="needsIosInstall" class="hint hint--warn">
-              On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-            </div>
-            <div v-else-if="permissionDenied" class="hint hint--warn">
-              Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-            </div>
-            <div v-else-if="!pushSupportedFlag" class="loading">
-              Push notifications are not supported here. On macOS, install Ciaobot as an app
-              (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-            </div>
-            <template v-else>
-              <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-                You're covered — the menu bar already shows a notification when a chat
-                replies and the app isn't focused. Nothing to enable.
-              </p>
-              <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-                Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-                open the exact chat (and keep working even if you quit the menu bar), install
-                Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-                &ldquo;Add to Dock&rdquo;), then enable it here.
-              </p>
-            </template>
-          </template>
-          <div v-if="!inDesktopApp && pushError" class="action-result">{{ pushError }}</div>
-        </div>
+        <SettingsNotifications />
       </template>
 
 
@@ -1171,18 +1070,9 @@
                   Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
                 </p>
                 <div class="action-row">
-                  <button
-                    class="btn-primary btn-small"
-                    :disabled="gwsInstalling"
-                    @click="installGws"
-                  >
-                    {{ gwsInstalling ? 'Installing…' : 'Install gws' }}
-                  </button>
+                  <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
                 </div>
-                <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
-                <div v-if="isGwsInstallError" class="action-row">
-                  <button class="btn-primary btn-small" @click="fixGwsInstallErrorInChat">Fix in Chat</button>
-                </div>
+                <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
@@ -2130,7 +2020,6 @@ import type {
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
@@ -2138,6 +2027,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsNotifications from './settings/SettingsNotifications.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
@@ -3058,63 +2948,17 @@ async function removeGwsProfile(profile: GwsProfile) {
   }
 }
 
-const gwsInstalling = ref(false)
-const gwsInstallResult = ref('')
-const gwsInstallOutput = ref('')
-
-async function installGws() {
-  gwsInstalling.value = true
-  gwsInstallResult.value = 'Installing @googleworkspace/cli via npm…'
-  gwsInstallOutput.value = ''
-  try {
-    const res = await api.post<{ ok: boolean; output?: string; error?: string; integration?: GwsIntegrationSettings }>(
-      '/api/integrations/gws/install',
-      {},
-    )
-    if (res.ok) {
-      if (res.integration) gwsIntegration.value = res.integration
-      gwsInstallResult.value = 'gws installed successfully.'
-      gwsInstallOutput.value = res.output || ''
-    } else {
-      gwsInstallOutput.value = res.output || ''
-      const base = res.error || 'Installation failed.'
-      gwsInstallResult.value = gwsInstallOutput.value ? `${base}: ${gwsInstallOutput.value.slice(0, 500)}` : base
-    }
-  } catch (e) {
-    // A failed `npm install` returns HTTP 500 carrying the diagnostic stream
-    // in `payload.output`; the api wrapper throws an ApiError for that status,
-    // so the `res.ok === false` branch above is unreachable here. Surface the
-    // output so Fix in Chat gets the real reason (e.g. EACCES), not just the
-    // exit code.
-    const payload = errorPayload(e)
-    const output = typeof payload?.output === 'string' ? payload.output : ''
-    gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
-    gwsInstallOutput.value = output || errorMessage(e)
-  } finally {
-    gwsInstalling.value = false
-  }
-}
-
-const isGwsInstallError = computed(() => {
-  const t = gwsInstallResult.value
-  if (!t) return false
-  if (t === 'gws installed successfully.' || t === 'Installing @googleworkspace/cli via npm…') return false
-  return /error|failed|failure/i.test(t)
-})
-
-async function fixGwsInstallErrorInChat() {
-  const parts = [gwsInstallResult.value || 'gws install failed']
-  if (gwsInstallOutput.value && !parts[0].includes(gwsInstallOutput.value.slice(0, 80))) {
-    parts.push('', 'npm output:', gwsInstallOutput.value.slice(0, 4000))
-  }
-  const errorText = parts.join('\n')
+async function installGwsInChat() {
   try {
     await projectStore.fixError({
-      errorText,
-      context: 'Installing @googleworkspace/cli from Settings → Google Workspace → Install gws. The install failed (npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install).',
+      errorText:
+        'The @googleworkspace/cli (gws) is not installed on this machine, so Google Workspace tools are unavailable.',
+      context:
+        'Installing @googleworkspace/cli from Settings → Google Workspace → Install in Chat. Run `npm install -g @googleworkspace/cli` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). Walk the operator through the install; Ciaobot never runs package installs on its own.',
+      title: 'Install gws',
     })
   } catch (e) {
-    notifyFailed('Could not open fix chat', errorMessage(e))
+    notifyFailed('Could not open install chat', errorMessage(e))
   }
 }
 
@@ -3921,26 +3765,6 @@ async function fetchAutomation() {
   }
 }
 
-const pushSupportedFlag = ref(false)
-const pushEnabledFlag = ref(false)
-const pushPending = ref(false)
-const pushError = ref('')
-const permissionDenied = ref(false)
-const needsIosInstall = ref(false)
-
-function isIos(): boolean {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent)
-}
-function isMacDesktop(): boolean {
-  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
-}
-function isStandalone(): boolean {
-  return (
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as Navigator & { standalone?: boolean }).standalone === true
-  )
-}
-
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
@@ -4248,52 +4072,8 @@ onMounted(async () => {
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
-  pushSupportedFlag.value = pushSupported()
-  if (isIos() && !isStandalone()) {
-    needsIosInstall.value = true
-  }
-  if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
-    permissionDenied.value = true
-  }
-  if (pushSupportedFlag.value) {
-    pushEnabledFlag.value = await isPushEnabled()
-    // Self-heal: if the browser thinks it has a subscription but the server
-    // forgot it (state file moved, fresh deploy), silently re-register so
-    // pushes actually arrive without making the user click anything.
-    if (pushEnabledFlag.value && Notification.permission === 'granted') {
-      try {
-        const sub = await currentSubscription()
-        if (sub) {
-          const r = await api.get<{ registered: boolean }>(
-            `/api/push/subscription?endpoint=${encodeURIComponent(sub.endpoint)}`
-          )
-          if (!r.registered) {
-            await api.post('/api/push/subscribe', { subscription: sub.toJSON() })
-          }
-        }
-      } catch { /* best-effort */ }
-    }
-  }
 })
 
-
-async function togglePush() {
-  pushPending.value = true
-  pushError.value = ''
-  try {
-    if (pushEnabledFlag.value) {
-      await disablePush()
-      pushEnabledFlag.value = false
-    } else {
-      await enablePush()
-      pushEnabledFlag.value = true
-    }
-  } catch (e) {
-    pushError.value = errorMessage(e)
-  } finally {
-    pushPending.value = false
-  }
-}
 
 async function doSnapshot(confirmWarnings = false) {
   actionPending.value = 'snapshot'

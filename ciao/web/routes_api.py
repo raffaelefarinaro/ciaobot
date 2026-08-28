@@ -1559,72 +1559,6 @@ async def gws_integration_settings(request: Request) -> JSONResponse:
 GWS_CLI_PACKAGE = "@googleworkspace/cli"
 
 
-async def gws_install(request: Request) -> JSONResponse:
-    """Install the Google Workspace CLI globally via npm.
-
-    Runs ``npm install -g @googleworkspace/cli`` so the ``gws`` binary becomes
-    available on PATH. Returns the refreshed integration payload so the UI can
-    reflect the new status without a restart (unlike the local voice engine, no
-    Python import changes, so no server restart is needed).
-    """
-    config = request.app.state.config
-
-    if resolve_tool("gws"):
-        return JSONResponse(
-            {
-                "ok": True,
-                "output": "gws is already installed.",
-                "integration": _gws_integration_payload(config),
-            }
-        )
-
-    npm = resolve_tool("npm")
-    if not npm:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": (
-                    "npm was not found on PATH. Install Node.js/npm, then run "
-                    f"'npm install -g {GWS_CLI_PACKAGE}' manually."
-                ),
-            },
-            status_code=500,
-        )
-
-    cmd = [npm, "install", "-g", GWS_CLI_PACKAGE]
-    env = dict(os.environ)
-    env["PATH"] = login_shell_path()
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
-    output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-    if result.returncode != 0:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": f"npm exited with code {result.returncode}",
-                "output": output,
-            },
-            status_code=500,
-        )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "output": output,
-            "integration": _gws_integration_payload(config),
-        }
-    )
-
 
 async def gws_save_client_secret(request: Request) -> JSONResponse:
     config = request.app.state.config
@@ -4633,18 +4567,6 @@ async def libreoffice_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"available": _find_soffice() is not None})
 
 
-async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
-    """Install LibreOffice via Homebrew Cask. No server restart needed —
-    workspace_binary probes for soffice fresh on every request."""
-    from ciao.upgrade import upgrade_libreoffice
-
-    result = await upgrade_libreoffice()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
-
-
 async def workspace_binary(request: Request) -> Response:
     """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
@@ -6735,16 +6657,20 @@ async def skill_import(request: Request) -> JSONResponse:
     # Reject oversized bodies before multipart parsing. `request.form()` fully
     # consumes and spools the multipart file, so a very large upload would
     # exhaust temporary disk (and, in client mode, the proxy buffers the body in
-    # memory) before the per-file cap below is ever applied. A Content-Length
-    # check up front rejects those before any spooling.
+    # memory) before the per-file cap below is ever applied. A missing or
+    # malformed Content-Length (chunked/HTTP2 clients) is rejected too: without
+    # it there is no cheap pre-parse bound, and a legitimate zip upload always
+    # carries the header.
     max_zip_bytes = 10 * 1024 * 1024
     content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > max_zip_bytes:
-                return JSONResponse({"ok": False, "error": "Zip too large (max 10 MB)."}, status_code=400)
-        except ValueError:
-            pass
+    try:
+        declared = int(content_length) if content_length else -1
+    except ValueError:
+        declared = -1
+    if declared < 0 or declared > max_zip_bytes:
+        return JSONResponse(
+            {"ok": False, "error": "Zip too large (max 10 MB)."}, status_code=400
+        )
     # Parse multipart
     try:
         form = await request.form()
@@ -6754,6 +6680,14 @@ async def skill_import(request: Request) -> JSONResponse:
     # workspace. The client passes the active workspace so an upload lands in
     # the workspace the operator is actually working in, not always the primary.
     workspace_name = str(form.get("workspace") or "").strip()
+    if workspace_name and workspace_name not in config.workspace_names():
+        # `config.agent_root` accepts any single-segment name, so an unvalidated
+        # form value would scaffold `<install>/<name>/skills` and a whole
+        # orphan agent root on the next sync — reachable from a stale client
+        # after a workspace was deleted, or a typo in a direct API request.
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown workspace: {workspace_name}"}, status_code=400
+        )
     dest_skills: Path
     try:
         if workspace_name:
@@ -7699,6 +7633,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 record_dismissal(
                     queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
                 )
+            elif action == "accept":
+                from ciao.memory_proposals import record_promotion
+
+                record_promotion(
+                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                )
             if not proposal_outcomes.is_extraction_kind(row["kind"]):
                 # Not recorded: this ledger measures the MEMORY extraction
                 # pipeline. Skill proposals come from skill evolution and
@@ -8008,6 +7948,17 @@ async def proposal_action(request: Request) -> JSONResponse:
         if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
             proposal_outcomes.record(
                 kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
+            )
+        if removed_ours:
+            # Preserve the accepted row's text in the same decision history a
+            # dismissal uses: append-time dedupe consults the live queue and
+            # that sidecar — never the promoted destination — so the nightly
+            # curator would otherwise re-read the transcript and queue the
+            # already-accepted fact again.
+            from ciao.memory_proposals import record_promotion
+
+            record_promotion(
+                queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":

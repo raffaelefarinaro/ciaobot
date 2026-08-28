@@ -6,10 +6,28 @@ import io
 import re
 import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 
 from ciao.skill_evolution import MAX_SKILL_BYTES
+
+# One import at a time per skill name. Two concurrent imports of the SAME
+# skill otherwise interleave between the exists() check and the final rename:
+# both pass the overwrite=False check, the later one deletes the directory the
+# earlier one just installed, and both requests report success while one
+# archive has silently replaced the other.
+_SKILL_IMPORT_LOCKS_GUARD = threading.Lock()
+_SKILL_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _skill_import_lock(name: str) -> threading.Lock:
+    with _SKILL_IMPORT_LOCKS_GUARD:
+        lock = _SKILL_IMPORT_LOCKS.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _SKILL_IMPORT_LOCKS[name] = lock
+        return lock
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -176,6 +194,19 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
     name, errors = validate_skill_zip(zip_bytes)
     if errors or not name:
         return None, errors
+    # Serialize same-name imports: the existence check and the final
+    # rename must not interleave, or two concurrent non-force imports of
+    # the same skill both pass the check and the second deletes the
+    # first's just-installed directory (the route dispatches extraction
+    # via asyncio.to_thread, so this genuinely runs in parallel).
+    lock = _skill_import_lock(name)
+    with lock:
+        return _extract_locked(zip_bytes, dest_root, name, overwrite=overwrite)
+
+
+def _extract_locked(
+    zip_bytes: bytes, dest_root: Path, name: str, *, overwrite: bool
+) -> tuple[str | None, list[str]]:
     target = dest_root / name
     if target.exists() and not overwrite:
         return None, [f"Skill '{name}' already exists. Use force to overwrite."]
@@ -245,8 +276,27 @@ def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = Fa
         raise
     finally:
         zf.close()
-    # All members succeeded: atomically replace the target.
+    # All members succeeded: swap the replacement into place without ever
+    # leaving the target absent. Renaming the old directory aside first (same
+    # filesystem, so it is a rename, not a copy) means a failure of the final
+    # rename — a filesystem error, or another process recreating the target —
+    # can put the previous skill back instead of leaving the operator with
+    # neither: a force-import failure must not be data loss.
+    backup: Path | None = None
     if target.exists():
-        _remove_path(target)
-    tmp_target.rename(target)
+        # A unique sibling dir for the previous install; mkdtemp both
+        # generates the unique name and creates the directory, and the
+        # rename moves the old skill into it in one step.
+        backup = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=dest_root))
+        target.rename(backup)
+    try:
+        tmp_target.rename(target)
+    except Exception:
+        if backup is not None and not target.exists():
+            backup.rename(target)
+        _remove_path(tmp_target)
+        raise
+    finally:
+        if backup is not None and backup.exists():
+            _remove_path(backup)
     return name, []

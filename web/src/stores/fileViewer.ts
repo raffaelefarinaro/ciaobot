@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
@@ -23,6 +24,7 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
 }
 
 export const useFileViewerStore = defineStore('fileViewer', () => {
+  const projectStore = useProjectStore()
   const isOpen = ref(false)
   const kind = ref<FileViewerKind>('text')
   const path = ref('')
@@ -52,11 +54,24 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const isDirty = computed(() => editing.value && editBuffer.value !== content.value)
 
   // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
-  // Checked proactively so a missing install shows a real "Install" button
-  // instead of the iframe silently failing to load with a browser-level error.
+  // Checked proactively so a missing install shows guidance instead of the
+  // iframe silently failing to load with a browser-level error.
   const pptxNeedsLibreoffice = ref(false)
-  const libreofficeInstalling = ref(false)
   const libreofficeInstallError = ref('')
+
+  async function installLibreofficeInChat(): Promise<void> {
+    try {
+      await projectStore.fixError({
+        errorText:
+          'LibreOffice (soffice) is not installed, so PowerPoint files cannot be previewed in the Ciaobot file viewer.',
+        context:
+          'Previewing a .pptx from the Ciaobot file viewer. Install LibreOffice (e.g. `brew install --cask libreoffice` on macOS) so soffice can render slides; Ciaobot never runs package installs on its own.',
+        title: 'Install LibreOffice',
+      })
+    } catch (e) {
+      libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
 
   // Markdown vault-link resolution uses a vault-wide path index from the API.
   const markdownPaths = ref<string[]>([])
@@ -93,24 +108,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       pptxNeedsLibreoffice.value = !res.available
     } catch {
       pptxNeedsLibreoffice.value = false
-    }
-  }
-
-  async function installLibreoffice(): Promise<void> {
-    libreofficeInstalling.value = true
-    libreofficeInstallError.value = ''
-    try {
-      const res = await api.post<{ ok: boolean; error?: string }>('/api/libreoffice-install', {})
-      if (res.ok) {
-        await checkLibreofficeStatus()
-        if (!pptxNeedsLibreoffice.value) loadToken.value++
-      } else {
-        libreofficeInstallError.value = res.error || 'Installation failed.'
-      }
-    } catch (e) {
-      libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
-    } finally {
-      libreofficeInstalling.value = false
     }
   }
 
@@ -339,7 +336,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     editSaving,
     editError,
     pptxNeedsLibreoffice,
-    libreofficeInstalling,
     libreofficeInstallError,
     markdownPaths,
     htmlView,
@@ -356,6 +352,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     startEditing,
     cancelEditing,
     saveEdits,
-    installLibreoffice,
+    installLibreofficeInChat,
   }
 })

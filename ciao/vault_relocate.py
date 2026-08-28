@@ -211,6 +211,21 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
                 "registry entry gets repointed"
             )
             return result
+        if _at_or_beneath(source, destination):
+            # A whole-directory move whose destination lives inside the
+            # source (a global vault root nested under the pinned vault) is
+            # not a rename at all: `git mv` necessarily fails with "cannot
+            # move a directory into itself", after the destination parents
+            # have already been created inside the source. The shared-root
+            # branch below never hits this — there the move is per-entry,
+            # and the destination is a new subfolder of the source by
+            # construction. Refuse at plan time instead.
+            result.refusals.append(
+                f"the canonical destination ({destination}) is at or beneath "
+                "the vault being moved; relocating would nest the vault "
+                "inside itself — repoint the workspace's vault_root first"
+            )
+            return result
         result.whole_directory = True
         return result
 
@@ -463,13 +478,21 @@ def apply(
 
     # git mv rejects directories containing only untracked files. Stage the
     # planned sources so new notes move through the same tracked, undoable path.
+    staged: list[str] = []
     for src_rel, _dst_rel in moves_to_apply:
         code, out = _run_git(install_root, "add", "-A", "--", src_rel)
         if code != 0:
+            # Reset only what THIS attempt staged: a refusal must not change
+            # the user's index — staging previously untracked notes would
+            # make the next commit include data the operator never meant to
+            # stage, even though nothing was moved.
+            if staged:
+                _run_git(install_root, "reset", "-q", "--", *set(staged))
             payload["status"] = "refused"
             payload["refusals"] = [f"could not stage {src_rel}: {out}"]
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
+        staged.append(src_rel)
 
     code, head = _run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""
@@ -485,14 +508,40 @@ def apply(
         destination.rmdir()
 
     applied: list[dict[str, str]] = []
+
+    def _unwind_applied() -> str | None:
+        """Move completed moves back; returns the first rollback error.
+
+        A rollback `git mv` can itself fail (the same disk-full or permission
+        problem that broke the forward move usually persists). Swallowing
+        that would report a clean refusal while some notes sit at the
+        destination with the registry describing the source and no applied
+        receipt to recover from — so the failure is surfaced to the caller.
+        """
+        first_error: str | None = None
+        for done in reversed(applied):
+            (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
+            rb_code, rb_out = _run_git(
+                install_root, "mv", done["destination"], done["source"]
+            )
+            if rb_code != 0 and first_error is None:
+                first_error = rb_out
+        return first_error
+
     for src_rel, dst_rel in moves_to_apply:
         (install_root / dst_rel).parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", src_rel, dst_rel)
         if code != 0:
-            for done in reversed(applied):
-                _run_git(install_root, "mv", done["destination"], done["source"])
+            rollback_error = _unwind_applied()
+            refusals = [f"git mv failed for {src_rel}: {out}"]
+            if rollback_error:
+                refusals.append(
+                    "the partial-move rollback also failed; some notes may "
+                    "sit at their new locations while the registry still "
+                    f"describes the old layout: {rollback_error}"
+                )
             payload["status"] = "refused"
-            payload["refusals"] = [f"git mv failed for {src_rel}: {out}"]
+            payload["refusals"] = refusals
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
         applied.append({"source": src_rel, "destination": dst_rel})
@@ -513,8 +562,14 @@ def apply(
         # (permissions, disk full) shows up only now, with the vault already
         # moved on disk — leaving it moved with the registry unrepointed would
         # orphan it under a path nothing resolves to anymore, so unwind.
-        for done in reversed(applied):
-            _run_git(install_root, "mv", done["destination"], done["source"])
+        refusals = [f"could not persist the new location in the registry: {exc}"]
+        rollback_error = _unwind_applied()
+        if rollback_error:
+            refusals.append(
+                "the partial-move rollback also failed; some notes may sit at "
+                "their new locations while the registry still describes the "
+                f"old layout: {rollback_error}"
+            )
         if source_removed:
             source.mkdir(parents=True, exist_ok=True)
         if not result.whole_directory and destination.is_dir() and not any(destination.iterdir()):
@@ -523,7 +578,7 @@ def apply(
             except OSError:
                 pass
         payload["status"] = "refused"
-        payload["refusals"] = [f"could not persist the new location in the registry: {exc}"]
+        payload["refusals"] = refusals
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
     payload["registry_before"] = registry_before
@@ -545,13 +600,60 @@ def apply(
     try:
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
     except OSError as exc:
-        for done in reversed(applied):
-            (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
-            _run_git(install_root, "mv", done["destination"], done["source"])
+        rollback_error = _unwind_applied()
+        # The registry restore can fail under the same disk-full/permission
+        # condition that broke the receipt write. Unchecked, apply() would
+        # raise with no receipt while the registry still points at the
+        # destination and the notes are back at the source — after a restart
+        # the workspace resolves to a missing vault. Prefer rolling the files
+        # FORWARD to match the surviving registry (it was repointed before the
+        # receipt write, so it is the most recently successful state), and
+        # report the divergence explicitly when that fails too.
+        registry_error: str | None = None
         if registry_before is not None:
-            _write_registry(runtime_root, registry_before)
+            try:
+                _write_registry(runtime_root, registry_before)
+            except OSError as registry_exc:
+                registry_error = str(registry_exc)
+        refusals = [f"could not persist the relocation receipt: {exc}"]
+        if registry_error is not None:
+            # The registry still points at the DESTINATION. Roll the files
+            # forward to match it (the registry is the state a running server
+            # has already committed to), and report the remaining divergence
+            # explicitly if even that fails.
+            re_relocate_errors: list[str] = []
+            for done in applied:
+                (install_root / done["destination"]).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                fwd_code, fwd_out = _run_git(
+                    install_root, "mv", done["source"], done["destination"]
+                )
+                if fwd_code != 0:
+                    re_relocate_errors.append(f"{done['source']}: {fwd_out}")
+            refusals.append(
+                "restoring the registry to its pre-relocation state also "
+                "failed; the registry still points at the new location and "
+                "the moves were re-applied to match it, but the receipt is "
+                "missing — re-run the relocate or undo by hand. "
+                f"registry write error: {registry_error}"
+            )
+            if re_relocate_errors:
+                refusals.append(
+                    "re-applying the moves after the registry-restore "
+                    "failure also failed: " + "; ".join(re_relocate_errors)
+                )
+            payload["status"] = "refused"
+            payload["refusals"] = refusals
+            return payload
+        if rollback_error:
+            refusals.append(
+                "the partial-move rollback also failed; some notes may sit at "
+                "their new locations while the registry still describes the "
+                f"old layout: {rollback_error}"
+            )
         payload["status"] = "refused"
-        payload["refusals"] = [f"could not persist the relocation receipt: {exc}"]
+        payload["refusals"] = refusals
         return payload
     return payload
 
@@ -636,10 +738,40 @@ def undo(
         source.parent.mkdir(parents=True, exist_ok=True)
         code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
+            # Roll the earlier reversals forward again: the receipt and the
+            # registry still describe the relocated layout, so leaving those
+            # files back at their pre-relocation paths would strand them
+            # outside the configured vault — the same unwind the apply path
+            # does for partial moves.
+            fail_reason = out
+            rollback_error = None
+            for done in reversed(reversed_moves):
+                origin = next(
+                    (
+                        e
+                        for e in applied_entries
+                        if e["source"] == done
+                    ),
+                    None,
+                )
+                if origin is None:
+                    continue
+                (install_root / origin["source"]).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                code, out = _run_git(
+                    install_root, "mv", origin["source"], origin["destination"]
+                )
+                if code != 0:
+                    rollback_error = out
+                    break
+            reason = f"git mv failed reversing {entry['destination']}: {fail_reason}"
+            if rollback_error:
+                reason += f"; re-relocate also failed: {rollback_error}"
             return {
                 "status": "failed",
-                "reason": f"git mv failed reversing {entry['destination']}: {out}",
-                "reversed": reversed_moves,
+                "reason": reason,
+                "reversed": [],
                 "already_reversed": already,
             }
         reversed_moves.append(entry["source"])

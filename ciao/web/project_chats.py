@@ -448,6 +448,12 @@ def _is_retryable_auth_error(text: str) -> bool:
     recovers without user intervention. Keep this narrow: only the
     ``oauth session expired`` / ``could not be refreshed`` shape is
     retried, not every ``Failed to authenticate`` (e.g. revoked keys).
+
+    ``Not logged in · Please run /login`` is the same class: the CLI reports
+    it when the credentials it holds lapsed mid-turn, and the next spawn
+    re-reads them from disk. It is retried on the same bounded ladder, so a
+    genuinely signed-out install stops after ``_MAX_CONNECTION_DROP_RETRIES``
+    instead of looping.
     """
     low = (text or "").lower()
     if "oauth session expired" in low:
@@ -455,6 +461,8 @@ def _is_retryable_auth_error(text: str) -> bool:
     if "failed to authenticate" in low and "could not be refreshed" in low:
         return True
     if "session expired" in low and "could not be refreshed" in low:
+        return True
+    if "not logged in" in low and "/login" in low:
         return True
     return False
 
@@ -5973,7 +5981,13 @@ class ProjectChatManager:
                 self._retry_tasks.pop(chat_id, None)
 
     @staticmethod
-    def _result_snippet(text: str, limit: int = 140) -> str:
+    def _result_snippet(text: str, limit: int = 280) -> str:
+        """Flatten a reply to one line for the unread card and the push body.
+
+        The default is sized for the two-line clamp on the Home unread card
+        (`.home-chat-snippet`): at 140 the string ran out before the first line
+        did, so the card's second line was always blank.
+        """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if len(flat) > limit:
             flat = flat[: limit - 3] + "..."

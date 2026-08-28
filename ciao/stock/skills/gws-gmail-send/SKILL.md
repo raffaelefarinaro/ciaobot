@@ -7,7 +7,7 @@ metadata:
 
 # gmail +send
 
-> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
 Send an email
 

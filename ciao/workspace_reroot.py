@@ -2003,13 +2003,9 @@ def format_skill_triage(triage: SkillsTriage, workspaces: list[str]) -> str:
             f"or to `{_SKILLS_SRC}/<name>` when it genuinely applies everywhere."
         ),
         (
-            "3. Run a skill sync for both roots. The links under "
+            "3. Run `ciao sync-skills` for both roots. The links under "
             "`.claude/skills` are rebuilt from `skills/`, so nothing else needs "
             "editing."
-        ),
-        (
-            "4. Custom skills live in <code>skills/</code>. Move the folder, then "
-            "run <code>ciao sync-skills</code> for both roots."
         ),
         "",
         "## Catalog",

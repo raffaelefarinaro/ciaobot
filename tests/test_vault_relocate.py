@@ -316,6 +316,41 @@ def test_plan_treats_an_unrelated_path_as_the_whole_directory(tmp_path: Path) ->
     assert not result.refused
 
 
+def test_plan_refuses_a_destination_nested_inside_the_source(tmp_path: Path) -> None:
+    """The canonical destination must never be at or beneath the source.
+
+    With the global vault root nested under the pinned vault (source
+    install/legacy, canonical install/legacy/nested/personal), no
+    other-workspace overlap is found and the whole-directory move is
+    approved — but `git mv` then fails moving a directory into itself, after
+    apply() has already created the destination parents inside the source.
+    """
+    install = _git_install(tmp_path)
+    legacy = install / "legacy"
+    (legacy / "People").mkdir(parents=True)
+    (legacy / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    _write_registry(install, [{"name": "personal", "vault_root": str(legacy)}])
+    _commit_all(install)
+    # The global vault root sits INSIDE the pinned vault, so the canonical
+    # location (vault_root/personal) nests beneath the source.
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path / "install",
+        state_path=tmp_path / "install" / ".runtime" / "state.json",
+        media_root=tmp_path / "install" / ".runtime" / "media",
+        vault_root=legacy / "nested",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root=str(legacy)),
+        },
+    )
+
+    result = plan(config, "personal")
+
+    assert result.refused
+    assert any("at or beneath" in r for r in result.refusals), result.refusals
+    assert not result.whole_directory
+
+
 def test_apply_moves_the_whole_directory_and_repoints_the_registry(tmp_path: Path) -> None:
     install, config = _pinned_install(tmp_path)
     runtime = install / ".runtime"
@@ -408,13 +443,143 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
 
     result = apply(config, "scandit", runtime)
 
-    assert result["status"] == "refused"
-    assert any("registry" in r.lower() for r in result["refusals"])
-    assert (install / "memory-vault" / "People" / "Peter.md").is_file(), "move was not rolled back"
-    assert not (install / "memory-vault" / "scandit").exists()
     entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     scandit_entry = next(e for e in entries if e["name"] == "scandit")
     assert scandit_entry["vault_root"] == str(install / "memory-vault")
+
+
+def test_apply_unstages_earlier_sources_when_a_later_stage_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging failure must leave the user's git index untouched.
+
+    Staging runs one source at a time; if a later `git add` fails, the
+    earlier sources were already staged. Returning the refusal without
+    resetting them would change the index — converting previously untracked
+    notes into staged files — even though no move ever happened, so a later
+    commit would sweep in data the operator never intended to stage.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    real_run_git = vault_relocate._run_git
+    adds = {"n": 0}
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:2] == ("add", "-A") and len(args) >= 4:
+            target = args[-1]
+            # "other" is not part of this relocation; the real git add for
+            # the second planned source is the one that fails.
+            adds["n"] += 1
+            if adds["n"] == 2:
+                return (128, "fatal: simulated add failure")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("could not stage" in r for r in result["refusals"])
+    # The index is back to HEAD: nothing from this attempt stayed staged.
+    code, staged = vault_relocate._run_git(install, "diff", "--cached", "--name-only")
+    assert code == 0
+    assert staged.strip() == "", staged
+
+
+def test_apply_reports_a_failed_partial_move_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing rollback must not read as a clean refusal.
+
+    When a later forward `git mv` fails and unwinding an earlier completed
+    move fails too (the same disk/permission problem persists), the operator
+    must not get a refusal that implies the source layout is intact while
+    some notes sit at the destination with no applied receipt to recover
+    from.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    real_run_git = vault_relocate._run_git
+    forward_calls = [0]
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:1] == ("mv",) and len(args) == 3:
+            src = args[1]
+            forward = src.startswith("memory-vault/") and not src.startswith(
+                "memory-vault/scandit"
+            )
+            if forward:
+                forward_calls[0] += 1
+                if forward_calls[0] == 2:
+                    return (128, "fatal: simulated forward failure")
+            # Rollback: moving FROM the scandit destination BACK to source.
+            if src.startswith("memory-vault/scandit"):
+                return (128, "fatal: simulated rollback failure")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("simulated forward failure" in r for r in result["refusals"])
+    # The rollback failure is surfaced, not swallowed: the refusal names the
+    # divergence between disk and registry instead of claiming a clean undo.
+    assert any("rollback also failed" in r for r in result["refusals"]), result["refusals"]
+
+
+def test_apply_survives_a_failing_registry_restore_after_a_receipt_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipt-write failure + registry-restore failure must not raise.
+
+    The receipt write happens AFTER the registry was repointed, so if the
+    restore of the pre-relocation registry fails under the same disk/permission
+    condition, the registry still points at the destination while the moves
+    have been reversed. apply() must catch the restore failure, roll the
+    files forward to match the surviving registry, and report the divergence
+    — not raise with the workspace resolving to a missing vault after a
+    restart.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    def _receipt_boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    registry_writes = {"n": 0}
+    real_write_registry = vault_relocate._write_registry
+
+    def _registry_boom_after_repoint(*args, **kwargs):
+        # The FIRST registry write (the repoint inside _repoint_registry)
+        # succeeds; any later one (the compensation restore) fails, as it
+        # would under a persistent disk-full condition.
+        if registry_writes["n"] > 0:
+            raise OSError("disk full persists")
+        registry_writes["n"] += 1
+        return real_write_registry(*args, **kwargs)
+
+    monkeypatch.setattr(
+        vault_relocate,
+        "_write_receipt",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("receipt dir unwritable")),
+    )
+    monkeypatch.setattr(vault_relocate, "_write_registry", _registry_boom_after_repoint)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("receipt" in r for r in result["refusals"])
+    # The restore failure is surfaced with the recovery it performed: the
+    # moves were rolled forward to match the surviving registry.
+    assert any("registry" in r.lower() for r in result["refusals"]), result["refusals"]
+    # The vault content sits at the destination, matching the registry.
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    scandit_entry = next(e for e in entries if e["name"] == "scandit")
+    assert scandit_entry["vault_root"] == "memory-vault/scandit"
 
 
 # -- undo collision with a recreated source ----------------------------------
@@ -467,6 +632,53 @@ def test_undo_preflights_all_recreated_paths_before_reversing_anything(tmp_path:
     assert result["reversed"] == []
     assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
     assert (install / "memory-vault" / "scandit" / "Projects" / "roadmap.md").is_file()
+
+
+def test_undo_rolls_earlier_reversals_forward_when_a_later_one_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reverse `git mv` must not strand already-reversed files.
+
+    The receipt and registry still describe the relocated layout, so after
+    reversing two of three moves a failure in the third has to re-relocate
+    the two it already reversed — otherwise those files sit outside the
+    configured vault until the next successful undo.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+
+    real_run_git = vault_relocate._run_git
+    # The apply path also runs git mv; only fail the SECOND reverse move
+    # (destination -> source), once one reversal has already landed.
+    state = {"reverse_calls": 0}
+
+    def flaky_git(root: Path, *args: str) -> tuple[int, str]:
+        if args[:1] == ("mv",) and len(args) == 3 and state["reverse_calls"] >= 0:
+            # Distinguish reverse moves (dest -> src) from forward ones.
+            dest_arg, src_arg = args[1], args[2]
+            if dest_arg.startswith("memory-vault/scandit") and src_arg.startswith(
+                "memory-vault/"
+            ) and not src_arg.startswith("memory-vault/scandit"):
+                state["reverse_calls"] += 1
+                if state["reverse_calls"] == 2:
+                    return (128, "fatal: simulated git mv failure")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "failed"
+    assert "simulated git mv failure" in result["reason"]
+    # The earlier reversal was rolled forward: the relocated layout is intact
+    # and the receipt still describes it.
+    assert result["reversed"] == []
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "scandit" / "Projects" / "roadmap.md").is_file()
+    assert receipt_path(runtime, "scandit").is_file()
 
 
 # -- CLI: CIAO_RUNTIME_ROOT is honored ---------------------------------------

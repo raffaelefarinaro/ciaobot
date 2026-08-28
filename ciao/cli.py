@@ -4052,20 +4052,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scaffold_parser.set_defaults(func=_scaffold_command)
 
-    gws_parser = subparsers.add_parser(
+    # Help-only stub: `main()` intercepts `gws` before build_parser() runs, so
+    # this parser is never parsed against. It exists so `ciao --help` still
+    # lists the subcommand; the interception is what makes `ciao gws --version`
+    # reach the real CLI instead of being eaten by argparse. Do not give it a
+    # `func` — nothing can dispatch through it.
+    subparsers.add_parser(
         "gws",
         help="Profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).",
-        description=(
-            "Resolves the Google account profile and execs `gws` with the "
-            "remaining arguments, setting GOOGLE_WORKSPACE_CLI_CONFIG_DIR to "
-            "the profile's credential directory. A leading positional that is "
-            "not a gws service name is the profile; pass --profile or GWS_PROFILE "
-            "when the profile collides with a service name."
-        ),
+        add_help=False,
     )
-    gws_parser.add_argument("--profile", default=None, help="Google account profile name.")
-    gws_parser.add_argument("args", nargs=argparse.REMAINDER)
-    gws_parser.set_defaults(func=_gws_command)
 
     gws_helper_parser = subparsers.add_parser(
         "gws-auth-helper",
@@ -4098,16 +4094,6 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
     return 0
-
-
-def _gws_command(args: argparse.Namespace) -> int:
-    from ciao import gws_wrapper
-
-    argv = ["gws"]
-    if getattr(args, "profile", None):
-        argv += ["--profile", args.profile]
-    argv += list(getattr(args, "args", []) or [])
-    return gws_wrapper.main(argv[1:])
 
 
 def _gws_auth_helper_command(args: argparse.Namespace) -> int:

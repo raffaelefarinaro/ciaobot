@@ -98,9 +98,8 @@
           <span v-if="libreofficeInstallError"> {{ libreofficeInstallError }}</span>
           <button
             class="btn-primary btn-small"
-            :disabled="libreofficeInstalling"
-            @click="installLibreoffice"
-          >{{ libreofficeInstalling ? 'Installing…' : 'Install LibreOffice' }}</button>
+            @click="installLibreofficeInChat"
+          >Install in Chat</button>
         </div>
         <iframe
           v-else-if="kind === 'pdf'"
@@ -338,10 +337,9 @@ const editTextAreaEl = ref<HTMLTextAreaElement>()
 const imageTimestamp = ref(Date.now())
 
 // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
-// Checked proactively so a missing install shows a real "Install" button
-// instead of the iframe silently failing to load with a browser-level error.
+// Checked proactively so a missing install shows guidance instead of the
+// iframe silently failing to load with a browser-level error.
 const pptxNeedsLibreoffice = ref(false)
-const libreofficeInstalling = ref(false)
 const libreofficeInstallError = ref('')
 const markdownPaths = ref<string[]>([])
 
@@ -365,21 +363,17 @@ async function checkLibreofficeStatus(): Promise<void> {
   }
 }
 
-async function installLibreoffice(): Promise<void> {
-  libreofficeInstalling.value = true
-  libreofficeInstallError.value = ''
+async function installLibreofficeInChat(): Promise<void> {
   try {
-    const res = await api.post<{ ok: boolean; error?: string }>('/api/libreoffice-install', {})
-    if (res.ok) {
-      await checkLibreofficeStatus()
-      if (!pptxNeedsLibreoffice.value) imageTimestamp.value = Date.now()
-    } else {
-      libreofficeInstallError.value = res.error || 'Installation failed.'
-    }
+    await projectsStore.fixError({
+      errorText:
+        'LibreOffice (soffice) is not installed, so PowerPoint files cannot be previewed in the Ciaobot pinned file panel.',
+      context:
+        'Previewing a .pptx from the Ciaobot pinned file panel. Install LibreOffice (e.g. `brew install --cask libreoffice` on macOS) so soffice can render slides; Ciaobot never runs package installs on its own.',
+      title: 'Install LibreOffice',
+    })
   } catch (e) {
     libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    libreofficeInstalling.value = false
   }
 }
 

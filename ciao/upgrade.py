@@ -84,39 +84,6 @@ async def run_upgrade(
     )
 
 
-async def upgrade_libreoffice() -> UpgradeResult:
-    """Install LibreOffice via Homebrew Cask on macOS."""
-    brew_bin = shutil.which("brew")
-    if brew_bin is None:
-        return UpgradeResult(
-            command=["brew", "install", "--cask", "libreoffice"],
-            changed=False, success=False,
-            stdout="", stderr="brew not found (Homebrew is required for LibreOffice on macOS)",
-            before_version="", after_version="",
-        )
-    
-    from pathlib import Path
-    libreoffice_installed = False
-    for cmd in ("soffice", "libreoffice", "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
-        if shutil.which(cmd) or Path(cmd).exists():
-            libreoffice_installed = True
-            break
-
-    if libreoffice_installed:
-        return UpgradeResult(
-            command=["brew", "install", "--cask", "libreoffice"],
-            changed=False, success=True,
-            stdout="LibreOffice already installed", stderr="",
-            before_version="installed", after_version="installed",
-        )
-
-    soffice_path = shutil.which("soffice") or "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-    return await run_upgrade(
-        install_command=[brew_bin, "install", "--cask", "libreoffice"],
-        version_command=[soffice_path, "--version"],
-    )
-
-
 def install_custom_skills(cwd: str, workspace_name: str | None = None) -> int:
     """Install and mirror Ciaobot skills through the packaged sync command.
 

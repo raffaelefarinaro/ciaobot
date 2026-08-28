@@ -173,7 +173,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 **Extensibility — skills, subagents, commands**
 
 - Stock skills, subagents, and slash commands ship with the app; same-named workspace versions override them.
-- Install skills from GitHub repositories; they refresh automatically on restart.
+- Add your own skills by dropping a folder under `skills/` (or uploading a validated zip in Settings); `ciao sync-skills` mirrors them, and workspace git sync carries them to other machines.
 - Run declarative live evaluations for one skill or subagent through an isolated full chat, with deterministic output and tool assertions.
 - A weekly skill-evolution routine proposes improvements from real usage — reviewable proposals, never silent edits.
 
