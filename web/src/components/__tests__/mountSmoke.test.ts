@@ -957,9 +957,4 @@ describe('component mount smoke', () => {
     const errors = await mountAndSettle(() => import('../ProjectView.vue'))
     expect(errors).toEqual([])
   })
-
-  it('SchedulesView mounts without throwing', async () => {
-    const errors = await mountAndSettle(() => import('../SchedulesView.vue'))
-    expect(errors).toEqual([])
-  })
 })

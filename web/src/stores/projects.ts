@@ -1687,11 +1687,10 @@ export const useProjectStore = defineStore('projects', () => {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
-        // Boot only. fetchAll is also a refresh — SchedulePanel and
-        // SchedulesView call it while the app is running — and clearing the
-        // selection there dropped the user's open chat just because the
-        // current route was /schedules, sending them to the home screen when
-        // they navigated back.
+        // Boot only. fetchAll is also a refresh — SchedulePanel calls it
+        // while the app is running — and clearing the selection there dropped
+        // the user's open chat just because the current route was /schedules,
+        // sending them to the home screen when they navigated back.
         activeChatId.value = null
       }
       persistState()
