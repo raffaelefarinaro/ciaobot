@@ -179,6 +179,12 @@ def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> Non
     with pytest.raises(McpUnavailableError):
         manager.build_agent_request(chat, prompt="hi")
 
+    transcript_request = manager.build_agent_request(
+        chat, prompt="hi", require_mcp=False
+    )
+    assert transcript_request.mcp_url == ""
+    assert transcript_request.mcp_token == ""
+
 
 def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)

@@ -5156,6 +5156,7 @@ class ProjectChatManager:
         images: list[ImageAttachment] | None = None,
         resume_session: str | None = None,
         unattended: bool = False,
+        require_mcp: bool = True,
     ) -> AgentRequest:
         """Resolve all routing parameters and construct an AgentRequest.
 
@@ -5178,19 +5179,23 @@ class ProjectChatManager:
         # turns this into a durable error turn in the transcript.
         service = self._mcp_service
         project = self._projects.get(chat.project_id)
+        mcp_url = ""
+        mcp_token = ""
         if service is None or project is None:
-            logger.error(
-                "Ciaobot MCP unavailable for chat %s (service=%s, project=%s)",
-                chat.chat_id,
-                service is not None,
-                project is not None,
-            )
-            raise McpUnavailableError(
-                "Ciaobot's MCP control plane is not running, so this chat "
-                "cannot start a turn. Finish first-run setup or restart "
-                "Ciaobot, then try again."
-            )
-        mcp_url, mcp_token = service.credentials_for_chat(chat, project)
+            if require_mcp:
+                logger.error(
+                    "Ciaobot MCP unavailable for chat %s (service=%s, project=%s)",
+                    chat.chat_id,
+                    service is not None,
+                    project is not None,
+                )
+                raise McpUnavailableError(
+                    "Ciaobot's MCP control plane is not running, so this chat "
+                    "cannot start a turn. Finish first-run setup or restart "
+                    "Ciaobot, then try again."
+                )
+        else:
+            mcp_url, mcp_token = service.credentials_for_chat(chat, project)
 
         return AgentRequest(
             prompt=full_prompt,
@@ -6435,6 +6440,7 @@ class ProjectChatManager:
                                         images=current_images,
                                         resume_session=error_chat.session_id or None,
                                         unattended=turn_unattended,
+                                        require_mcp=False,
                                     )
                                     self._transcripts.record_turn(
                                         error_request,
