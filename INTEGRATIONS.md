@@ -221,6 +221,7 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 **Ciaobot agent control plane:**
 
 - `CIAO_MCP_ENABLED`: enables the embedded authenticated MCP endpoint and managed-process integration. Default `true`.
+- `CIAO_MCP_LAZY_TOOLS`: lists only the core and destructive Ciaobot tools in `tools/list` and defers the rest to the `tools_search` / `tools_call` pair, so the full catalog (~9k tokens of JSON schema) is not injected into every chat. Set to `0` to list the whole catalog eagerly. Default `true`.
 - `CIAO_CONTROL_SURFACE`: `legacy` or `mcp` (default `mcp`). `legacy` preserves CLI/skill/direct-file adapters; `mcp` is fail-closed. `auto` is a per-chat setting, not an env value: a chat left on `auto` reads the promoted per-provider result from `.runtime/control_surface_decision.json` and falls back to `legacy` when there is no promoted winner.
 - `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
 
