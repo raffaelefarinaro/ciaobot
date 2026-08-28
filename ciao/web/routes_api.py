@@ -2760,25 +2760,12 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    result = await pcm.archive_chat(chat_id)
-    outcome = result.outcome if result is not None else None
+    outcome = await pcm.archive_chat(chat_id)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
-    # Report the cascade per subchat rather than a bare ok. The client marks
-    # only what `archived_chat_ids` confirms — a delegate the server skipped is
-    # still live, and hiding it from the sidebar while it streams and spends
-    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
-    # the user is warned about; `failed_chat_ids` are the subchats they may
-    # still need to deal with by hand.
-    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
-        # A chat with an empty transcript yields no ArchiveOutcome but is still
-        # archived, so this is keyed off the cascade running at all.
-        "archived_chat_ids": (
-            ([chat_id] + result.archived_ids()) if result is not None else []
-        ),
         # The initiating client clears the active pane as soon as this response
         # arrives. Return the lifecycle record as well as publishing it over
         # /ws/events, so that client cannot miss the first "running" state in
@@ -2788,9 +2775,6 @@ async def chat_archive(request: Request) -> JSONResponse:
             if chat_meta and chat_meta.postprocess
             else None
         ),
-        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
-        "failed_chat_ids": result.failed_ids() if result is not None else [],
-        "subchats": [row.to_dict() for row in delegates],
     })
 
 
@@ -3886,6 +3870,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
         # sidebar for every working chat.
         state = subagent_tracking.parse_session_subagents(path)
         return subagent_tracking.running_agents(path, state)
+
 
     return [
         {
@@ -6016,17 +6001,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"chats": [], "attention_count": 0})
     chats = pcm.list_chats()
-    # Delegate completion is internal model-to-model traffic: it wakes the
-    # supervisor, so the PWA deliberately does not report a nested delegate as
-    # a second unread chat. Keep the tray feed on the same rule. An archived or
-    # missing supervisor makes the delegate an orphan, which remains a normal
-    # visible chat and may be unread.
-    active_chat_ids = {
-        candidate.chat_id
-        for candidate in chats
-        if not candidate.archived
-    }
-
     rows: list[dict[str, object]] = []
     attention_count = 0
     for chat in chats:
@@ -6037,11 +6011,7 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        nested_delegate = bool(
-            getattr(chat, "spawned_from_chat_id", "")
-            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
-        )
-        unread = not nested_delegate and bool(activity) and activity > read
+        unread = bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(
             chat.pending_question, getattr(chat, "pending_permission", "")
         )

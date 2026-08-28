@@ -55,11 +55,27 @@ describe('ChatSignals', () => {
     const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(many.find('.chat-signal--agents').exists()).toBe(true)
     expect(many.find('.chat-signal-count').text()).toBe('3')
-    expect(many.find('.chat-signal--agents').attributes('aria-label')).toContain('3 background agents')
+    expect(many.find('.chat-signal--agents').attributes('aria-label')).toBe('3 agents running')
 
     store.backgroundAgents = { 'chat-1': 1 }
     const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(one.find('.chat-signal-count').exists()).toBe(false)
+    expect(one.find('.chat-signal--agents').attributes('aria-label')).toBe('1 agent running')
+  })
+
+  // The poll and the watcher tick on different clocks, so a row must not read
+  // idle just because the pushed count has not arrived yet.
+  it('counts running subagents the watcher has not announced yet', () => {
+    const { store } = seed()
+    store.runningSubagents = {
+      'chat-1': [
+        { agent_id: 'a1', description: 'Sweep', status: 'running' },
+        { agent_id: 'a2', description: 'Verify', status: 'running' },
+      ],
+    }
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(wrapper.find('.chat-signal--agents').attributes('aria-label')).toBe('2 agents running')
+    expect(wrapper.find('.chat-signal-count').text()).toBe('2')
   })
 
   it('renders interval and retry modifiers with their accessible labels', () => {

@@ -2173,43 +2173,6 @@ describe('provider-neutral input state', () => {
     expect(store.chatNeedsInput(chatId)).toBe(false)
   })
 
-  test('chatNeedsInput rolls up a nested delegate blocked on an approval', () => {
-    const store = useProjectStore()
-    const supervisorId = 'supervisor-chat'
-    const delegateId = 'delegate-chat'
-    store.chats = [{
-      chat_id: supervisorId,
-      project_id: 'p1',
-      title: 'Supervisor',
-      model: 'gpt-test',
-      provider: 'opencode',
-      mode: 'auto',
-      session_id: 'thread-1',
-      created_at: '',
-      archived: false,
-    }, {
-      chat_id: delegateId,
-      project_id: 'p1',
-      title: 'Delegate',
-      model: 'gpt-test',
-      provider: 'opencode',
-      mode: 'auto',
-      session_id: 'thread-2',
-      created_at: '',
-      archived: false,
-      spawned_from_chat_id: supervisorId,
-      pending_permission: JSON.stringify({
-        request_id: 'req-1', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
-      }),
-    }]
-
-    expect(store.chatNeedsInput(delegateId)).toBe(true)
-    expect(store.chatNeedsInput(supervisorId)).toBe(true)
-
-    store.chats[1].pending_permission = ''
-    expect(store.chatNeedsInput(supervisorId)).toBe(false)
-  })
-
   test('rebuilds the Approve/Deny card from a persisted pending_permission on chat open', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -2994,34 +2957,29 @@ describe('deep-link chat navigation', () => {
     expect(store.activeChatId).toBeNull()
   })
 
-  function supervisorWithTwoSubchats(): ChatInfo[] {
+  function twoChats(): ChatInfo[] {
     return [
       { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
-      { chat_id: 'child-a', project_id: 'p1', title: 'Subchat A', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, spawned_from_chat_id: 'parent' },
-      { chat_id: 'child-b', project_id: 'p1', title: 'Subchat B', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, spawned_from_chat_id: 'parent' },
+      { chat_id: 'other', project_id: 'p1', title: 'Other', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
     ]
   }
 
-  test('archiving a supervisor marks the subchats the server confirms', async () => {
+  test('archiving a chat archives only that chat', async () => {
     const store = useProjectStore()
-    store.chats = supervisorWithTwoSubchats()
-    apiPost.mockResolvedValue({
-      ok: true,
-      archived_chat_ids: ['parent', 'child-a', 'child-b'],
-    })
+    store.chats = twoChats()
+    apiPost.mockResolvedValue({ ok: true })
 
     await store.archiveChat('parent')
 
     expect(apiPost).toHaveBeenCalledWith('/api/chats/parent/archive')
-    expect(store.chats.every(chat => chat.archived)).toBe(true)
+    expect(store.chats.map(chat => chat.archived)).toEqual([true, false])
   })
 
   test('archive response keeps the background insights status visible', async () => {
     const store = useProjectStore()
-    store.chats = supervisorWithTwoSubchats()
+    store.chats = twoChats()
     apiPost.mockResolvedValue({
       ok: true,
-      archived_chat_ids: ['parent'],
       postprocess: {
         state: 'running',
         step: 'insights',
@@ -3039,58 +2997,14 @@ describe('deep-link chat navigation', () => {
     expect(store.toasts.find(t => t.title === 'Chat archived')).toBeUndefined()
   })
 
-  test('a subchat the server did not archive stays active and keeps its socket', async () => {
-    const store = useProjectStore()
-    store.chats = supervisorWithTwoSubchats()
-    store.connectWs('child-b')
-    const childSocket = fakeSockets[fakeSockets.length - 1]
-    // The server archived the parent and one child; child-b failed and is
-    // still streaming. Marking it archived anyway would drop it out of the
-    // sidebar, recentChats and activeChatsAll while it burns tokens unseen.
-    apiPost.mockResolvedValue({
-      ok: true,
-      archived_chat_ids: ['parent', 'child-a'],
-      failed_chat_ids: ['child-b'],
-    })
-
-    await store.archiveChat('parent')
-
-    const byId = Object.fromEntries(store.chats.map(c => [c.chat_id, c.archived]))
-    expect(byId).toEqual({ parent: true, 'child-a': true, 'child-b': false })
-    // Its socket was closed before the POST, so it has to be reopened or the
-    // live chat would receive no more tokens or permission prompts.
-    expect(childSocket.readyState).toBe(FakeWebSocket.CLOSED)
-    expect(fakeSockets.some(s => s !== childSocket && s.url.includes('child-b'))).toBe(true)
-    // The failure is reported rather than silently dropped.
-    const errors = store.toasts.filter(t => t.variant === 'error')
-    expect(errors).toHaveLength(1)
-    expect(errors[0].title).toBe('Some subchats were not archived')
-  })
-
-  test('a stopped-mid-turn subchat is reported to the user', async () => {
-    const store = useProjectStore()
-    store.chats = supervisorWithTwoSubchats()
-    apiPost.mockResolvedValue({
-      ok: true,
-      archived_chat_ids: ['parent', 'child-a', 'child-b'],
-      stopped_chat_ids: ['child-a'],
-    })
-
-    await store.archiveChat('parent')
-
-    const toast = store.toasts.find(t => t.title.includes('mid-turn'))
-    expect(toast?.title).toBe('Stopped 1 subchat mid-turn')
-    expect(toast?.body).toContain('is not in the archive')
-  })
-
   test('a stale /api/chats payload does not resurrect a chat being archived', async () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
     ]
-    store.chats = supervisorWithTwoSubchats()
-    apiPost.mockResolvedValue({ ok: true, archived_chat_ids: ['parent', 'child-a', 'child-b'] })
+    store.chats = twoChats()
+    apiPost.mockResolvedValue({ ok: true })
 
     await store.archiveChat('parent')
 
@@ -3099,18 +3013,18 @@ describe('deep-link chat navigation', () => {
     // Taking it at face value put the row back in the sidebar until the next
     // poll corrected it — the archive flicker.
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
+      if (path === '/api/chats?active_only=1') return Promise.resolve(twoChats())
       return Promise.resolve([])
     })
     await store.syncLatest()
 
-    expect(store.chats.every(chat => chat.archived)).toBe(true)
-    expect(store.projectChats('p1')).toHaveLength(0)
+    expect(store.chats.find(c => c.chat_id === 'parent')?.archived).toBe(true)
+    expect(store.projectChats('p1').map(c => c.chat_id)).toEqual(['other'])
 
     // Once the server agrees, its payload is authoritative again.
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/chats?active_only=1') {
-        return Promise.resolve(supervisorWithTwoSubchats().map(c => ({ ...c, archived: true })))
+        return Promise.resolve(twoChats().map(c => ({ ...c, archived: true })))
       }
       return Promise.resolve([])
     })
@@ -3124,27 +3038,26 @@ describe('deep-link chat navigation', () => {
     store.projects = [
       { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
     ]
-    store.chats = supervisorWithTwoSubchats()
+    store.chats = twoChats()
     apiPost.mockRejectedValue(new Error('archive exploded'))
 
     await expect(store.archiveChat('parent')).rejects.toThrow('archive exploded')
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats?active_only=1') return Promise.resolve(supervisorWithTwoSubchats())
+      if (path === '/api/chats?active_only=1') return Promise.resolve(twoChats())
       return Promise.resolve([])
     })
     await store.syncLatest()
 
     expect(store.chats.some(chat => chat.archived)).toBe(false)
-    expect(store.projectChats('p1')).toHaveLength(3)
+    expect(store.projectChats('p1')).toHaveLength(2)
   })
 
-  test('a failed archive POST reconnects the sockets and raises an error toast', async () => {
+  test('a failed archive POST reconnects the socket and raises an error toast', async () => {
     const store = useProjectStore()
-    store.chats = supervisorWithTwoSubchats()
+    store.chats = twoChats()
     store.activeChatId = 'parent'
     store.connectWs('parent')
-    store.connectWs('child-a')
     const opened = fakeSockets.slice()
     apiPost.mockRejectedValue(new Error('archive exploded'))
 
@@ -3152,12 +3065,10 @@ describe('deep-link chat navigation', () => {
 
     // Nothing was archived, so nothing may be marked archived.
     expect(store.chats.some(chat => chat.archived)).toBe(false)
-    // disconnectWs marked both closes intentional, so onclose scheduled no
-    // reconnect; without an explicit one these live chats go permanently
+    // disconnectWs marked the close intentional, so onclose scheduled no
+    // reconnect; without an explicit one this live chat goes permanently
     // silent — no tokens, no permission cards, no AskUserQuestion prompts.
-    for (const chatId of ['parent', 'child-a']) {
-      expect(fakeSockets.some(s => !opened.includes(s) && s.url.includes(chatId))).toBe(true)
-    }
+    expect(fakeSockets.some(s => !opened.includes(s) && s.url.includes('parent'))).toBe(true)
     const errors = store.toasts.filter(t => t.variant === 'error')
     expect(errors).toHaveLength(1)
     expect(errors[0].title).toBe('Could not archive chat')
@@ -3848,166 +3759,6 @@ describe('switchChat workspace alignment', () => {
 
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
-  })
-})
-
-describe('projectChatRows (delegate grouping)', () => {
-  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = chats.map((c, i) => ({
-      project_id: 'p1',
-      title: c.chat_id,
-      archived: false,
-      created_at: `2026-07-31T00:0${i}:00Z`,
-      ...c,
-    })) as unknown as ChatInfo[]
-  }
-
-  test('delegates follow their supervisor and are marked', () => {
-    const store = useProjectStore()
-    seed(store, [
-      { chat_id: 'boss' },
-      { chat_id: 'other' },
-      { chat_id: 'd1', spawned_from_chat_id: 'boss' },
-      { chat_id: 'd2', spawned_from_chat_id: 'boss' },
-    ])
-
-    const rows = store.projectChatRows('p1')
-
-    expect(rows.map(r => r.chat.chat_id)).toEqual(['boss', 'd1', 'd2', 'other'])
-    expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
-  })
-
-  test('returns one collapsible group for a supervisor and its delegates', () => {
-    const store = useProjectStore()
-    seed(store, [
-      { chat_id: 'boss', title: 'Supervisor' },
-      { chat_id: 'd1', title: 'First task', spawned_from_chat_id: 'boss' },
-      { chat_id: 'd2', title: 'Second task', spawned_from_chat_id: 'boss' },
-      { chat_id: 'other', title: 'Other' },
-    ])
-
-    const groups = store.projectChatGroups('p1')
-
-    expect(groups.map(group => group.chat.chat_id)).toEqual(['boss', 'other'])
-    expect(groups[0].delegates.map(chat => chat.chat_id)).toEqual(['d1', 'd2'])
-    expect(groups[1].delegates).toEqual([])
-  })
-
-  test('an orphaned delegate stays top-level instead of disappearing', () => {
-    const store = useProjectStore()
-    // Supervisor archived, so it is not in the visible list at all.
-    seed(store, [
-      { chat_id: 'boss', archived: true },
-      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
-    ])
-
-    const rows = store.projectChatRows('p1')
-
-    expect(rows.map(r => r.chat.chat_id)).toEqual(['orphan'])
-    expect(rows[0].isDelegate).toBe(false)
-  })
-
-  test('a delegate whose supervisor lives in another project is not hidden', () => {
-    const store = useProjectStore()
-    seed(store, [{ chat_id: 'orphan', spawned_from_chat_id: 'boss-elsewhere' }])
-    store.chats = [
-      ...store.chats,
-      {
-        chat_id: 'boss-elsewhere',
-        project_id: 'p2',
-        title: 'Boss',
-        archived: false,
-        created_at: '2026-07-31T00:00:00Z',
-      } as unknown as ChatInfo,
-    ]
-
-    expect(store.projectChatRows('p1').map(r => r.chat.chat_id)).toEqual(['orphan'])
-  })
-
-  test('chats with no delegates produce a plain flat list', () => {
-    const store = useProjectStore()
-    seed(store, [{ chat_id: 'a' }, { chat_id: 'b' }])
-
-    const rows = store.projectChatRows('p1')
-
-    expect(rows.map(r => r.chat.chat_id)).toEqual(['a', 'b'])
-    expect(rows.every(r => !r.isDelegate)).toBe(true)
-  })
-})
-
-describe('activeChatsAll (hide nested delegates)', () => {
-  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = chats.map((c, i) => ({
-      project_id: 'p1',
-      title: c.title || c.chat_id,
-      archived: false,
-      local: true,
-      created_at: `2026-07-31T00:0${i}:00Z`,
-      last_activity_at: `2026-07-31T01:0${i}:00Z`,
-      ...c,
-    })) as unknown as ChatInfo[]
-  }
-
-  test('nested delegates are omitted from jump-back-in', () => {
-    const store = useProjectStore()
-    seed(store, [
-      { chat_id: 'boss', title: 'Architecture Review' },
-      { chat_id: 'other', title: 'Other' },
-      { chat_id: 'd1', title: 'Arch review: a', spawned_from_chat_id: 'boss' },
-      { chat_id: 'd2', title: 'Arch review: b', spawned_from_chat_id: 'boss' },
-    ])
-
-    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['other', 'boss'])
-  })
-
-  test('orphaned delegates remain listed when the supervisor is gone', () => {
-    const store = useProjectStore()
-    seed(store, [
-      { chat_id: 'boss', archived: true },
-      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
-    ])
-
-    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['orphan'])
-  })
-})
-
-describe('delegate unread notifications', () => {
-  test('internal delegate activity is not reported as unread', () => {
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = [
-      {
-        chat_id: 'boss',
-        project_id: 'p1',
-        title: 'Supervisor',
-        archived: false,
-        local: true,
-        created_at: '2026-07-31T00:00:00Z',
-        last_activity_at: '2026-07-31T01:00:00Z',
-        last_read_at: '2026-07-31T01:00:00Z',
-      },
-      {
-        chat_id: 'child',
-        project_id: 'p1',
-        title: 'Internal task',
-        archived: false,
-        local: true,
-        spawned_from_chat_id: 'boss',
-        created_at: '2026-07-31T00:00:00Z',
-        last_activity_at: '2026-07-31T02:00:00Z',
-        last_read_at: '2026-07-31T01:00:00Z',
-      },
-    ] as unknown as ChatInfo[]
-
-    expect(store.chatUnread('child')).toBe(0)
   })
 })
 

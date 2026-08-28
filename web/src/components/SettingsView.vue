@@ -3898,7 +3898,7 @@ const inspectorEmbeddedTools = computed(() => {
     'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
     'schedules_list', 'schedule', 'schedule_action',
     'loops_list', 'loop', 'loop_action', 'file_surface',
-    'delegate_spawn', 'delegates_list', 'project_action',
+    'project_action',
   ]
 })
 
