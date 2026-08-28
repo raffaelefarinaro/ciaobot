@@ -452,8 +452,8 @@ def exchange_code(
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
-            return payload
+            response_payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+            return response_payload
     except urllib.error.HTTPError as exc:
         try:
             err_json = json.loads(exc.read().decode("utf-8"))
