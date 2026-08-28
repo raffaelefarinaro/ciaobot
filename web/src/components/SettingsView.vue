@@ -2965,6 +2965,7 @@ async function installGwsInChat() {
 
 const gwsSavingProfile = ref<string | null>(null)
 const gwsAuthUrls = ref<Record<string, string>>({})
+const gwsAuthFlowIds = ref<Record<string, string>>({})
 const gwsRedirectUrls = ref<Record<string, string>>({})
 
 // One-click "Sign in with Google" loopback flow (issue #145). Tracks, per
@@ -3039,6 +3040,7 @@ function gwsClearRelogin(profileName: string) {
   // it keeps the card out of a stale manual-flow state and un-hides the
   // authenticated controls on success.
   delete gwsAuthUrls.value[profileName]
+  delete gwsAuthFlowIds.value[profileName]
   delete gwsRedirectUrls.value[profileName]
 }
 
@@ -3129,10 +3131,11 @@ async function startGwsAuth(profileName: string) {
   delete gwsReloginError.value[profileName]
   delete gwsReloginPending.value[profileName]
   try {
-    const res = await api.post<{ auth_url: string }>('/api/integrations/gws/auth-url', {
+    const res = await api.post<{ auth_url: string; flow_id: string }>('/api/integrations/gws/auth-url', {
       profile: profileName,
     })
     gwsAuthUrls.value[profileName] = res.auth_url
+    gwsAuthFlowIds.value[profileName] = res.flow_id
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
   } catch (e) {
@@ -3151,9 +3154,11 @@ async function exchangeGwsCode(profileName: string) {
     const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/exchange', {
       profile: profileName,
       code: code,
+      flow_id: gwsAuthFlowIds.value[profileName],
     })
     gwsIntegration.value = updated
     delete gwsAuthUrls.value[profileName]
+    delete gwsAuthFlowIds.value[profileName]
     delete gwsRedirectUrls.value[profileName]
   } catch (e) {
     notifyFailed('Could not complete the connection', errorMessage(e, 'The request failed.'))
@@ -3164,6 +3169,7 @@ async function exchangeGwsCode(profileName: string) {
 
 function cancelGwsAuth(profileName: string) {
   delete gwsAuthUrls.value[profileName]
+  delete gwsAuthFlowIds.value[profileName]
   delete gwsRedirectUrls.value[profileName]
 }
 

@@ -1650,14 +1650,14 @@ async def gws_auth_url(request: Request) -> JSONResponse:
         # trust boundary), so a code_challenge is the RFC 8252 remedy. The
         # verifier is held server-side, keyed by profile, until the matching
         # exchange call.
-        code_verifier = _gws_manual_pkce_store(request).start(profile)
+        flow_id, code_verifier = _gws_manual_pkce_store(request).start(profile)
         auth_url = gws_auth.build_auth_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scopes=gws_auth.scopes_for_profile(profile),
             code_challenge=gws_auth.code_challenge_s256(code_verifier),
         )
-        return JSONResponse({"auth_url": auth_url})
+        return JSONResponse({"auth_url": auth_url, "flow_id": flow_id})
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -1670,6 +1670,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         body = await request.json()
         profile = body.get("profile")
         code_or_url = body.get("code")
+        flow_id = body.get("flow_id")
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
@@ -1679,6 +1680,8 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
 
     if not code_or_url:
         return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
+    if flow_id is not None and not isinstance(flow_id, str):
+        return JSONResponse({"error": "Invalid flow ID"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
@@ -1691,21 +1694,19 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
         code = gws_auth.extract_code_from_input(code_or_url)
-        # The verifier for this profile's most recent auth-url call, if any
-        # (issue #354). "none" (no PKCE flow pending — never started, a
-        # legacy client, or superseded by a later auth-url call) is treated
-        # like a flow that never used PKCE: the exchange omits the verifier,
-        # matching whatever the auth URL itself sent. "expired" is different:
-        # Google is still holding a code_challenge for this profile, so
-        # silently omitting the verifier would fail with a confusing
-        # Google-side error — tell the user plainly to restart the flow
-        # instead. (A server restart between the two requests looks like
-        # "none" here, since the tombstone lives only in memory; that case
-        # degrades to Google's own invalid_grant/invalid_request error below,
-        # surfaced the same secret-free way as any other exchange failure —
-        # not a silent mismatch.)
+        # The flow ID binds this exchange to the exact auth URL that produced
+        # the pasted code. Without it, an old client must not accidentally use
+        # another tab's verifier.
         pkce_store = _gws_manual_pkce_store(request)
-        pkce_status = pkce_store.status(profile)
+        if flow_id:
+            pkce_status = pkce_store.status(flow_id, profile)
+        else:
+            pkce_status = "none"
+            if pkce_store.status_for_profile(profile) == "active":
+                return JSONResponse(
+                    {"error": "This sign-in flow needs a flow ID. Start manual connect again."},
+                    status_code=400,
+                )
         if pkce_status == "expired":
             return JSONResponse(
                 {
@@ -1716,7 +1717,12 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
                 },
                 status_code=400,
             )
-        code_verifier = pkce_store.peek(profile) if pkce_status == "active" else None
+        if pkce_status == "superseded":
+            return JSONResponse(
+                {"error": "This sign-in flow was replaced. Start manual connect again."},
+                status_code=400,
+            )
+        code_verifier = pkce_store.peek(flow_id, profile) if pkce_status == "active" else None
         # Token exchange + credential write happen off the event loop; the
         # helper never logs the code, tokens, or secret.
         await asyncio.to_thread(

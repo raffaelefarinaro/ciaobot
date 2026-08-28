@@ -665,17 +665,15 @@ MANUAL_PKCE_TTL_SECONDS = 3600.0
 
 
 class ManualPkceStore:
-    """Holds one pending PKCE verifier per profile between auth-url and exchange.
+    """Holds pending PKCE verifiers between auth-url and exchange.
 
-    Starting a new flow for a profile replaces (invalidates) any previous
-    pending verifier for that profile, mirroring how a fresh
-    :class:`GwsReloginManager` session replaces an in-flight one. Never
-    logged; verifiers are opaque, secret-adjacent material.
+    Each flow has its own opaque identifier, so multiple tabs can authorize the
+    same profile without replacing one another's verifier. Never logged;
+    verifiers are opaque, secret-adjacent material.
 
-    An expired entry is kept (as a tombstone, verifier discarded) rather than
-    deleted, so :meth:`status` can still tell "a challenge was issued for this
-    profile and the verifier is gone" apart from "no PKCE flow was ever
-    started for this profile" — the exchange endpoint needs that distinction:
+    Expired and superseded entries are kept as tombstones, so :meth:`status`
+    can tell "a challenge was issued but its verifier is gone" apart from "no
+    PKCE flow was ever started" — the exchange endpoint needs that distinction:
     the first case must fail loudly (Google is holding a challenge for the
     code; silently omitting the verifier gets a confusing ``invalid_grant``),
     while the second must silently omit the verifier, matching whatever the
@@ -687,18 +685,20 @@ class ManualPkceStore:
     def __init__(self, ttl: float = MANUAL_PKCE_TTL_SECONDS) -> None:
         self._ttl = ttl
         self._lock = threading.Lock()
-        # profile -> (verifier or "" once expired, expires_at)
-        self._pending: dict[str, tuple[str, float]] = {}
+        # flow_id -> (profile, verifier or "" once invalidated, expires_at,
+        # status: active/expired/superseded)
+        self._pending: dict[str, tuple[str, str, float, str]] = {}
 
-    def start(self, profile: str) -> str:
-        """Generate a fresh verifier for ``profile``, replacing any pending one."""
+    def start(self, profile: str) -> tuple[str, str]:
+        """Generate a flow ID and verifier for ``profile``."""
+        flow_id = secrets.token_urlsafe(32)
         verifier = generate_code_verifier()
         with self._lock:
-            self._pending[profile] = (verifier, time.time() + self._ttl)
-        return verifier
+            self._pending[flow_id] = (profile, verifier, time.time() + self._ttl, "active")
+        return flow_id, verifier
 
-    def peek(self, profile: str) -> str | None:
-        """Return the live pending verifier for ``profile``, or ``None``.
+    def peek(self, flow_id: str, profile: str | None = None) -> str | None:
+        """Return the live verifier for ``flow_id``, or ``None``.
 
         ``None`` covers both "no flow pending" and "expired" — callers that
         need to tell those apart (to avoid silently sending Google's token
@@ -709,16 +709,18 @@ class ManualPkceStore:
         retried with the same verifier without restarting the whole flow.
         """
         with self._lock:
-            entry = self._pending.get(profile)
+            entry = self._pending.get(flow_id)
             if entry is None:
                 return None
-            verifier, expires_at = entry
+            entry_profile, verifier, expires_at, _status = entry
+            if profile is not None and entry_profile != profile:
+                return None
             if time.time() > expires_at or not verifier:
                 return None
             return verifier
 
-    def status(self, profile: str) -> str:
-        """``"active"`` | ``"expired"`` | ``"none"`` for ``profile``.
+    def status(self, flow_id: str, profile: str | None = None) -> str:
+        """``"active"`` | ``"expired"`` | ``"superseded"`` | ``"none"``.
 
         ``"expired"`` means a challenge was issued and is still live at
         Google but the verifier is gone — the caller must not proceed
@@ -728,18 +730,30 @@ class ManualPkceStore:
         that like a flow that never used PKCE.
         """
         with self._lock:
-            entry = self._pending.get(profile)
+            entry = self._pending.get(flow_id)
             if entry is None:
                 return "none"
-            verifier, expires_at = entry
+            entry_profile, verifier, expires_at, status = entry
+            if profile is not None and entry_profile != profile:
+                return "none"
+            if status == "superseded":
+                return status
             if time.time() > expires_at:
                 # Tombstone it in place: keep the "something was issued"
                 # signal, but drop the verifier itself (never hold expired
                 # secret-adjacent material longer than necessary).
                 if verifier:
-                    self._pending[profile] = ("", expires_at)
+                    self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
                 return "expired"
             return "active"
+
+    def status_for_profile(self, profile: str) -> str:
+        """Return whether ``profile`` has any active manual flow."""
+        with self._lock:
+            for entry_profile, _verifier, _expires_at, status in self._pending.values():
+                if entry_profile == profile and status == "active":
+                    return "active"
+        return "none"
 
 
 # ── Token health (cheap ``auth status`` ping) ─────────────────────────────

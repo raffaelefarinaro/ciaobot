@@ -685,6 +685,8 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert "accounts.google.com/o/oauth2/auth" in resp.json()["auth_url"]
     assert "client_id=test-client-id" in resp.json()["auth_url"]
+    flow_id = resp.json()["flow_id"]
+    assert flow_id
 
     # PKCE (issue #354): the manual/paste flow cannot validate `state` on
     # paste-back, so the auth URL must carry a code_challenge, and the
@@ -725,7 +727,7 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     # Use a redirect URL as input
     resp = client.post(
         "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=test-code"}
+        json={"profile": "personal", "code": "http://localhost/?code=test-code", "flow_id": flow_id}
     )
     assert resp.status_code == 200
     assert mock_called is True
@@ -876,8 +878,8 @@ def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, 
 
     # Simulate the TTL elapsing before the user pastes the code back.
     store = client.app.state.gws_manual_pkce_store
-    for profile, (verifier, _expires_at) in list(store._pending.items()):
-        store._pending[profile] = (verifier, 0.0)
+    for flow_id, (profile, verifier, _expires_at, _status) in list(store._pending.items()):
+        store._pending[flow_id] = (profile, verifier, 0.0, "active")
 
     exchange_called = False
 

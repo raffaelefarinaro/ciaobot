@@ -199,38 +199,41 @@ def test_exchange_code_omits_code_verifier_when_none(monkeypatch) -> None:
 
 def test_manual_pkce_store_round_trip() -> None:
     store = gws_auth.ManualPkceStore()
-    verifier = store.start("personal")
+    flow_id, verifier = store.start("personal")
     assert 43 <= len(verifier) <= 128
     # Non-destructive: peeking again (e.g. a retried paste-back) returns the
     # same verifier rather than consuming it.
-    assert store.peek("personal") == verifier
-    assert store.peek("personal") == verifier
+    assert store.peek(flow_id, "personal") == verifier
+    assert store.peek(flow_id, "personal") == verifier
 
 
 def test_manual_pkce_store_unknown_profile_is_none() -> None:
     store = gws_auth.ManualPkceStore()
-    assert store.peek("never-started") is None
-    assert store.status("never-started") == "none"
+    assert store.peek("never-started", "personal") is None
+    assert store.status("never-started", "personal") == "none"
 
 
-def test_manual_pkce_store_restart_replaces_pending_verifier() -> None:
+def test_manual_pkce_store_keeps_concurrent_flows_separate() -> None:
     store = gws_auth.ManualPkceStore()
-    first = store.start("personal")
-    second = store.start("personal")
+    first_id, first = store.start("personal")
+    second_id, second = store.start("personal")
     assert first != second
-    assert store.peek("personal") == second
-    assert store.status("personal") == "active"
+    assert first_id != second_id
+    assert store.peek(first_id, "personal") == first
+    assert store.peek(second_id, "personal") == second
+    assert store.status(first_id, "personal") == "active"
+    assert store.status(second_id, "personal") == "active"
 
 
 def test_manual_pkce_store_expires_after_ttl(monkeypatch) -> None:
     fake_time = {"now": 1000.0}
     monkeypatch.setattr(gws_auth.time, "time", lambda: fake_time["now"])
     store = gws_auth.ManualPkceStore(ttl=10.0)
-    store.start("personal")
-    assert store.peek("personal") is not None
-    assert store.status("personal") == "active"
+    flow_id, _ = store.start("personal")
+    assert store.peek(flow_id, "personal") is not None
+    assert store.status(flow_id, "personal") == "active"
     fake_time["now"] += 11.0
-    assert store.peek("personal") is None
+    assert store.peek(flow_id, "personal") is None
 
 
 def test_manual_pkce_store_distinguishes_expired_from_never_started(monkeypatch) -> None:
@@ -243,18 +246,18 @@ def test_manual_pkce_store_distinguishes_expired_from_never_started(monkeypatch)
     monkeypatch.setattr(gws_auth.time, "time", lambda: fake_time["now"])
 
     store = gws_auth.ManualPkceStore(ttl=10.0)
-    assert store.status("personal") == "none"
-    store.start("personal")
-    assert store.status("personal") == "active"
+    assert store.status("missing", "personal") == "none"
+    flow_id, _ = store.start("personal")
+    assert store.status(flow_id, "personal") == "active"
     fake_time["now"] += 11.0
     # Expired, not "none": a real challenge is stranded at Google.
-    assert store.status("personal") == "expired"
-    assert store.peek("personal") is None
+    assert store.status(flow_id, "personal") == "expired"
+    assert store.peek(flow_id, "personal") is None
     # Still expired (tombstoned, not deleted) on a second check.
-    assert store.status("personal") == "expired"
+    assert store.status(flow_id, "personal") == "expired"
 
     # A different, never-touched profile is genuinely "none".
-    assert store.status("other") == "none"
+    assert store.status("missing", "other") == "none"
 
 
 def test_manual_pkce_default_ttl_is_generous() -> None:
