@@ -593,9 +593,51 @@ def apply(
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
     except OSError as exc:
         rollback_error = _unwind_applied()
+        # The registry restore can fail under the same disk-full/permission
+        # condition that broke the receipt write. Unchecked, apply() would
+        # raise with no receipt while the registry still points at the
+        # destination and the notes are back at the source — after a restart
+        # the workspace resolves to a missing vault. Prefer rolling the files
+        # FORWARD to match the surviving registry (it was repointed before the
+        # receipt write, so it is the most recently successful state), and
+        # report the divergence explicitly when that fails too.
+        registry_error: str | None = None
         if registry_before is not None:
-            _write_registry(runtime_root, registry_before)
+            try:
+                _write_registry(runtime_root, registry_before)
+            except OSError as registry_exc:
+                registry_error = str(registry_exc)
         refusals = [f"could not persist the relocation receipt: {exc}"]
+        if registry_error is not None:
+            # The registry still points at the DESTINATION. Roll the files
+            # forward to match it (the registry is the state a running server
+            # has already committed to), and report the remaining divergence
+            # explicitly if even that fails.
+            re_relocate_errors: list[str] = []
+            for done in applied:
+                (install_root / done["destination"]).parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                fwd_code, fwd_out = _run_git(
+                    install_root, "mv", done["source"], done["destination"]
+                )
+                if fwd_code != 0:
+                    re_relocate_errors.append(f"{done['source']}: {fwd_out}")
+            refusals.append(
+                "restoring the registry to its pre-relocation state also "
+                "failed; the registry still points at the new location and "
+                "the moves were re-applied to match it, but the receipt is "
+                "missing — re-run the relocate or undo by hand. "
+                f"registry write error: {registry_error}"
+            )
+            if re_relocate_errors:
+                refusals.append(
+                    "re-applying the moves after the registry-restore "
+                    "failure also failed: " + "; ".join(re_relocate_errors)
+                )
+            payload["status"] = "refused"
+            payload["refusals"] = refusals
+            return payload
         if rollback_error:
             refusals.append(
                 "the partial-move rollback also failed; some notes may sit at "

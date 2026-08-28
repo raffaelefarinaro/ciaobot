@@ -276,8 +276,27 @@ def _extract_locked(
         raise
     finally:
         zf.close()
-    # All members succeeded: atomically replace the target.
+    # All members succeeded: swap the replacement into place without ever
+    # leaving the target absent. Renaming the old directory aside first (same
+    # filesystem, so it is a rename, not a copy) means a failure of the final
+    # rename — a filesystem error, or another process recreating the target —
+    # can put the previous skill back instead of leaving the operator with
+    # neither: a force-import failure must not be data loss.
+    backup: Path | None = None
     if target.exists():
-        _remove_path(target)
-    tmp_target.rename(target)
+        # A unique sibling dir for the previous install; mkdtemp both
+        # generates the unique name and creates the directory, and the
+        # rename moves the old skill into it in one step.
+        backup = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=dest_root))
+        target.rename(backup)
+    try:
+        tmp_target.rename(target)
+    except Exception:
+        if backup is not None and not target.exists():
+            backup.rename(target)
+        _remove_path(tmp_target)
+        raise
+    finally:
+        if backup is not None and backup.exists():
+            _remove_path(backup)
     return name, []

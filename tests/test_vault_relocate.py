@@ -467,7 +467,7 @@ def test_apply_reports_a_failed_partial_move_rollback(
     runtime = install / ".runtime"
 
     real_run_git = vault_relocate._run_git
-    forward_calls = {"n": 0}
+    forward_calls = [0]
 
     def flaky_git(root: Path, *args: str) -> tuple[int, str]:
         if args[:1] == ("mv",) and len(args) == 3:
@@ -484,7 +484,6 @@ def test_apply_reports_a_failed_partial_move_rollback(
                 return (128, "fatal: simulated rollback failure")
         return real_run_git(root, *args)
 
-    forward_calls = [0]
     monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
 
     result = apply(config, "scandit", runtime)
@@ -494,6 +493,58 @@ def test_apply_reports_a_failed_partial_move_rollback(
     # The rollback failure is surfaced, not swallowed: the refusal names the
     # divergence between disk and registry instead of claiming a clean undo.
     assert any("rollback also failed" in r for r in result["refusals"]), result["refusals"]
+
+
+def test_apply_survives_a_failing_registry_restore_after_a_receipt_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipt-write failure + registry-restore failure must not raise.
+
+    The receipt write happens AFTER the registry was repointed, so if the
+    restore of the pre-relocation registry fails under the same disk/permission
+    condition, the registry still points at the destination while the moves
+    have been reversed. apply() must catch the restore failure, roll the
+    files forward to match the surviving registry, and report the divergence
+    — not raise with the workspace resolving to a missing vault after a
+    restart.
+    """
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+
+    def _receipt_boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    registry_writes = {"n": 0}
+    real_write_registry = vault_relocate._write_registry
+
+    def _registry_boom_after_repoint(*args, **kwargs):
+        # The FIRST registry write (the repoint inside _repoint_registry)
+        # succeeds; any later one (the compensation restore) fails, as it
+        # would under a persistent disk-full condition.
+        if registry_writes["n"] > 0:
+            raise OSError("disk full persists")
+        registry_writes["n"] += 1
+        return real_write_registry(*args, **kwargs)
+
+    monkeypatch.setattr(
+        vault_relocate,
+        "_write_receipt",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("receipt dir unwritable")),
+    )
+    monkeypatch.setattr(vault_relocate, "_write_registry", _registry_boom_after_repoint)
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("receipt" in r for r in result["refusals"])
+    # The restore failure is surfaced with the recovery it performed: the
+    # moves were rolled forward to match the surviving registry.
+    assert any("registry" in r.lower() for r in result["refusals"]), result["refusals"]
+    # The vault content sits at the destination, matching the registry.
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    scandit_entry = next(e for e in entries if e["name"] == "scandit")
+    assert scandit_entry["vault_root"] == "memory-vault/scandit"
 
 
 # -- undo collision with a recreated source ----------------------------------

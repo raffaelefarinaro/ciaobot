@@ -277,3 +277,54 @@ def test_concurrent_non_force_imports_of_the_same_skill_do_not_clobber(
     # And the winner's content is intact (not half-deleted).
     installed = (tmp_path / "demo" / "asset.bin").read_bytes()
     assert installed in (b"first", b"second")
+
+
+def test_force_import_failure_preserves_the_previous_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed force import must not delete the installed skill.
+
+    With overwrite=True the old directory used to be removed before the
+    final rename; if that rename then failed (filesystem error, another
+    process recreating the target), the previous skill was gone and the
+    replacement sat in a temp dir — data loss from an import failure. The
+    old directory is now renamed aside and restored when the swap fails.
+    """
+    real_rename = Path.rename
+    swap_attempts = {"n": 0}
+
+    def flaky_rename(self: Path, target: Path):
+        # Fail only the FIRST rename whose destination is the target skill
+        # dir — the swap, whose source is the unique .demo.tmp-* extraction
+        # dir (the rename-aside of the old skill uses demo itself as self).
+        # The restore rename that follows must succeed, as it would on a real
+        # filesystem once the transient error cleared.
+        if (
+            target.name == "demo"
+            and swap_attempts["n"] == 0
+            and ".demo.tmp-" in self.name
+        ):
+            swap_attempts["n"] += 1
+            raise OSError("simulated rename failure")
+        return real_rename(self, target)
+
+    monkeypatch.setattr("pathlib.Path.rename", flaky_rename)
+
+    # A previously installed skill the force import is replacing.
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Existing\n---\n# existing\n", encoding="utf-8"
+    )
+    (tmp_path / "demo" / "asset.bin").write_bytes(b"previous")
+
+    with pytest.raises(OSError, match="simulated rename failure"):
+        extract_skill_zip(_skill_zip("demo"), tmp_path, overwrite=True)
+
+    # The previous skill is back in place, intact.
+    assert (tmp_path / "demo" / "SKILL.md").read_text().startswith(
+        "---\nname: demo\ndescription: Existing"
+    )
+    assert (tmp_path / "demo" / "asset.bin").read_bytes() == b"previous"
+    # Nothing was left behind: no temp dirs, no backup dirs.
+    leftovers = [p for p in tmp_path.iterdir() if p.name != "demo"]
+    assert leftovers == []
