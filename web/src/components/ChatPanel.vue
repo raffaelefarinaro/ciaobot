@@ -7333,19 +7333,6 @@ details[open] > .activity-summary::before {
 }
 /* A live automation is the one thing here that is actively happening. */
 .ctx-chip-glyph.live { color: var(--accent); }
-/* Filled, because it means the user is the blocker — same rule as the
-   sidebar, home lanes and the action dock. */
-.ctx-attn {
-  margin-left: auto;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--bg);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  white-space: nowrap;
-}
-:global(:root.theme-light) .ctx-attn { color: var(--fg); }
 .ctx-detail {
   display: flex;
   flex-direction: column;

@@ -3760,6 +3760,28 @@ describe('switchChat workspace alignment', () => {
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
   })
+
+  // `/chat/:chatId/subagent/:agentId` carries the same chatId, so matching on
+  // that alone made the chat's own sidebar row a dead click while one of its
+  // subagents was open.
+  test('navigates back to the chat from one of its subagent views', async () => {
+    const { router } = await import('../router')
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat' } as unknown as ChatInfo,
+    ]
+    store.activeChatId = 'c1'
+    router.currentRoute.value.params = { chatId: 'c1', agentId: 'a1b2c3d4' }
+    routerPush.mockClear()
+
+    await store.switchChat('c1')
+
+    expect(routerPush).toHaveBeenCalledWith('/chat/c1')
+    router.currentRoute.value.params = {}
+  })
 })
 
 describe('workspaceNeedsInput', () => {

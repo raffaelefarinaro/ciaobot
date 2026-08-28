@@ -3166,8 +3166,13 @@ export const useProjectStore = defineStore('projects', () => {
     // landed here from /settings or /schedules where the chat route isn't
     // currently active).
     const { router } = await import('../router')
-    const currentRouteChatId = router.currentRoute.value.params.chatId
-    if (currentRouteChatId !== chatId) {
+    const currentRoute = router.currentRoute.value
+    const currentRouteChatId = currentRoute.params.chatId
+    // `/chat/:chatId/subagent/:agentId` carries the same `chatId`, so matching
+    // on that alone made clicking the chat's own sidebar row a no-op while one
+    // of its subagents was open: no push, and the activeChatId guard below
+    // returns early. Any sub-view of the chat still has to navigate back to it.
+    if (currentRouteChatId !== chatId || currentRoute.params.agentId) {
       router.push(`/chat/${chatId}`)
     }
     if (activeChatId.value === chatId) {
