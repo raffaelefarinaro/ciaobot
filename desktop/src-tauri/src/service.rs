@@ -26,12 +26,59 @@ fn resolve_ciao_from(path_value: Option<&str>, preferred: &[PathBuf]) -> Option<
         .find(|candidate| candidate.is_file())
 }
 
-fn bundled_ciao_from(executable: Option<&Path>) -> Option<PathBuf> {
-    let app_bundle = executable?
+fn app_bundle_of(executable: Option<&Path>) -> Option<PathBuf> {
+    executable?
         .ancestors()
-        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))?;
-    let candidate = app_bundle.join("Contents/Resources/ciao-runtime/bin/ciao");
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
+        .map(Path::to_path_buf)
+}
+
+fn bundled_ciao_from(executable: Option<&Path>) -> Option<PathBuf> {
+    let candidate = app_bundle_of(executable)?.join("Contents/Resources/ciao-runtime/bin/ciao");
     candidate.is_file().then_some(candidate)
+}
+
+/// Why [`resolve_ciao`] came up empty, as lines naming each lookup in order.
+///
+/// "The ciao executable was not found." alone does not separate the three ways
+/// this happens, and they need different fixes: a repo-built bundle never had a
+/// runtime staged into Contents/Resources (build one, or run the installed
+/// app), CIAO_ENGINE_PATH points somewhere the file is not, or a dev build is
+/// relying on a PATH lookup that only happens under CIAO_DEV_MODE.
+fn missing_engine_detail_from(
+    bundle: Option<&Path>,
+    engine_path: Option<&str>,
+    dev_mode: bool,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(match bundle {
+        Some(bundle) => format!(
+            "• no bundled engine at {}",
+            bundle
+                .join("Contents/Resources/ciao-runtime/bin/ciao")
+                .display()
+        ),
+        None => "• not running from an .app bundle, so there is no bundled engine".to_string(),
+    });
+    lines.push(match engine_path {
+        Some(value) => format!("• CIAO_ENGINE_PATH is set to {value}, which is not a file"),
+        None => "• CIAO_ENGINE_PATH is not set".to_string(),
+    });
+    lines.push(if dev_mode {
+        "• CIAO_DEV_MODE is on, but no `ciao` is on PATH".to_string()
+    } else {
+        "• PATH was not searched — that fallback only runs under CIAO_DEV_MODE".to_string()
+    });
+    lines.join("\n")
+}
+
+/// [`missing_engine_detail_from`] against this process's environment.
+pub fn missing_engine_detail() -> String {
+    missing_engine_detail_from(
+        app_bundle_of(env::current_exe().ok().as_deref()).as_deref(),
+        env::var("CIAO_ENGINE_PATH").ok().as_deref(),
+        env::var_os("CIAO_DEV_MODE").is_some(),
+    )
 }
 
 pub fn resolve_ciao(path_value: Option<&str>) -> Option<PathBuf> {
@@ -159,6 +206,36 @@ mod tests {
             resolve_ciao_from(path.to_str(), &[]).as_deref(),
             Some(binary.as_path())
         );
+    }
+
+    // The repo-built bundle: `cargo tauri build` stages no runtime, so the app
+    // launches and every engine action dead-ends. Naming the path it wanted is
+    // what separates that from a broken install.
+    #[test]
+    fn the_detail_names_the_bundle_path_it_expected() {
+        let detail = missing_engine_detail_from(Some(Path::new("/tmp/Ciaobot.app")), None, false);
+        assert!(
+            detail.contains("/tmp/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"),
+            "{detail}"
+        );
+        assert!(detail.contains("CIAO_ENGINE_PATH is not set"), "{detail}");
+        assert!(detail.contains("only runs under CIAO_DEV_MODE"), "{detail}");
+    }
+
+    // A dev build run straight from target/: no bundle, and the PATH fallback
+    // is the one that was supposed to work.
+    #[test]
+    fn the_detail_reports_a_stale_override_and_an_exhausted_path() {
+        let detail = missing_engine_detail_from(None, Some("/gone/ciao"), true);
+        assert!(
+            detail.contains("not running from an .app bundle"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("CIAO_ENGINE_PATH is set to /gone/ciao"),
+            "{detail}"
+        );
+        assert!(detail.contains("no `ciao` is on PATH"), "{detail}");
     }
 
     #[test]

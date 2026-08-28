@@ -349,7 +349,12 @@ def test_rotation_preserves_lifetime_totals(tmp_path: Path, monkeypatch) -> None
             # Distinct timestamps: byte-identical lines are what a crash
             # duplicate looks like, and the fold de-duplicates those on
             # purpose — so a fixture must not write the same ts twice.
-            old = (datetime.now(UTC) - timedelta(days=90, microseconds=n)).isoformat()
+            # Offset from the `base` captured above rather than re-reading the
+            # clock: `now() - n µs` inside the loop lets wall-clock advance
+            # cancel the decrement, so rows collide, the fold drops them as
+            # crash duplicates, and the totals come up short by however many
+            # microseconds the loop happened to take on that machine.
+            old = (base - timedelta(microseconds=n)).isoformat()
             f.write(json.dumps({
                 "ts": old, "workspace": "personal" if n % 2 else "work",
                 "kind": "memory", "action": "promoted", "via": "pwa",

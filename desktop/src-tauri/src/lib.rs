@@ -549,7 +549,10 @@ fn run_full_update(app: AppHandle, force: bool) {
             show_error(
                 &app,
                 "Ciaobot engine unavailable",
-                "The ciao executable was not found.",
+                format!(
+                    "The ciao executable was not found.\n\n{}",
+                    service::missing_engine_detail()
+                ),
             );
             return;
         };
@@ -908,7 +911,10 @@ fn build_windows(
             }
             None => append_log(
                 &runtime.runtime_root,
-                "bootstrap FAILED: the ciao executable was not found",
+                &format!(
+                    "bootstrap FAILED: the ciao executable was not found. {}",
+                    service::missing_engine_detail().replace('\n', " ")
+                ),
             ),
         }
     }
@@ -1118,7 +1124,10 @@ fn invoke_service_action(app: AppHandle, action: &'static str, force: bool, exit
             show_error(
                 &app,
                 "Ciaobot engine unavailable",
-                "The ciao executable was not found.",
+                format!(
+                    "The ciao executable was not found.\n\n{}",
+                    service::missing_engine_detail()
+                ),
             );
             return;
         };
@@ -1217,8 +1226,12 @@ fn set_login_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
         .autolaunch()
         .is_enabled()
         .map_err(|error| error.to_string())?;
-    let binary = service::resolve_ciao(env::var("PATH").ok().as_deref())
-        .ok_or_else(|| "The ciao engine executable was not found.".to_string())?;
+    let binary = service::resolve_ciao(env::var("PATH").ok().as_deref()).ok_or_else(|| {
+        format!(
+            "The ciao engine executable was not found.\n\n{}",
+            service::missing_engine_detail()
+        )
+    })?;
     let action = if enabled { "enable" } else { "disable" };
     let result = service::invoke(&binary, "login", &[action])?;
     if !result.ok {
