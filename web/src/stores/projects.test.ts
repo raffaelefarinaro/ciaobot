@@ -4774,4 +4774,36 @@ describe('chatLastSnippet', () => {
     // one, so the tie can only ever be the stale case.
     expect(store.chatLastSnippet('c1')).toBe('Newer response B.')
   })
+
+  test('rebases a receipt-time stamp when an unknown chat first reconciles', () => {
+    const store = useProjectStore()
+    // The event arrived for a chat this tab has never seen (created on
+    // another client), so the fallback stamped it with receipt time.
+    store.lastResultSnippet = { c1: 'Response A.' }
+    store.lastResultSnippetAt = { c1: '2026-08-27T01:00:00.123Z' }
+    store.lastResultSnippetNeedsRebase.add('c1')
+
+    // The chat reconciles with an activity time EARLIER than the receipt
+    // stamp (delayed event delivery). Before the rebase, the cached snippet
+    // would stay authoritative for the rest of the session.
+    store.chats = [{
+      chat_id: 'c1',
+      project_id: 'p1',
+      title: 'Created elsewhere',
+      archived: false,
+      local: true,
+      created_at: '2026-08-27T00:00:00Z',
+      last_activity_at: '2026-08-27T01:00:00Z',
+      last_read_at: '2026-08-27T00:00:00Z',
+      // Response B: the fresher response the record carries.
+      last_snippet: 'Response B.',
+    }] as unknown as ChatInfo[]
+    store.reconcileChatList(store.chats as ChatInfo[])
+
+    // The stamp was rebased to the server time, so the persisted record
+    // (same second, tie) wins over the stale cached snippet.
+    expect(store.lastResultSnippetAt.c1).toBe('2026-08-27T01:00:00Z')
+    expect(store.chatLastSnippet('c1')).toBe('Response B.')
+    expect(store.lastResultSnippetNeedsRebase.has('c1')).toBe(false)
+  })
 })
