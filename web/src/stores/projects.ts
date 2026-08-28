@@ -741,6 +741,7 @@ export const useProjectStore = defineStore('projects', () => {
   )
 
   let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
+  let runningSubagentRefreshGeneration = 0
   watch(anyChatWorking, (working) => {
     if (runningSubagentTimer !== null) {
       clearInterval(runningSubagentTimer)
@@ -3114,8 +3115,10 @@ export const useProjectStore = defineStore('projects', () => {
   // wholesale rather than merged: the server omits chats with nothing running,
   // and that omission is exactly how a finished subagent's row disappears.
   async function refreshRunningSubagents(): Promise<void> {
+    const generation = ++runningSubagentRefreshGeneration
     try {
       const r = await api.get<RunningSubagentsResponse>('/api/subagents/running')
+      if (generation !== runningSubagentRefreshGeneration) return
       runningSubagents.value = (r && typeof r === 'object' && r.chats) ? r.chats : {}
     } catch {
       // Transient (offline, host proxy down): keep the last known rows rather

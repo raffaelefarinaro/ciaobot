@@ -2594,6 +2594,26 @@ describe('background agents indicator', () => {
     expect(store.activeBackgroundAgents).toBe(0)
   })
 
+  test('ignores an older poll that resolves after a newer poll', async () => {
+    const responses: Array<(value: unknown) => void> = []
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') {
+        return new Promise(resolve => responses.push(resolve))
+      }
+      return Promise.resolve([])
+    })
+    const store = useProjectStore()
+
+    const older = store.refreshRunningSubagents()
+    const newer = store.refreshRunningSubagents()
+    responses[1]({ chats: {} })
+    await newer
+    responses[0]({ chats: { 'chat-finished': [{ agent_id: 'stale-agent' }] } })
+    await older
+
+    expect(store.runningSubagents).toEqual({})
+  })
+
   test('does not set toast or unread marker on background agent completion', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
