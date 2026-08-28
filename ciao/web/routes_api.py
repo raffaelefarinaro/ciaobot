@@ -845,9 +845,6 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
-        # App-wide fallback when a workspace's default_model is empty, so the
-        # PWA can label "Inherit default (<model>)" instead of a vague hint.
-        "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
     }
 
@@ -5767,6 +5764,12 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},
+        # Per-provider default execution (permission) mode for new chats, as
+        # stored ("manual" / "auto" / "bypass"; missing = app default auto).
+        "provider_default_modes": {
+            provider: ("manual" if mode == "normal" else mode)
+            for provider, mode in (s.provider_default_modes or {}).items()
+        },
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider routine models, as stored (missing = provider default).

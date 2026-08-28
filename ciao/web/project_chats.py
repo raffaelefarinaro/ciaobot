@@ -3158,17 +3158,15 @@ class ProjectChatManager:
             raise ValueError(f"Unknown provider '{provider}'")
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
-        # Per-workspace default: one workspace can default to a cheaper tier
-        # than another. An explicit ``model`` arg wins.
         project = self._projects.get(project_id)
         workspace = project.workspace if project else None
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        # Per-workspace default: one workspace can default to a cheaper model
-        # than another. An explicit ``model`` arg wins. Passing chat_provider
-        # makes this resolve against that provider's own operator default
-        # when it differs from the workspace's own default provider.
+        # The provider's operator default (Settings → Models tab); the
+        # workspace no longer pins a model. An explicit ``model`` arg wins.
+        # Passing chat_provider resolves against that provider's own operator
+        # default when it differs from the workspace's default provider.
         default_model = self._config.default_model_for_workspace(
             workspace, chat_provider
         )
@@ -4741,13 +4739,10 @@ class ProjectChatManager:
     ) -> str:
         """Pick the default model for a new schedule.
 
-        Mirrors ``create_chat``'s per-workspace default lookup so a
-        schedule attached to a personal project can default to an
-        tier, while another defaults to a more capable one.
-        Falls back to the global ``claude_default_model`` when the
-        project is unknown. ``provider``, when given, resolves against
-        that provider's own default instead of the workspace's default
-        provider (see ``CiaoConfig.default_model_for_workspace``).
+        Mirrors ``create_chat``'s provider-default lookup. ``provider``,
+        when given, resolves against that provider's own default instead
+        of the workspace's default provider (see
+        ``CiaoConfig.default_model_for_workspace``).
         """
         project = self._projects.get(project_id) if project_id else None
         workspace = project.workspace if project else None

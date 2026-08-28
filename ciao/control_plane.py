@@ -548,7 +548,6 @@ class CiaoControlPlane:
         *,
         name: str,
         default_provider: str = "claude",
-        default_model: str = "",
         gws_profile: str = "",
         disallowed_tools: Any = _UNSET,
         color: str = "",
@@ -559,7 +558,6 @@ class CiaoControlPlane:
         data: dict[str, Any] = {
             "name": name,
             "default_provider": default_provider,
-            "default_model": default_model,
             "gws_profile": gws_profile,
         }
         if disallowed_tools is not _UNSET:

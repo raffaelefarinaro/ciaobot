@@ -1412,7 +1412,6 @@ class CiaoMcpService:
         async def workspace_create(
             name: str,
             default_provider: str = "claude",
-            default_model: str = "",
             gws_profile: str = "",
             disallowed_tools: Any = _UNSET,
             color: str = "",
@@ -1423,7 +1422,6 @@ class CiaoMcpService:
                 name: Letters, numbers, dashes, or underscores. The vault
                     folder is the standard one under the vault root.
                 default_provider: claude or opencode.
-                default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
                     null resets the workspace-specific list to inherited defaults.
@@ -1435,7 +1433,6 @@ class CiaoMcpService:
                     p,
                     name=name,
                     default_provider=default_provider,
-                    default_model=default_model,
                     gws_profile=gws_profile,
                     disallowed_tools=disallowed_tools,
                     color=color,

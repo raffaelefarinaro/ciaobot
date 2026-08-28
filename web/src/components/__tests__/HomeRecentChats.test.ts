@@ -14,8 +14,8 @@ function timestamp(secondsAgo: number): string {
 function seedChats(includeChats = true) {
   const store = useProjectStore()
   store.workspaces = [
-    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', color: 'pink' },
-    { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '', color: 'cyan' },
+    { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '', color: 'pink' },
+    { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '', color: 'cyan' },
   ]
   store.projects = [
     { project_id: 'personal-project', name: 'Personal project', workspace: 'personal' },

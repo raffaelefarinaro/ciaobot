@@ -34,6 +34,26 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
     }
 
 
+# Execution (permission) modes a provider default may pin. ``manual`` is the
+# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
+# ``plan`` stays chat-only and is not a settings default.
+_MODES = ("manual", "auto", "bypass")
+
+
+def _clean_default_modes(raw: object) -> dict[str, str]:
+    """Normalize a ``{provider: mode}`` map, dropping junk and bad modes."""
+    if not isinstance(raw, dict):
+        return {}
+    known = set(provider_registry.provider_ids())
+    return {
+        str(provider_id): str(mode).strip()
+        for provider_id, mode in raw.items()
+        if str(provider_id) in known
+        and isinstance(mode, str)
+        and mode.strip() in _MODES
+    }
+
+
 def _default_model_settings(config: object, descriptor: object) -> Any:
     """This provider's default-model settings dataclass on ``config``, if present.
 
@@ -76,6 +96,11 @@ class AppSettings:
     # registry entry instead of a field threaded through the settings route and
     # the PWA.
     provider_default_models: dict[str, str] | None = None
+
+    # Per-provider default execution (permission) mode for new chats. Missing
+    # entry = the env-backed ``claude_mode`` (auto), for every provider. Same
+    # nested-map rationale as ``provider_default_models``.
+    provider_default_modes: dict[str, str] | None = None
 
     # Per-provider default thinking level for new chats. Missing entry = the
     # provider's own default ("auto").
@@ -126,6 +151,9 @@ class AppSettingsStore:
             cleaned = _clean_provider_map(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
+        provider_default_modes = _clean_default_modes(raw.get("provider_default_modes"))
+        if provider_default_modes:
+            settings.provider_default_modes = provider_default_modes
         return settings
 
     def _save(self) -> None:
@@ -156,6 +184,21 @@ class AppSettingsStore:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
                 setattr(self.settings, key, _clean_provider_map(value))
+                continue
+            if key == "provider_default_modes":
+                if not isinstance(value, dict):
+                    raise ValueError(f"{key} must be an object")
+                unknown = sorted(
+                    str(mode)
+                    for mode in value.values()
+                    if not isinstance(mode, str)
+                    or (mode.strip() and mode.strip() not in _MODES)
+                )
+                if unknown:
+                    raise ValueError(
+                        f"{key} entries must be one of {', '.join(_MODES)}"
+                    )
+                setattr(self.settings, key, _clean_default_modes(value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -201,6 +244,12 @@ class AppSettingsStore:
         config.provider_default_models = dict(s.provider_default_models or {})
         config.provider_default_thinking = dict(s.provider_default_thinking or {})
         config.provider_insights_models = dict(s.provider_insights_models or {})
+        # Modes carry the PWA-facing "manual" through as the BridgeMode
+        # "normal" the providers understand.
+        config.provider_default_modes = {
+            provider: ("normal" if mode == "manual" else mode)
+            for provider, mode in (s.provider_default_modes or {}).items()
+        }
         for descriptor in provider_registry.descriptors():
             current = _default_model_settings(config, descriptor)
             if current is None:

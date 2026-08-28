@@ -85,9 +85,6 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
-  // App-wide fallback model when a workspace default_model is empty; lets
-  // Settings label the picker "Inherit default (<model>)".
-  const workspaceAppDefaultModel = ref('')
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // Re-entry summaries are requested in the background whenever a non-empty
@@ -651,13 +648,12 @@ export const useProjectStore = defineStore('projects', () => {
         name,
         vault_root: '',
         default_provider: 'claude',
-        default_model: '',
         gws_profile: '',
       }))
     }
     return [
-      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal' },
-      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work' },
+      { name: 'personal', vault_root: 'personal', default_provider: 'claude', gws_profile: 'personal' },
+      { name: 'work', vault_root: 'work', default_provider: 'claude', gws_profile: 'work' },
     ]
   })
 
@@ -2036,7 +2032,6 @@ export const useProjectStore = defineStore('projects', () => {
   async function fetchWorkspaces() {
     const res = await api.get<WorkspacesResponse>('/api/workspaces')
     workspaces.value = res.workspaces || []
-    workspaceAppDefaultModel.value = res.app_default_model || ''
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
@@ -5603,7 +5598,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,

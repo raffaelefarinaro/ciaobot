@@ -127,7 +127,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
             "name": "client-a",
             "vault_root": "client-a",
             "default_provider": "claude",
-            "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
             "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         },
@@ -138,7 +137,9 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     names = [workspace["name"] for workspace in data["workspaces"]]
     assert "client-a" in names
     assert config.workspace("client-a").default_provider == "claude"
-    assert config.default_model_for_workspace("client-a") == "kimi-k2.7-code:cloud"
+    # The workspace no longer pins a model; new chats inherit the provider
+    # default (claude_default_model).
+    assert config.default_model_for_workspace("client-a") == "opus"
     assert config.disallowed_tools_for_workspace("client-a") == [
         "mcp__claude_ai_Slack",
         "Bash",
@@ -155,7 +156,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "name": "client-a",
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
-        "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "allowed_mcp_servers": None,
         "gws_profile": "work",
@@ -172,10 +172,9 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
 
     patch = client.patch(
         "/api/workspaces/client-a",
-        json={"default_model": "sonnet", "disallowed_tools": "mcp__example,Bash"},
+        json={"disallowed_tools": "mcp__example,Bash"},
     )
     assert patch.status_code == 200
-    assert config.workspace("client-a").default_model == "sonnet"
     assert config.disallowed_tools_for_workspace("client-a") == ["mcp__example", "Bash"]
 
     delete = client.delete("/api/workspaces/client-a")
@@ -190,7 +189,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "name": "personal",
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
-            "default_model": "",
             "disallowed_tools": None,
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
@@ -218,7 +216,7 @@ def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
     existing.vault_root = str(tmp_path / "external-vault")
     patched = client.patch(
         "/api/workspaces/research",
-        json={"vault_root": "../outside", "default_model": "sonnet"},
+        json={"vault_root": "../outside", "gws_profile": "work"},
     )
     assert patched.status_code == 200
     assert config.workspace("research").vault_root == str(
@@ -314,7 +312,6 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
                     "name": "personal",
                     "vault_root": "memory-vault/personal",
                     "default_provider": "ollama",
-                    "default_model": "qwen3:latest",
                     "model_bucket": "big",
                     "gws_profile": "personal",
                 },
@@ -342,7 +339,7 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
     # A save that omits the provider keeps working despite the stale record.
     untouched = client.patch(
         "/api/workspaces/personal",
-        json={"default_model": "sonnet"},
+        json={"gws_profile": "personal"},
     )
     assert untouched.status_code == 200
 
@@ -453,7 +450,7 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     # Other fields can update without resetting color.
     keep = client.patch(
         "/api/workspaces/client-a",
-        json={"default_model": "sonnet"},
+        json={"gws_profile": "work"},
     )
     assert keep.status_code == 200
     assert config.workspace("client-a").color == "emerald"

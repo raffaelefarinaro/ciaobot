@@ -54,7 +54,6 @@ export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
   default_provider: WorkspaceProvider
-  default_model: string
   disallowed_tools?: string[] | null
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
@@ -64,8 +63,6 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
-  // App-wide fallback model used when a workspace's default_model is empty.
-  app_default_model?: string
   provider_options?: WorkspaceProviderOption[]
 }
 
@@ -545,6 +542,9 @@ export interface RoutineSettings {
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>
+  // Per-provider default execution (permission) mode for new chats:
+  // manual | auto | bypass. Missing = the app default (auto).
+  provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
   // Per-provider session-insights models; missing = provider default.

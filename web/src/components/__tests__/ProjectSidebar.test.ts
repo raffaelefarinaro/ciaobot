@@ -20,7 +20,6 @@ describe('ProjectSidebar chat actions', () => {
       name: 'personal',
       vault_root: '/tmp/vault',
       default_provider: 'claude',
-      default_model: 'sonnet',
       gws_profile: '',
     }]
     store.projects = [{

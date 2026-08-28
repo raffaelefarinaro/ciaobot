@@ -68,8 +68,8 @@ describe('ProjectSidebar workspace guide card', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
-      { name: 'work', vault_root: '/tmp/w', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '/tmp/w', default_provider: 'claude', gws_profile: '' },
     ]
     store.activeWorkspace = 'work'
     store.projects = []

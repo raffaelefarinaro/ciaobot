@@ -719,8 +719,9 @@ const editInheritedModelLabel = computed(() => {
   const provider = projectStore.workspaceProviderOptions.find(
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
-  const model = workspace?.default_model
-    || projectStore.workspaceAppDefaultModel
+  // Workspaces no longer pin a model: the effective default is the
+  // provider's own default from the Models tab.
+  const model = store.models?.provider_defaults?.[workspace?.default_provider || '']
     || store.models?.default
     || ''
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`

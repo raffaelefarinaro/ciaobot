@@ -9,7 +9,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS
 from ciao.models import BridgeMode
@@ -203,7 +203,6 @@ class WorkspaceConfig:
     name: str
     vault_root: str
     default_provider: str = "claude"
-    default_model: str = ""
     # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
     # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
@@ -255,7 +254,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         name=name,
         vault_root=vault_root,
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
-        default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         allowed_mcp_servers=_coerce_allowed_mcp_servers(
             data.get("allowed_mcp_servers")
@@ -459,6 +457,10 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     claude_mode: BridgeMode = "auto"
+    # Per-provider default execution (permission) mode for new chats, set from
+    # the PWA Settings → Providers tab (runtime settings store). A missing
+    # entry uses ``claude_mode`` for every provider.
+    provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab (runtime settings store). A missing entry uses the provider's
     # own catalog default.
@@ -958,7 +960,6 @@ class CiaoConfig:
                 "default_provider": self.default_provider_for_workspace(
                     workspace.name
                 ),
-                "default_model": workspace.default_model,
                 "disallowed_tools": workspace.disallowed_tools,
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
@@ -976,16 +977,16 @@ class CiaoConfig:
     ) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
-        Falls back to ``claude_default_model`` when the per-workspace
-        knob is empty or the workspace is unknown.
+        The workspace no longer pins a model: the answer is the effective
+        provider's operator default (``provider_default_models``, surfaced in
+        the PWA Settings → Models tab), falling back to the provider's own
+        catalog default.
 
         ``provider``, when given, is the provider the chat/schedule will
         actually run on. It can differ from the workspace's own
         ``default_provider`` (an explicit provider override); in that case
         resolve against that provider's own operator default instead of the
-        workspace's default-provider model, since a workspace-level model
-        override is only meaningful for the workspace's own default
-        provider (#see create_chat/schedule_effective_routing callers).
+        workspace's default-provider model.
         """
         from ciao import provider_registry
 
@@ -997,13 +998,6 @@ class CiaoConfig:
         if effective_provider:
             descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
-                uses_workspace_default_provider = provider is None or provider == workspace_provider
-                if (
-                    workspace_config is not None
-                    and uses_workspace_default_provider
-                    and workspace_config.default_model
-                ):
-                    return workspace_config.default_model
                 if descriptor.default_model_config_key:
                     return str(getattr(self, descriptor.default_model_config_key, "") or "")
                 # A provider with an operator-settable default model uses it;
@@ -1049,13 +1043,17 @@ class CiaoConfig:
         return "claude"
 
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
-        """The default execution mode for new chats on ``provider``.
+        """The default execution (permission) mode for new chats on ``provider``.
 
-        Every provider runs in auto mode by default. Auto's classifier gates
-        risky actions (destructive shell, unapproved control-plane mutations)
-        while allowing safe reads and edits, so there is no safer default and
-        no per-provider override.
+        An operator pin (Settings → Providers → permission mode) wins;
+        otherwise every provider falls back to ``claude_mode`` (auto).
+        ``manual`` maps to the BridgeMode ``normal`` — ask for every
+        action; ``bypass`` allows everything; ``auto`` runs the permissive
+        classifier-gated default.
         """
+        mode = (self.provider_default_modes or {}).get(provider, "")
+        if mode in {"normal", "plan", "auto", "bypass"}:
+            return cast(BridgeMode, mode)
         return self.claude_mode
 
     def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str] | None:

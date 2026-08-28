@@ -669,7 +669,6 @@ describe('component mount smoke', () => {
         name: 'legacy',
         vault_root: 'memory-vault/legacy',
         default_provider: 'ollama',
-        default_model: 'qwen3:latest',
         gws_profile: '',
       }],
       active: 'legacy',
@@ -715,7 +714,6 @@ describe('component mount smoke', () => {
         name: 'personal',
         vault_root: 'memory-vault/personal',
         default_provider: 'claude',
-        default_model: '',
         gws_profile: '',
       }],
       active: 'personal',
@@ -842,7 +840,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView no longer offers a per-provider default mode', async () => {
+  it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -853,11 +851,10 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The default execution mode is fixed at auto for every provider; the
-    // per-provider "Default mode" selector is gone.
-    const modeSelect = wrapper.find('.routine-select[data-provider="opencode"]')
-    expect(modeSelect.exists()).toBe(false)
-    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Default mode')).toBe(false)
+    // The permission-mode selector is back: manual / auto / bypass per provider.
+    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Permission mode')).toBe(true)
+    const modeLabels = wrapper.findAll('select option').map((el) => el.text())
+    expect(modeLabels.join('\n')).toContain('Bypass — allow everything')
 
     wrapper.unmount()
   })

@@ -1214,8 +1214,6 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
 
 
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
-    ("CLAUDE_DEFAULT_MODEL_PERSONAL", "set a workspace's default_model in workspaces.json"),
-    ("CLAUDE_DEFAULT_MODEL_WORK", "set a workspace's default_model in workspaces.json"),
     ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
     ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
     # Execution mode is fixed at auto for every provider; there is no override.
@@ -1255,8 +1253,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one, tell me its current value and the "
                 "workspace it was meant for, then move the setting onto that "
-                "workspace in `.runtime/workspaces.json` (`default_model` and "
-                "`disallowed_tools` are per-workspace fields there). Ask before "
+                "workspace in `.runtime/workspaces.json` (`disallowed_tools` is "
+                "a per-workspace field there). Ask before "
                 "changing a value rather than assuming the old one still reflects "
                 "what I want, and comment the variable out of `.env` once its "
                 "setting has a new home."

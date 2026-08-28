@@ -97,14 +97,14 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
             {
                 "name": "home",
                 "vault_root": "memory-vault/home",
-                "default_model": "haiku",
+                "default_provider": "claude",
                 "disallowed_tools": ["Bash", "mcp__example"],
                 "gws_profile": "personal",
             },
             {
                 "name": "client",
                 "vault_root": "/tmp/client-vault",
-                "default_model": "opus",
+                "default_provider": "opencode",
                 "gws_profile": "work",
             },
         ]
@@ -116,9 +116,9 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.workspace_names() == ["home", "client"]
     assert config.workspace("home").vault_root == "memory-vault/home"
     assert config.workspace("home").gws_profile == "personal"
-    assert config.default_model_for_workspace("home") == "haiku"
+    assert config.default_provider_for_workspace("home") == "claude"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
-    assert config.default_model_for_workspace("client") == "opus"
+    assert config.default_provider_for_workspace("client") == "opencode"
     # A workspace with no explicit denylist gets the same defaults whatever it
     # is named — no branch on "personal"/"work" anywhere.
     assert config.disallowed_tools_for_workspace("client") == list(
@@ -135,7 +135,6 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
                 {
                     "name": "default",
                     "vault_root": "memory-vault",
-                    "default_model": "haiku",
                 }
             ]
         ),
@@ -152,7 +151,8 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
         tmp_path / "memory-vault"
     )
     assert config.workspace_vault_root("default") == tmp_path / "memory-vault"
-    assert config.default_model_for_workspace("default") == "haiku"
+    # The workspace no longer pins a model: the claude default applies.
+    assert config.default_model_for_workspace("default") == "opus"
 
 
 def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:

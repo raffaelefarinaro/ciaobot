@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.providers.opencode import OpencodeSettings
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -124,13 +125,11 @@ def test_system_schedule_default_inherits_first_workspace_routing(
                 name="personal",
                 vault_root="personal",
                 default_provider="opencode",
-                default_model="",
             ),
             "work": WorkspaceConfig(
                 name="work",
                 vault_root="work",
                 default_provider="claude",
-                default_model="opus",
             ),
         },
     )
@@ -166,7 +165,6 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
         name="personal",
         vault_root="personal",
         default_provider="opencode",
-        default_model="",
     )
     config = CiaoConfig(
         pwa_auth_token="test-token",
@@ -174,6 +172,7 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={"personal": workspace},
+        opencode=OpencodeSettings(default_model="anthropic/claude-sonnet-4-6"),
     )
     pcm = ProjectChatManager(
         config,
@@ -192,14 +191,17 @@ def test_schedule_inheritance_is_resolved_again_after_workspace_change(
         workspace="personal",
     )
 
-    assert pcm.schedule_effective_routing(entry) == ("opencode", "", "personal")
+    assert pcm.schedule_effective_routing(entry) == (
+        "opencode",
+        "anthropic/claude-sonnet-4-6",
+        "personal",
+    )
 
     workspace.default_provider = "claude"
-    workspace.default_model = "sonnet"
 
     assert pcm.schedule_effective_routing(entry) == (
         "claude",
-        "sonnet",
+        "opus",
         "personal",
     )
 

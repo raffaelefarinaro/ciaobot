@@ -160,7 +160,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "name": "personal",
                 "vault_root": "personal",
                 "default_provider": "claude",
-                "default_model": "",
                 "gws_profile": "personal",
                 "disallowed_tools": None,
                 "allowed_mcp_servers": None,
@@ -170,7 +169,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "name": "work",
                 "vault_root": "work",
                 "default_provider": "claude",
-                "default_model": "opus",
                 "gws_profile": "work",
                 "disallowed_tools": [],
                 "allowed_mcp_servers": None,
@@ -178,7 +176,6 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
             },
         ],
         "active": "personal",
-        "app_default_model": "opus",
         "provider_options": [
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
             {"value": "opencode", "label": "opencode"},

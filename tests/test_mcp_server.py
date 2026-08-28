@@ -1589,7 +1589,6 @@ def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:
         principal,
         name="research",
         default_provider="opencode",
-        default_model="opencode/big-pickle",
         gws_profile="work",
         disallowed_tools=["Bash"],
         color="cyan",

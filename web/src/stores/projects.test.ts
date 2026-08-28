@@ -3210,8 +3210,8 @@ describe('workspace and chat transitions', () => {
       if (path === '/api/workspaces') {
         return Promise.resolve({
           workspaces: [
-            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode', default_model: '', gws_profile: 'personal' },
-            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', default_model: '', gws_profile: 'work' },
+            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode', gws_profile: 'personal' },
+            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', gws_profile: 'work' },
           ],
           active: 'home',
           provider_options: [

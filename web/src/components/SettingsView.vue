@@ -731,6 +731,19 @@
                     <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
                   </label>
                   <label class="settings-field">
+                    <span class="ws-label">Permission mode</span>
+                    <select
+                      class="routine-select"
+                      :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="option in PROVIDER_MODE_OPTIONS" :key="option.value" :value="option.value">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
                     <span class="ws-label">Default thinking</span>
                     <select
                       class="routine-select"
@@ -858,15 +871,6 @@
                     </option>
                   </select>
                 </label>
-                <label class="settings-field"><span class="ws-label">Default model</span>
-                  <ModelSelector
-                    v-model="newWorkspaceForm.default_model"
-                    :sections="newWorkspaceModelSections"
-                    :placeholder="workspaceInheritPlaceholder"
-                    :empty-placeholder="workspaceInheritPlaceholder"
-                    :disabled="workspacesSaving === 'new'"
-                  />
-                </label>
                 <label class="settings-field">
                   <div class="settings-label-row">
                     <span class="ws-label">Google profile</span>
@@ -954,15 +958,6 @@
                         {{ provider.label }}
                       </option>
                     </select>
-                  </label>
-                  <label class="settings-field"><span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-model="form.default_model"
-                      :sections="workspaceModelSectionsForForm(form)"
-                      :placeholder="workspaceInheritPlaceholder"
-                      :empty-placeholder="workspaceInheritPlaceholder"
-                      :disabled="workspacesSaving === form.name"
-                    />
                   </label>
                   <label class="settings-field">
                     <div class="settings-label-row">
@@ -2724,6 +2719,30 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
+// ── Per-provider default permission mode (Providers tab) ────────────────
+const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
+
+// PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
+const PROVIDER_MODE_OPTIONS = [
+  { value: DEFAULT_MODE_SELECTION, label: 'Automatic (app default)' },
+  { value: 'manual', label: 'Manual — ask for every action' },
+  { value: 'auto', label: 'Auto — allow safe work, ask on risky' },
+  { value: 'bypass', label: 'Bypass — allow everything' },
+]
+
+function providerDefaultModeValue(provider: AliasProviderKey): string {
+  return routines.value?.provider_default_modes?.[provider] || DEFAULT_MODE_SELECTION
+}
+
+async function saveProviderDefaultMode(provider: AliasProviderKey, value: string) {
+  const modes = JSON.parse(
+    JSON.stringify(routines.value?.provider_default_modes || {}),
+  ) as Record<string, string>
+  if (value === DEFAULT_MODE_SELECTION) delete modes[provider]
+  else modes[provider] = value
+  await saveRoutines({ provider_default_modes: modes })
+}
+
 function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
   // Runtime-provider models need an explicit qualifier so the backend does not
   // send a global routine override through Claude by default.
@@ -3793,7 +3812,6 @@ type WorkspaceForm = {
   name: string
   vault_root: string
   default_provider: WorkspaceProvider
-  default_model: string
   gws_profile: string
   disallowed_tools: string
   color: WorkspaceColorId
@@ -3808,7 +3826,6 @@ function blankWorkspaceForm(): WorkspaceForm {
     name: '',
     vault_root: '',
     default_provider: defaultWorkspaceProvider(),
-    default_model: '',
     gws_profile: '',
     disallowed_tools: '',
     color: DEFAULT_WORKSPACE_COLOR,
@@ -3830,49 +3847,36 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     name: ws.name,
     vault_root: ws.vault_root || '',
     default_provider: normalizeWorkspaceProvider(ws.default_provider),
-    default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     color: normalizeWorkspaceColor(ws.color),
   }
 }
 
-function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
+function workspaceModelSectionsForProvider(provider: WorkspaceProvider): ModelSection[] {
   if (provider.startsWith('custom:')) {
     const section = sectionsFromModelsResponse(workspaceModels.value)
       .find((item) => item.key === provider)
-    if (!section) return []
-    const models = [...section.models]
-    if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
-    return [{ ...section, models }]
+    return section ? [section] : []
   }
   if (provider === 'opencode') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
-    if (!section) return []
-    const models = [...section.models]
-    const current = currentModelValue.trim()
-    if (current && !models.includes(current)) models.push(current)
-    return [{ ...section, models }]
+    return section ? [section] : []
   }
   // Claude's models are the tier aliases plus any configured concrete ids.
   const section = sectionsFromModelsResponse(workspaceModels.value)
     .find((item) => item.key === 'anthropic')
-  const models = section ? [...section.models] : []
-  const current = (currentModelValue || '').trim()
-  if (current && !models.includes(current)) models.push(current)
-  return [{
-    key: provider,
-    label: aliasProviderLabel(provider as AliasProviderKey),
-    models,
-  }]
+  return section
+    ? [{ ...section }]
+    : [{
+        key: provider,
+        label: aliasProviderLabel(provider as AliasProviderKey),
+        models: [],
+      }]
 }
 
-const newWorkspaceModelSections = computed<ModelSection[]>(() => {
-  return workspaceModelSectionsForProvider(newWorkspaceForm.value.default_provider, newWorkspaceForm.value.default_model)
-})
-
 function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
-  return workspaceModelSectionsForProvider(form.default_provider, form.default_model)
+  return workspaceModelSectionsForProvider(form.default_provider)
 }
 
 const workspaceForms = ref<WorkspaceForm[]>([])
@@ -3882,14 +3886,6 @@ const workspaceProviderOptions = computed(() =>
   projectStore.workspaceProviderOptions.length
     ? projectStore.workspaceProviderOptions
     : [{ value: 'claude' as WorkspaceProvider, label: 'Claude' }]
-)
-
-// Empty default_model inherits the app-wide default; name it in the picker
-// so "inherit" is not a mystery value.
-const workspaceInheritPlaceholder = computed(() =>
-  projectStore.workspaceAppDefaultModel
-    ? `Inherit default (${projectStore.workspaceAppDefaultModel})`
-    : 'Inherit default model'
 )
 
 function disallowedToolsPayload(raw: string): string[] | null {
@@ -3985,7 +3981,6 @@ async function saveWorkspace(name: string) {
       // adopted workspace's `memory-vault/<name>` root to a bare name.
       vault_root: form.vault_root.trim() || name,
       default_provider: form.default_provider,
-      default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
@@ -4015,7 +4010,6 @@ async function createNewWorkspace() {
       // The "Vault name" field is optional and defaults to the workspace name.
       vault_root: form.vault_root.trim() || form.name.trim(),
       default_provider: form.default_provider,
-      default_model: form.default_model,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
@@ -5766,7 +5760,7 @@ a.btn-secondary {
 }
 .provider-inline-defaults {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
   padding: 12px;
   border: 1px solid var(--border);
