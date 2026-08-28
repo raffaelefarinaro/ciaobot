@@ -64,6 +64,23 @@ def test_is_near_duplicate_short_tags_need_tighter_distance():
     assert is_near_duplicate("brain", "brsin") is True
 
 
+def test_is_near_duplicate_two_char_tags_below_edit_distance_floor():
+    # At two characters there are only 26*26 = 676 possible tags, so a single
+    # edit is nearly guaranteed by chance rather than evidence of a typo:
+    # `jo`/`mo` and `ai`/`aj` are both distance 1 but must NOT merge.
+    assert is_near_duplicate("jo", "mo") is False
+    assert is_near_duplicate("mo", "jo") is False
+    assert is_near_duplicate("ai", "aj") is False
+    assert is_near_duplicate("aj", "ai") is False
+    # The separator/namespace path is unaffected by the floor: a bare
+    # established `ai` must still merge with `ai-analysis` even though `ai`
+    # is only two characters.
+    assert is_near_duplicate("ai", "ai-analysis") is True
+    assert is_near_duplicate("ai-analysis", "ai") is True
+    # A genuine typo just above the floor (3+ chars) still merges.
+    assert is_near_duplicate("analysis", "analsis") is True
+
+
 def test_is_near_duplicate_short_tags_integration(tmp_path: Path):
     # An established `ai` and a singleton `hr` must NOT produce a merge.
     vault = tmp_path / "vault"
@@ -74,6 +91,21 @@ def test_is_near_duplicate_short_tags_integration(tmp_path: Path):
     entries = vi.scan_vault(vault)
     proposals = generate_vocabulary_proposals(entries, threshold=5)
     assert not any(m["tag"] == "hr" for m in proposals["tag_merges"])
+
+
+def test_two_char_singleton_tags_do_not_merge(tmp_path: Path):
+    # `jo` and `mo` are both singletons and distance 1 apart, but two
+    # characters is too short for that to mean anything — neither should
+    # produce a merge proposal against the other.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "Jo.md", _note_body(tags=["jo"], title="Jo"))
+    _write(vault / "Mo.md", _note_body(tags=["mo"], title="Mo"))
+    entries = vi.scan_vault(vault)
+    proposals = generate_vocabulary_proposals(entries, threshold=5)
+    merges = proposals["tag_merges"]
+    assert not any(m["tag"] == "jo" for m in merges)
+    assert not any(m["tag"] == "mo" for m in merges)
 
 
 def test_is_near_duplicate_identical_is_not_duplicate():

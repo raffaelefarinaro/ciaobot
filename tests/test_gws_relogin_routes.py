@@ -74,7 +74,7 @@ def test_relogin_full_flow(tmp_path: Path) -> None:
     _write_client_secret(config)
 
     # Inject a manager whose exchange writes real credentials without network.
-    def fake_exchange(cfg, profile, *, code, redirect_uri):
+    def fake_exchange(cfg, profile, *, code, redirect_uri, code_verifier=None):
         gws_auth.store_credentials(
             gws_auth.profile_config_dir(cfg, profile),
             client_id="cid",
@@ -101,6 +101,10 @@ def test_relogin_full_flow(tmp_path: Path) -> None:
     assert query["redirect_uri"][0] == data["redirect_uri"]
     port, state = data["port"], data["state"]
     assert urlparse(query["redirect_uri"][0]).port == port
+    # PKCE (issue #354): a small, safe addition to the loopback flow, which
+    # already validates `state`.
+    assert query["code_challenge_method"] == ["S256"]
+    assert "code_challenge" in query
 
     # Before the redirect, status is pending.
     pending = client.get("/api/integrations/gws/relogin/status?profile=personal")

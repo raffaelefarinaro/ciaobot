@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -58,6 +61,21 @@ def test_record_refuses_an_unknown_action(tmp_path: Path) -> None:
     assert _read_events(tmp_path) == []
 
 
+def test_record_refuses_an_unknown_via(tmp_path: Path) -> None:
+    """Every call site already passes "pwa" or "agent"; a typo like "agents"
+    must be refused rather than silently fragment the by-surface split."""
+    po.record("memory", "promoted", via="agents")
+    assert _read_events(tmp_path) == []
+
+
+def test_record_refuses_a_non_extraction_kind(tmp_path: Path) -> None:
+    """Skill proposals and rehome judgements share the review surface but
+    answer to different pipelines; this ledger counts only extraction kinds."""
+    po.record("skill", "promoted")
+    po.record("rehome", "dismissed")
+    assert _read_events(tmp_path) == []
+
+
 def test_record_is_fail_open(tmp_path: Path) -> None:
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("file in the way", encoding="utf-8")
@@ -71,11 +89,20 @@ def test_record_is_fail_open(tmp_path: Path) -> None:
 # ── tally ────────────────────────────────────────────────────────────────
 
 
-def test_tally_folds_totals_workspaces_and_recent_window() -> None:
+def test_tally_folds_totals_workspaces_and_recent_window(tmp_path: Path) -> None:
+    # ``rehome``/``skill`` are not extraction kinds, so ``record()`` itself
+    # refuses to write them (see test_record_refuses_a_non_extraction_kind).
+    # tally() folds any well-formed line by action regardless of kind, so
+    # seed these two straight into the log — before the ``record()`` calls
+    # below, since ``_write_events`` overwrites the whole file.
+    _write_events(tmp_path, [
+        json.dumps({"ts": datetime.now(UTC).isoformat(), "workspace": "work",
+                    "kind": "rehome", "action": "dismissed", "via": "pwa"}),
+        json.dumps({"ts": datetime.now(UTC).isoformat(), "workspace": "work",
+                    "kind": "skill", "action": "dismissed", "via": "pwa"}),
+    ])
     po.record("memory", "promoted", workspace="personal")
     po.record("profile", "promoted", workspace="personal")
-    po.record("rehome", "dismissed", workspace="work")
-    po.record("skill", "dismissed", workspace="work")
 
     report = po.tally()
 
@@ -169,6 +196,23 @@ def test_tally_cached_serves_stale_within_ttl_then_refreshes() -> None:
     refreshed = po.tally_cached()
     assert refreshed["promoted"] == 1
     assert refreshed["dismissed"] == 1
+
+
+def test_configure_invalidates_the_tally_cache(tmp_path: Path) -> None:
+    """A runtime-dir change must not keep serving a tally read from the
+    previous directory until the TTL happens to expire."""
+    po.record("memory", "promoted", workspace="personal")
+    first = po.tally_cached()
+    assert first["promoted"] == 1
+
+    other = tmp_path / "other-runtime"
+    po.configure(other)
+    try:
+        # The new directory has no log yet, so a stale cache would still show
+        # the old directory's count; a correctly invalidated cache shows zero.
+        assert po.tally_cached()["promoted"] == 0
+    finally:
+        po.configure(tmp_path)
 
 
 # ── agent path (curation CLI) ─────────────────────────────────────────────
@@ -505,3 +549,108 @@ def test_record_works_without_fcntl(tmp_path: Path, monkeypatch) -> None:
 
     report = po.tally()
     assert report["promoted"] == 1
+
+
+# ── concurrency ─────────────────────────────────────────────────────────────
+
+
+def test_concurrent_record_calls_all_land_without_corruption(tmp_path: Path) -> None:
+    """Many threads calling record() at once must all land: one JSON object
+    per line, none merged or torn. ``flock`` is scoped to the open file
+    description rather than the process, so two same-process threads each
+    opening the lock file separately still serialize against each other —
+    this pins that same-process concurrency, not just cross-process."""
+    n_threads = 8
+    n_per_thread = 25
+
+    def worker(i: int) -> None:
+        for _ in range(n_per_thread):
+            po.record("memory", "promoted", workspace=f"w{i}")
+
+    with ThreadPoolExecutor(max_workers=n_threads) as pool:
+        list(pool.map(worker, range(n_threads)))
+
+    raw_lines = po._log_path().read_text(encoding="utf-8").splitlines()
+    assert len(raw_lines) == n_threads * n_per_thread
+    # json.loads raises on anything torn or interleaved; every line must
+    # parse as exactly the one event that was written.
+    events = [json.loads(line) for line in raw_lines]
+    assert all(e["action"] == "promoted" and e["kind"] == "memory" for e in events)
+
+    report = po.tally()
+    assert report["promoted"] == n_threads * n_per_thread
+
+
+def test_tally_survives_concurrent_rotation(tmp_path: Path, monkeypatch) -> None:
+    """tally() takes the shared lock while a concurrent recorder holds the
+    exclusive lock to trim-and-archive; interleaving many rotations with many
+    reads must never raise, and the final tally must neither lose nor
+    double-count an event once every thread has finished."""
+    monkeypatch.setattr(po, "MAX_BYTES", 2 * 1024)  # force frequent rotation
+    n_events = 250
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        for _ in range(n_events):
+            po.record("memory", "promoted", workspace="w")
+
+    def reader() -> None:
+        for _ in range(50):
+            try:
+                po.tally()
+            except BaseException as exc:  # noqa: BLE001 - pragma: no cover
+                errors.append(exc)
+
+    writer_thread = threading.Thread(target=writer)
+    reader_threads = [threading.Thread(target=reader) for _ in range(4)]
+    writer_thread.start()
+    for t in reader_threads:
+        t.start()
+    writer_thread.join()
+    for t in reader_threads:
+        t.join()
+
+    assert errors == []
+    final = po.tally()
+    assert final["promoted"] == n_events
+    assert list(tmp_path.glob("proposal_outcomes.rotated-*.jsonl"))
+
+
+def test_tally_tolerates_a_truncated_final_line(tmp_path: Path) -> None:
+    """A crash mid-append can leave the log's last line partially written: no
+    trailing newline, and the JSON object itself cut short. tally() must
+    still count every complete line before it and never raise."""
+    complete = json.dumps({
+        "ts": datetime.now(UTC).isoformat(), "workspace": "personal",
+        "kind": "memory", "action": "promoted", "via": "pwa",
+    })
+    po._log_path().parent.mkdir(parents=True, exist_ok=True)
+    with po._log_path().open("w", encoding="utf-8") as f:
+        f.write(complete + "\n")
+        f.write('{"ts": "2026-08-2')  # write interrupted before it completed
+
+    report = po.tally()
+
+    assert report["promoted"] == 1
+    assert report["by_workspace"] == {"personal": {"promoted": 1, "dismissed": 0}}
+
+
+def test_log_lock_and_archive_files_are_created_owner_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Runtime files here hold workspace names; they must not be readable by
+    other accounts on the box, the same convention jsonio.write_private_text
+    uses for on-disk secrets, rather than trusting the process umask."""
+    monkeypatch.setattr(po, "MAX_BYTES", 1024)  # force a rotation to happen
+    for _ in range(50):
+        po.record("memory", "promoted", workspace="w")
+
+    log_mode = os.stat(po._log_path()).st_mode & 0o777
+    lock_mode = os.stat(tmp_path / po._LOCK_NAME).st_mode & 0o777
+    assert log_mode == 0o600
+    assert lock_mode == 0o600
+
+    archives = list(tmp_path.glob("proposal_outcomes.rotated-*.jsonl"))
+    assert archives
+    for archive in archives:
+        assert os.stat(archive).st_mode & 0o777 == 0o600

@@ -27,11 +27,14 @@ from ciao.gws_auth import fingerprint
 _PERSONAL_SCOPES = gws_auth._PERSONAL_SCOPES  # noqa: SLF001
 
 
-def _build_auth_url(*, client_id: str, redirect_uri: str, scopes: str) -> str:
+def _build_auth_url(
+    *, client_id: str, redirect_uri: str, scopes: str, code_challenge: str | None = None
+) -> str:
     return gws_auth.build_auth_url(
         client_id=client_id,
         redirect_uri=redirect_uri,
         scopes=scopes,
+        code_challenge=code_challenge,
     )
 
 
@@ -112,7 +115,17 @@ def main_entry(argv: Sequence[str] | None = None) -> int:
     print(f"Redirect URI: sha256:{fingerprint(redirect_uri)}")
     print()
 
-    auth_url = _build_auth_url(client_id=client_id, redirect_uri=redirect_uri, scopes=scopes)
+    # PKCE (issue #354): this is a single interactive process, so the verifier
+    # is just a local variable carried from the URL build to the exchange
+    # below — no cross-request state needed. Never printed or logged.
+    code_verifier = gws_auth.generate_code_verifier()
+    code_challenge = gws_auth.code_challenge_s256(code_verifier)
+    auth_url = _build_auth_url(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scopes=scopes,
+        code_challenge=code_challenge,
+    )
     print("Open this URL in your browser (pick the correct Google account):")
     print()
     print(auth_url)
@@ -143,6 +156,7 @@ def main_entry(argv: Sequence[str] | None = None) -> int:
             client_secret=client_secret,
             code=code,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
     except ValueError as exc:
         print(f"Error: {exc}")

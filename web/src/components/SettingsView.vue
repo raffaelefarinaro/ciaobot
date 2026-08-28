@@ -2030,6 +2030,7 @@ import SettingsAutomation from './settings/SettingsAutomation.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2964,6 +2965,7 @@ async function installGwsInChat() {
 
 const gwsSavingProfile = ref<string | null>(null)
 const gwsAuthUrls = ref<Record<string, string>>({})
+const gwsAuthFlowIds = ref<Record<string, string>>({})
 const gwsRedirectUrls = ref<Record<string, string>>({})
 
 // One-click "Sign in with Google" loopback flow (issue #145). Tracks, per
@@ -2990,9 +2992,11 @@ function gwsReloginHelpUrl(): string {
 // the client's own loopback and never arrive — those users must use the
 // manual paste flow instead.
 function gwsOnEngineHost(): boolean {
-  if (inDesktopApp && !isNodeClient.value) return true
-  const host = window.location.hostname
-  return !isNodeClient.value && (host === 'localhost' || host === '127.0.0.1' || host === '[::1]')
+  return isGwsEngineHostEligible(window.location.hostname, inDesktopApp, {
+    loaded: nodeStatusLoaded.value,
+    error: nodeStatusError.value,
+    isClient: isNodeClient.value,
+  })
 }
 
 async function gwsReloginStart(profileName: string) {
@@ -3036,6 +3040,7 @@ function gwsClearRelogin(profileName: string) {
   // it keeps the card out of a stale manual-flow state and un-hides the
   // authenticated controls on success.
   delete gwsAuthUrls.value[profileName]
+  delete gwsAuthFlowIds.value[profileName]
   delete gwsRedirectUrls.value[profileName]
 }
 
@@ -3126,10 +3131,11 @@ async function startGwsAuth(profileName: string) {
   delete gwsReloginError.value[profileName]
   delete gwsReloginPending.value[profileName]
   try {
-    const res = await api.post<{ auth_url: string }>('/api/integrations/gws/auth-url', {
+    const res = await api.post<{ auth_url: string; flow_id: string }>('/api/integrations/gws/auth-url', {
       profile: profileName,
     })
     gwsAuthUrls.value[profileName] = res.auth_url
+    gwsAuthFlowIds.value[profileName] = res.flow_id
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
   } catch (e) {
@@ -3148,9 +3154,11 @@ async function exchangeGwsCode(profileName: string) {
     const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/exchange', {
       profile: profileName,
       code: code,
+      flow_id: gwsAuthFlowIds.value[profileName],
     })
     gwsIntegration.value = updated
     delete gwsAuthUrls.value[profileName]
+    delete gwsAuthFlowIds.value[profileName]
     delete gwsRedirectUrls.value[profileName]
   } catch (e) {
     notifyFailed('Could not complete the connection', errorMessage(e, 'The request failed.'))
@@ -3161,6 +3169,7 @@ async function exchangeGwsCode(profileName: string) {
 
 function cancelGwsAuth(profileName: string) {
   delete gwsAuthUrls.value[profileName]
+  delete gwsAuthFlowIds.value[profileName]
   delete gwsRedirectUrls.value[profileName]
 }
 
@@ -4323,6 +4332,11 @@ async function saveAuthSettings() {
 // just enough to answer "whose settings am I editing": in client mode every
 // other card on this page is served by the host through the tunnel.
 const nodeStatus = ref<NodeStatus | null>(null)
+// Tri-state signal for gwsOnEngineHost (issue #351): nodeStatus reading null
+// is ambiguous between "still loading" and "the fetch failed", and both must
+// not be silently treated as a confirmed host role off a loopback hostname.
+const nodeStatusLoaded = ref(false)
+const nodeStatusError = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
@@ -4343,8 +4357,12 @@ const hostScopeLabel = computed(() => {
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+    nodeStatusError.value = false
   } catch {
     /* leave null on failure: cards then read as host-mode, which is the default */
+    nodeStatusError.value = true
+  } finally {
+    nodeStatusLoaded.value = true
   }
 }
 

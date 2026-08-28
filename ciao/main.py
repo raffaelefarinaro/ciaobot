@@ -693,7 +693,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     pcm.clear_notifications_cb = _clear_notifications
 
     # Google Workspace token health + server-managed re-login (issue #145).
-    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager
+    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager, ManualPkceStore
 
     app.state.gws_health_monitor = GwsHealthMonitor(
         config,
@@ -702,6 +702,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         runtime_root=config.state_path.parent,
     )
     app.state.gws_relogin_manager = GwsReloginManager(config)
+    # PKCE verifier store for the manual/paste OAuth flow (issue #354).
+    app.state.gws_manual_pkce_store = ManualPkceStore()
 
     # Wire push delivery into the broker drive task so a successful turn
     # notifies subscribed devices even when no WebSocket client is connected.
