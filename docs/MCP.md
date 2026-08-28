@@ -150,7 +150,6 @@ skill surface (admin or redundant with native tools).
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
-| Delegates | `delegate_spawn`, `delegates_list` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
 | Loops | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |

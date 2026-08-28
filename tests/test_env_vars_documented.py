@@ -23,7 +23,6 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
     "CIAO_RESTART_EXIT_CODE": "internal exit-code convention for restart-requesting handlers",
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
-    "CIAO_DELEGATE_OF": "subprocess IPC marker naming the supervisor chat of a delegate",
     "CIAO_BACKGROUND_RUN_ID": "subprocess IPC marker naming the background run a command belongs to",
     "CIAO_DEFAULT_NODE_ROLE": "internal multi-device node failover role default",
     "CIAO_NODE_ID": "internal multi-device node identification marker",

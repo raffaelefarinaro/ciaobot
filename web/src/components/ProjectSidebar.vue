@@ -985,16 +985,14 @@
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
               <template
-                v-for="{ chat, isDelegate } in store.projectChatRows(project.project_id)"
+                v-for="chat in store.projectChats(project.project_id)"
                 :key="chat.chat_id"
               >
                 <div
-                  v-if="!isDelegate || subchatsExpanded(chat.spawned_from_chat_id || '')"
                   class="chat-item"
                   :class="{
-                    active: chat.chat_id === store.activeChatId,
+                    active: chat.chat_id === store.activeChatId && !activeSubagentId,
                     remote: chat.local === false,
-                    delegate: isDelegate,
                     dragging: dragChatId === chat.chat_id,
                   }"
                   :draggable="chat.local !== false"
@@ -1009,21 +1007,15 @@
                   :aria-disabled="chat.local === false"
                   :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
                 >
-                  <span
-                    v-if="isDelegate"
-                    class="delegate-mark"
-                    title="Delegate: spawned by this chat's supervisor"
-                    aria-label="Delegate chat"
-                  >&#8627;</span>
                   <button
-                    v-else-if="visibleSubchatCount(project.project_id, chat.chat_id) > 0"
+                    v-if="subagentsFor(chat.chat_id).length"
                     type="button"
-                    class="subchat-toggle"
-                    :aria-expanded="subchatsExpanded(chat.chat_id)"
-                    :aria-label="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats for ' + chat.title"
-                    :title="(subchatsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subchats'"
-                    @click.stop="toggleSubchats(chat.chat_id)"
-                  >{{ subchatsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
+                    class="subagent-toggle"
+                    :aria-expanded="subagentsExpanded(chat.chat_id)"
+                    :aria-label="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents for ' + chat.title"
+                    :title="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents'"
+                    @click.stop="toggleSubagents(chat.chat_id)"
+                  >{{ subagentsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
                   <span
                     v-if="chat.title_status === 'pending'"
                     class="title-shimmer"
@@ -1048,6 +1040,35 @@
                     @click.stop="toggleChatMenu($event, chat.chat_id)"
                   >&middot;&middot;&middot;</button>
                 </div>
+                <!-- Subagents this chat has working right now. They are not
+                     chats: the row opens a read-only view of the agent's own
+                     transcript, and it disappears when the agent finishes
+                     (the completed transcript stays in the chat's Activity
+                     trace). -->
+                <template v-if="subagentsExpanded(chat.chat_id)">
+                  <RouterLink
+                    v-for="sub in subagentsFor(chat.chat_id)"
+                    :key="sub.agent_id"
+                    class="chat-item subagent-item"
+                    :class="{ active: isActiveSubagent(chat.chat_id, sub.agent_id) }"
+                    :to="subagentPath(chat.chat_id, sub.agent_id)"
+                    :title="subagentLabel(sub) + ' — running in ' + chat.title"
+                    @click="emit('chat-selected')"
+                  >
+                    <span class="subagent-mark" aria-hidden="true">&#8627;</span>
+                    <span class="chat-title">{{ subagentLabel(sub) }}</span>
+                    <span
+                      v-if="sub.subagent_type"
+                      class="subagent-chip"
+                    >{{ sub.subagent_type }}</span>
+                    <span
+                      class="subagent-spinner"
+                      role="img"
+                      aria-label="Working"
+                      title="Working"
+                    />
+                  </RouterLink>
+                </template>
               </template>
 
               <!-- Chat context menu - teleported to body -->
@@ -1069,7 +1090,7 @@
                       <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
                       <button v-if="chatMenuChat && !chatMenuChat.archived" @click="doMarkUnread(chatMenu!)">Mark unread</button>
                       <button @click="doArchiveChat(chatMenu!)">
-                        {{ archiveMenuLabel(chatMenu!) }}
+                        {{ ARCHIVE_MENU_LABEL }}
                       </button>
                       <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
                     </template>
@@ -1161,7 +1182,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
@@ -1173,7 +1194,7 @@ import { isLightTheme } from '../lib/theme'
 import ChatSignals from './ChatSignals.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
-import { archiveMenuLabel as menuLabel, archiveConfirmMessage } from '../lib/archiveCopy'
+import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
@@ -1490,18 +1511,18 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo } from '../lib/types'
+import type { ChatInfo, ProjectInfo, RunningSubagent } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
 }
 
 const expandedProjects = reactive(new Set<string>())
-// Keep supervisor groups open by default so the existing sidebar remains
-// unchanged until the user explicitly collapses one. This is deliberately
-// component-local, matching the project disclosure state above and the chat
-// context disclosure in ChatPanel.
-const collapsedSubchatParents = reactive(new Set<string>())
+// Subagent groups are open by default: a row only exists while its agent is
+// working, so hiding it behind a closed disclosure would defeat the point.
+// Deliberately component-local, matching the project disclosure state above
+// and the chat context disclosure in ChatPanel.
+const collapsedSubagentParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 const chatMenuPos = ref<{ top: number; left: number }>({ top: 0, left: 0 })
@@ -1586,27 +1607,6 @@ function closeChatMenus() {
   moveSubmenu.value = false
 }
 
-function activeSubchatCount(chatId: string): number {
-  return store.activeDelegatesFor(chatId).length
-}
-
-function archiveMenuLabel(chatId: string): string {
-  return menuLabel(activeSubchatCount(chatId))
-}
-
-// Subchats working right now. Archiving stops them instead of waiting, so the
-// confirm dialog names them first. Background agents count as working: they
-// outlive their turn, so a subchat with no live turn can still be busy.
-function busySubchatCount(chatId: string): number {
-  return store.activeDelegatesFor(chatId).filter(
-    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
-  ).length
-}
-
-function archiveConfirmation(chatId: string): string {
-  return archiveConfirmMessage(activeSubchatCount(chatId), busySubchatCount(chatId))
-}
-
 // Reset the submenu whenever the active chat menu changes (open, close,
 // switch chats), so re-opening always starts at the top-level menu.
 watch(chatMenu, () => { moveSubmenu.value = false })
@@ -1634,15 +1634,18 @@ watch(() => store.workspaceProjects, (projects) => {
   }
 }, { immediate: true })
 
+// Opening a subagent view must never leave its row hidden behind a collapsed
+// disclosure — the route is reachable from the chat's Activity trace too.
+watch(() => route.params.agentId, (agentId) => {
+  const chatId = route.params.chatId as string
+  if (agentId && chatId) collapsedSubagentParents.delete(chatId)
+}, { immediate: true })
+
 watch(() => store.activeChatId, (chatId) => {
   if (!chatId) return
   const project = store.projectFor(chatId)
   if (project) {
     expandedProjects.add(project.project_id)
-  }
-  const chat = store.chats.find(c => c.chat_id === chatId)
-  if (chat?.spawned_from_chat_id) {
-    collapsedSubchatParents.delete(chat.spawned_from_chat_id)
   }
 }, { immediate: true })
 
@@ -1746,21 +1749,47 @@ function toggleProject(id: string) {
   }
 }
 
-function visibleSubchatCount(projectId: string, chatId: string): number {
-  return store.projectChatGroups(projectId)
-    .find(group => group.chat.chat_id === chatId)?.delegates.length || 0
+function subagentsFor(chatId: string): RunningSubagent[] {
+  return store.runningSubagentsFor(chatId)
 }
 
-function subchatsExpanded(chatId: string): boolean {
-  return !collapsedSubchatParents.has(chatId)
+function subagentsExpanded(chatId: string): boolean {
+  return !collapsedSubagentParents.has(chatId)
 }
 
-function toggleSubchats(chatId: string) {
-  if (subchatsExpanded(chatId)) {
-    collapsedSubchatParents.add(chatId)
+function toggleSubagents(chatId: string) {
+  if (subagentsExpanded(chatId)) {
+    collapsedSubagentParents.add(chatId)
   } else {
-    collapsedSubchatParents.delete(chatId)
+    collapsedSubagentParents.delete(chatId)
   }
+}
+
+// Claude ids arrive bare from the parent JSONL and prefixed ("agent-<id>")
+// from the local transcript fallback, so both surfaces normalise before
+// comparing or routing — otherwise the same agent reads as two.
+function bareAgentId(agentId: string): string {
+  return agentId.replace(/^agent-/, '')
+}
+
+function subagentPath(chatId: string, agentId: string): string {
+  return `/chat/${chatId}/subagent/${bareAgentId(agentId)}`
+}
+
+const activeSubagentId = computed(() => (route.params.agentId as string) || '')
+
+function isActiveSubagent(chatId: string, agentId: string): boolean {
+  return (
+    route.params.chatId === chatId
+    && activeSubagentId.value === bareAgentId(agentId)
+  )
+}
+
+function subagentLabel(sub: RunningSubagent): string {
+  const described = (sub.description || '').trim()
+  if (described) return described
+  const id = bareAgentId(sub.agent_id)
+  return id.length > 12 ? `${id.slice(0, 8)}\u2026` : id
 }
 
 // `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in
@@ -1902,7 +1931,7 @@ async function doArchiveChat(chatId: string) {
   chatMenu.value = null
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm(archiveConfirmation(chatId), {
+  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
@@ -2664,26 +2693,65 @@ async function confirmDeleteChat(chatId: string) {
   border-bottom: none;
 }
 
-/* A delegate is a real chat, so it keeps the full row (streaming dot, unread
-   badge, actions menu) and only shifts right to read as owned by the chat
-   above it. Indent is on padding rather than margin so the hover/active
-   background still spans the full sidebar width. */
-.chat-item.delegate {
+/* A subagent row is not a chat: it opens a read-only transcript, so it drops
+   the actions menu and shifts right to read as owned by the chat above it.
+   Indent is on padding rather than margin so the hover/active background
+   still spans the full sidebar width. */
+.chat-item.subagent-item {
   padding-left: 34px;
+  text-decoration: none;
+  color: var(--fg2);
 }
 
-.delegate-mark {
+.subagent-mark {
   flex: none;
   color: var(--fg3, var(--fg2));
   font-size: var(--text-sm, 0.85em);
   line-height: 1;
 }
 
-/* A supervisor's disclosure sits inside the parent chat row. It uses the same
+/* The agent's type ("Explore", "general-purpose"), when the CLI recorded one.
+   Muted: the description is the row's subject, this only qualifies it. */
+.subagent-chip {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--fg3, var(--fg2));
+  font-size: var(--text-xs, 0.75em);
+  line-height: 16px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Live signal. Same pulse as the in-chat SubagentPanel spinner so the two
+   surfaces read as one state. */
+.subagent-spinner {
+  flex: none;
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent2, var(--accent));
+  animation: subagent-row-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes subagent-row-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-spinner { animation-duration: 2.2s; }
+}
+
+/* A chat's subagent disclosure sits inside the chat row. It uses the same
    44px hit area as the project disclosure while keeping the glyph compact, so
-   collapsing a busy supervisor does not make the child rows unreachable on a
+   collapsing a busy chat does not make the child rows unreachable on a
    touch device. */
-.subchat-toggle {
+.subagent-toggle {
   flex: 0 0 var(--touch);
   width: var(--touch);
   height: var(--touch);
@@ -2697,8 +2765,8 @@ async function confirmDeleteChat(chatId: string) {
   line-height: 1;
   text-align: center;
 }
-.subchat-toggle:hover { color: var(--fg); }
-.subchat-toggle:focus-visible {
+.subagent-toggle:hover { color: var(--fg); }
+.subagent-toggle:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   border-radius: var(--radius-sm);

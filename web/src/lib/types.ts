@@ -193,12 +193,6 @@ export interface ChatInfo {
   // because a schedule spawns a new chat each time).
   schedule_id?: string
   schedule_title?: string
-  // Set when this chat was spawned as a delegate by another chat's agent. The
-  // sidebar nests delegates under their supervisor; the engine wakes the
-  // supervisor with a fresh turn when a delegate finishes.
-  spawned_from_chat_id?: string
-  // Shared tag across delegates dispatched as one batch.
-  delegation_id?: string
   // What the post-archive pipeline is doing, or did. Present only on archived
   // chats that ran it. Drives the greyed activity signal and the settled
   // "here is what was learned from this chat" line.
@@ -224,20 +218,6 @@ export interface ChatPostprocess {
   updated_at?: string
   /** Set when a server restart killed the pipeline mid-flight. */
   interrupted?: boolean
-}
-
-// One sidebar chat row. Delegates follow their supervisor and render indented,
-// so the list stays a single flat v-for instead of a nested one.
-export interface ChatRow {
-  chat: ChatInfo
-  isDelegate: boolean
-}
-
-// One sidebar stack. The supervisor remains the visible anchor and its
-// delegate chats can be expanded beneath it as a single group.
-export interface ChatGroup {
-  chat: ChatInfo
-  delegates: ChatInfo[]
 }
 
 export interface ChatRetryInfo {
@@ -304,6 +284,24 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number
+}
+
+// One live subagent from `/api/subagents/running`. Same dispatch metadata as
+// SubagentTranscript, minus the transcript: the sidebar only needs to name the
+// agent and say it is working, and polling full transcripts for every working
+// chat would be far more than that costs.
+export interface RunningSubagent {
+  agent_id: string
+  description?: string
+  subagent_type?: string
+  is_async?: boolean
+  status?: 'running' | 'completed' | 'failed' | ''
+  turn_index?: number | null
+}
+
+/** `GET /api/subagents/running`. Chats with nothing running are omitted. */
+export interface RunningSubagentsResponse {
+  chats?: Record<string, RunningSubagent[]>
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
@@ -947,21 +945,9 @@ export interface ActionResult {
   [key: string]: unknown
 }
 
-/** Per-subchat row in the archive cascade response. */
-export interface ArchivedSubchat {
-  chat_id: string
-  archived: boolean
-  stopped_mid_turn: boolean
-  error: string
-}
-
 /**
  * `POST /api/chats/{id}/archive`.
  *
- * Archiving a supervisor cascades to its delegate subchats, and the cascade can
- * partly fail. The id lists are the contract that matters: mark archived only
- * what `archived_chat_ids` names, because a subchat missing from it is still
- * streaming, and hiding it would leave it burning tokens out of sight.
  * The fields are optional so a client talking to an older host (or through the
  * node proxy) degrades to "the chat I asked for" instead of breaking.
  */
@@ -969,10 +955,6 @@ export interface ArchiveChatResponse {
   ok?: boolean
   archived_to?: string | null
   postprocess?: ChatPostprocess | null
-  archived_chat_ids?: string[]
-  stopped_chat_ids?: string[]
-  failed_chat_ids?: string[]
-  subchats?: ArchivedSubchat[]
 }
 
 /** One commit row in the update modal, from ciao/package_version.py. */
