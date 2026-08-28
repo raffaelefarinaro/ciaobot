@@ -16,9 +16,9 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 ![Workspace → Project → Chat hierarchy](docs/diagrams/workspace-hierarchy.svg)
 
-> **PWA preview:** Home lanes + chat with a pinned doc. Wireframe placeholder until a real light-mode capture lands at `docs/screenshots/pwa-overview.png` (see `docs/screenshots/pwa-overview.svg`).
+> **PWA preview:** The home screen brings workspaces, projects, attention queues, and recent chats together in one focused console.
 >
-> ![Ciaobot PWA overview — wireframe placeholder](docs/screenshots/pwa-overview.svg)
+> ![Ciaobot PWA overview](docs/screenshots/pwa-overview.png)
 
 ## Install
 
