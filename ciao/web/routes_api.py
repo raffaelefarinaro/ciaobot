@@ -5634,7 +5634,16 @@ def _interval_entry(sm, loop_id: str) -> ScheduleEntry | None:
 async def list_loops(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    return JSONResponse([_loop_view(entry, pcm) for entry in _interval_entries(sm)])
+    # Only chat-bound entries, matching the MCP `loops_list` compatibility view.
+    # A loop was always bound to a fixed chat, so the cached pre-upgrade PWA on
+    # the other end of this route assumes `web_chat_id` is set: handed a
+    # project-bound interval it renders an "unavailable chat" row that cannot be
+    # repaired by editing, because `web_project_id` keeps taking precedence.
+    return JSONResponse([
+        _loop_view(entry, pcm)
+        for entry in _interval_entries(sm)
+        if entry.web_chat_id and not entry.web_project_id
+    ])
 
 
 async def create_loop(request: Request) -> JSONResponse:
@@ -5692,13 +5701,17 @@ async def loop_detail(request: Request) -> JSONResponse:
     loop_id = request.path_params["loop_id"]
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
+    # Resolve before doing anything, DELETE included. This route's contract is
+    # interval entries only, but DELETE used to hand the raw id straight to the
+    # shared schedule store — so an ordinary wall-clock schedule's id passed to
+    # the deprecated loops route deleted that schedule.
+    entry = _interval_entry(sm, loop_id)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
     if request.method == "DELETE":
         deleted = sm.delete(loop_id)
         publish_automations_changed(pcm)
         return JSONResponse({"ok": deleted})
-    entry = _interval_entry(sm, loop_id)
-    if entry is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
     body = await request.json()
     if "prompt" in body:
         prompt = (body["prompt"] or "").strip()

@@ -583,9 +583,15 @@ def mode_settings(
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Plan mode is excluded: its contract is "propose, don't act", and an allow
-    # rule would punch a hole in it — same carve-out as the Claude provider.
-    if key != "plan":
+    # Scoped to the modes whose contract allows acting without asking — the
+    # same carve-out as the Claude provider, and for the same two reasons.
+    # `plan` is "propose, don't act". `normal` is what the PWA labels
+    # "Manual — ask for every action", and these rules quietly broke that
+    # promise: no card for `memory_update`, `chat_send` or `schedule` — and
+    # `schedule` escalates, because an automation run is dispatched
+    # `unattended`, which forces `bypass`. A one-minute interval created
+    # without a card buys unprompted arbitrary tool use every minute.
+    if key in {"auto", "bypass"}:
         rules.extend(control_plane_permission_rules())
     return _MODE_AGENTS[key], rules
 

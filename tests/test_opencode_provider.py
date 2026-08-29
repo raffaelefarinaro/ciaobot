@@ -1973,14 +1973,20 @@ async def test_no_control_plane_registration_without_a_token(tmp_path):
 # ── control-plane auto-approval ─────────────────────────────────────────
 
 
-def test_control_plane_tools_do_not_prompt_outside_plan_mode():
+def test_control_plane_tools_do_not_prompt_in_the_permissive_modes():
     """Regression: `ciaobot_project_files_list` raised an Approve/Deny card in
     auto mode. Ciaobot's own bookkeeping is not a third-party tool the operator
     should confirm call by call — Claude allows these via allowed_tools, and
-    opencode needs them as session permission rules."""
+    opencode needs them as session permission rules.
+
+    `normal` is excluded, which is what this test used to assert the opposite
+    of: the PWA labels it "Manual — ask for every action", and the rationale
+    above is about *auto* mode's classifier. See
+    `test_manual_mode_still_prompts_for_the_control_plane` below.
+    """
     from ciao.execution_modes import MCP_SERVER_NAME
 
-    for mode in ("normal", "auto", "bypass"):
+    for mode in ("auto", "bypass"):
         allowed = {
             rule["permission"]
             for rule in mode_settings(mode)[1]
@@ -1988,6 +1994,25 @@ def test_control_plane_tools_do_not_prompt_outside_plan_mode():
         }
         assert f"{MCP_SERVER_NAME}_project" in allowed, mode
         assert f"{MCP_SERVER_NAME}_chat_send" in allowed, mode
+
+
+def test_manual_mode_still_prompts_for_the_control_plane():
+    """"Ask for every action" has to include Ciaobot's own tools.
+
+    `schedule` is the sharp one: an automation run is dispatched `unattended`,
+    which forces `bypass`, so a one-minute interval created without a card buys
+    unprompted arbitrary tool use every minute.
+    """
+    from ciao.execution_modes import MCP_SERVER_NAME
+
+    allowed = {
+        rule["permission"]
+        for rule in mode_settings("normal")[1]
+        if rule["action"] == "allow"
+    }
+    assert f"{MCP_SERVER_NAME}_schedule" not in allowed
+    assert f"{MCP_SERVER_NAME}_chat_send" not in allowed
+    assert f"{MCP_SERVER_NAME}_memory_update" not in allowed
 
 
 def test_destructive_control_plane_tools_still_prompt():

@@ -319,7 +319,8 @@ def test_legacy_delete(client: TestClient) -> None:
     ).json()["loop_id"]
     assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": True}
     assert client.get("/api/loops").json() == []
-    assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": False}
+    # Gone now, so it resolves like any other unknown id on this route.
+    assert client.delete(f"/api/loops/{loop_id}").status_code == 404
 
 
 def test_interval_to_wall_clock_without_a_time_is_rejected(client: TestClient) -> None:
@@ -571,3 +572,41 @@ def test_retargeting_onto_a_fixed_chat_drops_auto_archive(client: TestClient) ->
         if e.schedule_id == schedule_id
     )
     assert stored.archive_policy == "manual"
+
+
+def test_the_loops_route_refuses_to_delete_a_wall_clock_schedule(
+    client: TestClient,
+) -> None:
+    """The route's contract is interval entries only.
+
+    DELETE used to hand the raw id straight to the shared schedule store, so an
+    ordinary schedule's id passed to the deprecated loops route deleted it.
+    """
+    schedule_id = client.post("/api/schedules", json={
+        "prompt": "p", "frequency": "daily", "time": "09:00",
+        "web_chat_id": "chat-idle",
+    }).json()["schedule_id"]
+
+    assert client.delete(f"/api/loops/{schedule_id}").status_code == 404
+    # Still there.
+    assert any(
+        s["schedule_id"] == schedule_id for s in client.get("/api/schedules").json()
+    )
+
+
+def test_the_loops_list_hides_project_bound_intervals(client: TestClient) -> None:
+    """A loop was always bound to a fixed chat.
+
+    The cached pre-upgrade PWA on the other end assumes `web_chat_id` is set;
+    handed a project-bound interval it renders an unavailable-chat row that
+    editing cannot repair, since `web_project_id` keeps taking precedence.
+    """
+    _create_interval(client)  # chat-bound
+    client.post("/api/schedules", json={
+        "prompt": "p", "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5, "web_project_id": "proj-1",
+    })
+
+    loops = client.get("/api/loops").json()
+    assert all(loop["web_chat_id"] for loop in loops)
+    assert len(loops) == 1
