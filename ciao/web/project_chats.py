@@ -70,7 +70,7 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.error_log import clear_error_log, tail_error_log
-from ciao.schedules import INTERVAL_FREQUENCY
+from ciao.schedules import supports_auto_archive
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -1113,19 +1113,12 @@ def _should_auto_archive_schedule_run(
     archive_policy = getattr(entry, "archive_policy", "manual")
     if archive_policy != "auto":
         return False
-    # Never auto-archive the chat an interval entry is bound to. The whole
-    # point of that binding is one conversation carried across runs, and
-    # `_rehome_interval_chat` forks a replacement whenever it finds the target
-    # archived — so archiving after a clean run makes the next run fork, run,
-    # and archive again, forever: a new chat and a full post-archive pipeline
-    # every interval (144/day at the default cadence, 1440/day at the floor).
-    # A project-bound interval entry opens a fresh chat per run and is exactly
-    # the case auto-archive is for, so only the fixed-chat binding is excluded.
-    if (
-        getattr(entry, "frequency", "") == INTERVAL_FREQUENCY
-        and getattr(entry, "web_chat_id", "")
-        and not getattr(entry, "web_project_id", "")
-    ):
+    # Never auto-archive the chat an interval entry is bound to: archiving it
+    # makes the next run fork a replacement and archive that too, forever. One
+    # predicate, shared with the store-side normalisation that keeps `auto`
+    # from being persisted for such an entry in the first place — two copies of
+    # this rule would drift, and the dispatcher's copy is the one that decides.
+    if not supports_auto_archive(entry):
         return False
     return _schedule_run_clean(outcome) and not needs_user
 

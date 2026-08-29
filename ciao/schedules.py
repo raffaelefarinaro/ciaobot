@@ -139,8 +139,11 @@ def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) ->
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-def supports_auto_archive(entry: "ScheduleEntry") -> bool:
+def supports_auto_archive(entry: Any) -> bool:
     """False for an interval entry bound to a fixed chat.
+
+    Typed loosely because the dispatcher (``project_chats``) holds the entry as
+    an opaque object and reads it the same ``getattr`` way this does.
 
     The point of that binding is one conversation carried across runs, and
     ``_rehome_interval_chat`` forks a replacement whenever it finds the target

@@ -800,9 +800,10 @@ class ManualPkceStore:
             if time.time() > expires_at:
                 # Tombstone it in place: keep the "something was issued"
                 # signal, but drop the verifier itself (never hold expired
-                # secret-adjacent material longer than necessary).
-                if verifier:
-                    self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
+                # secret-adjacent material longer than necessary). The guard
+                # above already returned for every verifier-less entry, so
+                # there is always one to drop here.
+                self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
                 return "expired"
             return "active"
 

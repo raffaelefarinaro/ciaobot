@@ -1093,13 +1093,14 @@ class CiaoMcpService:
             if term in _TOOL_GROUPS:
                 hits = [t for t in catalog if _GROUP_OF_TOOL.get(t.name) == term]
             else:
-                # Name matches are unioned, not short-circuited. The merged
-                # tools are named `schedule`, `project`, and `loop` — the most
-                # natural one-word query for each domain — so stopping at the
-                # exact hit returned one schema and hid `schedules_list` /
+                # Substring, not exact-then-fallback. The merged tools are
+                # named `schedule`, `project`, and `loop` — the most natural
+                # one-word query for each domain — so stopping at the exact hit
+                # returned one schema and hid `schedules_list` /
                 # `schedule_action` from a model that had no other way to learn
-                # they exist.
-                hits = [t for t in catalog if term == t.name or term in t.name]
+                # they exist. (An exact name is a substring of itself, so this
+                # one test covers both.)
+                hits = [t for t in catalog if term in t.name]
                 if not hits:
                     hits = [
                         t for t in catalog if term in (t.description or "").lower()

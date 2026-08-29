@@ -360,13 +360,13 @@
                 <option value="auto">Automatically archive routine results</option>
               </select>
             </div>
+            <p v-if="editSupportsAutoArchive" class="hint">
+              Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
+              anything useful for the user to judge, the chat stays visible.
+            </p>
             <p v-else class="hint">
               Runs into one existing chat, so the conversation is kept —
               auto-archive does not apply to this binding.
-            </p>
-            <p class="hint">
-              Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
-              anything useful for the user to judge, the chat stays visible.
             </p>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
@@ -516,6 +516,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
@@ -850,7 +851,7 @@ function providerLabel(s: Schedule): string {
 // NewScheduleForm's `inheritsChatModel`.
 const inheritsChatModel = computed(() => {
   const s = schedule.value
-  return !!s && isIntervalSchedule(s) && !!s.web_chat_id && !s.web_project_id
+  return !!s && bindsFixedChat(s.frequency, s.web_chat_id, s.web_project_id)
 })
 
 function isIntervalSchedule(s: Schedule): boolean {
@@ -873,16 +874,11 @@ const editShowsTimeOfDay = computed(
 // behaviour that never happened. A project-bound interval opens a fresh chat
 // per run and is exactly what auto-archive is for, so only this binding is out.
 const editSupportsAutoArchive = computed(
-  () => !(editData.value.frequency === 'interval'
-    && editData.value.contextKey.startsWith('web:')),
+  () => !contextBindsFixedChat(editData.value.frequency, editData.value.contextKey),
 )
 watch(editSupportsAutoArchive, (supported) => {
   if (!supported) editData.value.archive_policy = 'manual'
 })
-
-function scheduleSupportsAutoArchive(s: Schedule): boolean {
-  return !(s.frequency === 'interval' && !!s.web_chat_id && !s.web_project_id)
-}
 
 // An interval entry has no `daily_time_utc`, so editing one to a wall-clock
 // cadence starts with the time field empty. Saving that persisted an empty

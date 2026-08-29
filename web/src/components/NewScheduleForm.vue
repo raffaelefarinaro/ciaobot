@@ -114,6 +114,7 @@ import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
+import { contextBindsFixedChat } from '../lib/scheduleBinding'
 const emit = defineEmits<{ created: [] }>()
 const store = useTaskStore()
 const projectStore = useProjectStore()
@@ -139,16 +140,12 @@ const isInterval = computed(() => frequency.value === 'interval')
 const needsTimeOfDay = computed(
   () => frequency.value !== 'manual' && !isInterval.value,
 )
-// An interval run into one existing chat inherits that chat's model and mode:
-// the backend ignores a model set here, so don't offer one.
+// One binding, two consequences — see lib/scheduleBinding. The backend ignores
+// a model set here (the chat's own wins), and the dispatcher refuses to
+// auto-archive the chat the runs land in, so neither control is offered.
 const inheritsChatModel = computed(
-  () => isInterval.value && contextKey.value.startsWith('web:'),
+  () => contextBindsFixedChat(frequency.value, contextKey.value),
 )
-// Same binding, different consequence: archiving the chat an interval is bound
-// to makes the next run fork a replacement and archive that too, so the
-// dispatcher refuses. Offering the choice anyway stored a setting nothing
-// honoured. (Bound to a project it opens a fresh chat per run, which is what
-// auto-archive is for, so only the fixed-chat case is excluded.)
 const supportsAutoArchive = computed(() => !inheritsChatModel.value)
 watch(supportsAutoArchive, (supported) => {
   if (!supported) archivePolicy.value = 'manual'

@@ -3871,12 +3871,12 @@ async def running_subagents(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
-    scanned: list[str] = []
+    scanned: list[tuple[str, Any]] = []
     for chat_id in pcm.active_chat_ids():
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
-        scanned.append(chat_id)
+        scanned.append((chat_id, chat))
     # Gathered, not awaited one at a time. Each scan is an independent thread
     # hop over that chat's own session file (or an independent opencode read),
     # so a serial loop cost N full parses of wall clock every four seconds
@@ -3884,10 +3884,10 @@ async def running_subagents(request: Request) -> JSONResponse:
     # tolerance the loop had: one unreadable session must not blank the
     # sidebar for the others.
     results = await asyncio.gather(
-        *(_running_subagent_rows(pcm, config, pcm.get_chat(cid)) for cid in scanned),
+        *(_running_subagent_rows(pcm, config, chat) for _cid, chat in scanned),
         return_exceptions=True,
     )
-    for chat_id, rows in zip(scanned, results):
+    for (chat_id, _chat), rows in zip(scanned, results):
         if isinstance(rows, BaseException):
             logger.warning(
                 "running-subagent scan failed for chat %s", chat_id, exc_info=rows

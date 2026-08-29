@@ -25,11 +25,13 @@
         subagents stay in the chat's Activity trace.
       </p>
       <template v-else>
-        <!-- Keyed by role+content, not index: the poll replaces the whole
-             transcript every few seconds, and any change that is not a pure
-             append shifts every later index. With index keys Vue patches the
-             nodes in place instead of moving them, so an already-rendered
-             bubble takes on a different message's role branch and v-html. -->
+        <!-- The key carries the message's own shape, not just its index: the
+             poll replaces the whole transcript every few seconds, and any
+             change that is not a pure append shifts every later index. On a
+             bare index key Vue patches the existing nodes in place, so an
+             already-rendered bubble takes on a different message's role branch
+             and v-html. The index stays in the key so it is unique even when
+             two messages are genuinely identical. -->
         <div
           v-for="(m, i) in subagent.messages"
           :key="`${i}:${m.role}:${m.tool_name || ''}:${m.content.length}`"

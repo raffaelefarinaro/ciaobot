@@ -179,25 +179,25 @@ class AppSettingsStore:
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key in _NESTED_CLEANERS and key != "provider_default_modes":
+            if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
-                setattr(self.settings, key, _NESTED_CLEANERS[key](value))
-                continue
-            if key == "provider_default_modes":
-                if not isinstance(value, dict):
-                    raise ValueError(f"{key} must be an object")
-                unknown = sorted(
-                    str(mode)
-                    for mode in value.values()
-                    if not isinstance(mode, str)
-                    or (mode.strip() and mode.strip() not in _MODES)
-                )
-                if unknown:
-                    raise ValueError(
-                        f"{key} entries must be one of {', '.join(_MODES)}"
+                # Modes carry a closed vocabulary, so a bad one is a 400 rather
+                # than a value the cleaner silently drops. The cleaner itself
+                # still comes from the table — carving this key out of it was
+                # exactly the drift the table exists to prevent.
+                if key == "provider_default_modes":
+                    unknown = sorted(
+                        str(mode)
+                        for mode in value.values()
+                        if not isinstance(mode, str)
+                        or (mode.strip() and mode.strip() not in _MODES)
                     )
-                setattr(self.settings, key, _clean_default_modes(value))
+                    if unknown:
+                        raise ValueError(
+                            f"{key} entries must be one of {', '.join(_MODES)}"
+                        )
+                setattr(self.settings, key, _NESTED_CLEANERS[key](value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
