@@ -348,6 +348,57 @@ async def test_a_concurrent_user_edit_is_not_clobbered(store: ScheduleStore) -> 
     assert store.get(entry.schedule_id).prompt == "user rewrote this mid-run"
 
 
+async def test_a_concurrent_target_edit_is_not_clobbered(store: ScheduleStore) -> None:
+    """Retargeting an automation mid-run must survive the run finishing.
+
+    The write-back carries the dispatcher's *own* re-homing onto the re-read
+    row. Deciding that by comparing the row against our stale copy cannot tell
+    re-homing apart from a user edit, so a retarget made while the run streamed
+    was silently reverted when it completed.
+    """
+    entry = _create(store, web_chat_id="original-chat")
+
+    async def dispatch_to_web(e, model, mode, provider, *, target_chat_id=None):
+        edited = store.get(e.schedule_id)
+        edited.web_chat_id = "user-picked-chat"
+        store.replace(edited)
+        return {"status": "ok"}
+
+    manager = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch_to_web,
+        prepare_chat=lambda e, prompt, model, mode, provider: e.web_chat_id,
+    )
+    await manager.tick()
+    await _settle()
+
+    assert store.get(entry.schedule_id).web_chat_id == "user-picked-chat"
+    # The run itself is still recorded.
+    assert store.get(entry.schedule_id).last_status == "ok"
+
+
+async def test_rehoming_still_wins_over_an_untouched_row(store: ScheduleStore) -> None:
+    """The other direction: nobody edited, so the replacement chat must stick."""
+    entry = _create(store, web_chat_id="dead-chat")
+
+    async def dispatch_to_web(e, model, mode, provider, *, target_chat_id=None):
+        return {"status": "ok"}
+
+    def prepare(e, prompt, model, mode, provider):
+        e.web_chat_id = "replacement-chat"
+        return "replacement-chat"
+
+    manager = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch_to_web,
+        prepare_chat=prepare,
+    )
+    await manager.tick()
+    await _settle()
+
+    assert store.get(entry.schedule_id).web_chat_id == "replacement-chat"
+
+
 async def test_dispatch_error_is_recorded(store: ScheduleStore) -> None:
     entry = _create(store)
     manager, _ = _make_manager(store, status="error")

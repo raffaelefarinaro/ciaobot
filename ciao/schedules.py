@@ -1170,6 +1170,12 @@ class ScheduleManager:
         chat_id: str,
     ) -> None:
         status = "ok"
+        # The target as it stood before dispatch. Dispatch re-points the entry
+        # when the fixed chat was archived or gone, and that re-homing is the
+        # only change worth carrying onto the re-read row below — comparing
+        # against the row instead would also "carry" a target the *user* edited
+        # mid-run, silently undoing their edit.
+        dispatched_chat_id = entry.web_chat_id
         try:
             result = (
                 await self._dispatch_to_web(
@@ -1194,7 +1200,10 @@ class ScheduleManager:
         if latest is None:
             return
         latest.last_status = status
-        if entry.web_chat_id and latest.web_chat_id != entry.web_chat_id:
+        if entry.web_chat_id and entry.web_chat_id != dispatched_chat_id:
+            # Dispatch re-pointed us at a replacement chat. Without carrying
+            # that across, the entry forgets it and builds a new chat every
+            # interval.
             latest.web_chat_id = entry.web_chat_id
         latest.last_run_chat_id = chat_id
         self._store.replace(latest)
