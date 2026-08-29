@@ -254,3 +254,38 @@ def test_harness_denylist_covers_superseded_bundled_skills() -> None:
     for name in HARNESS_DISABLED_SKILLS:
         assert f"Skill({name})" in entries
     assert harness_skill_overrides() == {name: "off" for name in HARNESS_DISABLED_SKILLS}
+
+
+def test_operator_default_model_applies_to_claude(tmp_path: Path) -> None:
+    """Settings → Models writes every provider into `provider_default_models`.
+
+    Claude is the one provider that also has an env-backed
+    `default_model_config_key`, and checking that key first meant the operator's
+    selection was stored, echoed back by the UI, and then ignored — new chats
+    kept using the old default.
+    """
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    assert config.default_model_for_workspace("default", "claude") == "opus"
+
+    config.provider_default_models = {"claude": "sonnet"}
+
+    assert config.default_model_for_workspace("default", "claude") == "sonnet"
+    assert config.default_model_for_provider("claude") == "sonnet"
+
+
+def test_the_env_default_still_applies_when_no_model_is_selected(
+    tmp_path: Path,
+) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    config.provider_default_models = {}
+
+    assert config.default_model_for_workspace("default", "claude") == "opus"
+
+
+def test_a_selection_for_another_provider_does_not_leak_into_claude(
+    tmp_path: Path,
+) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    config.provider_default_models = {"opencode": "some/other-model"}
+
+    assert config.default_model_for_workspace("default", "claude") == "opus"

@@ -156,7 +156,13 @@
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
                 <label>Time</label>
-                <input v-model="editData.time" type="time" />
+                <input v-model="editData.time" type="time" :aria-invalid="cardEditBlocked || undefined" />
+                <!-- Switching an interval entry to a wall-clock cadence leaves
+                     this empty; without a time the automation would save as
+                     enabled and never fire. -->
+                <p v-if="cardEditBlocked" class="field-hint field-hint--warn">
+                  Pick a time — this cadence needs one to run.
+                </p>
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
                 <label>Timezone</label>
@@ -186,7 +192,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -268,7 +274,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -297,21 +303,31 @@
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
-              <label>Model</label>
-              <ModelSelector
-                :model-value="editData.model"
-                :sections="scheduleModelSections"
-                :placeholder="editInheritedModelLabel"
-                :empty-placeholder="editInheritedModelLabel"
-                @select="selectScheduleModel"
-              />
-            </div>
-            <p class="hint">Leave empty to inherit the workspace default.</p>
+            <!-- An interval run into one existing chat inherits that chat's
+                 model and mode — prepare_schedule_chat skips the override — so
+                 offering a picker here reported a setting that never took
+                 effect. Same rule NewScheduleForm applies on create. -->
+            <p v-if="inheritsChatModel" class="hint">
+              This automation runs inside its chat, so every run uses that
+              chat's own model. Change it from the chat's model picker.
+            </p>
+            <template v-else>
+              <div class="form-group">
+                <label>Model</label>
+                <ModelSelector
+                  :model-value="editData.model"
+                  :sections="scheduleModelSections"
+                  :placeholder="editInheritedModelLabel"
+                  :empty-placeholder="editInheritedModelLabel"
+                  @select="selectScheduleModel"
+                />
+              </div>
+              <p class="hint">Leave empty to inherit the workspace default.</p>
+            </template>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -332,26 +348,30 @@
 
           <dl v-if="editingCard !== 'advanced'" class="prop-rows">
             <div class="prop-row">
-              <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
+              <dt>Archive</dt><dd>{{ scheduleSupportsAutoArchive(schedule) ? archiveLabel(schedule.archive_policy) : 'manual (keeps the bound chat)' }}</dd>
             </div>
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
+            <div v-if="editSupportsAutoArchive" class="form-group">
               <label>Archive behavior</label>
               <select v-model="editData.archive_policy">
                 <option value="manual">Manual, keep as normal chat</option>
                 <option value="auto">Automatically archive routine results</option>
               </select>
             </div>
-            <p class="hint">
+            <p v-if="editSupportsAutoArchive" class="hint">
               Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
               anything useful for the user to judge, the chat stays visible.
+            </p>
+            <p v-else class="hint">
+              Runs into one existing chat, so the conversation is kept —
+              auto-archive does not apply to this binding.
             </p>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -378,7 +398,7 @@
         <div class="card-actions">
           <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
           <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-          <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+          <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
         </div>
       </div>
 
@@ -496,6 +516,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
@@ -680,7 +701,12 @@ const recentRuns = computed(() =>
       lastRunAt: s.last_dispatched_at!,
       chatId: s.last_run_chat_id!,
     }))
-    .sort((a, b) => (a.lastRunAt > b.lastRunAt ? -1 : 1))
+    // Compared as instants, not as strings. `last_dispatched_at` is written in
+    // two offsets — UTC from the interval and run-now paths, the entry's own
+    // timezone from the wall-clock tick/catch-up — and ISO strings only sort
+    // correctly at a fixed offset, so an evening-local stamp sorted above a
+    // genuinely newer UTC one and could push it off the five-row list.
+    .sort((a, b) => Date.parse(b.lastRunAt) - Date.parse(a.lastRunAt))
     .slice(0, 5),
 )
 
@@ -820,6 +846,14 @@ function providerLabel(s: Schedule): string {
     : `${label} (inherited from ${workspaceDisplayName(s.workspace)})`
 }
 
+// An interval entry bound to one existing chat runs inside it and inherits its
+// model/mode; `prepare_schedule_chat` deliberately skips the override. Mirrors
+// NewScheduleForm's `inheritsChatModel`.
+const inheritsChatModel = computed(() => {
+  const s = schedule.value
+  return !!s && bindsFixedChat(s.frequency, s.web_chat_id, s.web_project_id)
+})
+
 function isIntervalSchedule(s: Schedule): boolean {
   return s.frequency === 'interval'
 }
@@ -834,6 +868,28 @@ const editShowsTimeOfDay = computed(
   () => editData.value.frequency !== 'manual' && editData.value.frequency !== 'interval',
 )
 
+// Archiving the chat an interval is bound to makes the next run fork a
+// replacement and archive that too, so the dispatcher refuses to archive these.
+// The setting was still offered and still rendered as "automatic", describing
+// behaviour that never happened. A project-bound interval opens a fresh chat
+// per run and is exactly what auto-archive is for, so only this binding is out.
+const editSupportsAutoArchive = computed(
+  () => !contextBindsFixedChat(editData.value.frequency, editData.value.contextKey),
+)
+watch(editSupportsAutoArchive, (supported) => {
+  if (!supported) editData.value.archive_policy = 'manual'
+})
+
+// An interval entry has no `daily_time_utc`, so editing one to a wall-clock
+// cadence starts with the time field empty. Saving that persisted an empty
+// `daily_time_utc`, which `compute_next_run` cannot parse — leaving an
+// automation that reads as enabled in the UI and silently never fires. Every
+// Save in this panel sends the whole payload, so all of them are gated.
+const cardEditValid = computed(
+  () => !editShowsTimeOfDay.value || /^\d{2}:\d{2}$/.test(editData.value.time || ''),
+)
+const cardEditBlocked = computed(() => cardDirty.value && !cardEditValid.value)
+
 function enabledToggleLabel(s: Schedule): string {
   if (isIntervalSchedule(s)) return s.enabled ? 'Stop' : 'Start'
   return s.enabled ? 'Disable' : 'Enable'
@@ -846,6 +902,13 @@ function intervalStatusLabel(s: Schedule): string {
   if (s.last_status === 'busy') return 'waiting — chat busy'
   if (s.last_status === 'running') return 'run in progress…'
   if (s.last_status === 'error') return 'last run failed'
+  // `_schedule_dispatch_status` reports "skipped" when the run reached the
+  // provider but stopped short of a result: an approval card, an
+  // AskUserQuestion, or a deferred retry after a quota rejection. Without an
+  // arm here it fell through to "waiting for first run", so an automation that
+  // had run many times and was blocked on a prompt read as one that had never
+  // run at all.
+  if (s.last_status === 'skipped') return 'last run needs you — check the chat'
   if (s.last_status === 'ok') return 'ok'
   return s.enabled ? 'waiting for first run' : 'never ran'
 }
@@ -1309,6 +1372,8 @@ function closeSchedule() {
 }
 .form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group label { font-size: var(--text-xs); color: var(--fg2); }
+.field-hint { margin: 4px 0 0; font-size: var(--text-xs); }
+.field-hint--warn { color: var(--warning); }
 .form-group input, .form-group select, .form-group textarea {
   padding: 6px 10px;
   border: 1px solid var(--border);

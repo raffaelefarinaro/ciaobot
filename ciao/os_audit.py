@@ -754,6 +754,7 @@ def _aggregate_memory_guides(
     event_shaped: list[dict[str, Any]] = []
     stale_paths: list[dict[str, Any]] = []
     superseded: list[dict[str, Any]] = []
+    aging_state: list[dict[str, Any]] = []
     for guide in guides:
         workspace = guide["workspace"]
         over_cap.extend(_tag_workspace(entry, workspace) for entry in guide["over_cap"])
@@ -765,6 +766,8 @@ def _aggregate_memory_guides(
         event_shaped.extend(guide["rot"]["event_shaped_entries"])
         stale_paths.extend(guide["rot"]["stale_path_entries"])
         superseded.extend(guide["rot"]["superseded_state_candidates"])
+        # Older scans (persisted or stubbed in tests) predate the aging pass.
+        aging_state.extend(guide["rot"].get("aging_state_entries", []))
 
     return {
         "guides": guides,
@@ -782,6 +785,7 @@ def _aggregate_memory_guides(
         "event_shaped_entries": event_shaped,
         "stale_path_entries": stale_paths,
         "superseded_state_candidates": superseded,
+        "aging_state_entries": aging_state,
         "paths_checked": sum(g["rot"]["paths_checked"] for g in guides),
         "paths_unverifiable": sum(g["rot"]["paths_unverifiable"] for g in guides),
         "pending_memory_proposals": pending_memory_proposals,

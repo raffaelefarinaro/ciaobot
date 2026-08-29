@@ -481,7 +481,10 @@ export interface Schedule {
   // Outcome of the most recent interval run. Interval entries have no expected
   // wall-clock slot, so `missed` is always false for them and this is what
   // reports their health instead. Empty on wall-clock schedules.
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
+  // 'skipped' is what the dispatcher records when a run reached the provider
+  // but stopped short of a result (approval card, AskUserQuestion, deferred
+  // retry) — see project_chats._schedule_dispatch_status.
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null

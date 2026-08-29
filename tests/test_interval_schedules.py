@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao.web.project_chats import ProjectChatManager
 from ciao.schedules import (
     INTERVAL_FREQUENCY,
     MIN_INTERVAL_MINUTES,
@@ -347,6 +348,57 @@ async def test_a_concurrent_user_edit_is_not_clobbered(store: ScheduleStore) -> 
     assert store.get(entry.schedule_id).prompt == "user rewrote this mid-run"
 
 
+async def test_a_concurrent_target_edit_is_not_clobbered(store: ScheduleStore) -> None:
+    """Retargeting an automation mid-run must survive the run finishing.
+
+    The write-back carries the dispatcher's *own* re-homing onto the re-read
+    row. Deciding that by comparing the row against our stale copy cannot tell
+    re-homing apart from a user edit, so a retarget made while the run streamed
+    was silently reverted when it completed.
+    """
+    entry = _create(store, web_chat_id="original-chat")
+
+    async def dispatch_to_web(e, model, mode, provider, *, target_chat_id=None):
+        edited = store.get(e.schedule_id)
+        edited.web_chat_id = "user-picked-chat"
+        store.replace(edited)
+        return {"status": "ok"}
+
+    manager = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch_to_web,
+        prepare_chat=lambda e, prompt, model, mode, provider: e.web_chat_id,
+    )
+    await manager.tick()
+    await _settle()
+
+    assert store.get(entry.schedule_id).web_chat_id == "user-picked-chat"
+    # The run itself is still recorded.
+    assert store.get(entry.schedule_id).last_status == "ok"
+
+
+async def test_rehoming_still_wins_over_an_untouched_row(store: ScheduleStore) -> None:
+    """The other direction: nobody edited, so the replacement chat must stick."""
+    entry = _create(store, web_chat_id="dead-chat")
+
+    async def dispatch_to_web(e, model, mode, provider, *, target_chat_id=None):
+        return {"status": "ok"}
+
+    def prepare(e, prompt, model, mode, provider):
+        e.web_chat_id = "replacement-chat"
+        return "replacement-chat"
+
+    manager = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch_to_web,
+        prepare_chat=prepare,
+    )
+    await manager.tick()
+    await _settle()
+
+    assert store.get(entry.schedule_id).web_chat_id == "replacement-chat"
+
+
 async def test_dispatch_error_is_recorded(store: ScheduleStore) -> None:
     entry = _create(store)
     manager, _ = _make_manager(store, status="error")
@@ -482,6 +534,9 @@ def test_migrate_loops_imports_as_interval_schedules(tmp_path: Path) -> None:
     # Legacy loops reused their existing chat; the old project hint must not
     # turn the migrated interval into a new-chat-per-run schedule.
     assert entry.web_project_id is None
+    # ...but it is still the project the loop would have been re-homed into if
+    # its chat went away, so it is kept as the fallback rather than dropped.
+    assert entry.fallback_project_id == "proj-1"
     assert entry.workspace == "work"
     assert entry.title == "PR watcher"
     assert entry.enabled is True
@@ -529,3 +584,107 @@ def test_migrate_loops_skips_a_loop_with_no_target(tmp_path: Path) -> None:
 
 def test_migrate_loops_no_file_is_a_no_op(tmp_path: Path) -> None:
     assert migrate_loops(tmp_path) == 0
+
+
+def test_migrated_loop_rehomes_into_its_own_project_not_general(tmp_path: Path) -> None:
+    """A migrated loop whose chat is deleted must resume where it lived.
+
+    The legacy resolver used the loop's own ``web_project_id`` for this. The
+    interval schema cannot reuse that field (there it means "new chat per run"
+    and outranks the fixed chat), so the value is carried as
+    ``fallback_project_id`` — without it ``resolve_automation_project`` falls
+    straight through to the workspace's General and the unattended prompt runs
+    in the wrong project context.
+    """
+    _write_loops(tmp_path, [{
+        "loop_id": "loop-rehome",
+        "prompt": "p",
+        "web_chat_id": "chat-gone",
+        "web_project_id": "proj-original",
+        "workspace": "work",
+    }])
+    migrate_loops(tmp_path)
+    entry = ScheduleStore(tmp_path).get("loop-rehome")
+
+    class _Project:
+        def __init__(self, pid: str, name: str) -> None:
+            self.project_id, self.name, self.workspace = pid, name, "work"
+
+    class _PCM:
+        _projects = {
+            "proj-original": _Project("proj-original", "Original"),
+            "proj-general": _Project("proj-general", "General"),
+        }
+        resolve_automation_project = (
+            ProjectChatManager.resolve_automation_project
+        )
+
+    assert _PCM().resolve_automation_project(entry).project_id == "proj-original"
+
+
+def test_rehome_falls_back_to_general_when_the_project_is_gone(tmp_path: Path) -> None:
+    _write_loops(tmp_path, [{
+        "loop_id": "loop-orphan",
+        "prompt": "p",
+        "web_chat_id": "chat-gone",
+        "web_project_id": "proj-deleted",
+        "workspace": "work",
+    }])
+    migrate_loops(tmp_path)
+    entry = ScheduleStore(tmp_path).get("loop-orphan")
+
+    class _Project:
+        def __init__(self, pid: str, name: str) -> None:
+            self.project_id, self.name, self.workspace = pid, name, "work"
+
+    class _PCM:
+        _projects = {"proj-general": _Project("proj-general", "General")}
+        resolve_automation_project = (
+            ProjectChatManager.resolve_automation_project
+        )
+
+    assert _PCM().resolve_automation_project(entry).project_id == "proj-general"
+
+
+def test_backfill_stamps_the_rehome_fallback_on_pre_existing_entries(
+    tmp_path: Path,
+) -> None:
+    """Entries written before the stamp existed are only repairable now.
+
+    The MCP `schedule`/`loop` creators recorded no fallback at all, so a
+    chat-bound entry created that way re-homes into the workspace's General
+    once its chat is deleted — and by then the chat's project is unknowable.
+    The startup backfill closes that window while the chat is still there.
+    """
+    store = ScheduleStore(tmp_path)
+    bound = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-a",
+    )
+    project_bound = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15,
+        web_project_id="proj-b",
+    )
+    gone = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-gone",
+    )
+
+    class _PCM:
+        def get_chat(self, chat_id: str):
+            if chat_id == "chat-a":
+                return type("C", (), {"project_id": "proj-a"})()
+            return None
+
+    manager = ScheduleManager(store=store, dispatch_to_web=lambda *a, **k: None)
+    assert manager.backfill_fallback_projects(_PCM()) == 1
+
+    assert store.get(bound.schedule_id).fallback_project_id == "proj-a"
+    # A project-bound entry names where its runs go; nothing to fall back to.
+    assert store.get(project_bound.schedule_id).fallback_project_id == ""
+    # The window has closed on this one: guessing would be worse than General.
+    assert store.get(gone.schedule_id).fallback_project_id == ""
+
+    # Idempotent, and it never overwrites a fallback that is already recorded.
+    assert manager.backfill_fallback_projects(_PCM()) == 0

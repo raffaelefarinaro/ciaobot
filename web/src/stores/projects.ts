@@ -37,7 +37,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId } from '../lib/subagentIds'
+import { bareAgentId, sameAgent } from '../lib/subagentIds'
 
 export function shouldReconnectActiveChatOnStreamingStarted(
   socket: Pick<WebSocket, 'readyState'> | undefined,
@@ -747,6 +747,7 @@ export const useProjectStore = defineStore('projects', () => {
   const RUNNING_SUBAGENT_DRAIN_MS = 90_000
 
   let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
+  let runningSubagentRefreshGeneration = 0
   function stopRunningSubagentPoll(): void {
     if (runningSubagentTimer !== null) {
       clearInterval(runningSubagentTimer)
@@ -3119,10 +3120,40 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Subagents ───────────────────────────────────────────────────────
 
+  // Both subagent loaders write `subagents.value[chatId]`, on independent 4s
+  // timers, and one replaces the whole array while the other merges a single
+  // row into it. Without ordering, a response that left earlier can land later
+  // and undo the newer one — visibly, as the open transcript losing its newest
+  // messages.
+  //
+  // One monotonic sequence orders every request across both loaders, but each
+  // guards only against *its own* out-of-order responses: a shared
+  // last-writer-wins counter would have let the fast single-agent poll
+  // invalidate a slow full-set fetch outright, so a chat with a large session
+  // file never refreshed its other agents while the subagent view was open.
+  // Cross-loader ordering is handled per row instead: the full set keeps any
+  // row a narrower, newer response already wrote.
+  let subagentSeq = 0
+  const subagentListSeq = new Map<string, number>()
+  const subagentRowSeq = new Map<string, number>()
+  const subagentRowApplied = new Map<string, number>()
+  const rowKey = (chatId: string, agentId: string) =>
+    `${chatId}|${bareAgentId(agentId)}`
+
   async function loadSubagents(chatId: string): Promise<void> {
+    const seq = ++subagentSeq
+    subagentListSeq.set(chatId, seq)
     try {
       const r = await api.get<SubagentTranscript[]>(`/api/chats/${chatId}/subagents`)
-      subagents.value[chatId] = Array.isArray(r) ? r : []
+      if (subagentListSeq.get(chatId) !== seq) return
+      const fresh = Array.isArray(r) ? r : []
+      const prior = subagents.value[chatId] || []
+      subagents.value[chatId] = fresh.map((row) => {
+        // A single-agent response that landed after this request was issued is
+        // newer for that row, whatever order the two responses arrived in.
+        if ((subagentRowApplied.get(rowKey(chatId, row.agent_id)) || 0) <= seq) return row
+        return prior.find(s => sameAgent(s.agent_id, row.agent_id)) || row
+      })
     } catch {
       // No session locally / SDK error — leave any prior data in place.
     }
@@ -3136,15 +3167,20 @@ export const useProjectStore = defineStore('projects', () => {
   // data for the other agents survives.
   async function loadSubagent(chatId: string, agentId: string): Promise<void> {
     if (!agentId) return
+    const key = rowKey(chatId, agentId)
+    const seq = ++subagentSeq
+    subagentRowSeq.set(key, seq)
     try {
       const r = await api.get<SubagentTranscript[]>(
         `/api/chats/${chatId}/subagents?agent_id=${encodeURIComponent(agentId)}`,
       )
+      if (subagentRowSeq.get(key) !== seq) return
       const fetched = Array.isArray(r) ? r : []
-      const one = fetched.find(s => bareAgentId(s.agent_id) === bareAgentId(agentId))
+      const one = fetched.find(s => sameAgent(s.agent_id, agentId))
       if (!one) return
+      subagentRowApplied.set(key, seq)
       const prior = subagents.value[chatId] || []
-      const idx = prior.findIndex(s => bareAgentId(s.agent_id) === bareAgentId(agentId))
+      const idx = prior.findIndex(s => sameAgent(s.agent_id, agentId))
       subagents.value[chatId] = idx === -1
         ? [...prior, one]
         : prior.map((s, i) => (i === idx ? one : s))
@@ -3157,8 +3193,10 @@ export const useProjectStore = defineStore('projects', () => {
   // wholesale rather than merged: the server omits chats with nothing running,
   // and that omission is exactly how a finished subagent's row disappears.
   async function refreshRunningSubagents(): Promise<void> {
+    const generation = ++runningSubagentRefreshGeneration
     try {
       const r = await api.get<RunningSubagentsResponse>('/api/subagents/running')
+      if (generation !== runningSubagentRefreshGeneration) return
       runningSubagents.value = (r && typeof r === 'object' && r.chats) ? r.chats : {}
     } catch {
       // Transient (offline, host proxy down): keep the last known rows rather
@@ -3199,7 +3237,10 @@ export const useProjectStore = defineStore('projects', () => {
       await reloadAndReconnectChat(chatId)
       return
     }
-    await switchChat(chatId)
+    // Every caller of this function is reacting to a route the browser or the
+    // router has already applied, so a sub-view named in that route is the
+    // destination — not something to navigate out of. See switchChat.
+    await switchChat(chatId, { keepSubView: true })
   }
 
   /**
@@ -3208,7 +3249,10 @@ export const useProjectStore = defineStore('projects', () => {
    * the "Loading conversation" skeleton sits on screen for its duration. Every
    * other entry point still fetches.
    */
-  async function switchChat(chatId: string, opts?: { skipHistory?: boolean }) {
+  async function switchChat(
+    chatId: string,
+    opts?: { skipHistory?: boolean; keepSubView?: boolean },
+  ) {
     await ensureWorkspaceForChat(chatId)
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
@@ -3220,7 +3264,18 @@ export const useProjectStore = defineStore('projects', () => {
     // on that alone made clicking the chat's own sidebar row a no-op while one
     // of its subagents was open: no push, and the activeChatId guard below
     // returns early. Any sub-view of the chat still has to navigate back to it.
-    if (currentRouteChatId !== chatId || currentRoute.params.agentId) {
+    //
+    //
+    // `keepSubView` is the exception, and it is what makes the subagent view
+    // reachable for a chat that is not already active. Opening
+    // `/chat/B/subagent/Y` navigates first and only then reaches here (through
+    // the route watcher / deep-link path), so the `agentId` this would strip is
+    // the one the user just asked for — the view would render for a frame and
+    // bounce to the chat, and a cold reload of that URL would never render it
+    // at all. A direct sidebar click on the chat's own row passes no flag and
+    // still leaves the sub-view, which is what that click means.
+    const keepSubView = Boolean(opts?.keepSubView) && currentRouteChatId === chatId
+    if ((currentRouteChatId !== chatId || currentRoute.params.agentId) && !keepSubView) {
       router.push(`/chat/${chatId}`)
     }
     if (activeChatId.value === chatId) {

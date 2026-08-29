@@ -1083,7 +1083,7 @@ def _build_workspace_index(
 ) -> dict[str, list[Path]]:
     """Entries keyed the way a cross-workspace ref spells them.
 
-    A ref names the other half as ``work/People/Ipek-Kahraman-Scandit`` — the
+    A ref names the other half as ``work/People/Mira-Rossi-Acme`` — the
     workspace, then the path inside that workspace's vault. Neither of
     ``_build_filename_index``'s keys is that shape: it strips the whole prefix,
     workspace segment included, because within one root the segment is not part

@@ -573,7 +573,7 @@ def _names_same_person(stem: str, aliases: Sequence[str], target_stem: str) -> b
     Both are explicit identity claims made in the note itself.
 
     A "longer stem extending this one at a name boundary" rule was written here
-    first, to catch `Ipek` -> `Ipek-Kahraman-Scandit`, and it was wrong: those
+    first, to catch `Mira` -> `Mira-Rossi-Acme`, and it was wrong: those
     are two different people who share a name, and the work note says so in
     prose ("the name collision in the vault is intentional — do not merge").
     Name shape is not identity. Requiring an alias means the vault has to *say*
@@ -612,7 +612,7 @@ def _links_back(target: Path, workspace: str, stem: str) -> bool:
     A mutual link is the strongest identity claim the vault can make, and unlike
     any name test it cannot be produced by coincidence: both notes had to be
     edited to say it. It is what lets two notes be recognised as one person when
-    the filenames cannot say so — `Ipek` and `Ipek-Kahraman-Scandit`, where the
+    the filenames cannot say so — `Mira` and `Mira-Rossi-Acme`, where the
     work note carries a disambiguating suffix no real alias would contain.
     """
     if not target.is_file():
@@ -625,8 +625,8 @@ def _links_back(target: Path, workspace: str, stem: str) -> bool:
         parts = Path(_new_ref(ref)).parts
         if not parts:
             continue
-        # Prefixed (`personal/People/Ipek`) or the legacy unprefixed form
-        # (`People/Ipek`), which can only mean the other root once split.
+        # Prefixed (`personal/People/Mira`) or the legacy unprefixed form
+        # (`People/Mira`), which can only mean the other root once split.
         if parts[0] == workspace and len(parts) >= 3:
             candidate = parts[-1]
         elif parts[0] in PEOPLE_DIRS and len(parts) >= 2:

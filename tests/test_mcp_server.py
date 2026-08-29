@@ -820,6 +820,65 @@ def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> N
     assert result["data"]["workspace"] == "work"
 
 
+def test_schedule_create_with_chat_id_records_the_rehome_fallback(
+    tmp_path: Path,
+) -> None:
+    """The MCP creator stamped no fallback, so a deleted chat lost the project.
+
+    `web_project_id` cannot carry this — on an interval entry it means "a new
+    chat per run" and outranks the fixed chat — so the bound chat's own project
+    is recorded separately, and only while that chat still exists. Without it
+    the unattended run re-homes into the workspace's General.
+    """
+    pcm = _work_project_pcm()
+    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
+    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+
+    result = control_plane.schedule_create(
+        _chat_create_principal(project_id="project-work", workspace="work"),
+        prompt="Continue this thread weekly.",
+        daily_time="08:00",
+        timezone="UTC",
+        frequency="weekly",
+        chat_id="chat-fixed",
+    )
+
+    # Read the persisted row, not the payload: the stamp lands after `create`
+    # and is only useful if it was written back.
+    stored = schedules._store.get(result["data"]["schedule_id"])
+    assert stored is not None
+    assert stored.fallback_project_id == "project-work"
+
+
+def test_mcp_loop_create_and_retarget_keep_the_rehome_fallback_in_step(
+    tmp_path: Path,
+) -> None:
+    """Retargeting must move the fallback, not leave it on the old project."""
+    pcm = _work_project_pcm()
+    chats = {
+        "chat-a": SimpleNamespace(chat_id="chat-a", project_id="project-work"),
+        "chat-b": SimpleNamespace(
+            chat_id="chat-b", project_id="project-work-general"
+        ),
+    }
+    pcm.get_chat = lambda cid: chats.get(cid)  # type: ignore[method-assign]
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+
+    created = control_plane.loop_create(
+        principal, chat_id="chat-a", prompt="watch the queue", interval_minutes=15
+    )
+    loop_id = created["data"]["loop_id"]
+    assert schedules._store.get(loop_id).fallback_project_id == "project-work"
+
+    control_plane.loop_update(principal, loop_id, chat_id="chat-b")
+
+    assert schedules._store.get(loop_id).fallback_project_id == (
+        "project-work-general"
+    )
+
+
 # ── workspace boundary for schedule targeting ────────────────────────────
 #
 # MCP tokens are scoped to one workspace, and a schedule is auto-approved

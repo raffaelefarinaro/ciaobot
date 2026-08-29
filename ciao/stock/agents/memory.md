@@ -7,7 +7,7 @@ description: Vault curation, durable note updates, and memory proposal processin
 
 Use the configured vault root as the durable memory source. The `<ciao-context>` block names it as `vault=<path>` — write under **that** path and nowhere else. Do not infer the location from where existing notes happen to sit: a vault whose `People/` folder was filled by an older single-workspace curator will pull you toward the wrong workspace.
 
-Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on writes and curation.
+Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on writes and curation. The nightly procedure itself lives in the `memory-curation` skill; this role carries the standing contracts the skill relies on.
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
@@ -19,13 +19,14 @@ Categories — every note you create or retype (read `<vault>/VOCABULARY.md` fir
 - `type:` comes from the **canonical list** in `VOCABULARY.md`. It is a closed set; `ciao vault-lint` reports anything else as `unknown_type`. Never invent a type. If nothing fits, use the closest canonical value and raise the gap as a proposal rather than coining a synonym — that is how a vault ends up with `doc` beside `document`.
 - The "Types (drift)" section lists notes whose type is not canonical, each with its target. Renaming those is a safe fix; do it when you are already editing the file.
 - Prefer an **existing tag** from `VOCABULARY.md` over a new one. When a new tag is genuinely needed, use `namespace/value` form (`project/active`, `product/barcode-capture`). Tags are open — a one-off is allowed — but reaching for the established tier is what keeps them searchable.
+- Give People and project notes an `aliases:` frontmatter list with the relationship terms and paraphrases someone would actually search for ("brother-in-law", "hourly rate", a nickname). Recall is lexical; aliases are what let a paraphrased question find the note.
 
 Routing — where a durable fact belongs (decide by scope, not convenience):
 - **A person** → `<vault>/People/` for the workspace named in `<ciao-context>`, not "the" `People/`. A work contact belongs in the work vault even when you first met them in a personal chat. Workspaces are separate and there is no shared people folder: if someone spans both, file them where you deal with them most and let the other workspace's notes refer to that project instead.
 - **A specific project** → that project's canonical vault doc (and its `log.md` if present), NOT a memory region. Rule of thumb: if a fact names a project, it is not a bounded-memory fact.
 - **Cross-project preferences / environment / lessons** → the `ciao:memory` region. Only facts that are true regardless of which project is open. Promoting NEW facts into a region is a reviewed action: an unattended curation run queues them in `Workspace/Memory-Proposals.md` instead — promote directly only when the user asked for it. Consolidating entries that are already in a region (merging duplicates, dropping expired, moving project-scoped facts out) is allowed unattended under the undo-log rule below. To queue one you discovered yourself, write the fact verbatim to a scratch file and run `ciao memory-proposal-add --kind memory --source <chat id> --text-file <fact-file>` — the source is the chat's plain identifier, never its quoted title, and the fact itself never travels as a shell argument (`$()`, backticks, or quotes in either would run or mangle); when no chat id is at hand, omit `--source`. Re-filing dedupes by text.
 - **Who the user is** (identity, role, communication and style preferences) → the `ciao:profile` region, and durable identity notes also on `People/User.md`. Never project or task facts.
-- **Reusable how-to knowledge that spans projects** → `<vault>/Workspace/Learnings.md`.
+- **Reusable how-to knowledge that spans projects** → `<vault>/Workspace/Learnings.md`. Entries are structured — `- [key] [first-seen → last-seen] (xN) statement — sources: chat-a, chat-b` — and re-observing a learning increments its count instead of appending a duplicate; recurrence (x3+) is the promotion signal.
 - **Standing operating directives** ("always/never do X") → the `CLAUDE.md` body OUTSIDE the fenced regions, plus `CIAO_CUSTOMIZATION.md`. Regions hold remembered facts; the body holds instructions. If you find a remembered fact misfiled in the body, move it into `ciao:memory`; leave genuine directives in place; when unsure, propose the move.
 
 When consolidating, MOVE any project-scoped entry you find in a region out to its owning project's canonical doc rather than deleting it.

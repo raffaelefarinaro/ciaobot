@@ -15,7 +15,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ciao import provider_registry
 
@@ -52,6 +52,21 @@ def _clean_default_modes(raw: object) -> dict[str, str]:
         and isinstance(mode, str)
         and mode.strip() in _MODES
     }
+
+
+# Every per-provider nested map, with the cleaner that normalizes it. One
+# table rather than a `nested_fields` set, a parallel key tuple, and a third
+# `if key in {...}` branch in `update`: those three had already drifted —
+# `provider_default_modes` was missing from the set, so it landed in
+# `string_fields` and survived a reload only because the dict failed the
+# incidental `isinstance(value, str)` check. A new knob added to one list and
+# not the others is silently dropped on every restart, with no error anywhere.
+_NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
+    "provider_default_models": _clean_provider_map,
+    "provider_default_thinking": _clean_provider_map,
+    "provider_insights_models": _clean_provider_map,
+    "provider_default_modes": _clean_default_modes,
+}
 
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
@@ -129,31 +144,19 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        nested_fields = {
-            "provider_default_models",
-            "provider_default_thinking",
-            "provider_insights_models",
-        }
         string_fields = {
             field.name
             for field in fields(AppSettings)
-            if field.name not in nested_fields
+            if field.name not in _NESTED_CLEANERS
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
-        for key in (
-            "provider_default_models",
-            "provider_default_thinking",
-            "provider_insights_models",
-        ):
-            cleaned = _clean_provider_map(raw.get(key))
+        for key, cleaner in _NESTED_CLEANERS.items():
+            cleaned = cleaner(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
-        provider_default_modes = _clean_default_modes(raw.get("provider_default_modes"))
-        if provider_default_modes:
-            settings.provider_default_modes = provider_default_modes
         return settings
 
     def _save(self) -> None:
@@ -176,29 +179,25 @@ class AppSettingsStore:
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key in {
-                "provider_default_models",
-                "provider_default_thinking",
-                "provider_insights_models",
-            }:
+            if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
-                setattr(self.settings, key, _clean_provider_map(value))
-                continue
-            if key == "provider_default_modes":
-                if not isinstance(value, dict):
-                    raise ValueError(f"{key} must be an object")
-                unknown = sorted(
-                    str(mode)
-                    for mode in value.values()
-                    if not isinstance(mode, str)
-                    or (mode.strip() and mode.strip() not in _MODES)
-                )
-                if unknown:
-                    raise ValueError(
-                        f"{key} entries must be one of {', '.join(_MODES)}"
+                # Modes carry a closed vocabulary, so a bad one is a 400 rather
+                # than a value the cleaner silently drops. The cleaner itself
+                # still comes from the table — carving this key out of it was
+                # exactly the drift the table exists to prevent.
+                if key == "provider_default_modes":
+                    unknown = sorted(
+                        str(mode)
+                        for mode in value.values()
+                        if not isinstance(mode, str)
+                        or (mode.strip() and mode.strip() not in _MODES)
                     )
-                setattr(self.settings, key, _clean_default_modes(value))
+                    if unknown:
+                        raise ValueError(
+                            f"{key} entries must be one of {', '.join(_MODES)}"
+                        )
+                setattr(self.settings, key, _NESTED_CLEANERS[key](value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")

@@ -30,6 +30,7 @@ from ciao.control_plane import (
     McpPrincipal,
     _UNSET,
 )
+from ciao.execution_modes import MCP_SERVER_NAME
 from ciao.schedules import DEFAULT_INTERVAL_MINUTES
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
@@ -1092,9 +1093,14 @@ class CiaoMcpService:
             if term in _TOOL_GROUPS:
                 hits = [t for t in catalog if _GROUP_OF_TOOL.get(t.name) == term]
             else:
-                hits = [t for t in catalog if t.name == term]
-                if not hits:
-                    hits = [t for t in catalog if term in t.name]
+                # Substring, not exact-then-fallback. The merged tools are
+                # named `schedule`, `project`, and `loop` — the most natural
+                # one-word query for each domain — so stopping at the exact hit
+                # returned one schema and hid `schedules_list` /
+                # `schedule_action` from a model that had no other way to learn
+                # they exist. (An exact name is a substring of itself, so this
+                # one test covers both.)
+                hits = [t for t in catalog if term in t.name]
                 if not hits:
                     hits = [
                         t for t in catalog if term in (t.description or "").lower()
@@ -1186,6 +1192,32 @@ class CiaoMcpService:
             return value
         return {"ok": True, "data": value}
 
+    def _denied_by_workspace(self, target: str) -> bool:
+        """Whether this workspace's ``disallowed_tools`` blocks ``target``.
+
+        The harness denylist is enforced by exact tool name on the provider
+        side (``ClaudeAgentOptions.disallowed_tools``), so it never sees a call
+        routed through ``tools_call`` — the dispatcher runs the target's
+        coroutine in-process under its own name. Re-checking here keeps the
+        deprecated indirection from becoming a way around an operator's
+        per-workspace denylist. Unknown principal or an unreadable denylist
+        falls through to "not denied": this is a second line, and the first
+        one still applies to every direct call.
+        """
+        principal = self._principal_or_none()
+        if principal is None:
+            return False
+        try:
+            denied = set(
+                self.config.disallowed_tools_for_workspace(principal.workspace)
+            )
+        except Exception:  # noqa: BLE001 — a broken denylist must not 500 a call
+            logger.exception("Could not resolve the workspace denylist")
+            return False
+        return bool(
+            denied & {target, f"mcp__{MCP_SERVER_NAME}__{target}", f"mcp__{MCP_SERVER_NAME}"}
+        )
+
     def _dispatch_refusal(self, target: str) -> str:
         """Why ``tools_call`` will not run ``target``, or "" if it will."""
         if not target:
@@ -1202,6 +1234,8 @@ class CiaoMcpService:
                 f"{target} is destructive and is listed in tools/list. "
                 "Call it directly by name so its approval prompt is raised."
             )
+        if self._denied_by_workspace(target):
+            return f"{target} is disallowed in this workspace."
         return ""
 
     def _principal_or_none(self) -> McpPrincipal | None:

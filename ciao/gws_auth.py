@@ -720,6 +720,32 @@ class ManualPkceStore:
             if expires_at < cutoff:
                 del self._pending[flow_id]
 
+    def consume(self, flow_id: str, profile: str | None = None) -> None:
+        """Retire a flow whose code has been exchanged successfully.
+
+        ``peek`` is deliberately non-destructive so a mistyped paste can be
+        retried with the same verifier, which means nothing else retires a
+        flow that actually *succeeded* — it stayed ``active`` for the rest of
+        its TTL. That is both a spent secret held longer than necessary and a
+        live blocker: ``status_for_profile`` reports ``"active"``, which is
+        what makes ``gws_exchange_code`` refuse a later flow-ID-less exchange
+        for the same profile (the cached pre-PKCE client path).
+
+        Tombstoned rather than deleted, and with the same status word an
+        expiry uses, so re-pasting the spent code still gets "start manual
+        connect again" instead of a confusing ``invalid_grant``. Call this only
+        after the exchange succeeds; on failure the verifier must survive for
+        the retry.
+        """
+        with self._lock:
+            entry = self._pending.get(flow_id)
+            if entry is None:
+                return
+            entry_profile, _verifier, expires_at, _status = entry
+            if profile is not None and entry_profile != profile:
+                return
+            self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
+
     def peek(self, flow_id: str, profile: str | None = None) -> str | None:
         """Return the live verifier for ``flow_id``, or ``None``.
 
@@ -761,12 +787,23 @@ class ManualPkceStore:
                 return "none"
             if status == "superseded":
                 return status
+            # A tombstone `consume` wrote is authoritative even inside the TTL.
+            # Reading only the clock reported a spent flow as "active" for the
+            # rest of its hour: a resubmitted flow_id (double-click, browser
+            # back, a retry after the response was lost) then passed every
+            # guard, `peek` returned None because the verifier is gone, and the
+            # exchange went to Google with a challenged code and no verifier —
+            # the `invalid_grant` this tombstone exists to replace with "start
+            # manual connect again".
+            if status == "expired" or not verifier:
+                return "expired"
             if time.time() > expires_at:
                 # Tombstone it in place: keep the "something was issued"
                 # signal, but drop the verifier itself (never hold expired
-                # secret-adjacent material longer than necessary).
-                if verifier:
-                    self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
+                # secret-adjacent material longer than necessary). The guard
+                # above already returned for every verifier-less entry, so
+                # there is always one to drop here.
+                self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
                 return "expired"
             return "active"
 

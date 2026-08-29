@@ -122,7 +122,7 @@ def test_audit_memory_reports_content_rot(tmp_path: Path) -> None:
             'User said: "do it" -> assistant bumped the default.',
             "Notes live in `memory-vault/absent.md` now.",
         ],
-        profile=["Raffa writes without em-dashes."],
+        profile=["The user writes without em-dashes."],
     )
 
     res = audit_memory(guide_path=guide, workspace_dir=tmp_path)

@@ -75,6 +75,9 @@ from ciao.schedules import (
     normalize_archive_policy,
     normalize_interval_minutes,
     publish_automations_changed,
+    stamp_fallback_project,
+    wall_clock_time_error,
+    wall_clock_time_value_error,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -1709,6 +1712,24 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
                     {"error": "This sign-in flow needs a flow ID. Start manual connect again."},
                     status_code=400,
                 )
+        if flow_id and pkce_status == "none":
+            # An explicit flow ID the store does not know cannot mean "this
+            # flow never used PKCE" — the client only has an ID because the
+            # auth URL it came from carried a challenge. The usual cause is a
+            # server restart between building that URL and pasting the code
+            # back, which drops the in-memory verifier. Exchanging anyway sends
+            # a challenged code with no verifier, which Google must reject, so
+            # the user would see `invalid_grant` instead of what to do next.
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in flow is no longer available (the server "
+                        "restarted before the code was pasted back). Start "
+                        "manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
         if pkce_status == "expired":
             return JSONResponse(
                 {
@@ -1735,6 +1756,14 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             redirect_uri=redirect_uri,
             code_verifier=code_verifier,
         )
+        # Retire the flow now that its code is spent. Only on success: a failed
+        # exchange (wrong code, transient error) must keep the verifier so the
+        # paste can be retried. Leaving it active held a spent secret for the
+        # rest of its TTL and, because `status_for_profile` then still reported
+        # "active", refused any flow-ID-less exchange for this profile in the
+        # meantime.
+        if flow_id:
+            pkce_store.consume(flow_id, profile)
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
         # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
@@ -3682,7 +3711,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
     # without this it re-fetched and re-rendered every subagent the chat ever
     # spawned on every tick. Narrowing skips the sibling transcript reads
     # entirely rather than filtering after the fact.
-    wanted_agent_id = (request.query_params.get("agent_id") or "").strip()
+    # Normalised once, here. The SDK and the opencode tree key agents by the
+    # bare id while the local-transcript fallback uses the file stem
+    # ("agent-a319…"), and both forms reach the client — so a prefixed id
+    # arriving here matched nothing, the narrow SDK read came back empty, and
+    # the request fell through to the whole-directory fallback it exists to
+    # avoid, on every poll.
+    wanted_agent_id = (request.query_params.get("agent_id") or "").strip().removeprefix("agent-")
 
     config = request.app.state.config
     if getattr(chat, "provider", "claude") == "opencode":
@@ -3705,7 +3740,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
             agent_id = str(info.get("id") or "")
             if not agent_id:
                 continue
-            if wanted_agent_id and agent_id != wanted_agent_id:
+            if wanted_agent_id and agent_id.removeprefix("agent-") != wanted_agent_id:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
@@ -3733,28 +3768,36 @@ async def chat_subagents(request: Request) -> JSONResponse:
     resolver = getattr(pcm, "_agent_root_for_chat", None)
     agent_root = resolver(chat_id) if resolver is not None else None
 
-    def _finalize(entries: list[dict]) -> JSONResponse:
+    async def _finalize(entries: list[dict]) -> JSONResponse:
         # Catch-all for the local-transcript fallbacks, which read the whole
         # session directory and cannot narrow at the source. Those entries are
         # keyed by file stem ("agent-a319…") while the SDK and the route use
         # the bare id, so compare on the bare form or the filter drops the
-        # agent it was asked for.
+        # agent it was asked for. `wanted_agent_id` is already bare.
         if wanted_agent_id:
-            bare_wanted = wanted_agent_id.removeprefix("agent-")
             entries = [
                 e
                 for e in entries
-                if str(e.get("agent_id", "")).removeprefix("agent-") == bare_wanted
+                if str(e.get("agent_id", "")).removeprefix("agent-") == wanted_agent_id
             ]
-        _merge_subagent_dispatch_meta(
-            entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        # Off the loop: this walks the whole parent session JSONL, which on a
+        # long Claude chat is tens of MB, and the read-only subagent view polls
+        # this endpoint every 4 seconds. Done inline it stalled every in-flight
+        # stream for the length of the parse. `_running_subagent_rows` already
+        # does the identical work in a thread.
+        await asyncio.to_thread(
+            _merge_subagent_dispatch_meta,
+            entries,
+            chat.session_id,
+            Path(config.workspace_root),
+            agent_root=agent_root,
         )
         return JSONResponse(entries)
 
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return _finalize(
+        return await _finalize(
             _local_subagent_transcripts(
                 chat.session_id, Path(config.workspace_root), agent_root=agent_root
             )
@@ -3768,13 +3811,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
         try:
             agent_ids = list_subagents(chat.session_id, directory=workspace)
         except (FileNotFoundError, ValueError):
-            return _finalize(
+            return await _finalize(
                 _local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
             )
         except Exception:  # noqa: BLE001 — defensive against SDK surprises
-            return _finalize(
+            return await _finalize(
                 _local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
@@ -3801,7 +3844,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
             chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
 
-    return _finalize(result)
+    return await _finalize(result)
 
 
 async def running_subagents(request: Request) -> JSONResponse:
@@ -3828,15 +3871,27 @@ async def running_subagents(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
+    scanned: list[tuple[str, Any]] = []
     for chat_id in pcm.active_chat_ids():
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
-        try:
-            rows = await _running_subagent_rows(pcm, config, chat)
-        except Exception:  # noqa: BLE001 — one unreadable session must not
-            # blank the whole sidebar, so log it and move on.
-            logger.exception("running-subagent scan failed for chat %s", chat_id)
+        scanned.append((chat_id, chat))
+    # Gathered, not awaited one at a time. Each scan is an independent thread
+    # hop over that chat's own session file (or an independent opencode read),
+    # so a serial loop cost N full parses of wall clock every four seconds
+    # while anything was working. `return_exceptions` preserves the per-chat
+    # tolerance the loop had: one unreadable session must not blank the
+    # sidebar for the others.
+    results = await asyncio.gather(
+        *(_running_subagent_rows(pcm, config, chat) for _cid, chat in scanned),
+        return_exceptions=True,
+    )
+    for (chat_id, _chat), rows in zip(scanned, results):
+        if isinstance(rows, BaseException):
+            logger.warning(
+                "running-subagent scan failed for chat %s", chat_id, exc_info=rows
+            )
             continue
         if rows:
             out[chat_id] = rows
@@ -5335,9 +5390,15 @@ async def create_schedule(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-    # Manual schedules don't auto-fire, so `time` is optional. For everything
-    # else we still require it (create will happily take "" but then the entry
-    # would never tick).
+    # Manual and interval schedules don't need a time of day. For every other
+    # cadence the entry is unusable without one: compute_next_run returns None,
+    # tick() never matches, and the row sits there reading as enabled while
+    # silently never firing. PATCH has always rejected this — and, because it
+    # re-validates the whole entry, an entry created this way could not even be
+    # paused afterwards. Same gate, same message, on the create door.
+    time_error = wall_clock_time_value_error(frequency, str(body.get("time") or ""))
+    if time_error:
+        return JSONResponse({"error": time_error}, status_code=400)
     provider = (body.get("provider") or "").strip()
     if provider and provider not in supported_providers():
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
@@ -5389,6 +5450,10 @@ async def create_schedule(request: Request) -> JSONResponse:
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
     )
+    # Records where a chat-bound entry re-homes once its chat is deleted; must
+    # be captured while that chat still exists. See stamp_fallback_project.
+    if stamp_fallback_project(entry, pcm):
+        sm.replace(entry)
     publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
 
@@ -5503,6 +5568,15 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
+    # Never store an automation that cannot run. Shared with the MCP write path
+    # (CiaoControlPlane.schedule_update) so the two cannot drift.
+    time_error = wall_clock_time_error(entry)
+    if time_error:
+        return JSONResponse({"error": time_error}, status_code=400)
+    # Retargeting the chat moves where this entry re-homes, so the fallback has
+    # to move with it — otherwise it keeps pointing at the previous chat's
+    # project. Also clears it when the entry becomes project-bound.
+    stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
         store.replace(entry)
     except ValueError as exc:
@@ -5560,7 +5634,16 @@ def _interval_entry(sm, loop_id: str) -> ScheduleEntry | None:
 async def list_loops(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    return JSONResponse([_loop_view(entry, pcm) for entry in _interval_entries(sm)])
+    # Only chat-bound entries, matching the MCP `loops_list` compatibility view.
+    # A loop was always bound to a fixed chat, so the cached pre-upgrade PWA on
+    # the other end of this route assumes `web_chat_id` is set: handed a
+    # project-bound interval it renders an "unavailable chat" row that cannot be
+    # repaired by editing, because `web_project_id` keeps taking precedence.
+    return JSONResponse([
+        _loop_view(entry, pcm)
+        for entry in _interval_entries(sm)
+        if entry.web_chat_id and not entry.web_project_id
+    ])
 
 
 async def create_loop(request: Request) -> JSONResponse:
@@ -5601,11 +5684,14 @@ async def create_loop(request: Request) -> JSONResponse:
         workspace=getattr(project, "workspace", "") or "",
     )
     # Loops recorded the chat's project only so a lost chat could be replaced
-    # there; on a schedule web_project_id means "new chat per run", so the
-    # replacement target is carried by `workspace` instead.
+    # there; on a schedule web_project_id means "new chat per run", so it is
+    # carried as the fixed-chat fallback instead — the same shape migrate_loops
+    # uses. Without it a loop created in a non-General project by a cached
+    # pre-upgrade PWA would re-home into General when its chat was deleted.
+    stamp_fallback_project(entry, pcm)
     if not (body.get("autostart") or body.get("start")):
         entry.enabled = False
-        sm.replace(entry)
+    sm.replace(entry)
     publish_automations_changed(pcm)
     return JSONResponse(_loop_view(entry, pcm), status_code=201)
 
@@ -5615,13 +5701,17 @@ async def loop_detail(request: Request) -> JSONResponse:
     loop_id = request.path_params["loop_id"]
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
+    # Resolve before doing anything, DELETE included. This route's contract is
+    # interval entries only, but DELETE used to hand the raw id straight to the
+    # shared schedule store — so an ordinary wall-clock schedule's id passed to
+    # the deprecated loops route deleted that schedule.
+    entry = _interval_entry(sm, loop_id)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
     if request.method == "DELETE":
         deleted = sm.delete(loop_id)
         publish_automations_changed(pcm)
         return JSONResponse({"ok": deleted})
-    entry = _interval_entry(sm, loop_id)
-    if entry is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
     body = await request.json()
     if "prompt" in body:
         prompt = (body["prompt"] or "").strip()
@@ -5642,6 +5732,8 @@ async def loop_detail(request: Request) -> JSONResponse:
                 {"error": "web_chat_id must point to an existing chat"}, status_code=400
             )
         entry.web_chat_id = web_chat_id
+        # Retargeting moves where this entry re-homes.
+        stamp_fallback_project(entry, pcm)
     # `autostart` and `running` were separate flags; both now set `enabled`.
     for key in ("autostart", "running"):
         if key in body:

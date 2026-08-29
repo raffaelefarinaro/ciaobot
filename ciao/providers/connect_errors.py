@@ -47,6 +47,7 @@ _AUTH_MARKERS = (
     "incorrect api key",
     "authentication",
     "unauthorized",
+    "not logged in",
     "permission denied",
     "401 unauthorized",
     "403 forbidden",

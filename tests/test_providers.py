@@ -909,3 +909,69 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
     )
     assert len(events3) == 1
     assert events3[0].status == "Rate limit exceeded (five_hour)"
+
+
+@pytest.mark.parametrize("mode", ["normal", "plan"])
+@pytest.mark.asyncio
+async def test_manual_and_plan_modes_pre_approve_nothing(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    """"Manual — ask for every action" has to mean it.
+
+    The allowlist was applied for every mode except `plan`, so Manual silently
+    auto-approved `memory_update`, `chat_send` and `schedule`. `schedule` is an
+    escalation rather than just a write: an automation run is dispatched
+    `unattended`, which forces `bypass`, so a one-minute interval created
+    without an approval card buys unprompted arbitrary tool use every minute —
+    the exact thing an operator picks this mode to prevent.
+    """
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    config = SimpleNamespace(
+        memory_char_limit=2200,
+        user_char_limit=1375,
+        vault_root=tmp_path / "memory-vault",
+    )
+    provider = ClaudeProvider(tmp_path, config=config)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode=mode,
+        provider="claude",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret-session-token",
+    )
+
+    await provider._ensure_connected(request)
+
+    allowed = captured["options"].allowed_tools or []
+    assert "mcp__ciaobot__schedule" not in allowed
+    assert "mcp__ciaobot__memory_update" not in allowed
+    assert "mcp__ciaobot__chat_send" not in allowed
+
+
+@pytest.mark.parametrize("mode", ["normal", "plan"])
+def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
+    """The same carve-out on the other provider."""
+    from ciao.providers.opencode import mode_settings
+
+    _agent, rules = mode_settings(mode)  # type: ignore[arg-type]
+    allowed = {r["permission"] for r in rules if r.get("action") == "allow"}
+    assert "ciaobot_schedule" not in allowed
+    assert "ciaobot_memory_update" not in allowed
+
+
+def test_opencode_auto_mode_still_pre_approves_the_control_plane() -> None:
+    """Auto's contract is "allow safe work", which is what the list is for."""
+    from ciao.providers.opencode import mode_settings
+
+    _agent, rules = mode_settings("auto")
+    allowed = {r["permission"] for r in rules if r.get("action") == "allow"}
+    assert "ciaobot_schedule" in allowed
+    assert "ciaobot_chat_delete" not in allowed

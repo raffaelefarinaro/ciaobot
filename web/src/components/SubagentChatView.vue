@@ -18,16 +18,23 @@
       <span v-if="status === 'running'" class="running-spinner" aria-hidden="true" />
     </div>
 
-    <div class="subagent-body" ref="bodyRef">
+    <div class="subagent-body">
       <p v-if="loading && !subagent" class="notice" role="status">Loading the subagent transcript…</p>
       <p v-else-if="!subagent" class="notice" role="status">
         This subagent's transcript is not available on this machine. Completed
         subagents stay in the chat's Activity trace.
       </p>
       <template v-else>
+        <!-- The key carries the message's own shape, not just its index: the
+             poll replaces the whole transcript every few seconds, and any
+             change that is not a pure append shifts every later index. On a
+             bare index key Vue patches the existing nodes in place, so an
+             already-rendered bubble takes on a different message's role branch
+             and v-html. The index stays in the key so it is unique even when
+             two messages are genuinely identical. -->
         <div
           v-for="(m, i) in subagent.messages"
-          :key="i"
+          :key="`${i}:${m.role}:${m.tool_name || ''}:${m.content.length}`"
           class="sub-msg"
           :class="m.role"
         >
@@ -90,14 +97,13 @@ import PaneHeader from './PaneHeader.vue'
 import { useProjectStore } from '../stores/projects'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import type { SubagentTranscript } from '../lib/types'
-import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import { sameAgent, shortAgentId } from '../lib/subagentIds'
 
 const props = defineProps<{ chatId: string; agentId: string }>()
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const loading = ref(false)
-const bodyRef = ref<HTMLElement | null>(null)
 
 const subagent = computed<SubagentTranscript | null>(() => {
   const rows = store.subagents[props.chatId] || []
@@ -108,12 +114,9 @@ const parentTitle = computed(
   () => store.chats.find(c => c.chat_id === props.chatId)?.title || 'Chat',
 )
 
-const agentLabel = computed(() => {
-  const described = (subagent.value?.description || '').trim()
-  if (described) return described
-  const id = bareAgentId(props.agentId)
-  return id.length > 12 ? `${id.slice(0, 8)}…` : id
-})
+const agentLabel = computed(
+  () => (subagent.value?.description || '').trim() || shortAgentId(props.agentId),
+)
 
 // The sidebar row only exists while the agent runs, but this view is also
 // reachable from the in-chat panel long after it finished, so fall back to the
@@ -141,23 +144,59 @@ async function refresh(): Promise<void> {
 // so this is a live feed for the same reason the in-chat panel polls. Only
 // this agent is re-fetched — the unfiltered endpoint renders every subagent
 // the chat ever spawned, which is far too much to put on a 4s timer.
+//
+// Bounded, and paused while the tab is hidden. A parent turn killed mid-
+// dispatch never writes the record that moves the transcript's status off
+// "running", so an unbounded timer polled a dead agent every four seconds for
+// as long as the tab stayed open — each poll a full parse of the parent
+// session file. The store's sidebar poll already bounds itself the same way.
+const POLL_MS = 4000
+const POLL_LIMIT_MS = 15 * 60 * 1000
 let timer: ReturnType<typeof setInterval> | null = null
-watch(status, (value) => {
+let pollingSince = 0
+
+function stopPolling(): void {
   if (timer !== null) {
     clearInterval(timer)
     timer = null
   }
-  if (value !== 'running') return
+}
+
+function startPolling(): void {
+  stopPolling()
+  if (status.value !== 'running') return
+  if (document.visibilityState !== 'visible') return
+  if (!pollingSince) pollingSince = Date.now()
   timer = setInterval(() => {
+    if (Date.now() - pollingSince > POLL_LIMIT_MS) {
+      stopPolling()
+      return
+    }
     void store.loadSubagent(props.chatId, props.agentId)
-  }, 4000)
+  }, POLL_MS)
+}
+
+watch(status, (value) => {
+  // A run that genuinely restarts gets a fresh budget; a stuck one does not.
+  if (value !== 'running') pollingSince = 0
+  startPolling()
 }, { immediate: true })
 
-watch(() => [props.chatId, props.agentId], () => { void refresh() })
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'visible') startPolling()
+  else stopPolling()
+}
+document.addEventListener('visibilitychange', onVisibilityChange)
+
+watch(() => [props.chatId, props.agentId], () => {
+  pollingSince = 0
+  void refresh()
+})
 
 onMounted(() => { void refresh() })
 onBeforeUnmount(() => {
-  if (timer !== null) clearInterval(timer)
+  stopPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 function renderMarkdown(text: string): string {
@@ -175,6 +214,12 @@ function renderMarkdown(text: string): string {
 }
 
 .parent-link {
+  /* The only in-header way back to the parent chat, and the first
+     touch-reachable control in a PaneHeader title slot — PaneHeader's own 44px
+     compensation is scoped to its icon buttons and does not reach this. */
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch, 44px);
   color: var(--fg2);
   text-decoration: none;
   overflow: hidden;

@@ -518,3 +518,219 @@ def test_logs_key_prefix_names_the_archive_in_both_layouts(
     outside_prefix = fts_search.logs_key_prefix(outside, install)
     assert fts_search.search_logs(db_conn, "findme", path_prefix=outside_prefix) == []
     assert len(fts_search.search_logs(db_conn, "findme")) == 1
+
+
+def test_bookkeeping_files_are_never_indexed(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """The memory pipeline's own queue and logs stay out of recall.
+
+    Indexed, they ranked above real notes for ordinary queries — the proposals
+    queue was a top-3 result for "fiancee" on a live vault.
+    """
+    workspace = temp_vault / "Workspace"
+    workspace.mkdir()
+    (workspace / "Memory-Proposals.md").write_text(
+        "# Memory Proposals\n\n- [review] the wedding venue is Villa Australis\n",
+        encoding="utf-8",
+    )
+    (workspace / "Curation-Log.md").write_text(
+        "# Curation Log\n\nProcessed wedding proposals.\n", encoding="utf-8"
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "wedding", limit=10)]
+    assert not any("Memory-Proposals" in p or "Curation-Log" in p for p in paths)
+    assert any("Ciaobot-Search" in p for p in paths)  # real notes still hit
+
+
+def test_reserved_names_only_excluded_under_workspace(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """A user's own note sharing a reserved basename stays searchable.
+
+    The exclusion exists for the pipeline's files under ``Workspace/``;
+    matching by basename anywhere would silently hide user content.
+    """
+    team = temp_vault / "projects" / "team"
+    team.mkdir(parents=True)
+    (team / "Weekly-Review-Log.md").write_text(
+        "# Weekly review\n\nSprint retrospectives and action items.\n",
+        encoding="utf-8",
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "retrospectives")]
+    assert any("Weekly-Review-Log" in p for p in paths)
+
+
+def test_search_false_frontmatter_opts_a_note_out(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """`search: false` removes a note from the index, including old rows."""
+    note = temp_vault / "Scratch.md"
+    note.write_text("# Scratch\nA wedding scratchpad.\n", encoding="utf-8")
+    fts_search.index_vault(db_conn, temp_vault)
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "scratchpad")]
+    assert any("Scratch" in p for p in paths)
+
+    time.sleep(0.01)
+    note.write_text(
+        "---\nsearch: false\n---\n# Scratch\nA wedding scratchpad.\n",
+        encoding="utf-8",
+    )
+    os.utime(note, (time.time() + 5, time.time() + 5))
+    fts_search.index_vault(db_conn, temp_vault)
+    assert fts_search.search_vault(db_conn, "scratchpad") == []
+
+
+def test_opt_out_removal_commits_when_it_is_the_only_change(
+    tmp_path: Path, temp_vault: Path
+) -> None:
+    """An opt-out settled as the pass's only change must persist.
+
+    The settle branch bypasses the indexed/removed counters, so it needs its
+    own path to the commit gate — without one, the FTS delete and the meta
+    refresh roll back on close and every later pass re-reads the file and
+    still serves the opted-out content.
+    """
+    db_path = tmp_path / "search.db"
+    note = temp_vault / "Scratch.md"
+    note.write_text("# Scratch\nA wedding scratchpad.\n", encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    fts_search.init_db(conn)
+    fts_search.index_vault(conn, temp_vault)
+    conn.close()
+
+    note.write_text(
+        "---\nsearch: false\n---\n# Scratch\nA wedding scratchpad.\n",
+        encoding="utf-8",
+    )
+    os.utime(note, (time.time() + 5, time.time() + 5))
+    conn = sqlite3.connect(db_path)
+    fts_search.index_vault(conn, temp_vault)  # opt-out is the ONLY change
+    conn.close()
+
+    conn = sqlite3.connect(db_path)  # a fresh connection sees committed state
+    try:
+        assert fts_search.search_vault(conn, "scratchpad") == []
+        # The meta row survived with the new mtime, so the next pass
+        # short-circuits instead of re-reading the file.
+        row = conn.execute(
+            "SELECT mtime FROM vault_meta WHERE path LIKE ?", ("%Scratch.md",)
+        ).fetchone()
+        assert row is not None and row[0] == note.stat().st_mtime
+    finally:
+        conn.close()
+
+
+def test_reserved_names_under_non_vault_workspace_dir_stay_indexed(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Only ``<vault>/Workspace/`` is the pipeline's write location.
+
+    A user's note inside any other directory that happens to be named
+    ``workspace`` (mirroring a code repo, notes about IDE workspaces) must
+    not be silently hidden from search by its basename.
+    """
+    nested = temp_vault / "projects" / "acme" / "workspace"
+    nested.mkdir(parents=True)
+    (nested / "Curation-Log.md").write_text(
+        "# Curation\n\nAcme quarterly curation ceremony notes.\n",
+        encoding="utf-8",
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "ceremony")]
+    assert any("Curation-Log" in p for p in paths)
+
+
+def test_index_file_keeps_meta_row_for_opted_out_note(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Force-indexing an opted-out note settles it like the bulk pass.
+
+    The searchable row goes, but the meta row stays fresh so the next
+    index_vault does not re-read the whole file.
+    """
+    note = temp_vault / "Archive.md"
+    note.write_text(
+        "---\nsearch: false\n---\n# Archive\nRolled wedding log archive.\n",
+        encoding="utf-8",
+    )
+    assert fts_search.index_file(db_conn, temp_vault, note) is False
+    assert fts_search.search_vault(db_conn, "rolled") == []
+    row = db_conn.execute(
+        "SELECT mtime FROM vault_meta WHERE path LIKE ?", ("%Archive.md",)
+    ).fetchone()
+    assert row is not None and row[0] == note.stat().st_mtime
+
+
+def test_index_file_honours_exclusions(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Force-indexing a reserved or opted-out file removes its rows instead."""
+    workspace = temp_vault / "Workspace"
+    workspace.mkdir()
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("# Memory Proposals\n\n- [review] secret pending fact\n", encoding="utf-8")
+
+    assert fts_search.index_file(db_conn, temp_vault, queue) is False
+    assert fts_search.search_vault(db_conn, "secret pending") == []
+
+
+def test_multiword_query_degrades_to_or_when_and_finds_nothing(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Paraphrase queries fall back to OR instead of returning nothing.
+
+    "brother in law" matched zero notes under AND-of-all-words even when a
+    note said "Elena's brother"; the OR fallback lets BM25 rank the notes
+    holding the distinctive terms.
+    """
+    people = temp_vault / "People"
+    (people / "Dario.md").write_text(
+        "# Dario\nElena's brother, married to Sofia.", encoding="utf-8"
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    rows = fts_search.search_vault(db_conn, "brother in law")
+    assert any("Dario" in r["path"] for r in rows)
+    # A single-word miss still returns empty (nothing to OR).
+    assert fts_search.search_vault(db_conn, "nonexistentterm") == []
+
+
+def test_search_hit_telemetry_round_trip(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    # No log yet: no evidence, not "never retrieved".
+    assert fts_search.read_search_hit_paths(runtime) is None
+
+    fts_search.record_search_hits(
+        runtime, "wedding venue", ["personal/memory-vault/Wedding.md"]
+    )
+    fts_search.record_search_hits(runtime, "other", [])
+    hits = fts_search.read_search_hit_paths(runtime, since_days=90)
+    assert hits == {"personal/memory-vault/Wedding.md"}
+
+    # Old records age out of the window.
+    assert fts_search.read_search_hit_paths(runtime, since_days=0) == set()
+
+
+def test_record_search_hits_never_raises(tmp_path: Path) -> None:
+    # A file where the directory should be: mkdir fails, the call swallows it.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("x", encoding="utf-8")
+    fts_search.record_search_hits(blocker, "q", ["p"])  # must not raise
+
+
+def test_read_search_hit_paths_tolerates_junk_lines(tmp_path: Path) -> None:
+    """One corrupt telemetry line must not void the whole evidence set."""
+    runtime = tmp_path / ".runtime"
+    fts_search.record_search_hits(runtime, "q", ["Wedding.md"])
+    log = runtime / fts_search.SEARCH_HITS_NAME
+    with log.open("a", encoding="utf-8") as f:
+        # Valid JSON, wrong shapes: non-object records and a non-list paths.
+        f.write('null\n42\n["x"]\n{"ts": "2999-01-01T00:00:00+00:00", "paths": 5}\nnot json\n')
+
+    assert fts_search.read_search_hit_paths(runtime) == {"Wedding.md"}

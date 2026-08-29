@@ -23,10 +23,12 @@ from ciao.web.routes_api import (
 
 
 class _Chat:
-    def __init__(self, title: str, *, archived: bool = False) -> None:
+    def __init__(
+        self, title: str, *, archived: bool = False, project_id: str = "proj-1"
+    ) -> None:
         self.title = title
         self.archived = archived
-        self.project_id = "proj-1"
+        self.project_id = project_id
 
 
 class _NewChat:
@@ -36,9 +38,10 @@ class _NewChat:
 
 
 class _Project:
-    project_id = "proj-1"
-    name = "General"
-    workspace = "personal"
+    def __init__(self, project_id: str = "proj-1", name: str = "General") -> None:
+        self.project_id = project_id
+        self.name = name
+        self.workspace = "personal"
 
 
 class _ProjectChats:
@@ -48,6 +51,7 @@ class _ProjectChats:
         self.chats = {
             "chat-idle": _Chat("Idle chat"),
             "chat-busy": _Chat("Busy chat"),
+            "chat-other-project": _Chat("Elsewhere", project_id="proj-2"),
         }
         self._created = 0
         self.events = None
@@ -56,7 +60,9 @@ class _ProjectChats:
         return self.chats.get(chat_id)
 
     def get_project(self, project_id: str):
-        return _Project() if project_id == "proj-1" else None
+        if project_id in {"proj-1", "proj-2"}:
+            return _Project(project_id, "General" if project_id == "proj-1" else "Other")
+        return None
 
     def find_project(self, name: str, workspace: str):
         return _Project() if name == "General" else None
@@ -313,4 +319,294 @@ def test_legacy_delete(client: TestClient) -> None:
     ).json()["loop_id"]
     assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": True}
     assert client.get("/api/loops").json() == []
-    assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": False}
+    # Gone now, so it resolves like any other unknown id on this route.
+    assert client.delete(f"/api/loops/{loop_id}").status_code == 404
+
+
+def test_interval_to_wall_clock_without_a_time_is_rejected(client: TestClient) -> None:
+    """An interval entry carries no ``daily_time_utc``.
+
+    Editing one to a wall-clock cadence therefore arrives with the time empty.
+    Persisting that produced an automation that reads as enabled and can never
+    fire: ``compute_next_run`` cannot parse the empty string, so ``tick()``
+    never matches it.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    resp = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": ""}
+    )
+
+    assert resp.status_code == 400
+    assert "HH:MM" in resp.json()["error"]
+
+    # The entry is untouched, still a working interval.
+    after = client.get("/api/schedules").json()
+    entry = next(s for s in after if s["schedule_id"] == schedule_id)
+    assert entry["frequency"] == INTERVAL_FREQUENCY
+    assert entry["next_run"] is not None
+
+
+def test_interval_to_wall_clock_with_a_time_is_accepted(client: TestClient) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    body = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": "09:30"}
+    ).json()
+
+    assert body["frequency"] == "daily"
+    assert body["daily_time_utc"] == "09:30"
+    assert body["next_run"] is not None
+
+
+@pytest.mark.parametrize("bad", ["", "9:30", "25:00", "09:60", "nope", "09:30:00"])
+def test_wall_clock_times_that_compute_next_run_cannot_parse_are_rejected(
+    client: TestClient, bad: str
+) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+    resp = client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "daily", "time": bad}
+    )
+    assert resp.status_code == 400, f"{bad!r} should not be storable"
+
+
+def test_manual_and_interval_still_need_no_time(client: TestClient) -> None:
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    assert client.patch(
+        f"/api/schedules/{schedule_id}", json={"frequency": "manual"}
+    ).status_code == 200
+    assert client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"frequency": INTERVAL_FREQUENCY, "interval_minutes": 5},
+    ).status_code == 200
+
+
+def test_a_legacy_created_loop_keeps_its_project_as_the_rehome_fallback(
+    client: TestClient,
+) -> None:
+    """A cached pre-upgrade PWA can still create loops through this route.
+
+    Migrated loops keep their original project as `fallback_project_id`; ones
+    created here have to as well, or a loop made in a non-General project
+    re-homes into General when its target chat is deleted and the unattended
+    run changes context.
+    """
+    for start in (True, False):
+        resp = client.post("/api/loops", json={
+            "prompt": "p",
+            "web_chat_id": "chat-idle",
+            "start": start,
+        })
+        assert resp.status_code == 201, resp.text
+        loop_id = resp.json()["loop_id"]
+
+        # Read the stored row: fallback_project_id is internal and not part of
+        # the API payload, so asserting on the response would prove nothing.
+        stored = next(
+            e for e in client.app.state.schedule_manager.list_entries()
+            if e.schedule_id == loop_id
+        )
+        assert stored.fallback_project_id == "proj-1"
+        # web_project_id stays unset: on an interval entry it would mean
+        # "a new chat per run" and outrank the fixed chat.
+        assert stored.web_project_id is None
+        assert stored.enabled is start
+
+
+def test_a_chat_bound_interval_records_its_chat_project_as_the_fallback(
+    client: TestClient,
+) -> None:
+    """The path actually in use, not just migration and the legacy route.
+
+    Without the fallback a chat-bound interval whose chat is deleted re-homes
+    into the workspace's General and continues the unattended prompt in the
+    wrong project.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == "proj-1"
+    # Still a fixed-chat entry: web_project_id would mean "new chat per run".
+    assert stored.web_project_id is None
+
+
+def test_an_explicit_workspace_does_not_skip_the_fallback(
+    client: TestClient,
+) -> None:
+    """The workspace derivation is skipped when the caller supplies one.
+
+    The fallback is computed independently precisely so it is not lost in that
+    case.
+    """
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_chat_id": "chat-idle",
+        "workspace": "personal",
+    })
+    assert resp.status_code == 201, resp.text
+    schedule_id = resp.json()["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == "proj-1"
+
+
+def test_a_project_bound_interval_records_no_fallback(client: TestClient) -> None:
+    """A project entry already names its project; a fallback would be noise."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+    })
+    assert resp.status_code == 201, resp.text
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == resp.json()["schedule_id"]
+    )
+    assert stored.fallback_project_id == ""
+    assert stored.web_project_id == "proj-1"
+
+
+def test_retargeting_an_interval_moves_its_rehome_fallback(client: TestClient) -> None:
+    """Stamping at creation is not enough — the binding can change later.
+
+    Editing a chat-bound entry from a chat in one project to a chat in another
+    left the fallback on the old project, so deleting the new chat resumed the
+    run in the previous project.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    def stored():
+        return next(
+            e for e in client.app.state.schedule_manager.list_entries()
+            if e.schedule_id == schedule_id
+        )
+
+    assert stored().fallback_project_id == "proj-1"
+
+    assert client.patch(
+        f"/api/schedules/{schedule_id}", json={"web_chat_id": "chat-other-project"}
+    ).status_code == 200
+
+    assert stored().fallback_project_id == "proj-2"
+
+
+def test_converting_to_project_bound_clears_the_fallback(client: TestClient) -> None:
+    """A project entry already names where its runs go."""
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    assert client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"web_project_id": "proj-1", "web_chat_id": None},
+    ).status_code == 200
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == ""
+
+
+def test_auto_archive_is_normalised_away_on_a_fixed_chat_interval(
+    client: TestClient,
+) -> None:
+    """The dispatcher refuses to archive these, so storing `auto` is a lie.
+
+    Archiving the chat an interval is bound to makes the next run fork a
+    replacement and archive that too — forever. Normalising at the store means
+    no write path can persist a setting nothing honours.
+    """
+    schedule_id = _create_interval(client, archive_policy="auto")["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.archive_policy == "manual"
+
+
+def test_a_project_bound_interval_keeps_auto_archive(client: TestClient) -> None:
+    """It opens a fresh chat per run, which is exactly what auto-archive is for."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+        "archive_policy": "auto",
+    })
+    assert resp.status_code == 201, resp.text
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == resp.json()["schedule_id"]
+    )
+    assert stored.archive_policy == "auto"
+
+
+def test_retargeting_onto_a_fixed_chat_drops_auto_archive(client: TestClient) -> None:
+    """The binding can become unsupported after creation, not just at it."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+        "archive_policy": "auto",
+    })
+    schedule_id = resp.json()["schedule_id"]
+
+    client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"web_project_id": None, "web_chat_id": "chat-idle"},
+    )
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.archive_policy == "manual"
+
+
+def test_the_loops_route_refuses_to_delete_a_wall_clock_schedule(
+    client: TestClient,
+) -> None:
+    """The route's contract is interval entries only.
+
+    DELETE used to hand the raw id straight to the shared schedule store, so an
+    ordinary schedule's id passed to the deprecated loops route deleted it.
+    """
+    schedule_id = client.post("/api/schedules", json={
+        "prompt": "p", "frequency": "daily", "time": "09:00",
+        "web_chat_id": "chat-idle",
+    }).json()["schedule_id"]
+
+    assert client.delete(f"/api/loops/{schedule_id}").status_code == 404
+    # Still there.
+    assert any(
+        s["schedule_id"] == schedule_id for s in client.get("/api/schedules").json()
+    )
+
+
+def test_the_loops_list_hides_project_bound_intervals(client: TestClient) -> None:
+    """A loop was always bound to a fixed chat.
+
+    The cached pre-upgrade PWA on the other end assumes `web_chat_id` is set;
+    handed a project-bound interval it renders an unavailable-chat row that
+    editing cannot repair, since `web_project_id` keeps taking precedence.
+    """
+    _create_interval(client)  # chat-bound
+    client.post("/api/schedules", json={
+        "prompt": "p", "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5, "web_project_id": "proj-1",
+    })
+
+    loops = client.get("/api/loops").json()
+    assert all(loop["web_chat_id"] for loop in loops)
+    assert len(loops) == 1

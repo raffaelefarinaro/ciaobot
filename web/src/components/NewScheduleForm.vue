@@ -73,14 +73,15 @@
         shortly after, never queued.
       </p>
     </div>
-    <div class="form-group">
+    <div v-if="supportsAutoArchive" class="form-group">
       <label>Archive behavior</label>
       <select v-model="archivePolicy">
         <option value="manual">Manual, keep as normal chat</option>
         <option value="auto">Auto, archive if boring</option>
       </select>
     </div>
-    <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
+    <p v-if="supportsAutoArchive" class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
+    <p v-else class="hint">Runs into one existing chat, so the conversation is kept — auto-archive does not apply to this binding.</p>
     <div v-if="frequency === 'once'" class="form-group">
       <label>Date</label>
       <input v-model="runAtDate" type="date" :min="todayDate" required />
@@ -113,6 +114,7 @@ import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
+import { contextBindsFixedChat } from '../lib/scheduleBinding'
 const emit = defineEmits<{ created: [] }>()
 const store = useTaskStore()
 const projectStore = useProjectStore()
@@ -138,11 +140,16 @@ const isInterval = computed(() => frequency.value === 'interval')
 const needsTimeOfDay = computed(
   () => frequency.value !== 'manual' && !isInterval.value,
 )
-// An interval run into one existing chat inherits that chat's model and mode:
-// the backend ignores a model set here, so don't offer one.
+// One binding, two consequences — see lib/scheduleBinding. The backend ignores
+// a model set here (the chat's own wins), and the dispatcher refuses to
+// auto-archive the chat the runs land in, so neither control is offered.
 const inheritsChatModel = computed(
-  () => isInterval.value && contextKey.value.startsWith('web:'),
+  () => contextBindsFixedChat(frequency.value, contextKey.value),
 )
+const supportsAutoArchive = computed(() => !inheritsChatModel.value)
+watch(supportsAutoArchive, (supported) => {
+  if (!supported) archivePolicy.value = 'manual'
+})
 
 const canSubmit = computed(() => {
   if (!prompt.value || !contextKey.value) return false
