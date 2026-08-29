@@ -70,6 +70,7 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.error_log import clear_error_log, tail_error_log
+from ciao.schedules import INTERVAL_FREQUENCY
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -384,6 +385,16 @@ def _is_retryable_quota_error(text: str) -> bool:
     if "at capacity" in low:
         return True
     if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
+    # A provider that just states the limit, with no 429 and none of the vendor
+    # phrasings above — opencode/OpenAI surfaces "The usage limit has been
+    # reached". Pairing a limit noun with an exhaustion verb is unambiguous in a
+    # way the bare nouns are not, which is why those still need the 429 marker
+    # below: "quota" or "session" alone appears in plenty of prose that is not
+    # an exhaustion error.
+    if any(noun in low for noun in ("usage limit", "rate limit", "quota", "token limit")) and any(
+        verb in low for verb in ("reached", "exceeded", "exhausted")
+    ):
         return True
     if "429" not in low and "too many requests" not in low:
         return False
@@ -1100,9 +1111,23 @@ def _should_auto_archive_schedule_run(
     entry: object, outcome: ScheduleRunOutcome, *, needs_user: bool = False
 ) -> bool:
     archive_policy = getattr(entry, "archive_policy", "manual")
-    if archive_policy == "auto":
-        return _schedule_run_clean(outcome) and not needs_user
-    return False
+    if archive_policy != "auto":
+        return False
+    # Never auto-archive the chat an interval entry is bound to. The whole
+    # point of that binding is one conversation carried across runs, and
+    # `_rehome_interval_chat` forks a replacement whenever it finds the target
+    # archived — so archiving after a clean run makes the next run fork, run,
+    # and archive again, forever: a new chat and a full post-archive pipeline
+    # every interval (144/day at the default cadence, 1440/day at the floor).
+    # A project-bound interval entry opens a fresh chat per run and is exactly
+    # the case auto-archive is for, so only the fixed-chat binding is excluded.
+    if (
+        getattr(entry, "frequency", "") == INTERVAL_FREQUENCY
+        and getattr(entry, "web_chat_id", "")
+        and not getattr(entry, "web_project_id", "")
+    ):
+        return False
+    return _schedule_run_clean(outcome) and not needs_user
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -3063,7 +3088,6 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
-        control_surface: str | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")

@@ -62,10 +62,25 @@ for m in $(git rev-list --merges "$range"); do
   # Octopus merges have no single automatic result to compare against.
   [ $# -ne 2 ] && continue
 
-  auto=$(git merge-tree --write-tree "$1" "$2" 2>/dev/null | head -1)
-  if [ -z "$auto" ]; then
+  # `--write-tree` still writes a tree when the parents conflict: line 1 is its
+  # OID and the file content carries `<<<<<<<` markers. Only the exit status
+  # says which happened, and it is lost through a pipe — so testing the output
+  # for emptiness (it never is) made the "review by hand" branch unreachable
+  # and diffed every genuinely-conflicted merge against a marker-laden tree,
+  # reporting inflated, meaningless deltas on exactly the merges that most need
+  # a human read.
+  if auto_out=$(git merge-tree --write-tree "$1" "$2" 2>/dev/null); then
+    auto=$(printf '%s\n' "$auto_out" | head -1)
+  else
     echo "== $m  $(git log -1 --format='%s' "$m")"
     echo "     (parents conflict; resolution cannot be replayed — review by hand)"
+    echo
+    found=1
+    continue
+  fi
+  if [ -z "$auto" ]; then
+    echo "== $m  $(git log -1 --format='%s' "$m")"
+    echo "     (no automatic merge result — review by hand)"
     echo
     found=1
     continue

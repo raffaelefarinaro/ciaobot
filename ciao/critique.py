@@ -95,30 +95,31 @@ def is_opencode_available() -> bool:
 def default_critique_panel(config: CiaoConfig) -> list[str]:
     """Provider-aware default when Settings → Models has no critique override.
 
-    Aims for one voice per signed-in vendor: an adversarial panel of multiple
-    Anthropic models would mostly agree with itself, so breadth across vendors
-    beats depth within one. Every entry is gated on that vendor being usable --
-    listing a signed-out provider would only put a guaranteed failure in the
-    panel.
+    One voice per signed-in vendor, and that voice is the vendor's own default
+    model — the same one new chats use, so the panel needs no separate notion of
+    "which model". Breadth across vendors beats depth within one: an adversarial
+    panel of two Anthropic models would mostly agree with itself, which is why
+    this previously pairing ``opus`` with ``fable`` contradicted its own stated
+    rule. Every entry is gated on that vendor being usable — listing a
+    signed-out provider would only put a guaranteed failure in the panel.
 
-    Claude entries use the tier aliases (``opus``/``fable``), which Claude Code
-    resolves itself. opencode entries resolve to the operator's per-provider
-    default model (Settings → Models); when none is set the model
-    id is left empty so the provider's own account catalog picks the default.
+    So: Claude Code alone gives a one-model panel; adding opencode makes it two.
+    An opencode entry whose default is unset leaves the model id empty on
+    purpose, letting that provider's own account catalog choose.
     """
     models = []
 
     if is_anthropic_available():
-        models.extend(["opus", "fable"])
+        models.append(config.default_model_for_workspace(None, "claude") or "opus")
     # The prefixed entry routes through opencode's app-server. The model id is
     # the operator's per-provider default; empty lets the provider pick its own.
     if is_opencode_available():
         models.append(f"{OPENCODE_PREFIX}{config.default_model_for_provider('opencode')}")
 
     if not models:
-        # Nothing is signed in. Name the Anthropic tiers anyway so the panel
-        # reports a real auth error instead of silently reviewing nothing.
-        models = ["opus", "fable"]
+        # Nothing is signed in. Name a Claude tier anyway so the panel reports a
+        # real auth error instead of silently reviewing nothing.
+        models = ["opus"]
 
     # Filter out empty strings or duplicates while preserving order
     seen = set()

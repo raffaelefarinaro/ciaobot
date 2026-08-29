@@ -72,13 +72,23 @@ def wall_clock_time_error(entry: "ScheduleEntry") -> str:
     REST ``PATCH /api/schedules/{id}`` and the ``schedule`` MCP tool. Guarding
     only one of them leaves the other door open.
     """
-    if getattr(entry, "frequency", "") in {"manual", INTERVAL_FREQUENCY}:
+    return wall_clock_time_value_error(
+        getattr(entry, "frequency", ""), getattr(entry, "daily_time_utc", "") or ""
+    )
+
+
+def wall_clock_time_value_error(frequency: str, daily_time_utc: str) -> str:
+    """:func:`wall_clock_time_error` on the raw values.
+
+    The REST create route validates the request body before any entry exists,
+    so it has the two fields and not the object. Same rule, one implementation.
+    """
+    if frequency in {"manual", INTERVAL_FREQUENCY}:
         return ""
-    if _VALID_DAILY_TIME.match(getattr(entry, "daily_time_utc", "") or ""):
+    if _VALID_DAILY_TIME.match(daily_time_utc or ""):
         return ""
     return (
-        f"frequency '{entry.frequency}' needs a HH:MM time; "
-        f"got {entry.daily_time_utc!r}"
+        f"frequency '{frequency}' needs a HH:MM time; got {daily_time_utc!r}"
     )
 
 
@@ -270,7 +280,14 @@ def migrate_loops(runtime_root: Path) -> int:
             last_dispatched_at=str(item.get("last_run_at") or ""),
             last_status=str(item.get("last_status") or ""),
             enabled=bool(item.get("autostart")),
-            scope=str(item.get("scope") or "user"),
+            # Deliberately not carried from the loop. `replace` routes a
+            # ``scope == "system"`` entry to ``_replace_system_state``, which
+            # writes only the overlay fields into system_schedules_state.json
+            # and never adds a row to schedules.json — so a loop that named
+            # itself system-scoped was counted as imported, logged as imported,
+            # and then invisible to ``list_entries`` forever, with loops.json
+            # already renamed aside. An imported loop is a user schedule.
+            scope="user",
         )
         store.replace(entry)
         imported += 1
@@ -390,11 +407,16 @@ def compute_next_run(
         if last is None:
             return current.astimezone(tz)
         return (last + interval_delta(entry)).astimezone(tz)
-    try:
-        hh, mm = entry.daily_time_utc.split(":")
-        target_h, target_m = int(hh), int(mm)
-    except (ValueError, AttributeError):
+    # Range-checked, not just parseable: `int()` accepts "25:00" and "09:99"
+    # and the out-of-range value only blows up later, in `datetime.replace`
+    # below — outside this try, so it escaped as a 500 from every caller that
+    # serialises a schedule (`_enrich_schedule`, and therefore the whole
+    # `GET /api/schedules` list, permanently). An unusable time is "never
+    # fires", which is what None already means here.
+    if not _VALID_DAILY_TIME.match(entry.daily_time_utc or ""):
         return None
+    hh, mm = entry.daily_time_utc.split(":")
+    target_h, target_m = int(hh), int(mm)
     tz = ZoneInfo(entry.timezone_name)
     now_local = (now or _now_utc()).astimezone(tz)
     # `once` schedules have a fixed target date; if it's already past we
@@ -446,11 +468,12 @@ def compute_last_expected_run(
     """
     if not entry.enabled or entry.frequency == "manual" or is_interval(entry):
         return None
-    try:
-        hh, mm = entry.daily_time_utc.split(":")
-        target_h, target_m = int(hh), int(mm)
-    except (ValueError, AttributeError):
+    # Same range check as compute_next_run: `int()` alone lets "25:00" through
+    # to a `datetime.replace` that raises outside this guard.
+    if not _VALID_DAILY_TIME.match(entry.daily_time_utc or ""):
         return None
+    hh, mm = entry.daily_time_utc.split(":")
+    target_h, target_m = int(hh), int(mm)
     tz = ZoneInfo(entry.timezone_name)
     now_local = (now or _now_utc()).astimezone(tz)
     # Never report a fire from before the schedule existed.
@@ -1020,6 +1043,18 @@ class ScheduleManager:
         # next tick comes due. Tracked here so the cadence skips instead of
         # starting a second copy.
         self._inflight: set[str] = set()
+        # Chats an interval run has claimed but not yet started streaming on.
+        # `_fire_interval` reaches `create_task` without ever awaiting, so the
+        # broker is still empty when the same tick evaluates the next entry:
+        # two entries bound to one chat both read `chat_busy` as False and both
+        # fire, and the second `start_stream` silently returns the first one's
+        # stream, dropping the second prompt while recording it as a clean run.
+        self._claimed_chats: set[str] = set()
+        # Strong references to the in-flight run tasks. The event loop holds
+        # only weak ones, and `_inflight` is discarded exclusively from inside
+        # the task, so a collected task would strand its schedule id there and
+        # the automation would read "run in progress" forever.
+        self._run_tasks: set[asyncio.Task[Any]] = set()
         self._loop_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -1157,11 +1192,16 @@ class ScheduleManager:
     ) -> None:
         """Dispatch a schedule entry through the web pipeline."""
         if self._dispatch_to_web is not None:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._dispatch_to_web(
                     entry, model, mode, provider, target_chat_id=target_chat_id
-                )
+                ),
+                name=f"schedule-dispatch-{entry.schedule_id}",
             )
+            # The loop keeps only a weak reference; without one of ours the
+            # task can be collected mid-run and the dispatch simply vanishes.
+            self._run_tasks.add(task)
+            task.add_done_callback(self._run_tasks.discard)
 
     # ── Interval cadence ────────────────────────────────────────────────
 
@@ -1177,9 +1217,16 @@ class ScheduleManager:
         """
         if entry.schedule_id in self._inflight:
             return True
-        if self._chat_busy is None or not self._binds_existing_chat(entry):
+        if not self._binds_existing_chat(entry):
             return False
-        return self._chat_busy(str(entry.web_chat_id))
+        chat_id = str(entry.web_chat_id)
+        # Checked before `chat_busy`: a sibling entry that fired earlier in this
+        # same tick has not reached the broker yet, so only the claim shows it.
+        if chat_id in self._claimed_chats:
+            return True
+        if self._chat_busy is None:
+            return False
+        return self._chat_busy(chat_id)
 
     def _interval_dispatchable(self, entry: ScheduleEntry) -> bool:
         if self._chat_dispatchable is None:
@@ -1218,6 +1265,11 @@ class ScheduleManager:
             if self._resolve_target is not None
             else ("claude", entry.model, entry.mode, entry.provider)
         )
+        # The binding as it stood *before* prepare_chat, which is what
+        # `_run_interval` needs to tell a re-home apart from a user edit.
+        # Sampling it in there instead read the already-re-pointed value, so
+        # the carry-over below could never fire.
+        bound_before = entry.web_chat_id
         chat_id: str | None = None
         if self._prepare_chat is not None:
             chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
@@ -1231,10 +1283,17 @@ class ScheduleManager:
         entry.last_status = "running"
         self._store.replace(entry)
         self._inflight.add(entry.schedule_id)
-        asyncio.create_task(
-            self._run_interval(entry, model, mode, provider, chat_id),
+        self._claimed_chats.add(chat_id)
+        task = asyncio.create_task(
+            self._run_interval(
+                entry, model, mode, provider, chat_id, bound_before=bound_before
+            ),
             name=f"interval-run-{entry.schedule_id}",
         )
+        # Hold a strong reference until the task finishes: the loop keeps only
+        # a weak one, and every release of `_inflight` happens inside the task.
+        self._run_tasks.add(task)
+        task.add_done_callback(self._run_tasks.discard)
         return chat_id
 
     async def _run_interval(
@@ -1244,14 +1303,10 @@ class ScheduleManager:
         mode: BridgeMode,
         provider: str,
         chat_id: str,
+        *,
+        bound_before: str | None = None,
     ) -> None:
         status = "ok"
-        # The target as it stood before dispatch. Dispatch re-points the entry
-        # when the fixed chat was archived or gone, and that re-homing is the
-        # only change worth carrying onto the re-read row below — comparing
-        # against the row instead would also "carry" a target the *user* edited
-        # mid-run, silently undoing their edit.
-        dispatched_chat_id = entry.web_chat_id
         try:
             result = (
                 await self._dispatch_to_web(
@@ -1269,6 +1324,7 @@ class ScheduleManager:
             status = "error"
         finally:
             self._inflight.discard(entry.schedule_id)
+            self._claimed_chats.discard(chat_id)
         # Re-read before stamping: the user may have edited the entry while the
         # run was streaming. Only the dispatcher's own re-homing is carried over
         # from our copy; everything else on the stored row is the user's edit.
@@ -1276,10 +1332,14 @@ class ScheduleManager:
         if latest is None:
             return
         latest.last_status = status
-        if entry.web_chat_id and entry.web_chat_id != dispatched_chat_id:
-            # Dispatch re-pointed us at a replacement chat. Without carrying
-            # that across, the entry forgets it and builds a new chat every
-            # interval.
+        rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
+        if rehomed and latest.web_chat_id == bound_before:
+            # prepare_chat re-pointed us at a replacement chat (the target was
+            # archived or gone) and nobody has retargeted the stored row since.
+            # Without carrying that across, the entry forgets the replacement
+            # and builds a new chat every interval. When `latest` no longer
+            # holds `bound_before` the user retargeted it mid-run, and their
+            # edit wins.
             latest.web_chat_id = entry.web_chat_id
         latest.last_run_chat_id = chat_id
         self._store.replace(latest)

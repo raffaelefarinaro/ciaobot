@@ -19,7 +19,7 @@
         <div class="subagent-head" @click.stop="toggleAgent(i)">
           <span class="chevron">{{ openAgents[i] ? '\u25BE' : '\u25B8' }}</span>
           <span class="agent-id">
-            <template v-if="sub.subagent_type">[{{ sub.subagent_type }}]&nbsp;</template>{{ sub.description || shortId(sub.agent_id) }}
+            <template v-if="sub.subagent_type">[{{ sub.subagent_type }}]&nbsp;</template>{{ sub.description || shortAgentId(sub.agent_id) }}
           </span>
           <span v-if="sub.status" class="status-chip" :class="sub.status">{{ sub.status }}</span>
           <span class="meta">{{ agentMeta(sub) }}</span>
@@ -29,8 +29,8 @@
           <RouterLink
             v-if="chatId"
             class="open-link"
-            :to="`/chat/${chatId}/subagent/${bareId(sub.agent_id)}`"
-            :title="`Open ${sub.description || shortId(sub.agent_id)} in a read-only view`"
+            :to="subagentPath(chatId, sub.agent_id)"
+            :title="`Open ${sub.description || shortAgentId(sub.agent_id)} in a read-only view`"
             @click.stop
           >open</RouterLink>
         </div>
@@ -69,17 +69,12 @@ import { ref, computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { SubagentTranscript } from '../lib/types'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { shortAgentId, subagentPath } from '../lib/subagentIds'
 
 // `chatId` is optional so the panel still renders in isolation (tests, and any
 // caller that has no route to offer); the link is simply omitted then.
 const props = defineProps<{ subagents: SubagentTranscript[]; chatId?: string }>()
 const chatId = computed(() => props.chatId || '')
-
-// SDK ids are bare; the local-JSONL fallback uses the "agent-" file stem. The
-// route carries the bare form so both spellings resolve to one view.
-function bareId(id: string): string {
-  return id.replace(/^agent-/, '')
-}
 
 const subs = computed<SubagentTranscript[]>(() => props.subagents || [])
 const runningCount = computed(
@@ -96,11 +91,6 @@ function togglePanel() {
 
 function toggleAgent(i: number) {
   openAgents.value = { ...openAgents.value, [i]: !openAgents.value[i] }
-}
-
-function shortId(id: string): string {
-  // Most SDK ids are UUIDs; show the first 8 chars for readability.
-  return id.length > 12 ? `${id.slice(0, 8)}\u2026` : id
 }
 
 function agentMeta(sub: SubagentTranscript): string {

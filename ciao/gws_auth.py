@@ -787,6 +787,16 @@ class ManualPkceStore:
                 return "none"
             if status == "superseded":
                 return status
+            # A tombstone `consume` wrote is authoritative even inside the TTL.
+            # Reading only the clock reported a spent flow as "active" for the
+            # rest of its hour: a resubmitted flow_id (double-click, browser
+            # back, a retry after the response was lost) then passed every
+            # guard, `peek` returned None because the verifier is gone, and the
+            # exchange went to Google with a challenged code and no verifier —
+            # the `invalid_grant` this tombstone exists to replace with "start
+            # manual connect again".
+            if status == "expired" or not verifier:
+                return "expired"
             if time.time() > expires_at:
                 # Tombstone it in place: keep the "something was issued"
                 # signal, but drop the verifier itself (never hold expired

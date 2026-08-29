@@ -762,7 +762,6 @@ def _claude_status(
     # not evidence of authentication, and neither is Desktop metadata — an
     # `oauthAccount` block in ~/.claude.json can belong to the Desktop app
     # while the CLI credential store is signed out (issue #347). Fail closed.
-    app_path = claude_app_path()
     if auth_status.get("cli_too_old"):
         # This CLI predates `claude auth status`; reporting it as "signed out"
         # would send the user to re-authenticate against a command that
@@ -786,6 +785,7 @@ def _claude_status(
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
         )
+    app_path = claude_app_path()
     detail = (
         "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
         "no separate CLI install is needed."

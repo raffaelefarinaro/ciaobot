@@ -303,17 +303,27 @@
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
-              <label>Model</label>
-              <ModelSelector
-                :model-value="editData.model"
-                :sections="scheduleModelSections"
-                :placeholder="editInheritedModelLabel"
-                :empty-placeholder="editInheritedModelLabel"
-                @select="selectScheduleModel"
-              />
-            </div>
-            <p class="hint">Leave empty to inherit the workspace default.</p>
+            <!-- An interval run into one existing chat inherits that chat's
+                 model and mode — prepare_schedule_chat skips the override — so
+                 offering a picker here reported a setting that never took
+                 effect. Same rule NewScheduleForm applies on create. -->
+            <p v-if="inheritsChatModel" class="hint">
+              This automation runs inside its chat, so every run uses that
+              chat's own model. Change it from the chat's model picker.
+            </p>
+            <template v-else>
+              <div class="form-group">
+                <label>Model</label>
+                <ModelSelector
+                  :model-value="editData.model"
+                  :sections="scheduleModelSections"
+                  :placeholder="editInheritedModelLabel"
+                  :empty-placeholder="editInheritedModelLabel"
+                  @select="selectScheduleModel"
+                />
+              </div>
+              <p class="hint">Leave empty to inherit the workspace default.</p>
+            </template>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
@@ -686,7 +696,12 @@ const recentRuns = computed(() =>
       lastRunAt: s.last_dispatched_at!,
       chatId: s.last_run_chat_id!,
     }))
-    .sort((a, b) => (a.lastRunAt > b.lastRunAt ? -1 : 1))
+    // Compared as instants, not as strings. `last_dispatched_at` is written in
+    // two offsets — UTC from the interval and run-now paths, the entry's own
+    // timezone from the wall-clock tick/catch-up — and ISO strings only sort
+    // correctly at a fixed offset, so an evening-local stamp sorted above a
+    // genuinely newer UTC one and could push it off the five-row list.
+    .sort((a, b) => Date.parse(b.lastRunAt) - Date.parse(a.lastRunAt))
     .slice(0, 5),
 )
 
@@ -826,6 +841,14 @@ function providerLabel(s: Schedule): string {
     : `${label} (inherited from ${workspaceDisplayName(s.workspace)})`
 }
 
+// An interval entry bound to one existing chat runs inside it and inherits its
+// model/mode; `prepare_schedule_chat` deliberately skips the override. Mirrors
+// NewScheduleForm's `inheritsChatModel`.
+const inheritsChatModel = computed(() => {
+  const s = schedule.value
+  return !!s && isIntervalSchedule(s) && !!s.web_chat_id && !s.web_project_id
+})
+
 function isIntervalSchedule(s: Schedule): boolean {
   return s.frequency === 'interval'
 }
@@ -862,6 +885,13 @@ function intervalStatusLabel(s: Schedule): string {
   if (s.last_status === 'busy') return 'waiting — chat busy'
   if (s.last_status === 'running') return 'run in progress…'
   if (s.last_status === 'error') return 'last run failed'
+  // `_schedule_dispatch_status` reports "skipped" when the run reached the
+  // provider but stopped short of a result: an approval card, an
+  // AskUserQuestion, or a deferred retry after a quota rejection. Without an
+  // arm here it fell through to "waiting for first run", so an automation that
+  // had run many times and was blocked on a prompt read as one that had never
+  // run at all.
+  if (s.last_status === 'skipped') return 'last run needs you — check the chat'
   if (s.last_status === 'ok') return 'ok'
   return s.enabled ? 'waiting for first run' : 'never ran'
 }

@@ -1200,6 +1200,13 @@ class CiaoControlPlane:
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
         )
+        # Same gate `schedule_update` applies, on the create door. A model
+        # emitting `daily_time: "9:30"` (no leading zero) or "25:00" otherwise
+        # got a stored entry that `tick()` compares against "%H:%M" and never
+        # matches — reported as healthy by `next_run` and silently dead.
+        time_error = wall_clock_time_error(entry)
+        if time_error:
+            raise ControlPlaneError("invalid_time", time_error)
         return _ok(self._schedule_payload(entry))
 
     def schedule_create(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
@@ -1367,9 +1374,35 @@ class CiaoControlPlane:
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
 
+    _RUN_REFUSALS: dict[str, tuple[str, str]] = {
+        "busy": (
+            "schedule_busy",
+            "The target chat has a turn in flight; retry when it finishes.",
+        ),
+        "missing-chat": (
+            "schedule_target_missing",
+            "The target chat no longer exists and could not be re-homed.",
+        ),
+    }
+
+    def _raise_if_run_refused(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Turn a non-dispatching ``dispatch_now`` outcome into an error.
+
+        An interval entry refuses rather than queues, and reports that through
+        ``status`` rather than by raising. Wrapping it in ``_ok`` told the
+        model the run had started when nothing was dispatched — the REST twin
+        answers 409 for exactly these two, so the tool surface has to agree.
+        """
+        refusal = self._RUN_REFUSALS.get(str(result.get("status") or ""))
+        if refusal is not None:
+            raise ControlPlaneError(refusal[0], refusal[1])
+        return result
+
     async def schedule_run(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
         self._schedule(principal, schedule_id)
-        return _ok(await self.schedules.dispatch_now(schedule_id))
+        result = self._raise_if_run_refused(await self.schedules.dispatch_now(schedule_id))
+        publish_automations_changed(self.pcm)
+        return _ok(result)
 
     def schedule_delete(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
@@ -1473,6 +1506,27 @@ class CiaoControlPlane:
         )
         if entry is None:
             raise ControlPlaneError("loop_not_found", f"Loop '{loop_id}' was not found.")
+        # Same workspace boundary `_schedule` enforces. Loops always carried a
+        # `web_chat_id`, so the chat check below was the only scope check they
+        # ever needed; interval schedules can be project-bound and carry none,
+        # which left this deprecated surface as an unguarded second door onto
+        # another workspace's automations — and both `loop` and `loop_action`
+        # are auto-approved, so no card would have been raised either.
+        if entry.workspace and entry.workspace != principal.workspace:
+            raise ControlPlaneError(
+                "workspace_forbidden", "Loop belongs to another workspace."
+            )
+        # Packaged routines are read-only through `schedule`/`schedule_action`
+        # (`system_schedule_read_only` / `schedule_not_removable`). Every
+        # `_loop` caller mutates, runs, or deletes, so refuse them outright
+        # here rather than let the deprecated shape reach a row the supported
+        # surface protects. No packaged routine is interval-cadenced today;
+        # this keeps that from silently becoming a hole if one ever is.
+        if entry.scope == "system" or not entry.removable:
+            raise ControlPlaneError(
+                "system_schedule_read_only",
+                "This is a system routine; manage it with `schedule`, not `loop`.",
+            )
         if entry.web_chat_id:
             self._chat(principal, entry.web_chat_id)
         return entry
@@ -1526,7 +1580,8 @@ class CiaoControlPlane:
 
     async def loop_run(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
-        result = await self.schedules.dispatch_now(loop_id)
+        result = self._raise_if_run_refused(await self.schedules.dispatch_now(loop_id))
+        publish_automations_changed(self.pcm)
         return _ok({**result, "loop_id": loop_id})
 
     def loop_delete(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:

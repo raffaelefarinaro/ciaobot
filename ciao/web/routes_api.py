@@ -77,6 +77,7 @@ from ciao.schedules import (
     publish_automations_changed,
     stamp_fallback_project,
     wall_clock_time_error,
+    wall_clock_time_value_error,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -3710,7 +3711,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
     # without this it re-fetched and re-rendered every subagent the chat ever
     # spawned on every tick. Narrowing skips the sibling transcript reads
     # entirely rather than filtering after the fact.
-    wanted_agent_id = (request.query_params.get("agent_id") or "").strip()
+    # Normalised once, here. The SDK and the opencode tree key agents by the
+    # bare id while the local-transcript fallback uses the file stem
+    # ("agent-a319…"), and both forms reach the client — so a prefixed id
+    # arriving here matched nothing, the narrow SDK read came back empty, and
+    # the request fell through to the whole-directory fallback it exists to
+    # avoid, on every poll.
+    wanted_agent_id = (request.query_params.get("agent_id") or "").strip().removeprefix("agent-")
 
     config = request.app.state.config
     if getattr(chat, "provider", "claude") == "opencode":
@@ -3733,7 +3740,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
             agent_id = str(info.get("id") or "")
             if not agent_id:
                 continue
-            if wanted_agent_id and agent_id != wanted_agent_id:
+            if wanted_agent_id and agent_id.removeprefix("agent-") != wanted_agent_id:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
@@ -3761,28 +3768,36 @@ async def chat_subagents(request: Request) -> JSONResponse:
     resolver = getattr(pcm, "_agent_root_for_chat", None)
     agent_root = resolver(chat_id) if resolver is not None else None
 
-    def _finalize(entries: list[dict]) -> JSONResponse:
+    async def _finalize(entries: list[dict]) -> JSONResponse:
         # Catch-all for the local-transcript fallbacks, which read the whole
         # session directory and cannot narrow at the source. Those entries are
         # keyed by file stem ("agent-a319…") while the SDK and the route use
         # the bare id, so compare on the bare form or the filter drops the
-        # agent it was asked for.
+        # agent it was asked for. `wanted_agent_id` is already bare.
         if wanted_agent_id:
-            bare_wanted = wanted_agent_id.removeprefix("agent-")
             entries = [
                 e
                 for e in entries
-                if str(e.get("agent_id", "")).removeprefix("agent-") == bare_wanted
+                if str(e.get("agent_id", "")).removeprefix("agent-") == wanted_agent_id
             ]
-        _merge_subagent_dispatch_meta(
-            entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        # Off the loop: this walks the whole parent session JSONL, which on a
+        # long Claude chat is tens of MB, and the read-only subagent view polls
+        # this endpoint every 4 seconds. Done inline it stalled every in-flight
+        # stream for the length of the parse. `_running_subagent_rows` already
+        # does the identical work in a thread.
+        await asyncio.to_thread(
+            _merge_subagent_dispatch_meta,
+            entries,
+            chat.session_id,
+            Path(config.workspace_root),
+            agent_root=agent_root,
         )
         return JSONResponse(entries)
 
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return _finalize(
+        return await _finalize(
             _local_subagent_transcripts(
                 chat.session_id, Path(config.workspace_root), agent_root=agent_root
             )
@@ -3796,13 +3811,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
         try:
             agent_ids = list_subagents(chat.session_id, directory=workspace)
         except (FileNotFoundError, ValueError):
-            return _finalize(
+            return await _finalize(
                 _local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
             )
         except Exception:  # noqa: BLE001 — defensive against SDK surprises
-            return _finalize(
+            return await _finalize(
                 _local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
@@ -3829,7 +3844,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
             chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
 
-    return _finalize(result)
+    return await _finalize(result)
 
 
 async def running_subagents(request: Request) -> JSONResponse:
@@ -3856,15 +3871,27 @@ async def running_subagents(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
+    scanned: list[str] = []
     for chat_id in pcm.active_chat_ids():
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
-        try:
-            rows = await _running_subagent_rows(pcm, config, chat)
-        except Exception:  # noqa: BLE001 — one unreadable session must not
-            # blank the whole sidebar, so log it and move on.
-            logger.exception("running-subagent scan failed for chat %s", chat_id)
+        scanned.append(chat_id)
+    # Gathered, not awaited one at a time. Each scan is an independent thread
+    # hop over that chat's own session file (or an independent opencode read),
+    # so a serial loop cost N full parses of wall clock every four seconds
+    # while anything was working. `return_exceptions` preserves the per-chat
+    # tolerance the loop had: one unreadable session must not blank the
+    # sidebar for the others.
+    results = await asyncio.gather(
+        *(_running_subagent_rows(pcm, config, pcm.get_chat(cid)) for cid in scanned),
+        return_exceptions=True,
+    )
+    for chat_id, rows in zip(scanned, results):
+        if isinstance(rows, BaseException):
+            logger.warning(
+                "running-subagent scan failed for chat %s", chat_id, exc_info=rows
+            )
             continue
         if rows:
             out[chat_id] = rows
@@ -5363,9 +5390,15 @@ async def create_schedule(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-    # Manual schedules don't auto-fire, so `time` is optional. For everything
-    # else we still require it (create will happily take "" but then the entry
-    # would never tick).
+    # Manual and interval schedules don't need a time of day. For every other
+    # cadence the entry is unusable without one: compute_next_run returns None,
+    # tick() never matches, and the row sits there reading as enabled while
+    # silently never firing. PATCH has always rejected this — and, because it
+    # re-validates the whole entry, an entry created this way could not even be
+    # paused afterwards. Same gate, same message, on the create door.
+    time_error = wall_clock_time_value_error(frequency, str(body.get("time") or ""))
+    if time_error:
+        return JSONResponse({"error": time_error}, status_code=400)
     provider = (body.get("provider") or "").strip()
     if provider and provider not in supported_providers():
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)

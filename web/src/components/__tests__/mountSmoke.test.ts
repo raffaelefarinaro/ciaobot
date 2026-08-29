@@ -159,10 +159,10 @@ vi.mock('../../lib/api', () => {
       default: 'sonnet',
       provider_models: {
         claude: ['haiku', 'sonnet', 'opus', 'fable'],
-        opencode: ['opus', 'sonnet', 'haiku'],
+        opencode: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
-      opencode_models: ['opus', 'sonnet', 'haiku'],
+      opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
     },
     '/api/projects': [],
@@ -607,11 +607,13 @@ describe('component mount smoke', () => {
     await nextTick()
 
     // The panel is one voice per vendor: a bare tier is Anthropic, a prefixed
-    // entry routes to that provider's app-server.
+    // entry routes to that provider's app-server. The opencode section lists
+    // that account's real catalog (`providerID/modelID`) — it used to show the
+    // Anthropic tiers prefixed, i.e. `opencode:opus`, which is not a model.
     const opusOption = critiqueSelector.findAll('.model-selector__item')
       .find((el) => el.text() === 'opus')
     const opencodeOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'opencode:opus')
+      .find((el) => el.text() === 'openai/gpt-5.6-luna')
     expect(opusOption).toBeTruthy()
     expect(opencodeOption).toBeTruthy()
 
@@ -621,9 +623,9 @@ describe('component mount smoke', () => {
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'opus,opencode:opus',
+      critique_models: 'opus,opencode:openai/gpt-5.6-luna',
     })
-    expect(wrapper.text()).toContain('opencode:opus')
+    expect(wrapper.text()).toContain('opencode:openai/gpt-5.6-luna')
     wrapper.unmount()
   })
 
@@ -828,13 +830,13 @@ describe('component mount smoke', () => {
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
     const opencodeOption = opencodeSelector.findAll('.model-selector__item')
-      .find((el) => el.attributes('data-model') === 'opus')
+      .find((el) => el.attributes('data-model') === 'openai/gpt-5.6-luna')
     expect(opencodeOption).toBeTruthy()
     await opencodeOption!.trigger('click')
     await flushPromises()
     // Per-provider default models go through the provider_default_models map.
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_models: { opencode: 'opus' },
+      provider_default_models: { opencode: 'openai/gpt-5.6-luna' },
     })
 
     wrapper.unmount()

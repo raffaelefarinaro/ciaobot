@@ -537,8 +537,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # Persist only if the entry still exists: a "once" schedule may have
             # been consumed (replace-then-delete) before this background task
             # resolves, and replace() upserts — writing here would resurrect it.
-            if schedule_store.get(entry.schedule_id) is not None:
-                schedule_store.replace(entry)
+            #
+            # Write only the field this function owns, onto a freshly read row.
+            # `entry` is the snapshot taken when the run started, and a run can
+            # stream for minutes: replacing the whole row with it reverted any
+            # edit the user made meanwhile (a Stop, a new prompt, a new
+            # interval), and did so *before* `_run_interval`'s own re-read, so
+            # that function's documented "the user's edit survives" guarantee
+            # was reading an already-clobbered row.
+            latest = schedule_store.get(entry.schedule_id)
+            if latest is not None:
+                latest.last_run_chat_id = result["chat_id"]
+                schedule_store.replace(latest)
         return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):

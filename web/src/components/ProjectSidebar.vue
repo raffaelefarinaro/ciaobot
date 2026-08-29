@@ -1479,7 +1479,7 @@ function missedCountFor(workspace: string): number {
 }
 
 import type { ChatInfo, ProjectInfo, RunningSubagent, Schedule } from '../lib/types'
-import { bareAgentId } from '../lib/subagentIds'
+import { bareAgentId, shortAgentId, subagentPath } from '../lib/subagentIds'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1738,10 +1738,6 @@ function toggleSubagents(chatId: string) {
   }
 }
 
-function subagentPath(chatId: string, agentId: string): string {
-  return `/chat/${chatId}/subagent/${bareAgentId(agentId)}`
-}
-
 const activeSubagentId = computed(() => (route.params.agentId as string) || '')
 
 function isActiveSubagent(chatId: string, agentId: string): boolean {
@@ -1752,10 +1748,7 @@ function isActiveSubagent(chatId: string, agentId: string): boolean {
 }
 
 function subagentLabel(sub: RunningSubagent): string {
-  const described = (sub.description || '').trim()
-  if (described) return described
-  const id = bareAgentId(sub.agent_id)
-  return id.length > 12 ? `${id.slice(0, 8)}\u2026` : id
+  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
 }
 
 // `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in

@@ -164,7 +164,14 @@ def is_near_duplicate(a: str, b: str, *, known_tags: set[str] | None = None) -> 
     na, nb = _normalized_tag(a), _normalized_tag(b)
     if na == nb:
         return True
-    if shorter >= min_edit_len and _edit_distance(na, nb, max_dist=max_edit) <= max_edit:
+    # Measured on the normalized forms, not the raw ones. Stripping separators
+    # shortens a tag, so `a-i`/`a-j` cleared a raw-length floor of 3 and were
+    # then compared as `ai`/`aj` — the exact two-character coincidence the
+    # floor exists to reject.
+    if (
+        min(len(na), len(nb)) >= min_edit_len
+        and _edit_distance(na, nb, max_dist=max_edit) <= max_edit
+    ):
         return True
     return False
 

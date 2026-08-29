@@ -64,8 +64,9 @@ Useful `.env` settings:
 - `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
 
-Each provider has its own default model, permission mode, and thinking level for
-new chats, set in Settings → Providers. A Claude model alias
+Each provider has its own default model and thinking level for new chats, set in
+Settings → Models, and its own default permission mode, set in
+Settings → Providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto

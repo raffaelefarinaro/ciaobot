@@ -155,7 +155,7 @@ def _panel(
 def test_default_critique_panel_is_anthropic_only_when_nothing_else_signed_in(
     monkeypatch,
 ) -> None:
-    assert _panel(monkeypatch, opencode=False) == ["opus", "fable"]
+    assert _panel(monkeypatch, opencode=False) == ["opus"]
 
 
 def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
@@ -169,7 +169,7 @@ def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
 def test_default_critique_panel_never_resolves_empty(monkeypatch) -> None:
     """With nothing signed in, report a real auth error rather than review nothing."""
     panel = _panel(monkeypatch, opencode=False, anthropic=False)
-    assert panel == ["opus", "fable"]
+    assert panel == ["opus"]
 
 
 def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
@@ -177,12 +177,12 @@ def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
 ) -> None:
     """The point of the panel is disagreement, so prefer vendor diversity.
 
-    Multiple Anthropic models would largely agree with each other; opencode
-    contributes a genuinely different model.
+    One entry per signed-in vendor, each that vendor's own default model. Two
+    Anthropic models would largely agree with each other, which is why pairing
+    `opus` with `fable` contradicted the rule this test names.
     """
     assert _panel(monkeypatch, opencode=True) == [
         "opus",
-        "fable",
         "opencode:",
     ]
 
@@ -201,7 +201,6 @@ def test_default_critique_panel_uses_per_provider_default_models(
         opencode_model="ollama-cloud/deepseek-v4-flash",
     ) == [
         "opus",
-        "fable",
         "opencode:ollama-cloud/deepseek-v4-flash",
     ]
 
@@ -209,4 +208,20 @@ def test_default_critique_panel_uses_per_provider_default_models(
 def test_default_critique_panel_omits_vendors_that_are_signed_out(monkeypatch) -> None:
     """An unavailable provider would put a guaranteed failure in the panel."""
     opencode_only = _panel(monkeypatch, opencode=True)
-    assert opencode_only == ["opus", "fable", "opencode:"]
+    assert opencode_only == ["opus", "opencode:"]
+
+
+def test_the_panel_follows_the_operator_default_model(monkeypatch) -> None:
+    """The vendor's voice is whatever model new chats use.
+
+    Picking a Claude default in Settings → Models moves the panel with it, so
+    there is no second place to configure "which model reviews".
+    """
+    from ciao.config import CiaoConfig
+
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
+    monkeypatch.setattr(crt, "is_opencode_available", lambda: False)
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    config.provider_default_models = {"claude": "sonnet"}
+
+    assert crt.default_critique_panel(config) == ["sonnet"]

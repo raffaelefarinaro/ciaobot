@@ -57,20 +57,20 @@ def test_an_unparseable_time_leaves_the_entry_unfireable(unparseable: str) -> No
 
 
 @pytest.mark.parametrize("out_of_range", ["25:00", "09:60"])
-def test_an_out_of_range_time_raises_rather_than_returning_none(
-    out_of_range: str,
-) -> None:
-    """Worse than unfireable, and the reason the guard checks range too.
+def test_an_out_of_range_time_is_unfireable_not_a_crash(out_of_range: str) -> None:
+    """Range is checked, and checking it does not raise out of the serializer.
 
-    ``compute_next_run`` guards the *parse* but not the *range*: "25:00" splits
-    and int()s cleanly, then ``datetime.replace(hour=25)`` raises inside
-    ``tick()``. Pinned so the guard cannot be relaxed to a bare parse check.
+    "25:00" splits and int()s cleanly, so a bare parse guard let it through to
+    ``datetime.replace(hour=25)``. That raised, and because ``_enrich_schedule``
+    calls ``compute_next_run`` unguarded, one such row 500-ed the whole
+    ``GET /api/schedules`` list for good. Both create doors now reject the
+    value, so the only way to store one is a hand edit — for which "never
+    fires" is the same honest answer an unparseable time already gets.
     """
     entry = _entry(frequency="daily", daily_time_utc=out_of_range)
 
     assert wall_clock_time_error(entry)
-    with pytest.raises(ValueError):
-        compute_next_run(entry)
+    assert compute_next_run(entry) is None
 
 
 @pytest.mark.parametrize("good", ["00:00", "09:30", "23:59"])
