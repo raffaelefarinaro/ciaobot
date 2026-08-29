@@ -3911,8 +3911,16 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
         ):
             collab_tree = await live_provider.read_live_collab_tree()
         else:
+            # Sessions are cwd-scoped: a chat in a non-primary workspace was
+            # created under its agent root, not the install root. The
+            # live-provider path already uses that root; the ephemeral fallback
+            # must do the same, otherwise it returns no children and the sidebar
+            # drops still-running agents.
+            resolver = getattr(pcm, "_agent_root_for_chat", None)
+            agent_root = resolver(chat.chat_id) if resolver is not None else None
+            root = Path(agent_root) if agent_root else Path(config.workspace_root)
             collab_tree = await OpencodeProvider.read_collab_tree(
-                config.workspace_root, chat.session_id
+                root, chat.session_id
             )
         rows: list[dict] = []
         for item in collab_tree:

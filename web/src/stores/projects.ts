@@ -708,6 +708,15 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
+  // Paused while the read-only subagent view is open for this chat: that
+  // view already polls its single transcript on a 4s timer, so the store's
+  // full-chat poll (every subagent, every transcript, re-parsed) would run
+  // alongside it and defeat the narrowing the dedicated endpoint provides.
+  const subagentViewActiveChatId = ref<string | null>(null)
+  function setSubagentViewActive(chatId: string | null) {
+    subagentViewActiveChatId.value = chatId
+  }
+
   // Live view while subagents run: refresh the active chat's subagent
   // transcripts on a short interval so the panel updates as the agents
   // work. The CLI appends to the transcript files continuously, so polling
@@ -716,13 +725,19 @@ export const useProjectStore = defineStore('projects', () => {
   // dispatched mid-turn nest live inside the Working trace).
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
   watch(
-    () => [activeChatId.value, activeBackgroundAgents.value, isStreaming.value] as const,
-    ([chatId, count, streamingNow]) => {
+    () => [
+      activeChatId.value,
+      activeBackgroundAgents.value,
+      isStreaming.value,
+      subagentViewActiveChatId.value,
+    ] as const,
+    ([chatId, count, streamingNow, viewChatId]) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
       if (!chatId || (count <= 0 && !streamingNow)) return
+      if (viewChatId !== null && viewChatId === chatId) return
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
@@ -5636,7 +5651,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled,
+    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,

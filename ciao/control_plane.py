@@ -1550,6 +1550,8 @@ class CiaoControlPlane:
         if target_chat is not None:
             chat, project = self._chat_scope(principal, str(target_chat))
             entry.web_chat_id = chat.chat_id
+            entry.web_project_id = None
+            entry.web_project_name = ""
             entry.workspace = project.workspace
             # Retargeting moves where this entry re-homes.
             stamp_fallback_project(entry, self.pcm)
