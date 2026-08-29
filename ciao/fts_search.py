@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -18,7 +19,10 @@ EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
 # Vault bookkeeping the memory pipeline itself writes (casefolded names).
 # Indexing them made the proposals queue and the curation logs rank above real
 # notes for ordinary recall queries — the memory system's paperwork must never
-# compete with the memories it manages.
+# compete with the memories it manages. Matched only directly under a
+# `Workspace/` directory — where the pipeline writes them — so a user's own
+# note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
+# stays searchable.
 RESERVED_UNINDEXED_FILES = frozenset(
     {
         "memory-proposals.md",
@@ -27,6 +31,15 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "weekly-review-log.md",
     }
 )
+
+
+def _is_reserved_bookkeeping(rel: Path) -> bool:
+    """True for the memory pipeline's own files under ``Workspace/``."""
+    return (
+        len(rel.parts) >= 2
+        and rel.parts[-2].casefold() == "workspace"
+        and rel.name.casefold() in RESERVED_UNINDEXED_FILES
+    )
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
@@ -252,6 +265,10 @@ def _index_directory(
         # spelled lowercase by OKF and titlecase by this vault's history)
         if rel.name.casefold() in exclude_files:
             continue
+        # The memory pipeline's own bookkeeping, but only where the pipeline
+        # writes it — a user note elsewhere sharing the name stays indexed.
+        if _is_reserved_bookkeeping(rel):
+            continue
 
         found_paths.add(rel_str)
 
@@ -272,9 +289,16 @@ def _index_directory(
             continue
 
         if _search_opted_out(text):
-            # Dropped from the found set so the prune below removes any rows
-            # indexed before the note opted out.
-            found_paths.discard(rel_str)
+            # Remove any FTS rows indexed before the note opted out, but keep
+            # (and refresh) the meta row: the mtime short-circuit above is what
+            # stops every later pass from re-reading and re-parsing the file —
+            # opted-out notes are often the vault's largest (rolled log
+            # archives), and index_vault runs on every vault_search call.
+            conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+            conn.execute(
+                f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
+                (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
+            )
             continue
 
         title = _parse_title(text, md_path.stem)
@@ -336,7 +360,7 @@ def index_vault(
         meta_table="vault_meta",
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
-        exclude_files=set(GENERATED_VAULT_FILES) | RESERVED_UNINDEXED_FILES,
+        exclude_files=set(GENERATED_VAULT_FILES),
         path_base=path_base,
     )
 
@@ -418,10 +442,7 @@ def index_file(
     except OSError:
         return False
 
-    if not is_log and (
-        file_path.name.casefold() in RESERVED_UNINDEXED_FILES
-        or _search_opted_out(text)
-    ):
+    if not is_log and (_is_reserved_bookkeeping(rel) or _search_opted_out(text)):
         # Force-indexing must honour the same exclusions as the bulk pass, and
         # clean up rows written before the file became excluded.
         conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
@@ -571,8 +592,6 @@ _HITS_KEEP_LINES = 2000
 def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
     """Append one search's returned note paths to the hits log. Never raises."""
     try:
-        import json as _json
-
         runtime_dir.mkdir(parents=True, exist_ok=True)
         path = runtime_dir / SEARCH_HITS_NAME
         record = {
@@ -581,7 +600,7 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
             "paths": paths[:50],
         }
         with path.open("a", encoding="utf-8") as f:
-            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
         if path.stat().st_size > _HITS_MAX_BYTES:
             lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -597,8 +616,6 @@ def read_search_hit_paths(
     None matters: an install that never wrote the log has no retrieval
     evidence, and the audit must not read that absence as "never retrieved".
     """
-    import json as _json
-
     path = runtime_dir / SEARCH_HITS_NAME
     if not path.exists():
         return None
@@ -610,8 +627,12 @@ def read_search_hit_paths(
             if not line:
                 continue
             try:
-                record = _json.loads(line)
+                record = json.loads(line)
             except ValueError:
+                continue
+            if not isinstance(record, dict):
+                # One junk line must not void the audit's whole stale-notes
+                # section (the caller wraps this in a broad advisory except).
                 continue
             try:
                 ts = datetime.fromisoformat(str(record.get("ts", ""))).timestamp()
@@ -619,7 +640,10 @@ def read_search_hit_paths(
                 continue
             if ts < cutoff:
                 continue
-            for item in record.get("paths", []):
+            paths = record.get("paths", [])
+            if not isinstance(paths, list):
+                continue
+            for item in paths:
                 if isinstance(item, str):
                     hits.add(item)
     except OSError:

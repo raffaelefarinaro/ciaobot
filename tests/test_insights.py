@@ -181,7 +181,7 @@ def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n\nbody\n", encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         return "## Errors\n- something failed [idx=3]\n"
 
     with patch.object(insights, "_call_model", side_effect=fake_call):
@@ -206,12 +206,12 @@ def test_extract_is_idempotent_when_section_already_present(
         "# Existing\n\n## Session insights\n\nold body\n", encoding="utf-8"
     )
 
-    async def fake_call(filtered_jsonl: str, model: str) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         return "fresh content"
 
     called = {"count": 0}
 
-    async def counting_call(filtered_jsonl: str, model: str) -> str:
+    async def counting_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         called["count"] += 1
         return await fake_call(filtered_jsonl, model)
 
@@ -252,7 +252,7 @@ def test_extract_retries_once_then_skips(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         calls["count"] += 1
         raise RuntimeError("boom")
 
@@ -284,7 +284,7 @@ def test_extract_succeeds_on_retry(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("transient")
@@ -314,7 +314,7 @@ def test_extract_skips_silently_on_empty_model_output(
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n", encoding="utf-8")
 
-    async def empty_call(filtered_jsonl: str, model: str) -> str:
+    async def empty_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         return ""
 
     with patch.object(insights, "_call_model", side_effect=empty_call):
@@ -476,7 +476,7 @@ def test_extract_updates_project_doc_when_insights_carry_decisions(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     updated_doc = _PROJECT_DOC.replace(
@@ -511,7 +511,7 @@ def test_extract_skips_project_doc_when_path_empty(
     doc = tmp_path / "doc.md"
     doc.write_text(_PROJECT_DOC, encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
         return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
 
     async def fail_oneshot(prompt, **kwargs):
@@ -1101,3 +1101,39 @@ def test_an_appended_snippet_fence_does_not_hide_the_section(tmp_path):
     # appending a duplicate.
     assert text.count(insights._INSIGHTS_HEADER) == 1
     assert "npm run build" in text
+
+
+# ---- Fact-augmented extraction (known-context block) ----------------------
+
+
+def test_known_context_block_carries_regions_and_roster(tmp_path):
+    from ciao import memory_tool as mt
+    from ciao.insights import _known_context_block
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    mt.write_region(guide, "memory", ["Prefers plain engineering notes."])
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Ipek.md").write_text("# Ipek\n", encoding="utf-8")
+    (vault / "projects" / "active" / "Wedding").mkdir(parents=True)
+
+    block = _known_context_block(guide, vault)
+    assert block.startswith("## Known context")
+    assert "Prefers plain engineering notes." in block
+    assert "Known people: Ipek" in block
+    assert "Known projects: Wedding" in block
+    # Absent inputs mean no context section at all, not an empty header.
+    assert _known_context_block(None, None) == ""
+    assert _known_context_block(tmp_path / "missing.md", tmp_path / "nope") == ""
+
+
+def test_text_user_prompt_prepends_context():
+    from ciao.insights import _text_user_prompt
+
+    plain = _text_user_prompt("body")
+    augmented = _text_user_prompt("body", "## Known context\nKnown people: A\n\n")
+    assert plain.startswith("Below is a rendered")
+    assert augmented.startswith("## Known context")
+    assert augmented.endswith(plain)
