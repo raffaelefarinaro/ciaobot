@@ -461,8 +461,58 @@ def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     return True
 
 
-def append_learning(vault_root: Path, text: str) -> bool:
-    """Append one learning under the Active section of Workspace/Learnings.md.
+# One structured learning line. The shape is a contract: the curation skill
+# reads the recurrence count to decide promotion (N ≥ 3) and the sources to
+# cite episodes, so recurrence bookkeeping is mechanical instead of prose.
+_LEARNING_LINE_RE = re.compile(
+    r"^- \[(?P<key>[a-z0-9][a-z0-9-]*)\] "
+    r"\[(?P<first>\d{4}-\d{2}-\d{2}) → (?P<last>\d{4}-\d{2}-\d{2})\] "
+    r"\(x(?P<count>\d+)\) "
+    r"(?P<text>.*?)"
+    r"(?: — sources: (?P<sources>.*))?$"
+)
+
+_LEARNING_KEY_WORDS = 4
+_LEARNING_MAX_SOURCES = 8
+
+
+def _learning_key(text: str) -> str:
+    """A short kebab identifier from the statement's first distinctive words."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return "-".join(words[:_LEARNING_KEY_WORDS]) or "learning"
+
+
+def _normalized_learning(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def format_learning_line(
+    text: str,
+    *,
+    first_seen: str,
+    last_seen: str,
+    count: int,
+    sources: list[str],
+) -> str:
+    line = (
+        f"- [{_learning_key(text)}] [{first_seen} → {last_seen}] "
+        f"(x{count}) {_one_line(text)}"
+    )
+    cited = [s for s in sources if s][:_LEARNING_MAX_SOURCES]
+    if cited:
+        line += f" — sources: {', '.join(cited)}"
+    return line
+
+
+def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
+    """File one learning under the Active section of Workspace/Learnings.md.
+
+    Structured entries carry a key, first-seen/last-seen dates, a recurrence
+    count, and source chat ids. Re-observing a learning (same normalized
+    statement) increments its count and refreshes last-seen instead of
+    appending a duplicate — recurrence is what the curation skill promotes on,
+    so it must be counted mechanically, not judged from prose. Legacy plain
+    bullets are left untouched; an exact legacy duplicate still short-circuits.
 
     Public because accepting a ``[learnings]`` proposal from the review queue
     performs exactly this write.
@@ -477,11 +527,47 @@ def append_learning(vault_root: Path, text: str) -> bool:
             "---\n"
             "# Learnings\n\n"
             "Reusable cross-project knowledge. Active entries are candidates "
-            "for promotion into canonical guidance.\n"
+            "for promotion into canonical guidance once they recur (x3 or "
+            "more).\n"
         )
-    entry = f"- {text}"
-    if entry in existing:
+    if f"- {_one_line(text)}" in existing:
+        # Exact legacy duplicate: already recorded in the old plain shape.
         return True
+
+    today = date.today().isoformat()
+    normalized = _normalized_learning(text)
+    lines = existing.split("\n")
+    for index, line in enumerate(lines):
+        match = _LEARNING_LINE_RE.match(line)
+        if match is None:
+            continue
+        if _normalized_learning(match.group("text")) != normalized:
+            continue
+        sources = [
+            item.strip()
+            for item in (match.group("sources") or "").split(",")
+            if item.strip()
+        ]
+        if source and source not in sources:
+            sources.append(source)
+        lines[index] = format_learning_line(
+            match.group("text"),
+            first_seen=match.group("first"),
+            last_seen=today,
+            count=int(match.group("count")) + 1,
+            sources=sources,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return True
+
+    entry = format_learning_line(
+        text,
+        first_seen=today,
+        last_seen=today,
+        count=1,
+        sources=[source] if source else [],
+    )
     marker = "\n## Active\n"
     if marker in existing:
         head, _, tail = existing.partition(marker)
@@ -499,6 +585,7 @@ def apply_proposals(
     guide_path: Path | None = None,
     vault_root: Path | None = None,
     region_decisions: dict[str, dict[str, Any]] | None = None,
+    learning_source: str = "",
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Write every confidently-addressed proposal to its destination.
 
@@ -549,7 +636,7 @@ def apply_proposals(
                 else:
                     remaining.append(proposal)
             elif proposal.target == "learnings" and vault_root is not None:
-                if append_learning(vault_root, proposal.text):
+                if append_learning(vault_root, proposal.text, source=learning_source):
                     applied.append(proposal.text)
                 else:
                     remaining.append(proposal)
@@ -1045,6 +1132,7 @@ def proposals_from_archive(
                 guide_path=guide_path,
                 vault_root=workspace_vault_root,
                 region_decisions=region_decisions,
+                learning_source=archive_path.stem,
             )
             if promoted:
                 if stats is not None:

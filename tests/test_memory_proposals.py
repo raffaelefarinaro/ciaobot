@@ -1332,3 +1332,57 @@ def test_plan_region_reconcile_failure_returns_none(
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", broken_run_oneshot)
 
     assert asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet")) is None
+
+
+# ---- Structured learnings -------------------------------------------------
+
+
+def test_append_learning_writes_structured_entry(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    assert mp.append_learning(
+        vault, "Airtable sort param returns 400; filter by field ID.", source="chat-a1"
+    )
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if l.startswith("- ["))
+    match = mp._LEARNING_LINE_RE.match(line)
+    assert match is not None
+    assert match.group("count") == "1"
+    assert match.group("first") == match.group("last")
+    assert match.group("sources") == "chat-a1"
+
+
+def test_append_learning_recurrence_increments_instead_of_duplicating(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    fact = "Airtable sort param returns 400; filter by field ID."
+    assert mp.append_learning(vault, fact, source="chat-a1")
+    assert mp.append_learning(vault, fact, source="chat-b2")
+    # Whitespace/case variations still count as the same learning.
+    assert mp.append_learning(vault, fact.upper(), source="chat-b2")
+
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    lines = [l for l in text.splitlines() if l.startswith("- [")]
+    assert len(lines) == 1
+    match = mp._LEARNING_LINE_RE.match(lines[0])
+    assert match is not None
+    assert match.group("count") == "3"
+    assert match.group("sources") == "chat-a1, chat-b2"  # dedup'd source
+
+
+def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = vault / "Workspace" / "Learnings.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "# Learnings\n\n## Active\n- legacy plain learning bullet\n",
+        encoding="utf-8",
+    )
+    assert mp.append_learning(vault, "legacy plain learning bullet")
+    text = path.read_text(encoding="utf-8")
+    assert text.count("legacy plain learning bullet") == 1  # exact dup short-circuit
+
+    assert mp.append_learning(vault, "A brand new structured learning.", source="chat-x")
+    text = path.read_text(encoding="utf-8")
+    assert "- legacy plain learning bullet" in text
+    assert "(x1) A brand new structured learning." in text
