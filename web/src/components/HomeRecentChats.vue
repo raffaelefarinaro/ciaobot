@@ -1306,6 +1306,10 @@ defineExpose({ onArrow })
   margin-left: auto;
   color: var(--fg2);
   font-size: var(--text-xs);
+  /* The card heading top-aligns its children, so this smaller text needs the
+     title's first-line height (1.35 x text-sm) to share its centerline — and
+     the unread dot's (see .chat-signals--card in ChatSignals.vue). */
+  line-height: calc(1.35 * var(--text-sm));
 }
 
 .home-chat-project {
