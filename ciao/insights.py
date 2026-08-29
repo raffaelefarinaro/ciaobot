@@ -355,7 +355,9 @@ Rules:
   Y, and we should keep doing X"). Drop one-off picks about this transcript.
 - When citing a vault link, use a relative Markdown link with the path from the
   vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
-- Be terse. One line per item where possible.
+- Be terse. One line per item where possible. Every bullet is a final
+  statement: never narrate reconsideration, hedging, or self-correction
+  inside a bullet — resolve it first, then write only the surviving fact.
 
 ## Errors
 - <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
@@ -1243,7 +1245,9 @@ Rules:
   with, not one-off references in this transcript.
 - "Decisions" = choices that set a precedent for future sessions; drop one-off
   picks about this transcript.
-- Be terse. One line per item where possible.
+- Be terse. One line per item where possible. Every bullet is a final
+  statement: never narrate reconsideration, hedging, or self-correction
+  inside a bullet — resolve it first, then write only the surviving fact.
 
 Your entire response must be Markdown using only the section headers below. Never
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
