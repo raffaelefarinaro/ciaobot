@@ -405,3 +405,65 @@ def test_a_legacy_created_loop_keeps_its_project_as_the_rehome_fallback(
         # "a new chat per run" and outrank the fixed chat.
         assert stored.web_project_id is None
         assert stored.enabled is start
+
+
+def test_a_chat_bound_interval_records_its_chat_project_as_the_fallback(
+    client: TestClient,
+) -> None:
+    """The path actually in use, not just migration and the legacy route.
+
+    Without the fallback a chat-bound interval whose chat is deleted re-homes
+    into the workspace's General and continues the unattended prompt in the
+    wrong project.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == "proj-1"
+    # Still a fixed-chat entry: web_project_id would mean "new chat per run".
+    assert stored.web_project_id is None
+
+
+def test_an_explicit_workspace_does_not_skip_the_fallback(
+    client: TestClient,
+) -> None:
+    """The workspace derivation is skipped when the caller supplies one.
+
+    The fallback is computed independently precisely so it is not lost in that
+    case.
+    """
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_chat_id": "chat-idle",
+        "workspace": "personal",
+    })
+    assert resp.status_code == 201, resp.text
+    schedule_id = resp.json()["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == "proj-1"
+
+
+def test_a_project_bound_interval_records_no_fallback(client: TestClient) -> None:
+    """A project entry already names its project; a fallback would be noise."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+    })
+    assert resp.status_code == 201, resp.text
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == resp.json()["schedule_id"]
+    )
+    assert stored.fallback_project_id == ""
+    assert stored.web_project_id == "proj-1"

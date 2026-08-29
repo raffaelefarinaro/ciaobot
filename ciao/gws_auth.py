@@ -720,6 +720,32 @@ class ManualPkceStore:
             if expires_at < cutoff:
                 del self._pending[flow_id]
 
+    def consume(self, flow_id: str, profile: str | None = None) -> None:
+        """Retire a flow whose code has been exchanged successfully.
+
+        ``peek`` is deliberately non-destructive so a mistyped paste can be
+        retried with the same verifier, which means nothing else retires a
+        flow that actually *succeeded* — it stayed ``active`` for the rest of
+        its TTL. That is both a spent secret held longer than necessary and a
+        live blocker: ``status_for_profile`` reports ``"active"``, which is
+        what makes ``gws_exchange_code`` refuse a later flow-ID-less exchange
+        for the same profile (the cached pre-PKCE client path).
+
+        Tombstoned rather than deleted, and with the same status word an
+        expiry uses, so re-pasting the spent code still gets "start manual
+        connect again" instead of a confusing ``invalid_grant``. Call this only
+        after the exchange succeeds; on failure the verifier must survive for
+        the retry.
+        """
+        with self._lock:
+            entry = self._pending.get(flow_id)
+            if entry is None:
+                return
+            entry_profile, _verifier, expires_at, _status = entry
+            if profile is not None and entry_profile != profile:
+                return
+            self._pending[flow_id] = (entry_profile, "", expires_at, "expired")
+
     def peek(self, flow_id: str, profile: str | None = None) -> str | None:
         """Return the live verifier for ``flow_id``, or ``None``.
 

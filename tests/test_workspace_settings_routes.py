@@ -901,6 +901,109 @@ def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, 
     assert exchange_called is False
 
 
+def test_a_successful_exchange_retires_its_pkce_flow(tmp_path, monkeypatch):
+    """`peek` is non-destructive so a mistyped paste can be retried, which
+    means nothing retired a flow that actually succeeded — it stayed "active"
+    for the rest of its TTL. That held a spent secret, and because
+    `status_for_profile` still reported "active" it also refused any later
+    flow-ID-less exchange for the profile (the cached pre-PKCE client path).
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        gws_auth, "exchange_and_store",
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {
+            "ok": True, "email": "x@y"
+        },
+    )
+
+    flow_id = client.post(
+        "/api/integrations/gws/auth-url", json={"profile": "personal"}
+    ).json()["flow_id"]
+    store = client.app.state.gws_manual_pkce_store
+    assert store.status_for_profile("personal") == "active"
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=good",
+            "flow_id": flow_id,
+        },
+    )
+    assert resp.status_code == 200
+
+    # Spent: verifier gone, and no longer blocking the profile.
+    assert store.peek(flow_id, "personal") is None
+    assert store.status_for_profile("personal") != "active"
+    # A legacy client with no flow_id can exchange again straight away.
+    assert client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "http://localhost/?code=legacy"},
+    ).status_code == 200
+
+
+def test_a_failed_exchange_keeps_its_pkce_flow_for_a_retry(tmp_path, monkeypatch):
+    """The other half: only success retires the flow."""
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(config, profile, *, code, redirect_uri, code_verifier=None):
+        raise ValueError("wrong code")
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", _boom)
+
+    flow_id = client.post(
+        "/api/integrations/gws/auth-url", json={"profile": "personal"}
+    ).json()["flow_id"]
+    store = client.app.state.gws_manual_pkce_store
+    verifier = store.peek(flow_id, "personal")
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=typo",
+            "flow_id": flow_id,
+        },
+    )
+    assert resp.status_code == 400
+    assert store.peek(flow_id, "personal") == verifier
+
+
 def test_gws_exchange_rejects_an_explicit_but_unknown_flow_id(tmp_path, monkeypatch):
     """A restart between auth-url and paste-back must not exchange blindly.
 

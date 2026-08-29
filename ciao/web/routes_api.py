@@ -1754,6 +1754,14 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             redirect_uri=redirect_uri,
             code_verifier=code_verifier,
         )
+        # Retire the flow now that its code is spent. Only on success: a failed
+        # exchange (wrong code, transient error) must keep the verifier so the
+        # paste can be retried. Leaving it active held a spent secret for the
+        # rest of its TTL and, because `status_for_profile` then still reported
+        # "active", refused any flow-ID-less exchange for this profile in the
+        # meantime.
+        if flow_id:
+            pkce_store.consume(flow_id, profile)
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
         # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
@@ -5386,6 +5394,18 @@ async def create_schedule(request: Request) -> JSONResponse:
             else None
         )
         workspace = getattr(chat_project, "workspace", "") or ""
+    # Where a chat-bound entry re-homes when its target chat is deleted.
+    # `web_project_id` cannot carry this: on an interval entry it means "a new
+    # chat per run" and outranks `web_chat_id`, so the chat's own project is
+    # recorded as a fallback instead — the same shape `migrate_loops` and the
+    # legacy `POST /api/loops` route use. Computed on its own rather than
+    # inside the workspace derivation above, which is skipped entirely when the
+    # caller already supplied a valid workspace. Without it the run re-homes
+    # into the workspace's General and continues in the wrong project.
+    fallback_project_id = ""
+    if web_chat_id and not web_project_id:
+        bound_chat = pcm.get_chat(web_chat_id)
+        fallback_project_id = getattr(bound_chat, "project_id", "") or ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -5408,6 +5428,9 @@ async def create_schedule(request: Request) -> JSONResponse:
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
     )
+    if fallback_project_id:
+        entry.fallback_project_id = fallback_project_id
+        sm.replace(entry)
     publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
 
