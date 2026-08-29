@@ -65,7 +65,11 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
-from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
+from ciao.execution_modes import (
+    CONTROL_PLANE_PREAPPROVED_MODES,
+    auto_approved_mcp_tool_names,
+    harness_skill_overrides,
+)
 from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import (
     build_foreground_bash_hook,
@@ -600,21 +604,12 @@ class ClaudeProvider(BaseSDKProvider):
             # readOnlyHint, so "create the automation you just asked me for" raised
             # an Approve/Deny card. These names bypass the PermissionGate;
             # destructive tools (delete/stop/lifecycle) are absent from the
-            # policy and still prompt. See AUTO_APPROVED_MCP_TOOLS in
+            # policy and still prompt. Scoped to the modes whose contract
+            # allows acting without asking — the rationale (why `plan` and
+            # `normal` are excluded, and why `schedule` in particular is an
+            # escalation) lives beside the shared constant in
             # ciao/execution_modes.py.
-            #
-            # Scoped to the modes whose contract allows acting without asking.
-            # `plan` is "propose, don't act", and an allow rule would punch a
-            # hole in it. `normal` is what the PWA labels "Manual — ask for
-            # every action", and the list quietly broke that promise: an
-            # injected model got no card for `memory_update`, `chat_send` or
-            # `schedule` — and `schedule` is an escalation, not just a write,
-            # because an automation run is dispatched `unattended`, which
-            # forces `bypass` (see `_effective_mode_for_chat`). A one-minute
-            # interval created without a card therefore buys unprompted
-            # arbitrary tool use every minute, which is the exact thing the
-            # operator chose this mode to prevent.
-            if request.mode in {"auto", "bypass"}:
+            if request.mode in CONTROL_PLANE_PREAPPROVED_MODES:
                 options.allowed_tools = auto_approved_mcp_tool_names()
         if system_cli:
             options.cli_path = system_cli

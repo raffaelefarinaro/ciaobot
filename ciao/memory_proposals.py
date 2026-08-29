@@ -320,30 +320,30 @@ def _promotable_text(text: str) -> str | None:
     return text
 
 
-def _log_consolidation(vault_root: Path, region: str, old_entry: str) -> None:
+def _log_consolidation(
+    vault_root: Path, region: str, old_entry: str, *, label: str = "auto-reconcile"
+) -> None:
     """Copy a replaced region entry into the undo log before it disappears.
 
     ``Workspace/Memory-Consolidations.md`` is the standing rule for unattended
     region edits: nothing is dropped silently, and the user can restore any
     line. The file is in ``RESERVED_UNINDEXED_FILES``, so it never pollutes
-    recall.
+    recall. Appended rather than rewritten: the log grows without bound, and a
+    full read-modify-write would slow every consolidation as history piles up.
     """
     path = vault_root / "Workspace" / "Memory-Consolidations.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-    else:
-        existing = (
+    if not path.exists():
+        path.write_text(
             "---\ntags: [ciao, memory, undo-log]\n---\n"
             "# Memory Consolidations\n\n"
             "Undo log for bounded-memory edits: every removed or replaced "
-            "entry is copied here first.\n"
+            "entry is copied here first.\n",
+            encoding="utf-8",
         )
-    heading = f"\n## {date.today().isoformat()} — ciao:{region} (auto-reconcile)\n"
-    path.write_text(
-        existing.rstrip() + heading + f"- {_one_line(old_entry)}\n",
-        encoding="utf-8",
-    )
+    heading = f"\n## {date.today().isoformat()} — ciao:{region} ({label})\n"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(heading + f"- {_one_line(old_entry)}\n")
 
 
 def _promote_to_region(
@@ -394,21 +394,47 @@ def _promote_to_region(
             )
             return "duplicate", promotable
 
-        action = str((decision or {}).get("action", "add"))
+        decision = decision or {}
+        action = str(decision.get("action", "add"))
         if action == "covered":
             logger.info(
                 "memory apply: reconcile says already covered: %r",
                 promotable[:80],
             )
+            # A model verdict, not a provable string match: leave a trace in
+            # the undo log so a hallucinated "covered" never silently loses
+            # the fact — the standing "nothing is dropped silently" contract.
+            if vault_root is not None:
+                _log_consolidation(
+                    vault_root,
+                    region,
+                    f"(incoming fact judged covered; not written) {promotable}",
+                    label="auto-reconcile covered",
+                )
             return "duplicate", promotable
-        # The learned-at stamp is system time — when this fact entered the
-        # region — read by the aging audit so unverified old facts surface
-        # for re-verification instead of asserting themselves forever.
-        stamped = f"{promotable} [{date.today().isoformat()}]"
         if action == "update" and vault_root is not None:
-            index = decision.get("index") if decision else None
-            merged = str((decision or {}).get("text", "")).strip()
-            if isinstance(index, int) and 1 <= index <= len(entries) and merged:
+            index = decision.get("index")
+            merged = str(decision.get("text", "")).strip()
+            plan_old = str(decision.get("old", ""))
+            from ciao.memory_audit import find_event_shaped
+
+            if (
+                isinstance(index, int)
+                and 1 <= index <= len(entries)
+                and merged
+                # The region only ever holds state-shaped text; a model-merged
+                # replacement must clear the same bar the plain append does.
+                and not find_event_shaped(region, [merged])
+                # The index was computed against a snapshot taken before an
+                # up-to-two-minute model call; if the entry it names has
+                # changed since (concurrent /remember, another archive's
+                # apply), replacing it would overwrite an unrelated fact.
+                and (
+                    not plan_old
+                    or strip_learned_stamp(entries[index - 1])
+                    == strip_learned_stamp(plan_old)
+                )
+            ):
                 old = entries[index - 1]
                 _log_consolidation(vault_root, region, old)
                 updated = list(entries)
@@ -420,8 +446,13 @@ def _promote_to_region(
                     region,
                 )
                 return "written", promotable
-            # A malformed update decision degrades to the safe plain append —
-            # never to silently dropping either the old or the new fact.
+            # A malformed or stale update decision degrades to the safe plain
+            # append — never to silently dropping either the old or the new
+            # fact.
+        # The learned-at stamp is system time — when this fact entered the
+        # region — read by the aging audit so unverified old facts surface
+        # for re-verification instead of asserting themselves forever.
+        stamped = f"{promotable} [{date.today().isoformat()}]"
         write_region(guide_path, region, entries + [stamped])
         return "written", promotable
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
@@ -597,10 +628,12 @@ def apply_proposals(
     which is neither an apply nor something to re-decide. On any write failure
     the proposal stays reviewable.
 
-    ``region_decisions`` maps a fact's promotable text to its reconcile
-    decision (see :func:`plan_region_reconcile`); absent or None, every
-    region write is the plain append path.
+    ``region_decisions`` maps :func:`_decision_key` (region + promotable fact
+    text) to its reconcile decision (see :func:`plan_region_reconcile`);
+    absent or None, every region write is the plain append path.
     """
+    from ciao.memory_tool import resolve_region
+
     remaining: list[MemoryProposal] = []
     applied: list[str] = []
 
@@ -611,11 +644,11 @@ def apply_proposals(
                     remaining.append(proposal)
                     continue
                 promotable_key = _promotable_text(proposal.text)
-                decision = (
-                    region_decisions.get(promotable_key)
-                    if region_decisions and promotable_key
-                    else None
-                )
+                decision = None
+                if region_decisions and promotable_key:
+                    decision = region_decisions.get(
+                        _decision_key(resolve_region(proposal.target), promotable_key)
+                    )
                 outcome, promotable = _promote_to_region(
                     proposal,
                     guide_path,
@@ -672,6 +705,16 @@ No prose, no code fences, no trailing commentary.
 # candidates, so a short timeout keeps a slow backend from stalling archive
 # post-processing. Failure is safe: the caller degrades to plain appends.
 _RECONCILE_TIMEOUT_S = 120.0
+
+
+def _decision_key(region: str, fact: str) -> str:
+    """The ``region_decisions`` map key for one candidate fact.
+
+    Region-qualified: the same sentence can be bound to both ``memory`` and
+    ``profile`` in one archive, and a bare-text key would let one region's
+    ``update`` index be applied against the other region's entries.
+    """
+    return f"{region}\n{fact}"
 
 
 def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
@@ -809,7 +852,20 @@ async def plan_region_reconcile(
             )
             continue
         for fact, row in zip(candidates, rows):
-            decisions[fact] = row
+            if row.get("action") == "update":
+                index = row.get("index")
+                if not (isinstance(index, int) and 1 <= index <= len(entries)):
+                    # Out-of-range against the very snapshot the model saw:
+                    # degrade now rather than carry a junk decision around.
+                    row = {"action": "add"}
+                else:
+                    # Snapshot the entry this index named at plan time. The
+                    # apply step re-reads the region and refuses the update if
+                    # the entry changed during the model call — the index
+                    # would otherwise overwrite an unrelated fact.
+                    row = dict(row)
+                    row["old"] = entries[index - 1]
+            decisions[_decision_key(region_name, fact)] = row
 
     return decisions or None
 

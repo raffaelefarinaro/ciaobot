@@ -1220,7 +1220,9 @@ def test_promote_update_decision_replaces_and_logs_undo(tmp_path: Path) -> None:
         source_section="Decisions",
     )
     decisions = {
-        "Insights model is sonnet since the Ollama quota 429s.": {
+        mp._decision_key(
+            "memory", "Insights model is sonnet since the Ollama quota 429s."
+        ): {
             "action": "update",
             "index": 1,
             "text": "Insights model is sonnet (moved off deepseek-flash: quota 429s).",
@@ -1249,7 +1251,7 @@ def test_promote_covered_decision_drops_the_fact(tmp_path: Path) -> None:
         text="When the fix is clear, code it instead of drafting an issue.",
         source_section="User corrections",
     )
-    decisions = {proposal.text: {"action": "covered"}}
+    decisions = {mp._decision_key("memory", proposal.text): {"action": "covered"}}
     remaining, promoted = mp.apply_proposals(
         [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
     )
@@ -1264,7 +1266,13 @@ def test_promote_malformed_update_degrades_to_append(tmp_path: Path) -> None:
     proposal = mp.MemoryProposal(
         target="memory", text="A brand new durable fact.", source_section="Decisions"
     )
-    decisions = {proposal.text: {"action": "update", "index": 9, "text": "merged"}}
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 9,
+            "text": "merged",
+        }
+    }
     remaining, promoted = mp.apply_proposals(
         [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
     )
@@ -1302,10 +1310,13 @@ def test_plan_region_reconcile_maps_facts_to_decisions(
         mp.plan_region_reconcile(archive, guide, model="sonnet")
     )
     assert decisions == {
-        "Insights model is sonnet.": {
+        mp._decision_key("memory", "Insights model is sonnet."): {
             "action": "update",
             "index": 1,
             "text": "Insights model is sonnet.",
+            # Snapshotted at plan time so the apply step can refuse the
+            # update if the entry changed during the model call.
+            "old": "Insights model is deepseek-flash.",
         }
     }
 

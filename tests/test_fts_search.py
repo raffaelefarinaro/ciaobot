@@ -531,7 +531,7 @@ def test_bookkeeping_files_are_never_indexed(
     workspace = temp_vault / "Workspace"
     workspace.mkdir()
     (workspace / "Memory-Proposals.md").write_text(
-        "# Memory Proposals\n\n- [review] the wedding venue is Tortoreto\n",
+        "# Memory Proposals\n\n- [review] the wedding venue is Villa Australis\n",
         encoding="utf-8",
     )
     (workspace / "Curation-Log.md").write_text(
@@ -542,6 +542,26 @@ def test_bookkeeping_files_are_never_indexed(
     paths = [r["path"] for r in fts_search.search_vault(db_conn, "wedding", limit=10)]
     assert not any("Memory-Proposals" in p or "Curation-Log" in p for p in paths)
     assert any("Ciaobot-Search" in p for p in paths)  # real notes still hit
+
+
+def test_reserved_names_only_excluded_under_workspace(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """A user's own note sharing a reserved basename stays searchable.
+
+    The exclusion exists for the pipeline's files under ``Workspace/``;
+    matching by basename anywhere would silently hide user content.
+    """
+    team = temp_vault / "projects" / "team"
+    team.mkdir(parents=True)
+    (team / "Weekly-Review-Log.md").write_text(
+        "# Weekly review\n\nSprint retrospectives and action items.\n",
+        encoding="utf-8",
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "retrospectives")]
+    assert any("Weekly-Review-Log" in p for p in paths)
 
 
 def test_search_false_frontmatter_opts_a_note_out(
@@ -583,17 +603,17 @@ def test_multiword_query_degrades_to_or_when_and_finds_nothing(
     """Paraphrase queries fall back to OR instead of returning nothing.
 
     "brother in law" matched zero notes under AND-of-all-words even when a
-    note said "Ipek's brother"; the OR fallback lets BM25 rank the notes
+    note said "Elena's brother"; the OR fallback lets BM25 rank the notes
     holding the distinctive terms.
     """
     people = temp_vault / "People"
-    (people / "Burak.md").write_text(
-        "# Burak\nIpek's brother, married to Gizem.", encoding="utf-8"
+    (people / "Dario.md").write_text(
+        "# Dario\nElena's brother, married to Sofia.", encoding="utf-8"
     )
     fts_search.index_vault(db_conn, temp_vault)
 
     rows = fts_search.search_vault(db_conn, "brother in law")
-    assert any("Burak" in r["path"] for r in rows)
+    assert any("Dario" in r["path"] for r in rows)
     # A single-word miss still returns empty (nothing to OR).
     assert fts_search.search_vault(db_conn, "nonexistentterm") == []
 
@@ -619,3 +639,15 @@ def test_record_search_hits_never_raises(tmp_path: Path) -> None:
     blocker = tmp_path / "blocked"
     blocker.write_text("x", encoding="utf-8")
     fts_search.record_search_hits(blocker, "q", ["p"])  # must not raise
+
+
+def test_read_search_hit_paths_tolerates_junk_lines(tmp_path: Path) -> None:
+    """One corrupt telemetry line must not void the whole evidence set."""
+    runtime = tmp_path / ".runtime"
+    fts_search.record_search_hits(runtime, "q", ["Wedding.md"])
+    log = runtime / fts_search.SEARCH_HITS_NAME
+    with log.open("a", encoding="utf-8") as f:
+        # Valid JSON, wrong shapes: non-object records and a non-list paths.
+        f.write('null\n42\n["x"]\n{"ts": "2999-01-01T00:00:00+00:00", "paths": 5}\nnot json\n')
+
+    assert fts_search.read_search_hit_paths(runtime) == {"Wedding.md"}

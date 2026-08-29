@@ -2393,17 +2393,31 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             # Decay-by-disuse: mark whether recall has returned each stale
             # note recently. Stale AND unretrieved is the strongest demotion
             # candidate; no evidence at all (no hits log yet) marks nothing.
-            from ciao.fts_search import read_search_hit_paths
+            from ciao.fts_search import read_search_hit_paths, vault_key_prefix
 
-            hit_paths = read_search_hit_paths(workspace / ".runtime")
-            if hit_paths is not None:
+            # The writer (control_plane.vault_search) appends beside
+            # state.json, which honours CIAO_RUNTIME_ROOT — a hardcoded
+            # `.runtime` would silently read an empty location on installs
+            # with a custom runtime root.
+            hit_paths = read_search_hit_paths(Path(config.state_path).parent)
+            # Compare in the index's own key space: hits are stored relative
+            # to the install root with the vault directory's real name, while
+            # scan_vault renders every path under a fixed `memory-vault/`
+            # prefix. Rebuilding the stored key per finding keeps a same-named
+            # note in another workspace (or a vault not named `memory-vault`)
+            # from producing a false match. The fail-closed prefix means this
+            # vault has no identifiable rows: no evidence, so mark nothing.
+            key_base = getattr(config, "workspace_root", None) or vault.parent
+            key_prefix = vault_key_prefix(vault, Path(key_base))
+            if hit_paths is not None and key_prefix != os.sep:
                 normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
+                normalized_prefix = key_prefix.replace(os.sep, "/")
                 for finding in report["stale_notes"]["stale_notes"]:
-                    rel = str(finding["path"]).replace(os.sep, "/")
-                    finding["retrieved_recently"] = any(
-                        hit == rel or hit.endswith("/" + rel)
-                        for hit in normalized_hits
-                    )
+                    rendered = str(finding["path"]).replace(os.sep, "/")
+                    rel = rendered.removeprefix("memory-vault/")
+                    finding["retrieved_recently"] = (
+                        normalized_prefix + rel
+                    ) in normalized_hits
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],

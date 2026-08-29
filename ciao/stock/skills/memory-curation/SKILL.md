@@ -16,7 +16,7 @@ Curate this workspace's durable memory. The `<ciao-context>` block names the vau
 
 ## 1. Process the proposals queue
 
-Archive time already auto-applies confidently-tagged facts, so what remains queued is unsure or failed. List pending items with `ciao memory-proposals` and route each by its bracketed kind:
+Start from the recent archived chats: prefer their existing session-insights sections, and sweep any archive since the last run that has none (its extraction failed or predates insights) — those are exactly the chats whose facts never entered the queue. Archive time already auto-applies confidently-tagged facts, so what remains queued is unsure or failed. List pending items with `ciao memory-proposals` and route each by its bracketed kind:
 
 - `[memory]` / `[profile]` name bounded regions and **stay queued** for the user.
 - `[project <doc-path>]` folds into that canonical doc.

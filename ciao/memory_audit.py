@@ -331,11 +331,11 @@ def find_aging_state(
             if not learned:
                 continue
             kind, raw, horizon = "learned", learned.group(1), LEARNED_AGING_DAYS
-        try:
-            stamped = datetime.date.fromisoformat(raw)
-        except ValueError:
-            # Shape-valid but impossible date; the expiration-tag checks own
-            # malformed-stamp reporting, aging must not guess.
+        # Shape-valid but impossible dates (2025-02-30) come back None; the
+        # expiration-tag checks own malformed-stamp reporting, aging must not
+        # guess.
+        stamped = parse_verified_date(raw)
+        if stamped is None:
             continue
         age_days = (current - stamped).days
         if age_days < horizon:

@@ -61,7 +61,11 @@ from ciao.providers.base import (
     build_runtime_context,
     prepend_stable_context,
 )
-from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
+from ciao.execution_modes import (
+    AUTO_APPROVED_MCP_TOOLS,
+    CONTROL_PLANE_PREAPPROVED_MODES,
+    MCP_SERVER_NAME,
+)
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
 
@@ -584,14 +588,10 @@ def mode_settings(
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
     # Scoped to the modes whose contract allows acting without asking — the
-    # same carve-out as the Claude provider, and for the same two reasons.
-    # `plan` is "propose, don't act". `normal` is what the PWA labels
-    # "Manual — ask for every action", and these rules quietly broke that
-    # promise: no card for `memory_update`, `chat_send` or `schedule` — and
-    # `schedule` escalates, because an automation run is dispatched
-    # `unattended`, which forces `bypass`. A one-minute interval created
-    # without a card buys unprompted arbitrary tool use every minute.
-    if key in {"auto", "bypass"}:
+    # same carve-out as the Claude provider. The rationale (why `plan` and
+    # `normal` are excluded, and why `schedule` in particular is an
+    # escalation) lives beside the shared constant in ciao/execution_modes.py.
+    if key in CONTROL_PLANE_PREAPPROVED_MODES:
         rules.extend(control_plane_permission_rules())
     return _MODE_AGENTS[key], rules
 
