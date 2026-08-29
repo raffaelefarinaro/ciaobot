@@ -23,10 +23,12 @@ from ciao.web.routes_api import (
 
 
 class _Chat:
-    def __init__(self, title: str, *, archived: bool = False) -> None:
+    def __init__(
+        self, title: str, *, archived: bool = False, project_id: str = "proj-1"
+    ) -> None:
         self.title = title
         self.archived = archived
-        self.project_id = "proj-1"
+        self.project_id = project_id
 
 
 class _NewChat:
@@ -36,9 +38,10 @@ class _NewChat:
 
 
 class _Project:
-    project_id = "proj-1"
-    name = "General"
-    workspace = "personal"
+    def __init__(self, project_id: str = "proj-1", name: str = "General") -> None:
+        self.project_id = project_id
+        self.name = name
+        self.workspace = "personal"
 
 
 class _ProjectChats:
@@ -48,6 +51,7 @@ class _ProjectChats:
         self.chats = {
             "chat-idle": _Chat("Idle chat"),
             "chat-busy": _Chat("Busy chat"),
+            "chat-other-project": _Chat("Elsewhere", project_id="proj-2"),
         }
         self._created = 0
         self.events = None
@@ -56,7 +60,10 @@ class _ProjectChats:
         return self.chats.get(chat_id)
 
     def get_project(self, project_id: str):
-        return _Project() if project_id == "proj-1" else None
+        if project_id in {"proj-1", "proj-2"}:
+            return _Project(project_id, "General" if project_id == "proj-1" else "Other")
+        return None
+
 
     def find_project(self, name: str, workspace: str):
         return _Project() if name == "General" else None
@@ -467,3 +474,43 @@ def test_a_project_bound_interval_records_no_fallback(client: TestClient) -> Non
     )
     assert stored.fallback_project_id == ""
     assert stored.web_project_id == "proj-1"
+
+
+def test_retargeting_an_interval_moves_its_rehome_fallback(client: TestClient) -> None:
+    """Stamping at creation is not enough — the binding can change later.
+
+    Editing a chat-bound entry from a chat in one project to a chat in another
+    left the fallback on the old project, so deleting the new chat resumed the
+    run in the previous project.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    def stored():
+        return next(
+            e for e in client.app.state.schedule_manager.list_entries()
+            if e.schedule_id == schedule_id
+        )
+
+    assert stored().fallback_project_id == "proj-1"
+
+    assert client.patch(
+        f"/api/schedules/{schedule_id}", json={"web_chat_id": "chat-other-project"}
+    ).status_code == 200
+
+    assert stored().fallback_project_id == "proj-2"
+
+
+def test_converting_to_project_bound_clears_the_fallback(client: TestClient) -> None:
+    """A project entry already names where its runs go."""
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"web_project_id": "proj-1", "web_chat_id": None},
+    )
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.fallback_project_id == ""

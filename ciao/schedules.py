@@ -129,6 +129,48 @@ def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) ->
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
+    """Keep ``fallback_project_id`` in step with ``web_chat_id``.
+
+    Every path that binds or rebinds an automation's chat calls this — REST
+    create/update, the ``schedule`` MCP create/update, and both legacy loop
+    routes. The field records where a *fixed-chat* entry re-homes once its
+    target chat is deleted, so it can only be captured while that chat still
+    exists; ``resolve_automation_project`` cannot derive it later, by which
+    point the chat is gone.
+
+    This exists because stamping it per call site did not hold: each creator
+    was fixed separately and the next one shipped without it, and no update
+    path refreshed it at all — retargeting an entry from a chat in project A to
+    one in project B left the fallback on A, so deleting the new chat resumed
+    the run in the old project.
+
+    Takes ``pcm`` rather than living on it: the only thing needed is
+    ``get_chat``, and a free function keeps the duck-typed managers in the
+    tests honest instead of forcing every stub to grow a method.
+
+    A project-bound entry clears the field — ``web_project_id`` already names
+    where its runs go, and a stale fallback under it would only mislead.
+    Returns whether anything changed, so callers can skip a redundant write.
+    """
+    web_project_id = getattr(entry, "web_project_id", "") or ""
+    web_chat_id = getattr(entry, "web_chat_id", "") or ""
+    if web_project_id or not web_chat_id:
+        resolved = ""
+    else:
+        chat = pcm.get_chat(web_chat_id) if pcm is not None else None
+        # A chat we cannot see right now (already gone, or not local) tells us
+        # nothing new — keep whatever was captured while it existed rather than
+        # blanking the entry's only re-home target.
+        if chat is None:
+            return False
+        resolved = getattr(chat, "project_id", "") or ""
+    if (getattr(entry, "fallback_project_id", "") or "") == resolved:
+        return False
+    entry.fallback_project_id = resolved
+    return True
+
+
 def publish_automations_changed(pcm) -> None:
     """Nudge every open tab to refetch schedules.
 

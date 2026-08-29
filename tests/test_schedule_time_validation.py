@@ -123,7 +123,11 @@ def plane(tmp_path: Path):
                 workspace_root=str(tmp_path),
             ),
             project_chat_manager=SimpleNamespace(
-                get_project=lambda _pid: None, events=None
+                get_project=lambda _pid: None,
+                # stamp_fallback_project asks for the bound chat; None means
+                # "cannot see it right now", which leaves the fallback alone.
+                get_chat=lambda _cid: None,
+                events=None,
             ),
             schedule_manager=store,
             background_runner=None,

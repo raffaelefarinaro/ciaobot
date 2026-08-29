@@ -75,6 +75,7 @@ from ciao.schedules import (
     normalize_archive_policy,
     normalize_interval_minutes,
     publish_automations_changed,
+    stamp_fallback_project,
     wall_clock_time_error,
     was_dispatched_since,
 )
@@ -5394,18 +5395,6 @@ async def create_schedule(request: Request) -> JSONResponse:
             else None
         )
         workspace = getattr(chat_project, "workspace", "") or ""
-    # Where a chat-bound entry re-homes when its target chat is deleted.
-    # `web_project_id` cannot carry this: on an interval entry it means "a new
-    # chat per run" and outranks `web_chat_id`, so the chat's own project is
-    # recorded as a fallback instead — the same shape `migrate_loops` and the
-    # legacy `POST /api/loops` route use. Computed on its own rather than
-    # inside the workspace derivation above, which is skipped entirely when the
-    # caller already supplied a valid workspace. Without it the run re-homes
-    # into the workspace's General and continues in the wrong project.
-    fallback_project_id = ""
-    if web_chat_id and not web_project_id:
-        bound_chat = pcm.get_chat(web_chat_id)
-        fallback_project_id = getattr(bound_chat, "project_id", "") or ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -5428,8 +5417,9 @@ async def create_schedule(request: Request) -> JSONResponse:
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
     )
-    if fallback_project_id:
-        entry.fallback_project_id = fallback_project_id
+    # Records where a chat-bound entry re-homes once its chat is deleted; must
+    # be captured while that chat still exists. See stamp_fallback_project.
+    if stamp_fallback_project(entry, pcm):
         sm.replace(entry)
     publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
@@ -5550,6 +5540,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     time_error = wall_clock_time_error(entry)
     if time_error:
         return JSONResponse({"error": time_error}, status_code=400)
+    # Retargeting the chat moves where this entry re-homes, so the fallback has
+    # to move with it — otherwise it keeps pointing at the previous chat's
+    # project. Also clears it when the entry becomes project-bound.
+    stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
         store.replace(entry)
     except ValueError as exc:
@@ -5652,7 +5646,7 @@ async def create_loop(request: Request) -> JSONResponse:
     # carried as the fixed-chat fallback instead — the same shape migrate_loops
     # uses. Without it a loop created in a non-General project by a cached
     # pre-upgrade PWA would re-home into General when its chat was deleted.
-    entry.fallback_project_id = project_id
+    stamp_fallback_project(entry, pcm)
     if not (body.get("autostart") or body.get("start")):
         entry.enabled = False
     sm.replace(entry)
@@ -5692,6 +5686,8 @@ async def loop_detail(request: Request) -> JSONResponse:
                 {"error": "web_chat_id must point to an existing chat"}, status_code=400
             )
         entry.web_chat_id = web_chat_id
+        # Retargeting moves where this entry re-homes.
+        stamp_fallback_project(entry, pcm)
     # `autostart` and `running` were separate flags; both now set `enabled`.
     for key in ("autostart", "running"):
         if key in body:

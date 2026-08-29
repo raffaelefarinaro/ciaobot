@@ -40,6 +40,7 @@ from ciao.schedules import (
     is_interval,
     normalize_interval_minutes,
     publish_automations_changed,
+    stamp_fallback_project,
     wall_clock_time_error,
 )
 
@@ -1224,6 +1225,10 @@ class CiaoControlPlane:
             title=preview["title"],
             description=str(values.get("description") or ""),
         )
+        # Where a chat-bound entry re-homes once its chat is deleted; only
+        # capturable while that chat still exists. See stamp_fallback_project.
+        if stamp_fallback_project(entry, self.pcm):
+            self.schedules.replace(entry)
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(entry))
 
@@ -1356,6 +1361,8 @@ class CiaoControlPlane:
         time_error = wall_clock_time_error(updated)
         if time_error:
             raise ControlPlaneError("invalid_time", time_error)
+        # A changed chat/project binding moves where this entry re-homes.
+        stamp_fallback_project(updated, self.pcm)
         self.schedules.replace(updated)
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
@@ -1452,9 +1459,10 @@ class CiaoControlPlane:
         # a loop could tick until the next restart and then be silently dead,
         # which is the "model says running, loop isn't" failure it was meant to
         # prevent. Either flag now means "run it".
+        stamp_fallback_project(entry, self.pcm)
         if not (start or autostart):
             entry.enabled = False
-            self.schedules.replace(entry)
+        self.schedules.replace(entry)
         publish_automations_changed(self.pcm)
         return _ok(self._loop_payload(entry))
 
@@ -1483,6 +1491,8 @@ class CiaoControlPlane:
             chat, project = self._chat_scope(principal, str(target_chat))
             entry.web_chat_id = chat.chat_id
             entry.workspace = project.workspace
+            # Retargeting moves where this entry re-homes.
+            stamp_fallback_project(entry, self.pcm)
         if "prompt" in supplied:
             entry.prompt = str(supplied["prompt"])
         if "title" in supplied:
