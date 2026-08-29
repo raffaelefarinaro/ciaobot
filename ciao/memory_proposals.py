@@ -38,6 +38,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -319,9 +320,38 @@ def _promotable_text(text: str) -> str | None:
     return text
 
 
+def _log_consolidation(vault_root: Path, region: str, old_entry: str) -> None:
+    """Copy a replaced region entry into the undo log before it disappears.
+
+    ``Workspace/Memory-Consolidations.md`` is the standing rule for unattended
+    region edits: nothing is dropped silently, and the user can restore any
+    line. The file is in ``RESERVED_UNINDEXED_FILES``, so it never pollutes
+    recall.
+    """
+    path = vault_root / "Workspace" / "Memory-Consolidations.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+    else:
+        existing = (
+            "---\ntags: [ciao, memory, undo-log]\n---\n"
+            "# Memory Consolidations\n\n"
+            "Undo log for bounded-memory edits: every removed or replaced "
+            "entry is copied here first.\n"
+        )
+    heading = f"\n## {date.today().isoformat()} — ciao:{region} (auto-reconcile)\n"
+    path.write_text(
+        existing.rstrip() + heading + f"- {_one_line(old_entry)}\n",
+        encoding="utf-8",
+    )
+
+
 def _promote_to_region(
     proposal: MemoryProposal,
     guide_path: Path,
+    *,
+    vault_root: Path | None = None,
+    decision: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     """Write one region-bound proposal.
 
@@ -330,6 +360,13 @@ def _promote_to_region(
     remaining), ``"failed"`` (the write itself failed; stays queued), or
     ``"unshaped"`` (not state-shaped text; stays queued for the curator to
     rephrase).
+
+    ``decision`` is this fact's row from :func:`plan_region_reconcile`, when
+    the caller ran one: ``{"action": "covered"}`` drops the fact as already
+    remembered, ``{"action": "update", "index": N, "text": ...}`` replaces
+    entry ``N`` (1-based) with the merged text — the replaced entry goes to
+    the consolidations undo log first — and ``{"action": "add"}`` or ``None``
+    is the plain append path.
     """
     from ciao.memory_tool import ensure_regions, read_region, resolve_region, write_region
 
@@ -356,10 +393,35 @@ def _promote_to_region(
                 promotable[:80],
             )
             return "duplicate", promotable
+
+        action = str((decision or {}).get("action", "add"))
+        if action == "covered":
+            logger.info(
+                "memory apply: reconcile says already covered: %r",
+                promotable[:80],
+            )
+            return "duplicate", promotable
         # The learned-at stamp is system time — when this fact entered the
         # region — read by the aging audit so unverified old facts surface
         # for re-verification instead of asserting themselves forever.
         stamped = f"{promotable} [{date.today().isoformat()}]"
+        if action == "update" and vault_root is not None:
+            index = decision.get("index") if decision else None
+            merged = str((decision or {}).get("text", "")).strip()
+            if isinstance(index, int) and 1 <= index <= len(entries) and merged:
+                old = entries[index - 1]
+                _log_consolidation(vault_root, region, old)
+                updated = list(entries)
+                updated[index - 1] = f"{merged} [{date.today().isoformat()}]"
+                write_region(guide_path, region, updated)
+                logger.info(
+                    "memory apply: reconciled update of entry %d in ciao:%s",
+                    index,
+                    region,
+                )
+                return "written", promotable
+            # A malformed update decision degrades to the safe plain append —
+            # never to silently dropping either the old or the new fact.
         write_region(guide_path, region, entries + [stamped])
         return "written", promotable
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
@@ -436,6 +498,7 @@ def apply_proposals(
     *,
     guide_path: Path | None = None,
     vault_root: Path | None = None,
+    region_decisions: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Write every confidently-addressed proposal to its destination.
 
@@ -446,6 +509,10 @@ def apply_proposals(
     Exact duplicates vanish from both lists: the fact is already remembered,
     which is neither an apply nor something to re-decide. On any write failure
     the proposal stays reviewable.
+
+    ``region_decisions`` maps a fact's promotable text to its reconcile
+    decision (see :func:`plan_region_reconcile`); absent or None, every
+    region write is the plain append path.
     """
     remaining: list[MemoryProposal] = []
     applied: list[str] = []
@@ -456,7 +523,18 @@ def apply_proposals(
                 if guide_path is None:
                     remaining.append(proposal)
                     continue
-                outcome, promotable = _promote_to_region(proposal, guide_path)
+                promotable_key = _promotable_text(proposal.text)
+                decision = (
+                    region_decisions.get(promotable_key)
+                    if region_decisions and promotable_key
+                    else None
+                )
+                outcome, promotable = _promote_to_region(
+                    proposal,
+                    guide_path,
+                    vault_root=vault_root,
+                    decision=decision,
+                )
                 if outcome == "written":
                     applied.append(promotable or proposal.text)
                 elif outcome != "duplicate":
@@ -482,6 +560,171 @@ def apply_proposals(
             logger.info("memory apply: %s stays queued (%s)", proposal.target, exc)
             remaining.append(proposal)
     return remaining, applied
+
+
+# ── Write-time reconcile (ADD / UPDATE / COVERED) ──────────────────────────
+
+
+_RECONCILE_SYSTEM_PROMPT = """\
+You maintain a small always-loaded memory region for a personal assistant.
+You are given its current numbered entries and lettered candidate facts.
+For each candidate, decide exactly one action:
+- "add": genuinely new information no existing entry carries.
+- "covered": an existing entry already states this fact (even in other words).
+- "update": it supersedes or extends exactly ONE existing entry. Give that
+  entry's number and the single merged replacement text: present tense, keep
+  every part of the old entry that is still true, keep any [expires:] or
+  [as-of:] tag that still applies, and never merge two unrelated facts.
+Be conservative: when unsure between update and add, choose add.
+Reply with ONLY a JSON array, one object per candidate in their given order:
+[{"action": "add"}, {"action": "update", "index": 2, "text": "..."}, {"action": "covered"}]
+No prose, no code fences, no trailing commentary.
+"""
+
+# One reconcile call is bounded by the region cap (~3000 chars) plus a few
+# candidates, so a short timeout keeps a slow backend from stalling archive
+# post-processing. Failure is safe: the caller degrades to plain appends.
+_RECONCILE_TIMEOUT_S = 120.0
+
+
+def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
+    """Parse the model's JSON array; None when the shape is unusable.
+
+    Per-row problems degrade that row to ``{"action": "add"}`` — the plain
+    append never loses a fact — but a reply that is not a JSON array of the
+    right length is discarded whole rather than guessed at.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, list) or len(data) != count:
+        return None
+    rows: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            rows.append({"action": "add"})
+            continue
+        action = str(item.get("action", "add")).lower()
+        if action == "update":
+            index = item.get("index")
+            merged = str(item.get("text", "")).strip()
+            if isinstance(index, bool) or not isinstance(index, int) or not merged:
+                rows.append({"action": "add"})
+                continue
+            rows.append({"action": "update", "index": index, "text": merged})
+        elif action in ("covered", "add"):
+            rows.append({"action": action})
+        else:
+            rows.append({"action": "add"})
+    return rows
+
+
+async def plan_region_reconcile(
+    archive_path: Path,
+    guide_path: Path,
+    *,
+    model: str,
+    provider: str = "claude",
+    cwd: Path | None = None,
+) -> dict[str, dict[str, Any]] | None:
+    """Decide ADD / UPDATE / COVERED for an archive's region-bound facts.
+
+    The Mem0 pattern, done at write time where dedupe is cheap: before the
+    sync apply step runs, one small model call per region compares the new
+    facts against the region's current entries (the whole region fits in a
+    prompt — it is capped at a few thousand characters). Returns a map from
+    promotable fact text to its decision row, or None when there is nothing
+    to reconcile or the call failed — the caller then takes today's plain
+    append path, which never blocks archiving and never loses a fact.
+    """
+    from ciao.memory_tool import read_region, resolve_region
+
+    try:
+        text = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    body = _extract_insights_section(text)
+    if not body:
+        return None
+
+    from ciao.memory_audit import strip_learned_stamp
+
+    # Candidates per region: state-shaped facts that are not already exact
+    # duplicates (those need no model call to drop).
+    by_region: dict[str, list[str]] = {}
+    entries_by_region: dict[str, list[str]] = {}
+    for proposal in propose_from_insights(body):
+        if proposal.target not in ("memory", "profile"):
+            continue
+        promotable = _promotable_text(proposal.text)
+        if promotable is None:
+            continue
+        try:
+            region = resolve_region(proposal.target)
+            if region not in entries_by_region:
+                entries, diags = read_region(guide_path, region)
+                if diags:
+                    continue
+                entries_by_region[region] = entries
+        except Exception:  # noqa: BLE001 — reconcile is best-effort
+            continue
+        stripped = {
+            strip_learned_stamp(entry) for entry in entries_by_region[region]
+        }
+        if promotable in stripped:
+            continue
+        # An empty region has nothing to reconcile against.
+        if not entries_by_region[region]:
+            continue
+        by_region.setdefault(region, []).append(promotable)
+
+    if not by_region:
+        return None
+
+    from ciao.providers.oneshot import run_oneshot
+
+    decisions: dict[str, dict[str, Any]] = {}
+    for region, candidates in by_region.items():
+        entries = entries_by_region[region]
+        numbered = "\n".join(
+            f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
+        )
+        lettered = "\n".join(
+            f"{chr(ord('A') + index)}. {fact}"
+            for index, fact in enumerate(candidates)
+        )
+        prompt = (
+            f"Region `ciao:{region}` current entries:\n{numbered}\n\n"
+            f"Candidate facts:\n{lettered}\n"
+        )
+        try:
+            reply = await run_oneshot(
+                prompt,
+                system_prompt=_RECONCILE_SYSTEM_PROMPT,
+                model=model,
+                timeout_s=_RECONCILE_TIMEOUT_S,
+                provider=provider,
+                cwd=cwd,
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to plain appends
+            logger.info("memory reconcile: call failed (%s); using plain adds", exc)
+            continue
+        rows = _parse_reconcile_reply(reply, len(candidates))
+        if rows is None:
+            logger.info(
+                "memory reconcile: unparseable reply for ciao:%s; using plain adds",
+                region,
+            )
+            continue
+        for fact, row in zip(candidates, rows):
+            decisions[fact] = row
+
+    return decisions or None
 
 
 # ── Persistence ───────────────────────────────────────────────────────────
@@ -726,6 +969,7 @@ def proposals_from_archive(
     stats: dict[str, int] | None = None,
     project_doc_path: str = "",
     project_fold_wrote: bool = False,
+    region_decisions: dict[str, dict[str, Any]] | None = None,
 ) -> Path | None:
     """Read an archived chat, route its insights, optionally auto-apply.
 
@@ -797,7 +1041,10 @@ def proposals_from_archive(
 
         if auto_promote_memory and proposals:
             proposals, promoted = apply_proposals(
-                proposals, guide_path=guide_path, vault_root=workspace_vault_root
+                proposals,
+                guide_path=guide_path,
+                vault_root=workspace_vault_root,
+                region_decisions=region_decisions,
             )
             if promoted:
                 if stats is not None:

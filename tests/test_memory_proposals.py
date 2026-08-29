@@ -1179,3 +1179,156 @@ def test_promote_dedupes_across_learned_stamps(tmp_path: Path) -> None:
     assert promoted == ["person: User Example - the user, product lead."]
     mem_entries, _diags = mt.read_region(guide, "memory")
     assert len(mem_entries) == 1  # no second copy with a fresh stamp
+
+
+# ---- Write-time reconcile (ADD / UPDATE / COVERED) -----------------------
+
+
+def test_parse_reconcile_reply_shapes() -> None:
+    good = '[{"action": "add"}, {"action": "update", "index": 2, "text": "merged"}, {"action": "covered"}]'
+    rows = mp._parse_reconcile_reply(good, 3)
+    assert rows == [
+        {"action": "add"},
+        {"action": "update", "index": 2, "text": "merged"},
+        {"action": "covered"},
+    ]
+    # Fenced replies are unwrapped.
+    assert mp._parse_reconcile_reply(f"```json\n{good}\n```", 3) is not None
+    # Wrong length or non-array: discarded whole.
+    assert mp._parse_reconcile_reply('[{"action": "add"}]', 2) is None
+    assert mp._parse_reconcile_reply('{"action": "add"}', 1) is None
+    assert mp._parse_reconcile_reply("not json", 1) is None
+    # Per-row junk degrades to the safe plain add.
+    rows = mp._parse_reconcile_reply(
+        '[{"action": "update"}, {"action": "delete"}, 42]', 3
+    )
+    assert rows == [{"action": "add"}, {"action": "add"}, {"action": "add"}]
+
+
+def test_promote_update_decision_replaces_and_logs_undo(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=[
+            "Insights model is deepseek-flash. [2026-01-01]",
+            "Unrelated standing rule.",
+        ],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Insights model is sonnet since the Ollama quota 429s.",
+        source_section="Decisions",
+    )
+    decisions = {
+        "Insights model is sonnet since the Ollama quota 429s.": {
+            "action": "update",
+            "index": 1,
+            "text": "Insights model is sonnet (moved off deepseek-flash: quota 429s).",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=vault, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 2  # replaced, not appended
+    assert any("moved off deepseek-flash" in e for e in entries)
+    assert all("Insights model is deepseek-flash" not in e for e in entries)
+    undo = (vault / "Workspace" / "Memory-Consolidations.md").read_text(encoding="utf-8")
+    assert "Insights model is deepseek-flash" in undo
+    assert "ciao:memory" in undo
+
+
+def test_promote_covered_decision_drops_the_fact(tmp_path: Path) -> None:
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Prefers direct implementation over proposals."],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="When the fix is clear, code it instead of drafting an issue.",
+        source_section="User corrections",
+    )
+    decisions = {proposal.text: {"action": "covered"}}
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    # Covered: neither promoted nor left queued — same as an exact duplicate.
+    assert promoted == [] and remaining == []
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+
+
+def test_promote_malformed_update_degrades_to_append(tmp_path: Path) -> None:
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Only entry."])
+    proposal = mp.MemoryProposal(
+        target="memory", text="A brand new durable fact.", source_section="Decisions"
+    )
+    decisions = {proposal.text: {"action": "update", "index": 9, "text": "merged"}}
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 2  # appended; nothing replaced
+    assert "Only entry." in entries
+
+
+def test_plan_region_reconcile_maps_facts_to_decisions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Insights model is deepseek-flash."],
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- User said switch models. Durable rule: Insights model is sonnet. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def fake_run_oneshot(prompt: str, **kwargs: object) -> str:
+        assert "Insights model is deepseek-flash." in prompt
+        assert "Insights model is sonnet." in prompt
+        return '[{"action": "update", "index": 1, "text": "Insights model is sonnet."}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run_oneshot)
+
+    decisions = asyncio.run(
+        mp.plan_region_reconcile(archive, guide, model="sonnet")
+    )
+    assert decisions == {
+        "Insights model is sonnet.": {
+            "action": "update",
+            "index": 1,
+            "text": "Insights model is sonnet.",
+        }
+    }
+
+
+def test_plan_region_reconcile_failure_returns_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Existing entry."]
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: A new standing rule. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def broken_run_oneshot(prompt: str, **kwargs: object) -> str:
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", broken_run_oneshot)
+
+    assert asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet")) is None

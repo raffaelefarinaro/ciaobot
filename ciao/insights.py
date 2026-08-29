@@ -545,6 +545,9 @@ async def extract_and_append(
     # the proposal step runs in the `finally` below.
     doc_fold_wrote = False
     resolved_doc_path = ""
+    # Hoisted for the reconcile step in the `finally`: an exception before
+    # `_resolve_insights_call` would otherwise leave it unbound there.
+    effective_model = model
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -678,7 +681,30 @@ async def extract_and_append(
             and output
         ):
             try:
-                from ciao.memory_proposals import proposals_from_archive
+                from ciao.memory_proposals import (
+                    plan_region_reconcile,
+                    proposals_from_archive,
+                )
+
+                # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
+                # model call per region compares the new facts against the
+                # region's current entries so near-duplicates update the old
+                # entry instead of piling up beside it. Best-effort — any
+                # failure degrades to the plain append path below.
+                region_decisions = None
+                if guide_path is not None:
+                    try:
+                        region_decisions = await plan_region_reconcile(
+                            archive_path,
+                            guide_path,
+                            model=effective_model,
+                            provider=provider,
+                            cwd=workspace_root,
+                        )
+                    except Exception:  # noqa: BLE001 — reconcile is optional
+                        logger.exception(
+                            "Region reconcile failed for %s", archive_path
+                        )
 
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
@@ -699,6 +725,7 @@ async def extract_and_append(
                         stats=proposal_stats,
                         project_doc_path=resolved_doc_path,
                         project_fold_wrote=doc_fold_wrote,
+                        region_decisions=region_decisions,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
