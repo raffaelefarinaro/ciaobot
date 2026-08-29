@@ -1100,6 +1100,161 @@ def _refresh_header(file_text: str) -> str:
     return _STUB_HEADER + file_text[boundary:]
 
 
+# ── Already-applied guard ─────────────────────────────────────────────────
+
+# Minimum character overlap for a proposal to be considered already present in
+# a destination file. Shorter than a meaningful fact would be noise; longer
+# than a sentence would require exact formatting.
+_APPLIED_MIN_OVERLAP = 40
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercased, whitespace-collapsed form for containment checks."""
+    return " ".join(text.lower().split())
+
+
+def _is_already_in_file(path: Path, proposal_text: str) -> bool:
+    """True when *path* already contains the proposal's substance."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    norm_content = _normalize_for_match(content)
+    norm_proposal = _normalize_for_match(proposal_text)
+    if not norm_proposal or len(norm_proposal) < _APPLIED_MIN_OVERLAP:
+        return False
+    # Exact containment first (fast, precise for copy-paste facts like paths).
+    if norm_proposal in norm_content:
+        return True
+    # Also check the promotable variant for memory/profile: the region holds
+    # "Avoid em dashes; use commas instead." while the proposal may carry
+    # "User said: ... Durable rule: Avoid em dashes; use commas instead."
+    promotable = _promotable_text(proposal_text)
+    if promotable and promotable != proposal_text:
+        norm_promotable = _normalize_for_match(promotable)
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_content:
+            return True
+    # Token-overlap fallback for rephrased but equivalent sentences (e.g.
+    # finance policy: "Keep Finance.xlsx local with quarterly review" vs
+    # proposal "Chose to keep Finance.xlsx local with quarterly schedule").
+    # Require ≥60% of the proposal's significant tokens to appear to avoid
+    # false positives on short phrases like "Chose Postgres over SQLite".
+    tokens = [t for t in re.split(r"\W+", norm_proposal) if len(t) > 3]
+    if len(tokens) < 4:
+        return False
+    hits = sum(1 for tok in tokens if tok in norm_content)
+    return hits / len(tokens) >= 0.6
+
+
+def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> bool:
+    """True when a bounded region already holds the proposal."""
+    from ciao.memory_tool import read_region
+
+    try:
+        entries, diags = read_region(guide_path, region)
+    except Exception:
+        return False
+    if diags:
+        return False
+    # Exact promotable match is the canonical dedupe (see _promote_to_region),
+    # but the guard also suppresses near-duplicates already present with
+    # different punctuation/casing so they never reach the review tab.
+    promotable = _promotable_text(proposal_text) or proposal_text
+    norm_promotable = _normalize_for_match(promotable)
+    for entry in entries:
+        norm_entry = _normalize_for_match(entry)
+        if norm_promotable == norm_entry:
+            return True
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_entry:
+            return True
+        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and norm_entry in norm_promotable:
+            return True
+    # File-level fallback: the whole guide may contain the fact outside the
+    # region (e.g. standing directive in body). Check full guide text.
+    try:
+        guide_text = guide_path.read_text(encoding="utf-8")
+        if _normalize_for_match(promotable) in _normalize_for_match(guide_text):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _is_already_applied(
+    proposal: MemoryProposal,
+    vault_root: Path,
+    guide_path: Path | None,
+    project_doc_path: str = "",
+) -> bool:
+    """True when the destination already holds the proposal's fact.
+
+    This is the extra check before creating a review card: if the chat already
+    applied the edit (via Edit/Write/memory_update in-session), the post-archive
+    insight will re-extract the same fact and must not re-queue it.
+    """
+    if proposal.target in ("memory", "profile") and guide_path is not None:
+        try:
+            if guide_path.exists() and _is_already_in_region(
+                guide_path, proposal.target, proposal.text
+            ):
+                return True
+        except Exception:
+            pass
+    if proposal.target == "project":
+        doc_path = proposal.payload or project_doc_path
+        if doc_path:
+            p = Path(doc_path)
+            if not p.is_absolute():
+                # workspace_vault_root is the vault; the canonical doc is often
+                # vault-relative (e.g. personal/memory-vault/projects/...) or
+                # relative to the vault root.
+                # Try vault_root-relative first, then cwd-relative.
+                candidate = vault_root / doc_path
+                if candidate.exists():
+                    p = candidate
+                else:
+                    # doc_path may already be vault_root-relative with a prefix
+                    # like "personal/memory-vault/projects/..."; vault_root may
+                    # be the vault itself, so join will duplicate. Try as-is.
+                    p = Path(doc_path)
+            if _is_already_in_file(p, proposal.text):
+                return True
+    if proposal.target == "people" and vault_root is not None:
+        name = proposal.payload or _safe_name(proposal.text.split("-")[0])
+        p = vault_root / _PEOPLE_DIR / f"{_safe_name(name)}.md"
+        if p.exists() and _is_already_in_file(p, proposal.text):
+            return True
+        # Also check if any people note already contains the fact (payload may
+        # differ from canonical filename due to model paraphrase).
+        try:
+            people_dir = vault_root / _PEOPLE_DIR
+            if people_dir.is_dir():
+                for note in people_dir.glob("*.md"):
+                    if _is_already_in_file(note, proposal.text):
+                        return True
+        except OSError:
+            pass
+    if proposal.target == "learnings" and vault_root is not None:
+        p = vault_root / _LEARNINGS_RELATIVE
+        if p.exists() and _is_already_in_file(p, proposal.text):
+            return True
+    if proposal.target == "review":
+        # Review has no known destination; suppress only if the fact is
+        # demonstrably already remembered somewhere obvious (memory/profile
+        # regions or the canonical doc). Do not scan the whole vault.
+        if guide_path is not None and guide_path.exists():
+            for region in ("memory", "profile"):
+                if _is_already_in_region(guide_path, region, proposal.text):
+                    return True
+        if project_doc_path:
+            p = Path(project_doc_path)
+            if not p.is_absolute():
+                p = vault_root / project_doc_path
+            if p.exists() and _is_already_in_file(p, proposal.text):
+                return True
+    return False
+
+
 # ── Pipeline entry point ──────────────────────────────────────────────────
 
 
@@ -1181,6 +1336,37 @@ def proposals_from_archive(
                 )
                 for p in proposals
             ]
+
+        # Extra guard before creating a review card: if the chat already
+        # applied the change in-session (via memory_update/Edit/Write), the
+        # destination now contains the fact and the insight must not re-queue it.
+        if proposals:
+            filtered: list[MemoryProposal] = []
+            suppressed = 0
+            for _p in proposals:
+                if _is_already_applied(
+                    _p, workspace_vault_root, guide_path, project_doc_path
+                ):
+                    suppressed += 1
+                    logger.info(
+                        "memory proposals: suppressed already-applied %r from %s",
+                        _p.text[:80],
+                        archive_path.name,
+                    )
+                    continue
+                filtered.append(_p)
+            if suppressed:
+                logger.info(
+                    "memory proposals: suppressed %d already-applied fact(s) from %s",
+                    suppressed,
+                    archive_path.name,
+                )
+            proposals = filtered
+            if not proposals:
+                if stats is not None:
+                    stats["proposed"] = 0
+                    stats["promoted"] = stats.get("promoted", 0)
+                return None
 
         if auto_promote_memory and proposals:
             proposals, promoted = apply_proposals(
