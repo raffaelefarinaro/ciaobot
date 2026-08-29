@@ -115,12 +115,25 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     assert any(item.schedule_id == "system-memory-curation" for item in schedules)
 
 
-def test_stock_memory_curation_schedule_updates_project_canonical_docs(tmp_path: Path) -> None:
+def test_stock_memory_curation_schedule_invokes_the_skill(tmp_path: Path) -> None:
+    """The schedule prompt dispatches to the memory-curation skill.
+
+    The procedure itself — canonical-doc folding, session-insights routing —
+    lives in the skill file, where test_stock_package asserts its contract.
+    """
+    from importlib import resources
+
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    assert "canonical doc" in entry.prompt.lower()
-    assert "session-insights" in entry.prompt.lower()
+    assert "memory-curation" in entry.prompt
+    skill = (
+        resources.files("ciao.stock")
+        .joinpath("skills", "memory-curation", "SKILL.md")
+        .read_text(encoding="utf-8")
+    )
+    assert "canonical doc" in skill.lower()
+    assert "session-insights" in skill.lower()
 
 
 def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
@@ -903,22 +916,31 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     allowed behind two guardrails: every removal is logged to the undo file,
     and uncertain removals become [review] yes/no questions instead.
     """
+    from importlib import resources
+
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    prompt = entry.prompt
+    # The contract lives in the skill the prompt dispatches to.
+    assert "memory-curation" in entry.prompt
+    skill = (
+        resources.files("ciao.stock")
+        .joinpath("skills", "memory-curation", "SKILL.md")
+        .read_text(encoding="utf-8")
+    )
     # Promotion stays forbidden; consolidation is required when needed.
-    assert "Do not promote new facts into the bounded" in prompt
-    assert "consolidate that region now" in prompt
+    assert "Do not promote new facts into the bounded" in skill
+    assert "consolidate that region now" in skill
     # Guardrail 1: nothing is dropped without an undo log entry.
-    assert "Workspace/Memory-Consolidations.md" in prompt
-    assert "undo log" in prompt
+    assert "Workspace/Memory-Consolidations.md" in skill
+    assert "undo log" in skill
     # Guardrail 2: judgment calls become reviewable questions, not deletions.
-    assert "[review] Keep" in prompt
-    assert "Memory-Proposals.md" in prompt
-    assert "memory_status" in prompt
+    assert "[review] Keep" in skill
+    assert "Memory-Proposals.md" in skill
+    assert "memory_status" in skill
     # The old blanket ban must be gone, or the two instructions cancel out.
-    assert "Do not edit the bounded" not in prompt
+    assert "Do not edit the bounded" not in skill
+    assert "Do not edit the bounded" not in entry.prompt
 
 
 def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:
