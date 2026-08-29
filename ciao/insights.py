@@ -241,7 +241,8 @@ _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
 The user is the workspace owner. Output Markdown with the exact section headers below.
 Omit a section entirely if empty - do NOT write "none" or "n/a".
-Cite the message index `[idx=N]` for every claim. Do not invent facts.
+Cite the message index `[idx=N]` for every claim. Indices start at 1;
+never cite `[idx=0]`. Do not invent facts.
 Do not summarise the conversation - that is already saved.
 
 Rules:
@@ -251,6 +252,13 @@ Rules:
   entirely rather than fill it with session-local noise — a one-off choice
   about this one repo, a single loop, or a phrasing pushback that was only
   about this session has no place here.
+- If this is a scheduled maintenance session (memory curation, hygiene
+  audits, skill evolution), never extract the session's own operating
+  instructions, prompt rules, or memory-system procedures as facts — they
+  are machinery, not knowledge about the user.
+- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
+  or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
+  destination tag. Never invent a date the transcript does not support.
 - End every bullet with exactly one destination tag, after the citation:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.
@@ -537,6 +545,9 @@ async def extract_and_append(
     # the proposal step runs in the `finally` below.
     doc_fold_wrote = False
     resolved_doc_path = ""
+    # Hoisted for the reconcile step in the `finally`: an exception before
+    # `_resolve_insights_call` would otherwise leave it unbound there.
+    effective_model = model
     try:
         if not archive_path.exists():
             logger.warning("Archive path %s missing, skipping insights", archive_path)
@@ -670,7 +681,30 @@ async def extract_and_append(
             and output
         ):
             try:
-                from ciao.memory_proposals import proposals_from_archive
+                from ciao.memory_proposals import (
+                    plan_region_reconcile,
+                    proposals_from_archive,
+                )
+
+                # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
+                # model call per region compares the new facts against the
+                # region's current entries so near-duplicates update the old
+                # entry instead of piling up beside it. Best-effort — any
+                # failure degrades to the plain append path below.
+                region_decisions = None
+                if guide_path is not None:
+                    try:
+                        region_decisions = await plan_region_reconcile(
+                            archive_path,
+                            guide_path,
+                            model=effective_model,
+                            provider=provider,
+                            cwd=workspace_root,
+                        )
+                    except Exception:  # noqa: BLE001 — reconcile is optional
+                        logger.exception(
+                            "Region reconcile failed for %s", archive_path
+                        )
 
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
@@ -691,6 +725,7 @@ async def extract_and_append(
                         stats=proposal_stats,
                         project_doc_path=resolved_doc_path,
                         project_fold_wrote=doc_fold_wrote,
+                        region_decisions=region_decisions,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
@@ -1087,6 +1122,13 @@ Rules:
   rather than fill it with session-local noise — a one-off choice about this
   one repo, a single exchange, or a phrasing pushback that only fixed this
   session has no place here.
+- If this is a scheduled maintenance session (memory curation, hygiene
+  audits, skill evolution), never extract the session's own operating
+  instructions, prompt rules, or memory-system procedures as facts — they
+  are machinery, not knowledge about the user.
+- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
+  or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.
+  Never invent a date the transcript does not support.
 - End every bullet with exactly one destination tag:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.

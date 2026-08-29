@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 # Directory-based type inference (similar to vault_index.py)
 EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
 
+# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Indexing them made the proposals queue and the curation logs rank above real
+# notes for ordinary recall queries — the memory system's paperwork must never
+# compete with the memories it manages.
+RESERVED_UNINDEXED_FILES = frozenset(
+    {
+        "memory-proposals.md",
+        "memory-consolidations.md",
+        "curation-log.md",
+        "weekly-review-log.md",
+    }
+)
+
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
@@ -124,6 +137,23 @@ def _parse_title(text: str, filename_stem: str) -> str:
     if h:
         return h.group(1).strip()
     return filename_stem
+
+
+def _search_opted_out(text: str) -> bool:
+    """True when a note's frontmatter carries ``search: false``.
+
+    The general escape hatch behind ``RESERVED_UNINDEXED_FILES``: any note can
+    take itself out of recall (rolled log archives, scratch files) without the
+    engine having to learn its name.
+    """
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return False
+    try:
+        fm = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return False
+    return isinstance(fm, dict) and fm.get("search") is False
 
 
 def _public_snippet(raw: str) -> str:
@@ -241,6 +271,12 @@ def _index_directory(
             logger.warning("FTS search: failed to read %s", md_path)
             continue
 
+        if _search_opted_out(text):
+            # Dropped from the found set so the prune below removes any rows
+            # indexed before the note opted out.
+            found_paths.discard(rel_str)
+            continue
+
         title = _parse_title(text, md_path.stem)
 
         # Delete old index entry if it exists
@@ -300,7 +336,7 @@ def index_vault(
         meta_table="vault_meta",
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
-        exclude_files=set(GENERATED_VAULT_FILES),
+        exclude_files=set(GENERATED_VAULT_FILES) | RESERVED_UNINDEXED_FILES,
         path_base=path_base,
     )
 
@@ -382,6 +418,17 @@ def index_file(
     except OSError:
         return False
 
+    if not is_log and (
+        file_path.name.casefold() in RESERVED_UNINDEXED_FILES
+        or _search_opted_out(text)
+    ):
+        # Force-indexing must honour the same exclusions as the bulk pass, and
+        # clean up rows written before the file became excluded.
+        conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+        conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
+        conn.commit()
+        return False
+
     title = _parse_title(text, file_path.stem)
 
     conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
@@ -442,6 +489,13 @@ def search(
     try:
         cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
+        if not rows and len(words) > 1:
+            # AND-of-all-words returns nothing for paraphrase queries ("how
+            # much do I charge per hour" — no note holds every word). Degrade
+            # to OR and let BM25 rank the notes matching the distinctive
+            # terms; a weaker match beats an empty answer for recall.
+            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit))
+            rows = cursor.fetchall()
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
@@ -500,6 +554,77 @@ def search_logs(
     what a not-yet-migrated root and every per-root ``index_file`` write produce.
     """
     return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+
+
+# ── Retrieval telemetry (decay-by-disuse signal) ───────────────────────────
+#
+# Every vault_search result set is appended here so the memory audit can tell
+# which notes recall actually uses. A note that is both stale and never
+# retrieved is the strongest demotion candidate the nightly curator sees.
+# Strictly best-effort and signal-only: nothing reads this to delete anything.
+
+SEARCH_HITS_NAME = "vault_search_hits.jsonl"
+_HITS_MAX_BYTES = 1 * 1024 * 1024
+_HITS_KEEP_LINES = 2000
+
+
+def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
+    """Append one search's returned note paths to the hits log. Never raises."""
+    try:
+        import json as _json
+
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = runtime_dir / SEARCH_HITS_NAME
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "query": query[:200],
+            "paths": paths[:50],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+        if path.stat().st_size > _HITS_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 — telemetry must never break search
+        logger.debug("Could not record search hits", exc_info=True)
+
+
+def read_search_hit_paths(
+    runtime_dir: Path, *, since_days: int = 90
+) -> set[str] | None:
+    """Note paths returned by any search in the window; None when no log exists.
+
+    None matters: an install that never wrote the log has no retrieval
+    evidence, and the audit must not read that absence as "never retrieved".
+    """
+    import json as _json
+
+    path = runtime_dir / SEARCH_HITS_NAME
+    if not path.exists():
+        return None
+    cutoff = datetime.now(timezone.utc).timestamp() - since_days * 86400
+    hits: set[str] = set()
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = _json.loads(line)
+            except ValueError:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(record.get("ts", ""))).timestamp()
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            for item in record.get("paths", []):
+                if isinstance(item, str):
+                    hits.add(item)
+    except OSError:
+        return None
+    return hits
 
 
 def logs_key_prefix(logs_root: Path, path_base: Path | None) -> str:

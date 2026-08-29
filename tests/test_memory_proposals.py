@@ -245,8 +245,13 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
         "person: User Example - the user, product lead.",
     ])
     mem_entries, _diags = mt.read_region(guide, "memory")
-    # Only the state-shaped rule lands in the region, not the chat event.
-    assert "Avoid em dashes; use commas instead." in mem_entries
+    # Only the state-shaped rule lands in the region, not the chat event —
+    # stamped with the learned-at date the aging audit reads.
+    from ciao.memory_audit import strip_learned_stamp
+
+    stripped = [strip_learned_stamp(entry) for entry in mem_entries]
+    assert "Avoid em dashes; use commas instead." in stripped
+    assert any(re.search(r"\[\d{4}-\d{2}-\d{2}\]$", entry) for entry in mem_entries)
     assert all("User said" not in entry for entry in mem_entries)
     profile_entries, _diags = mt.read_region(guide, "profile")
     assert any("User Example" in entry for entry in profile_entries)
@@ -375,7 +380,11 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     )
 
     mem_entries, _diags = mt.read_region(guide, "memory")
-    assert "Avoid em dashes; use commas instead." in mem_entries
+    from ciao.memory_audit import strip_learned_stamp
+
+    assert "Avoid em dashes; use commas instead." in [
+        strip_learned_stamp(entry) for entry in mem_entries
+    ]
     # The promoted correction is not duplicated into the proposals file.
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
@@ -1073,6 +1082,64 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
     assert (explicit_dir / "memory-vault" / "Workspace" / "Memory-Proposals.md").is_file()
 
 
+def test_removing_last_bullet_sweeps_its_batch_header(tmp_path: Path) -> None:
+    """Dismissing a batch's only bullet removes the batch header too.
+
+    Before the sweep, every fully-dismissed batch left its ``## <timestamp>``
+    header behind; a real queue accumulated 29 empty batches out of 30.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    proposals = [
+        mp.MemoryProposal(target="review", text="lone fact one", source_section="Decisions"),
+    ]
+    out = mp.append_proposals(proposals, vault, source_path=None)
+    assert out is not None
+    out2 = mp.append_proposals(
+        [mp.MemoryProposal(target="review", text="second batch fact", source_section="Decisions")],
+        vault,
+        source_path=None,
+    )
+    assert out2 is not None
+
+    removed = mp.remove_proposal_by_substring(out, "lone fact one")
+    assert removed is not None
+
+    text = out.read_text(encoding="utf-8")
+    # One batch header remains (the second batch still has its bullet).
+    assert len(re.findall(r"^## \d{4}-", text, re.MULTILINE)) == 1
+    assert "second batch fact" in text
+
+
+def test_sweep_keeps_batches_with_bullets_or_prose(tmp_path: Path) -> None:
+    """The sweep only removes headers over all-blank sections.
+
+    A timestamped section that carries prose (agents have appended notes into
+    the queue) was written by someone else and is not the sweep's to delete.
+    """
+    lines = [
+        "# Memory Proposals",
+        "",
+        "## 2026-08-01T00:00:00+00:00 — from `a.md`",
+        "",
+        "- [review] pending fact  _(from: Decisions)_",
+        "",
+        "## 2026-08-02T00:00:00+00:00 — from `b.md`",
+        "",
+        "",
+        "## 2026-08-03T00:00:00+00:00 — from `c.md`",
+        "",
+        "Some hand-written note under a timestamp.",
+        "",
+    ]
+    swept = mp._sweep_empty_batches(lines)
+    text = "\n".join(swept)
+    assert "2026-08-01" in text  # has a bullet
+    assert "2026-08-02" not in text  # empty: swept
+    assert "2026-08-03" in text  # has prose: kept
+    assert "Some hand-written note" in text
+
+
 def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
     """Blank decisions record nothing; unreadable sidecar lines never crash."""
     from ciao.cli import _memory_proposal_add_command
@@ -1097,3 +1164,225 @@ def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
     legacy = queue.with_suffix(".dismissed.log")
     legacy.write_text('{"text": "legacy fact", "kind": "memory"}\n', encoding="utf-8")
     assert mp._dismissed_texts(queue) == {"kept fact", "legacy fact"}
+
+
+def test_promote_dedupes_across_learned_stamps(tmp_path: Path) -> None:
+    """The same fact promoted on a different day is still a duplicate."""
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Avoid em dashes; use commas instead. [2026-01-15]"],
+    )
+
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
+
+    assert promoted == ["person: User Example - the user, product lead."]
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert len(mem_entries) == 1  # no second copy with a fresh stamp
+
+
+# ---- Write-time reconcile (ADD / UPDATE / COVERED) -----------------------
+
+
+def test_parse_reconcile_reply_shapes() -> None:
+    good = '[{"action": "add"}, {"action": "update", "index": 2, "text": "merged"}, {"action": "covered"}]'
+    rows = mp._parse_reconcile_reply(good, 3)
+    assert rows == [
+        {"action": "add"},
+        {"action": "update", "index": 2, "text": "merged"},
+        {"action": "covered"},
+    ]
+    # Fenced replies are unwrapped.
+    assert mp._parse_reconcile_reply(f"```json\n{good}\n```", 3) is not None
+    # Wrong length or non-array: discarded whole.
+    assert mp._parse_reconcile_reply('[{"action": "add"}]', 2) is None
+    assert mp._parse_reconcile_reply('{"action": "add"}', 1) is None
+    assert mp._parse_reconcile_reply("not json", 1) is None
+    # Per-row junk degrades to the safe plain add.
+    rows = mp._parse_reconcile_reply(
+        '[{"action": "update"}, {"action": "delete"}, 42]', 3
+    )
+    assert rows == [{"action": "add"}, {"action": "add"}, {"action": "add"}]
+
+
+def test_promote_update_decision_replaces_and_logs_undo(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=[
+            "Insights model is deepseek-flash. [2026-01-01]",
+            "Unrelated standing rule.",
+        ],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Insights model is sonnet since the Ollama quota 429s.",
+        source_section="Decisions",
+    )
+    decisions = {
+        "Insights model is sonnet since the Ollama quota 429s.": {
+            "action": "update",
+            "index": 1,
+            "text": "Insights model is sonnet (moved off deepseek-flash: quota 429s).",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=vault, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 2  # replaced, not appended
+    assert any("moved off deepseek-flash" in e for e in entries)
+    assert all("Insights model is deepseek-flash" not in e for e in entries)
+    undo = (vault / "Workspace" / "Memory-Consolidations.md").read_text(encoding="utf-8")
+    assert "Insights model is deepseek-flash" in undo
+    assert "ciao:memory" in undo
+
+
+def test_promote_covered_decision_drops_the_fact(tmp_path: Path) -> None:
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Prefers direct implementation over proposals."],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="When the fix is clear, code it instead of drafting an issue.",
+        source_section="User corrections",
+    )
+    decisions = {proposal.text: {"action": "covered"}}
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    # Covered: neither promoted nor left queued — same as an exact duplicate.
+    assert promoted == [] and remaining == []
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+
+
+def test_promote_malformed_update_degrades_to_append(tmp_path: Path) -> None:
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Only entry."])
+    proposal = mp.MemoryProposal(
+        target="memory", text="A brand new durable fact.", source_section="Decisions"
+    )
+    decisions = {proposal.text: {"action": "update", "index": 9, "text": "merged"}}
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 2  # appended; nothing replaced
+    assert "Only entry." in entries
+
+
+def test_plan_region_reconcile_maps_facts_to_decisions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Insights model is deepseek-flash."],
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- User said switch models. Durable rule: Insights model is sonnet. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def fake_run_oneshot(prompt: str, **kwargs: object) -> str:
+        assert "Insights model is deepseek-flash." in prompt
+        assert "Insights model is sonnet." in prompt
+        return '[{"action": "update", "index": 1, "text": "Insights model is sonnet."}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run_oneshot)
+
+    decisions = asyncio.run(
+        mp.plan_region_reconcile(archive, guide, model="sonnet")
+    )
+    assert decisions == {
+        "Insights model is sonnet.": {
+            "action": "update",
+            "index": 1,
+            "text": "Insights model is sonnet.",
+        }
+    }
+
+
+def test_plan_region_reconcile_failure_returns_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Existing entry."]
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: A new standing rule. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def broken_run_oneshot(prompt: str, **kwargs: object) -> str:
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", broken_run_oneshot)
+
+    assert asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet")) is None
+
+
+# ---- Structured learnings -------------------------------------------------
+
+
+def test_append_learning_writes_structured_entry(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    assert mp.append_learning(
+        vault, "Airtable sort param returns 400; filter by field ID.", source="chat-a1"
+    )
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if l.startswith("- ["))
+    match = mp._LEARNING_LINE_RE.match(line)
+    assert match is not None
+    assert match.group("count") == "1"
+    assert match.group("first") == match.group("last")
+    assert match.group("sources") == "chat-a1"
+
+
+def test_append_learning_recurrence_increments_instead_of_duplicating(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    fact = "Airtable sort param returns 400; filter by field ID."
+    assert mp.append_learning(vault, fact, source="chat-a1")
+    assert mp.append_learning(vault, fact, source="chat-b2")
+    # Whitespace/case variations still count as the same learning.
+    assert mp.append_learning(vault, fact.upper(), source="chat-b2")
+
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    lines = [l for l in text.splitlines() if l.startswith("- [")]
+    assert len(lines) == 1
+    match = mp._LEARNING_LINE_RE.match(lines[0])
+    assert match is not None
+    assert match.group("count") == "3"
+    assert match.group("sources") == "chat-a1, chat-b2"  # dedup'd source
+
+
+def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = vault / "Workspace" / "Learnings.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "# Learnings\n\n## Active\n- legacy plain learning bullet\n",
+        encoding="utf-8",
+    )
+    assert mp.append_learning(vault, "legacy plain learning bullet")
+    text = path.read_text(encoding="utf-8")
+    assert text.count("legacy plain learning bullet") == 1  # exact dup short-circuit
+
+    assert mp.append_learning(vault, "A brand new structured learning.", source="chat-x")
+    text = path.read_text(encoding="utf-8")
+    assert "- legacy plain learning bullet" in text
+    assert "(x1) A brand new structured learning." in text

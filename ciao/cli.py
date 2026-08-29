@@ -2390,6 +2390,20 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             report["stale_notes"] = find_stale_notes(
                 entries, vault_root=vault, today=datetime.date.today()
             )
+            # Decay-by-disuse: mark whether recall has returned each stale
+            # note recently. Stale AND unretrieved is the strongest demotion
+            # candidate; no evidence at all (no hits log yet) marks nothing.
+            from ciao.fts_search import read_search_hit_paths
+
+            hit_paths = read_search_hit_paths(workspace / ".runtime")
+            if hit_paths is not None:
+                normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
+                for finding in report["stale_notes"]["stale_notes"]:
+                    rel = str(finding["path"]).replace(os.sep, "/")
+                    finding["retrieved_recently"] = any(
+                        hit == rel or hit.endswith("/" + rel)
+                        for hit in normalized_hits
+                    )
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],
@@ -2443,6 +2457,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         )
         for finding in report["superseded_state_candidates"]:
             print(f"  [{finding['region']}] {finding['subject']}")
+        aging = report.get("aging_state_entries", [])
+        print(f"Aging dated entries to re-verify (informational): {len(aging)}")
+        for finding in aging:
+            print(
+                f"  [{finding['region']}] {finding['kind']} {finding['date']} "
+                f"({finding['age_days']}d ≥ {finding['threshold_days']}d) :: "
+                f"{finding['entry']}"
+            )
         stale = report.get("stale_notes") or {}
         if stale:
             print(
