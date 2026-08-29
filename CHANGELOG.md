@@ -91,6 +91,8 @@
 - Keep personal names and local paths out of public fixtures and docs (`113d8b92`)
 - Extraction bullets are final statements: no mid-bullet self-correction (`2cc1698b`)
 - Apply v0.12.0 post-cut review findings: reconcile safety, audit correlation, mode carve-out sharing (`21ac3e08`)
+- Second review pass: fit context block into the model budget, settle opted-out FTS rows, scope reserved names, harden disuse matching (`d2a689e2`)
+- Scrub remaining personal names from public sources and fixtures (`73652390`)
 
 ### Maintenance
 - test: stop the rotation fixture racing the clock (`6430e8ba`)
