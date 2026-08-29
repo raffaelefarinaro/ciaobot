@@ -5625,11 +5625,14 @@ async def create_loop(request: Request) -> JSONResponse:
         workspace=getattr(project, "workspace", "") or "",
     )
     # Loops recorded the chat's project only so a lost chat could be replaced
-    # there; on a schedule web_project_id means "new chat per run", so the
-    # replacement target is carried by `workspace` instead.
+    # there; on a schedule web_project_id means "new chat per run", so it is
+    # carried as the fixed-chat fallback instead — the same shape migrate_loops
+    # uses. Without it a loop created in a non-General project by a cached
+    # pre-upgrade PWA would re-home into General when its chat was deleted.
+    entry.fallback_project_id = project_id
     if not (body.get("autostart") or body.get("start")):
         entry.enabled = False
-        sm.replace(entry)
+    sm.replace(entry)
     publish_automations_changed(pcm)
     return JSONResponse(_loop_view(entry, pcm), status_code=201)
 

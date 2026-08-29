@@ -373,3 +373,35 @@ def test_manual_and_interval_still_need_no_time(client: TestClient) -> None:
         f"/api/schedules/{schedule_id}",
         json={"frequency": INTERVAL_FREQUENCY, "interval_minutes": 5},
     ).status_code == 200
+
+
+def test_a_legacy_created_loop_keeps_its_project_as_the_rehome_fallback(
+    client: TestClient,
+) -> None:
+    """A cached pre-upgrade PWA can still create loops through this route.
+
+    Migrated loops keep their original project as `fallback_project_id`; ones
+    created here have to as well, or a loop made in a non-General project
+    re-homes into General when its target chat is deleted and the unattended
+    run changes context.
+    """
+    for start in (True, False):
+        resp = client.post("/api/loops", json={
+            "prompt": "p",
+            "web_chat_id": "chat-idle",
+            "start": start,
+        })
+        assert resp.status_code == 201, resp.text
+        loop_id = resp.json()["loop_id"]
+
+        # Read the stored row: fallback_project_id is internal and not part of
+        # the API payload, so asserting on the response would prove nothing.
+        stored = next(
+            e for e in client.app.state.schedule_manager.list_entries()
+            if e.schedule_id == loop_id
+        )
+        assert stored.fallback_project_id == "proj-1"
+        # web_project_id stays unset: on an interval entry it would mean
+        # "a new chat per run" and outrank the fixed chat.
+        assert stored.web_project_id is None
+        assert stored.enabled is start

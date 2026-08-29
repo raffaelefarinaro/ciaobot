@@ -998,20 +998,34 @@ class CiaoConfig:
         if effective_provider:
             descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
-                if descriptor.default_model_config_key:
-                    return str(getattr(self, descriptor.default_model_config_key, "") or "")
-                # A provider with an operator-settable default model uses it;
-                # otherwise "use that provider account's
-                # current catalog default": the provider resolves it and the
-                # chat records the effective model.
+                # The operator's explicit pick comes first, whatever the
+                # provider. Checking `default_model_config_key` before this
+                # meant Claude — the one provider that has such a key — always
+                # returned its env-backed value, so a Claude default chosen in
+                # Settings → Models was stored, echoed back by the UI, and
+                # never actually used.
                 operator_default = self._operator_default_model(descriptor)
                 if operator_default:
                     return operator_default
+                if descriptor.default_model_config_key:
+                    return str(getattr(self, descriptor.default_model_config_key, "") or "")
+                # No operator default and no env-backed key: "use that provider
+                # account's current catalog default" — the provider resolves it
+                # and the chat records the effective model.
                 return descriptor.default_model
         return self.claude_default_model
 
     def _operator_default_model(self, descriptor: "ProviderDescriptor") -> str:
-        """The operator-settable default model for a provider, or ``""`` when unset."""
+        """The operator-settable default model for a provider, or ``""`` when unset.
+
+        ``provider_default_models`` is what Settings → Models writes for every
+        provider, so it is the authority. The per-provider settings dataclass is
+        consulted only as a fallback, for providers that mirror the same value
+        there (``app_settings`` copies it across for those).
+        """
+        selected = (self.provider_default_models or {}).get(descriptor.id, "")
+        if selected:
+            return str(selected)
         if not descriptor.default_model_settings_attr:
             return ""
         settings = getattr(self, descriptor.default_model_settings_attr, None)
