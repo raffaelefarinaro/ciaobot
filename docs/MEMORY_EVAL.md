@@ -21,10 +21,10 @@ LaunchAgents (a dev-checkout run against live state can destroy both):
 
 ```bash
 export CIAO_MEMORY_DIR=$(mktemp -d)          # fresh index, isolated from ~/.ciao
-export CIAO_WORKSPACE=~/repos/ciao           # the install root
-cd ~/repos/ciaobot
+export CIAO_WORKSPACE=<install workspace>           # the install root
+cd <ciaobot checkout>
 .venv/bin/python -m ciao.cli vault-search \
-  --vault-root ~/repos/ciao/personal/memory-vault \
+  --vault-root <workspace>/<agent-root>/memory-vault \
   --limit 3 "<probe query>"
 ```
 
@@ -33,7 +33,7 @@ Probe set (adjust entities to the vault under test):
 | Class | Example probe | Pass condition |
 | --- | --- | --- |
 | Entity | a person's first name | their `People/` note in top 3 |
-| Paraphrase | "brother in law", "how much do I charge per hour" | the aliased note found |
+| Paraphrase | a relationship term, a paraphrased question | the aliased note found |
 | Update | a fact known to have changed | note snippet names the current value |
 | Abstention | a topic the vault cannot know | zero results |
 | Isolation | any query | no `Memory-Proposals`/`Curation-Log` in results |

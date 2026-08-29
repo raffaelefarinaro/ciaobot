@@ -29,13 +29,13 @@ def eval_vault(tmp_path: Path) -> Path:
     vault = tmp_path / "memory-vault"
     people = vault / "People"
     people.mkdir(parents=True)
-    (people / "Burak.md").write_text(
+    (people / "Dario.md").write_text(
         "---\n"
         "tags: [person]\n"
         "aliases: [brother-in-law]\n"
         "updated: 2026-08-01\n"
         "---\n"
-        "# Burak\n\nIpek's brother, married to Gizem, father of Defne.\n",
+        "# Dario\n\nElena's brother, married to Sofia, father of Nina.\n",
         encoding="utf-8",
     )
     projects = vault / "projects"
@@ -46,20 +46,20 @@ def eval_vault(tmp_path: Path) -> Path:
         "aliases: [hourly rate, how much I charge]\n"
         "updated: 2026-08-01\n"
         "---\n"
-        "# Consulting\n\nRate policy: 700 per hour is the top-of-band ask.\n",
+        "# Consulting\n\nRate policy: 250 per hour is the top-of-band ask.\n",
         encoding="utf-8",
     )
     (projects / "Wedding.md").write_text(
         "---\ntype: project\nupdated: 2026-08-01\n---\n"
         "# Wedding\n\n"
-        "Venue history: originally Hotel Poseidon; the venue is now "
-        "Villa Corallo (decided 2026-07-10, supersedes Poseidon).\n",
+        "Venue history: originally Hotel Boreale; the venue is now "
+        "Villa Australis (decided 2026-07-10, supersedes Boreale).\n",
         encoding="utf-8",
     )
     workspace = vault / "Workspace"
     workspace.mkdir()
     (workspace / "Memory-Proposals.md").write_text(
-        "# Memory Proposals\n\n- [review] venue rumor noise about Villa Corallo\n",
+        "# Memory Proposals\n\n- [review] venue rumor noise about Villa Australis\n",
         encoding="utf-8",
     )
     return vault
@@ -83,7 +83,7 @@ def test_paraphrase_queries_find_the_right_note(
     fts_search.index_vault(conn, eval_vault)
 
     hits = _paths(fts_search.search_vault(conn, "brother in law"))
-    assert hits and "Burak" in hits[0]
+    assert hits and "Dario" in hits[0]
 
     hits = _paths(fts_search.search_vault(conn, "how much do I charge per hour"))
     assert any("Consulting" in p for p in hits)
@@ -96,11 +96,11 @@ def test_updated_knowledge_keeps_current_and_history_findable(
     the note carries which one is current."""
     fts_search.index_vault(conn, eval_vault)
 
-    for query in ("wedding venue Villa Corallo", "wedding venue Poseidon"):
+    for query in ("wedding venue Villa Australis", "wedding venue Boreale"):
         hits = _paths(fts_search.search_vault(conn, query))
         assert any("Wedding" in p for p in hits), query
     snippet = fts_search.search_vault(conn, "venue now")[0]["snippet"]
-    assert "Villa Corallo" in snippet
+    assert "Villa Australis" in snippet
 
 
 def test_abstention_nothing_is_better_than_noise(
@@ -115,7 +115,7 @@ def test_bookkeeping_never_outranks_knowledge(
     conn: sqlite3.Connection, eval_vault: Path
 ) -> None:
     fts_search.index_vault(conn, eval_vault)
-    hits = _paths(fts_search.search_vault(conn, "Villa Corallo"))
+    hits = _paths(fts_search.search_vault(conn, "Villa Australis"))
     assert hits and all("Memory-Proposals" not in p for p in hits)
 
 
