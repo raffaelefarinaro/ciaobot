@@ -1,7 +1,7 @@
 <template>
   <div class="schedule-panel">
     <PaneHeader
-      v-if="!schedule && !loop && !showNew"
+      v-if="!schedule && !showNew"
       page-tag="automations"
       @open-sidebar="emit('open-sidebar')"
     />
@@ -10,7 +10,6 @@
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
           <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
-          <span v-else-if="loop" class="pane-title">{{ loop.title || promptTitle(loop.prompt) }}</span>
           <span v-else-if="showNew" class="pane-title">New automation</span>
         </div>
       </template>
@@ -23,7 +22,7 @@
             @click="onRunButtonClick"
           >{{ showRunning ? 'Running...' : 'Run now' }}</button>
           <button class="btn-small desktop-only" @click="onToggleEnabled">
-            {{ schedule.enabled ? 'Disable' : 'Enable' }}
+            {{ enabledToggleLabel(schedule) }}
           </button>
           <button v-if="schedule.scope !== 'system'" class="btn-small btn-danger desktop-only" @click="onDelete">Delete</button>
 
@@ -43,128 +42,53 @@
             >•••</button>
             <div v-if="actionsOpen" class="header-menu" role="menu">
               <button role="menuitem" @click="runHeaderAction(onToggleEnabled)">
-                {{ schedule.enabled ? 'Disable' : 'Enable' }}
+                {{ enabledToggleLabel(schedule) }}
               </button>
               <button v-if="schedule.scope !== 'system'" class="danger" role="menuitem" @click="runHeaderAction(onDelete)">Delete</button>
             </div>
           </div>
         </template>
 
-        <template v-if="loop && !loopEditing">
-          <button
-            v-if="loop.running"
-            class="btn-small desktop-only"
-            :class="{ 'btn-running': loop.running }"
-            @click="onToggleLoopRunning"
-          >Stop</button>
-          <button
-            v-else
-            class="btn-small desktop-only"
-            @click="onRunLoopNow"
-          >Run now</button>
-          <button class="btn-small desktop-only" @click="startLoopEdit">Edit</button>
-          <button class="btn-small btn-danger desktop-only" @click="onDeleteLoop">Delete</button>
-          <div class="desktop-overflow desktop-only" @keydown.escape.stop="actionsOpen = false">
-            <button
-              type="button"
-              class="btn-icon overflow-trigger"
-              aria-label="More loop actions"
-              :aria-expanded="actionsOpen"
-              @click="actionsOpen = !actionsOpen"
-            >•••</button>
-            <div v-if="actionsOpen" class="header-menu" role="menu">
-              <button v-if="loop.running" role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
-              <button v-else role="menuitem" @click="runHeaderAction(onToggleLoopRunning)">Start loop</button>
-            </div>
-          </div>
-
-          <button
-            v-if="loop.running"
-            class="btn-small mobile-primary"
-            :class="{ 'btn-running': loop.running }"
-            @click="onToggleLoopRunning"
-          >Stop</button>
-          <button
-            v-else
-            class="btn-small mobile-primary"
-            @click="onRunLoopNow"
-          >Run now</button>
-          <div class="mobile-overflow" @keydown.escape.stop="actionsOpen = false">
-            <button
-              type="button"
-              class="btn-icon overflow-trigger"
-              aria-label="Automation actions"
-              :aria-expanded="actionsOpen"
-              @click="actionsOpen = !actionsOpen"
-            >•••</button>
-            <div v-if="actionsOpen" class="header-menu" role="menu">
-              <button v-if="loop.running" role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
-              <button v-else role="menuitem" @click="runHeaderAction(onToggleLoopRunning)">Start loop</button>
-              <button role="menuitem" @click="runHeaderAction(startLoopEdit)">Edit</button>
-              <button class="danger" role="menuitem" @click="runHeaderAction(onDeleteLoop)">Delete</button>
-            </div>
-          </div>
-        </template>
       </template>
     </PaneHeader>
 
-    <!-- New automation form (schedule or loop) -->
+    <!-- New automation form -->
     <div v-if="showNew" class="scroll-body">
-      <div class="type-toggle">
-        <button class="btn-chip" :class="{ 'type-active': newType === 'schedule' }" @click="newType = 'schedule'">Schedule</button>
-        <details class="field-info">
-          <summary aria-label="What's possible with schedules" title="What's possible with schedules">i</summary>
-          <div class="field-info-panel">
-            <p>
-              Fires at a time of day — daily, weekly, monthly, or once — usually opening a fresh
-              chat per run in a chosen workspace, with its own model and provider (or the
-              workspace default).
-            </p>
-            <p>
-              Missed runs (app was off when one was due) are caught up on next launch. Can be
-              run on demand, enabled or disabled without deleting.
-            </p>
-            <p>
-              Set <strong>archive behavior</strong> to automatic and a classifier reviews each
-              clean run — routine results with nothing to judge (no proposals, decisions, or
-              warnings) get archived out of the way automatically.
-            </p>
-          </div>
-        </details>
-        <button class="btn-chip" :class="{ 'type-active': newType === 'loop' }" @click="newType = 'loop'">Loop</button>
-        <details class="field-info">
-          <summary aria-label="What's possible with loops" title="What's possible with loops">i</summary>
-          <div class="field-info-panel">
-            <p>
-              Lives inside one existing chat and re-sends the same prompt every N minutes (e.g.
-              "check my PRs for changes every 10 minutes"), keeping full conversation context
-              between iterations.
-            </p>
-            <p>
-              Always runs with that chat's own model — change the chat's model to change the
-              loop's. <strong>Start with the server</strong> loops resume automatically on boot;
-              others stay stopped until started manually.
-            </p>
-            <p>
-              If an iteration is still running when the next is due, the loop skips it and
-              retries shortly after. Can be started, stopped, or run on demand at any time.
-            </p>
-          </div>
-        </details>
-      </div>
-      <p class="hint type-hint">
-        {{ newType === 'schedule'
-          ? 'Fires at a time of day (daily / weekly / monthly / once), usually in a new chat per run.'
-          : 'Re-sends a prompt into one existing chat every N minutes, keeping the conversation going.' }}
-      </p>
-      <NewScheduleForm v-if="newType === 'schedule'" @created="onCreated" />
-      <NewLoopForm v-else @created="onCreated" />
+      <details class="field-info field-info--block">
+        <summary aria-label="What's possible with automations" title="What's possible with automations">i</summary>
+        <div class="field-info-panel">
+          <p>
+            An automation dispatches its prompt on a cadence you choose: at a time
+            of day (daily, weekly, monthly, or once), every N minutes, or only
+            when you click Run.
+          </p>
+          <p>
+            Point it at a <strong>project</strong> and each run opens a fresh chat
+            there with its own model and provider. Point it at a <strong>chat</strong>
+            and every run continues that conversation, inheriting its model and
+            mode — the way to keep context between runs.
+          </p>
+          <p>
+            Missed time-of-day runs (the app was off when one was due) are caught
+            up on the next launch. Interval runs are not replayed; their cadence
+            just resumes. Any automation can be run on demand, and paused without
+            deleting it.
+          </p>
+          <p>
+            Set <strong>archive behavior</strong> to automatic and a classifier
+            reviews each clean run — routine results with nothing to judge (no
+            proposals, decisions, or warnings) get archived out of the way.
+          </p>
+        </div>
+      </details>
+      <NewScheduleForm @created="onCreated" />
     </div>
 
     <!-- Detail -->
     <div v-else-if="schedule" class="scroll-body">
       <div v-if="!schedule.enabled" class="disabled-banner">
-        Disabled — won't run automatically. "Run now" still works.
+        {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Disabled' }} — won't run
+        automatically. "Run now" still works.
       </div>
       <div class="prop-cards">
         <!-- Schedule -->
@@ -185,11 +109,16 @@
             <div class="prop-row">
               <dt>Repeats</dt><dd>{{ frequencyLabel(schedule) }}</dd>
             </div>
-            <div v-if="schedule.frequency !== 'manual'" class="prop-row">
+            <div v-if="showsTimeOfDay(schedule)" class="prop-row">
               <dt>At</dt><dd>{{ schedule.daily_time_utc }} · {{ schedule.timezone_name }}</dd>
             </div>
             <div v-if="schedule.frequency !== 'manual'" class="prop-row">
               <dt>Next run</dt><dd class="prop-highlight">{{ nextRunLabel(schedule) }}</dd>
+            </div>
+            <!-- Interval cadence has no expected slot, so the missed-run check
+                 cannot report its health. last_status does instead. -->
+            <div v-if="isIntervalSchedule(schedule)" class="prop-row">
+              <dt>Status</dt><dd>{{ intervalStatusLabel(schedule) }}</dd>
             </div>
             <div class="prop-row">
               <dt>Last run</dt>
@@ -217,14 +146,25 @@
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
                   <option value="monthly">Monthly</option>
+                  <option value="interval">Every N minutes</option>
                   <option value="manual">Manual (run on click only)</option>
                 </select>
               </div>
-              <div v-if="editData.frequency !== 'manual'" class="form-group">
-                <label>Time</label>
-                <input v-model="editData.time" type="time" />
+              <div v-if="editData.frequency === 'interval'" class="form-group">
+                <label>Every (minutes)</label>
+                <input v-model.number="editData.interval_minutes" type="number" min="1" />
               </div>
-              <div v-if="editData.frequency !== 'manual'" class="form-group">
+              <div v-if="editShowsTimeOfDay" class="form-group">
+                <label>Time</label>
+                <input v-model="editData.time" type="time" :aria-invalid="cardEditBlocked || undefined" />
+                <!-- Switching an interval entry to a wall-clock cadence leaves
+                     this empty; without a time the automation would save as
+                     enabled and never fire. -->
+                <p v-if="cardEditBlocked" class="field-hint field-hint--warn">
+                  Pick a time — this cadence needs one to run.
+                </p>
+              </div>
+              <div v-if="editShowsTimeOfDay" class="form-group">
                 <label>Timezone</label>
                 <select v-model="editData.timezone">
                   <option value="Europe/Zurich">Europe/Zurich</option>
@@ -252,7 +192,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -334,7 +274,7 @@
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -363,21 +303,31 @@
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
-              <label>Model</label>
-              <ModelSelector
-                :model-value="editData.model"
-                :sections="scheduleModelSections"
-                :placeholder="editInheritedModelLabel"
-                :empty-placeholder="editInheritedModelLabel"
-                @select="selectScheduleModel"
-              />
-            </div>
-            <p class="hint">Leave empty to inherit the workspace default.</p>
+            <!-- An interval run into one existing chat inherits that chat's
+                 model and mode — prepare_schedule_chat skips the override — so
+                 offering a picker here reported a setting that never took
+                 effect. Same rule NewScheduleForm applies on create. -->
+            <p v-if="inheritsChatModel" class="hint">
+              This automation runs inside its chat, so every run uses that
+              chat's own model. Change it from the chat's model picker.
+            </p>
+            <template v-else>
+              <div class="form-group">
+                <label>Model</label>
+                <ModelSelector
+                  :model-value="editData.model"
+                  :sections="scheduleModelSections"
+                  :placeholder="editInheritedModelLabel"
+                  :empty-placeholder="editInheritedModelLabel"
+                  @select="selectScheduleModel"
+                />
+              </div>
+              <p class="hint">Leave empty to inherit the workspace default.</p>
+            </template>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -398,26 +348,30 @@
 
           <dl v-if="editingCard !== 'advanced'" class="prop-rows">
             <div class="prop-row">
-              <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
+              <dt>Archive</dt><dd>{{ scheduleSupportsAutoArchive(schedule) ? archiveLabel(schedule.archive_policy) : 'manual (keeps the bound chat)' }}</dd>
             </div>
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
+            <div v-if="editSupportsAutoArchive" class="form-group">
               <label>Archive behavior</label>
               <select v-model="editData.archive_policy">
                 <option value="manual">Manual, keep as normal chat</option>
                 <option value="auto">Automatically archive routine results</option>
               </select>
             </div>
-            <p class="hint">
+            <p v-if="editSupportsAutoArchive" class="hint">
               Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
               anything useful for the user to judge, the chat stays visible.
+            </p>
+            <p v-else class="hint">
+              Runs into one existing chat, so the conversation is kept —
+              auto-archive does not apply to this binding.
             </p>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -444,7 +398,7 @@
         <div class="card-actions">
           <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
           <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-          <button class="btn-primary" :disabled="!cardDirty" @click="saveCardEdit">Save</button>
+          <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
         </div>
       </div>
 
@@ -463,129 +417,8 @@
       </div>
     </div>
 
-    <!-- Loop detail -->
-    <div v-else-if="loop" class="scroll-body">
-      <div v-if="!loop.running" class="disabled-banner">
-        Stopped — won't fire automatically. "Run now" still works.
-      </div>
-      <div v-if="!loopEditing" class="meta-grid">
-        <div><strong>Every</strong><br />{{ loop.interval_minutes }} min</div>
-        <div>
-          <strong>Chat</strong><br />
-          <router-link v-if="!loopContextUnavailable(loop)" :to="`/chat/${loop.web_chat_id}`">
-            {{ loopChatLabel(loop) }}
-          </router-link>
-          <span v-else :class="{ 'context-unavailable': loopContextUnavailable(loop) }">{{ loopChatLabel(loop) }}</span>
-          <span v-if="loopContextUnavailable(loop)" class="context-help">Edit this loop to choose an available chat.</span>
-        </div>
-        <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
-        <div>
-          <strong>Last run</strong><br />
-          <component
-            :is="loop.last_run_at && !loopContextUnavailable(loop) ? 'router-link' : 'span'"
-            :to="loop.last_run_at && !loopContextUnavailable(loop) ? `/chat/${loop.web_chat_id}` : undefined"
-          >
-            {{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}
-            <span
-              v-if="loop.last_run_at && loop.last_status === 'running'"
-              class="spinner-dot"
-              title="Running now"
-            />
-          </component>
-        </div>
-        <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
-        <div><strong>After restart</strong><br />{{ loop.autostart ? 'resumes ticking' : 'stays stopped until started' }}</div>
-      </div>
-
-      <div v-if="loopEditing" class="edit-form">
-        <div class="form-grid">
-          <div class="form-group">
-            <label>Every (minutes)</label>
-            <input v-model.number="loopEditData.interval_minutes" type="number" min="1" />
-          </div>
-          <div class="form-group">
-            <label>Chat</label>
-            <select v-model="loopEditData.web_chat_id">
-              <optgroup v-for="group in loopChatGroups" :key="group.label" :label="group.label">
-                <option v-for="c in group.items" :key="c.key" :value="c.key">{{ c.label }}</option>
-              </optgroup>
-            </select>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Title</label>
-          <input v-model="loopEditData.title" type="text" />
-        </div>
-        <label class="checkbox-line">
-          <input v-model="loopEditData.autostart" type="checkbox" />
-          Start with the server
-        </label>
-        <div class="form-group">
-          <label>Prompt</label>
-          <textarea v-model="loopEditData.prompt" rows="10"></textarea>
-        </div>
-        <div class="form-actions">
-          <button class="btn-primary" @click="saveLoopEdit">Save</button>
-          <button class="btn-chip" @click="loopEditing = false">Cancel</button>
-        </div>
-      </div>
-
-      <div v-else class="prompt-display">
-        <div class="prompt-heading">
-          <span class="prompt-label">Prompt</span>
-          <div class="prompt-actions">
-            <button type="button" class="btn-small" @click="copyPrompt(loop.prompt, loop.loop_id)">
-              {{ promptCopyLabel(loop.loop_id) }}
-            </button>
-          </div>
-        </div>
-        <pre class="full-prompt">{{ loop.prompt }}</pre>
-      </div>
-    </div>
-
     <!-- Overview homepage: shown when nothing is selected but automations exist -->
-    <div v-else-if="workspaceSchedules.length || workspaceLoops.length" ref="overviewEl" class="scroll-body overview-body">
-      <div v-if="workspaceLoops.length" class="ov-card">
-        <div class="ov-head">
-          <span class="ov-dot"></span>
-          Loops
-          <details class="field-info">
-            <summary aria-label="About loops" title="About loops">i</summary>
-            <div class="field-info-panel">
-              <p>
-                A loop lives inside one existing chat and re-sends the same prompt every N minutes
-                (e.g. "check my PRs for changes every 10 minutes"), so the conversation keeps its
-                context between iterations.
-              </p>
-              <p>
-                It always runs with that chat's own model — change the chat's model to change the
-                loop's. Loops set to <strong>start with the server</strong> resume on boot; others
-                stay stopped until started manually. If an iteration is still running when the next
-                one is due, the loop skips it and retries shortly after.
-              </p>
-            </div>
-          </details>
-          <span class="ov-hint">{{ runningLoops.length }} running</span>
-        </div>
-        <router-link
-          v-for="l in workspaceLoops"
-          :key="l.loop_id"
-          :to="`/schedules/${l.loop_id}`"
-          class="ov-item"
-        >
-          <span class="ov-when" :class="{ 'ov-when--muted': !l.running }">
-            {{ l.running ? `every ${l.interval_minutes}m` : 'stopped' }}
-          </span>
-          <span class="ov-title">
-            {{ l.title || promptTitle(l.prompt) }}
-            <span
-              v-if="l.running && l.web_chat_id && projectStore.isChatStreaming(l.web_chat_id)"
-              class="spinner-dot"
-              title="This loop is working"
-            />
-          </span>
-        </router-link>
-      </div>
+    <div v-else-if="workspaceSchedules.length" ref="overviewEl" class="scroll-body overview-body">
       <div v-if="recentRuns.length" class="ov-card">
         <div class="ov-head">
           <span class="ov-dot"></span>
@@ -637,19 +470,19 @@
           <span class="ov-dot"></span>
           Next up
           <details class="field-info">
-            <summary aria-label="About schedules" title="About schedules">i</summary>
+            <summary aria-label="About automations" title="About automations">i</summary>
             <div class="field-info-panel">
               <p>
-                A schedule fires at a time of day — daily, weekly, monthly, or once — and usually
-                opens a fresh chat per run in a chosen workspace. Use it for briefings, reports,
-                and maintenance.
+                An automation fires at a time of day — daily, weekly, monthly, or once — or every
+                N minutes. It either opens a fresh chat per run in a chosen project, or continues
+                one existing chat and inherits its model and mode.
               </p>
               <p>
-                Missed runs (app was off when one was due) are caught up on next launch. Set
-                <strong>archive behavior</strong> to automatic and, after each clean run, a
-                classifier checks the result — if there's nothing to judge (no proposals,
-                decisions, or warnings) the chat is archived out of the way; anything worth your
-                attention stays visible.
+                Missed time-of-day runs (app was off when one was due) are caught up on next
+                launch; interval cadence just resumes. Set <strong>archive behavior</strong> to
+                automatic and, after each clean run, a classifier checks the result — if there's
+                nothing to judge (no proposals, decisions, or warnings) the chat is archived out
+                of the way; anything worth your attention stays visible.
               </p>
             </div>
           </details>
@@ -665,7 +498,7 @@
           <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
         </router-link>
         <p v-if="!upcomingSchedules.length" class="ov-empty">
-          No upcoming runs. Only manual or paused schedules.
+          No upcoming runs. Only manual or paused automations.
         </p>
       </div>
     </div>
@@ -674,8 +507,8 @@
       <div class="empty-mark"><span class="wordmark wordmark--md">automations</span></div>
       <p class="empty-hint">// pick one on the left, or tap <strong>+ New</strong>.</p>
       <p class="empty-hint">
-        <strong>Schedules</strong> fire at a time of day, usually in a new chat per run.<br />
-        <strong>Loops</strong> re-send a prompt into one existing chat every N minutes.
+        An automation fires at a time of day or every N minutes — in a new chat
+        per run, or continuing one you pick.
       </p>
     </div>
   </div>
@@ -683,17 +516,17 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
-import type { Loop, RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
+import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
-import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
-import { isPerWorkspaceRoutine, loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
+import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
 
@@ -726,6 +559,7 @@ const editData = ref({
   prompt: '',
   timezone: 'Europe/Zurich',
   frequency: 'daily',
+  interval_minutes: 10,
   days_of_week: [] as string[],
   day_of_month: null as number | null,
   contextKey: '',
@@ -733,21 +567,20 @@ const editData = ref({
   archive_policy: 'manual' as ScheduleArchivePolicy,
 })
 
-// Loops and schedules change state server-side (running / last_status /
-// next_run), so refresh them periodically while the panel is open. Schedules'
-// next_run is always computed forward from "now" on the server, so a tab left
-// open across its fire time (or asleep overnight) otherwise keeps showing a
-// stale "next run" that's drifted into the past.
-let loopPollTimer: number | undefined
+// Schedules change state server-side (last_status / next_run / missed), so
+// refresh them periodically while the panel is open. next_run is always
+// computed forward from "now" on the server, so a tab left open across a fire
+// time (or asleep overnight) otherwise keeps showing a stale "next run" that
+// has drifted into the past.
+let pollTimer: number | undefined
 let copiedPromptTimer: number | undefined
 
-function refreshSchedulesAndLoops() {
+function refreshSchedules() {
   store.fetchSchedules().catch(() => {})
-  store.fetchLoops().catch(() => {})
 }
 
 function onVisibilityChange() {
-  if (document.visibilityState === 'visible') refreshSchedulesAndLoops()
+  if (document.visibilityState === 'visible') refreshSchedules()
 }
 
 // Escape always leaves the open card. Stop it here so it doesn't also fall
@@ -761,13 +594,13 @@ function onEditKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   if (!store.models) store.fetchModels()
-  loopPollTimer = window.setInterval(refreshSchedulesAndLoops, 30_000)
+  pollTimer = window.setInterval(refreshSchedules, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onEditKeydown, true)
 })
 
 onUnmounted(() => {
-  if (loopPollTimer !== undefined) window.clearInterval(loopPollTimer)
+  if (pollTimer !== undefined) window.clearInterval(pollTimer)
   if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   document.removeEventListener('keydown', onEditKeydown, true)
@@ -777,33 +610,20 @@ const scheduleId = computed(() => (route.params.scheduleId as string) || '')
 const schedule = computed(() =>
   store.schedules.find(s => s.schedule_id === scheduleId.value) || null,
 )
-// Loops share the /schedules/:id route; their ids are "loop-…" so they never
-// collide with "sched-…" schedule ids.
-const loop = computed(() =>
-  store.loops.find(l => l.loop_id === scheduleId.value) || null,
-)
-
-watch([schedule, loop], ([s, l]) => {
-  const targetWs = s?.workspace || (l ? workspaceForLoop(l, projectStore.chats, projectStore.projects) : undefined)
+watch(schedule, (s) => {
+  // An entry migrated from a loop may carry no workspace of its own; the
+  // helper falls back to the bound chat's, which is where loops kept it.
+  const targetWs = s
+    ? workspaceForSchedule(s, projectStore.chats, projectStore.projects)
+    : undefined
   if (targetWs && targetWs !== projectStore.activeWorkspace) {
     projectStore.activeWorkspace = targetWs
   }
 }, { immediate: true })
 
-const newType = ref<'schedule' | 'loop'>('schedule')
-const loopEditing = ref(false)
-const loopEditData = ref({
-  prompt: '',
-  title: '',
-  interval_minutes: 10,
-  web_chat_id: '',
-  autostart: false,
-})
-
 watch(scheduleId, () => {
   editingCard.value = ''
   editBaseline.value = ''
-  loopEditing.value = false
   actionsOpen.value = false
   copiedPromptKey.value = ''
   purgeFinishedRuns()
@@ -857,11 +677,8 @@ watch(
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
 const workspaceSchedules = computed(() =>
-  store.schedules.filter(s => scheduleInWorkspace(s, projectStore.activeWorkspace)),
-)
-const workspaceLoops = computed(() =>
-  store.loops.filter(l => loopInWorkspace(
-    l,
+  store.schedules.filter(s => scheduleInWorkspace(
+    s,
     projectStore.activeWorkspace,
     projectStore.chats,
     projectStore.projects,
@@ -874,146 +691,24 @@ const upcomingSchedules = computed(() =>
     .slice(0, 5),
 )
 const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
-const runningLoops = computed(() => workspaceLoops.value.filter(l => l.running))
 
-const recentRuns = computed(() => {
-  const runs: Array<{
-    id: string
-    title: string
-    type: 'schedule' | 'loop'
-    lastRunAt: string
-    chatId: string
-  }> = []
-
-  for (const s of workspaceSchedules.value) {
-    if (s.last_dispatched_at && s.last_run_chat_id) {
-      runs.push({
-        id: s.schedule_id,
-        title: s.title || promptTitle(s.prompt),
-        type: 'schedule',
-        lastRunAt: s.last_dispatched_at,
-        chatId: s.last_run_chat_id,
-      })
-    }
-  }
-
-  for (const l of workspaceLoops.value) {
-    if (l.last_run_at && l.web_chat_id) {
-      runs.push({
-        id: l.loop_id,
-        title: l.title || promptTitle(l.prompt),
-        type: 'loop',
-        lastRunAt: l.last_run_at,
-        chatId: l.web_chat_id,
-      })
-    }
-  }
-
-  return runs.sort((a, b) => (a.lastRunAt > b.lastRunAt ? -1 : 1)).slice(0, 5)
-})
-
-const loopChatGroups = computed(() => {
-  const groups: { label: string; items: { key: string; label: string }[] }[] = []
-  for (const p of projectStore.projects.filter(p => p.workspace === projectStore.activeWorkspace)) {
-    const items = projectStore.projectChats(p.project_id).map(c => ({
-      key: c.chat_id,
-      label: c.title,
+const recentRuns = computed(() =>
+  workspaceSchedules.value
+    .filter(s => s.last_dispatched_at && s.last_run_chat_id)
+    .map(s => ({
+      id: s.schedule_id,
+      title: s.title || promptTitle(s.prompt),
+      lastRunAt: s.last_dispatched_at!,
+      chatId: s.last_run_chat_id!,
     }))
-    if (items.length) groups.push({ label: `${p.name} (${p.workspace})`, items })
-  }
-  return groups
-})
-
-function loopChatLabel(l: Loop): string {
-  if (l.context_label) return l.context_label
-  const chat = projectStore.chats.find(c => c.chat_id === l.web_chat_id)
-  return chat?.title || 'Unavailable chat'
-}
-
-function loopContextUnavailable(l: Loop): boolean {
-  return !l.context_label && !projectStore.chats.some(c => c.chat_id === l.web_chat_id)
-}
-
-function loopStatusLabel(l: Loop): string {
-  if (l.last_status === 'missing-chat') return 'stopped — chat missing'
-  if (l.last_status === 'busy') return 'waiting — chat busy'
-  if (l.last_status === 'running') return 'iteration running…'
-  if (l.last_status === 'error') return 'last run failed'
-  if (l.last_status === 'ok') return 'ok'
-  return l.running ? 'waiting for first run' : 'never ran'
-}
-
-function startLoopEdit() {
-  if (!loop.value) return
-  loopEditData.value = {
-    prompt: loop.value.prompt,
-    title: loop.value.title || '',
-    interval_minutes: loop.value.interval_minutes,
-    web_chat_id: loop.value.web_chat_id,
-    autostart: loop.value.autostart,
-  }
-  loopEditing.value = true
-}
-
-async function saveLoopEdit() {
-  if (!loop.value) return
-  await store.updateLoop(loop.value.loop_id, { ...loopEditData.value })
-  loopEditing.value = false
-}
-
-async function onToggleLoopRunning() {
-  if (!loop.value) return
-  const wasChatId = loop.value.web_chat_id
-  const nextRunning = !loop.value.running
-  try {
-    const updated = await store.updateLoop(loop.value.loop_id, { running: nextRunning })
-    if (nextRunning && updated.web_chat_id !== wasChatId) {
-      projectStore.pushToast({
-        chat_id: updated.web_chat_id,
-        title: 'Loop resumed in a new chat',
-        body: 'Its chat was archived, so this loop now continues in a fresh one.',
-      })
-    }
-  } catch (e) {
-    projectStore.pushToast({
-      chat_id: wasChatId,
-      title: 'Loop not started',
-      body: e instanceof Error ? e.message : 'Could not resume this loop.',
-    })
-  }
-}
-
-async function onRunLoopNow() {
-  if (!loop.value) return
-  const l = loop.value
-  try {
-    await store.runLoopNow(l.loop_id)
-    projectStore.pushToast({
-      chat_id: l.web_chat_id,
-      title: 'Loop iteration started',
-      body: l.title || promptTitle(l.prompt),
-    })
-  } catch {
-    projectStore.pushToast({
-      chat_id: l.web_chat_id,
-      title: 'Loop not started',
-      body: 'The chat has a turn in flight — try again when it finishes.',
-    })
-  }
-  await store.fetchLoops().catch(() => {})
-}
-
-async function onDeleteLoop() {
-  if (!loop.value) return
-  if (!await askConfirm('Delete this loop? Future iterations will stop.', {
-    title: 'Delete loop',
-    confirmLabel: 'Delete loop',
-    destructive: true,
-  })) return
-  const id = loop.value.loop_id
-  await store.deleteLoop(id)
-  router.push('/schedules')
-}
+    // Compared as instants, not as strings. `last_dispatched_at` is written in
+    // two offsets — UTC from the interval and run-now paths, the entry's own
+    // timezone from the wall-clock tick/catch-up — and ISO strings only sort
+    // correctly at a fixed offset, so an evening-local stamp sorted above a
+    // genuinely newer UTC one and could push it off the five-row list.
+    .sort((a, b) => Date.parse(b.lastRunAt) - Date.parse(a.lastRunAt))
+    .slice(0, 5),
+)
 
 function archiveLabel(policy: ScheduleArchivePolicy | undefined): string {
   return policy === 'auto' ? 'automatic (archive routine results)' : 'manual (keep chat)'
@@ -1050,8 +745,9 @@ const editInheritedModelLabel = computed(() => {
   const provider = projectStore.workspaceProviderOptions.find(
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
-  const model = workspace?.default_model
-    || projectStore.workspaceAppDefaultModel
+  // Workspaces no longer pin a model: the effective default is the
+  // provider's own default from the Models tab.
+  const model = store.models?.provider_defaults?.[workspace?.default_provider || '']
     || store.models?.default
     || ''
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
@@ -1088,8 +784,14 @@ function promptTitle(prompt: string): string {
 }
 
 function nextRunLabel(s: Schedule): string {
-  if (!s.enabled) return 'Disabled'
+  if (!s.enabled) return isIntervalSchedule(s) ? 'Stopped' : 'Disabled'
   if (!s.next_run) return '—'
+  // Interval cadence is measured from the last run, and a run skipped because
+  // the chat was busy leaves next_run in the past. Say "as soon as the chat is
+  // free" rather than rendering a stale absolute time as if it were upcoming.
+  if (isIntervalSchedule(s) && new Date(s.next_run).getTime() <= Date.now()) {
+    return s.last_status === 'busy' ? 'when the chat is free' : 'due now'
+  }
   try {
     const d = new Date(s.next_run)
     const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -1107,6 +809,13 @@ function nextRunLabel(s: Schedule): string {
 }
 
 function modelLabel(s: Schedule): string {
+  if (isIntervalSchedule(s) && s.web_chat_id) {
+    // A chat-bound interval run always uses the chat's own settings; the
+    // backend ignores a model stored here, so never present one as active.
+    return s.effective_model
+      ? `${s.effective_model} (from the target chat)`
+      : 'From the target chat'
+  }
   if (s.model) return `${s.model} (override)`
   const source = s.web_chat_id
     ? 'target chat'
@@ -1137,8 +846,76 @@ function providerLabel(s: Schedule): string {
     : `${label} (inherited from ${workspaceDisplayName(s.workspace)})`
 }
 
+// An interval entry bound to one existing chat runs inside it and inherits its
+// model/mode; `prepare_schedule_chat` deliberately skips the override. Mirrors
+// NewScheduleForm's `inheritsChatModel`.
+const inheritsChatModel = computed(() => {
+  const s = schedule.value
+  return !!s && bindsFixedChat(s.frequency, s.web_chat_id, s.web_project_id)
+})
+
+function isIntervalSchedule(s: Schedule): boolean {
+  return s.frequency === 'interval'
+}
+
+// Interval cadence is relative and manual never auto-fires, so neither has a
+// time of day or a timezone to show.
+function showsTimeOfDay(s: Schedule): boolean {
+  return s.frequency !== 'manual' && !isIntervalSchedule(s)
+}
+
+const editShowsTimeOfDay = computed(
+  () => editData.value.frequency !== 'manual' && editData.value.frequency !== 'interval',
+)
+
+// Archiving the chat an interval is bound to makes the next run fork a
+// replacement and archive that too, so the dispatcher refuses to archive these.
+// The setting was still offered and still rendered as "automatic", describing
+// behaviour that never happened. A project-bound interval opens a fresh chat
+// per run and is exactly what auto-archive is for, so only this binding is out.
+const editSupportsAutoArchive = computed(
+  () => !contextBindsFixedChat(editData.value.frequency, editData.value.contextKey),
+)
+watch(editSupportsAutoArchive, (supported) => {
+  if (!supported) editData.value.archive_policy = 'manual'
+})
+
+// An interval entry has no `daily_time_utc`, so editing one to a wall-clock
+// cadence starts with the time field empty. Saving that persisted an empty
+// `daily_time_utc`, which `compute_next_run` cannot parse — leaving an
+// automation that reads as enabled in the UI and silently never fires. Every
+// Save in this panel sends the whole payload, so all of them are gated.
+const cardEditValid = computed(
+  () => !editShowsTimeOfDay.value || /^\d{2}:\d{2}$/.test(editData.value.time || ''),
+)
+const cardEditBlocked = computed(() => cardDirty.value && !cardEditValid.value)
+
+function enabledToggleLabel(s: Schedule): string {
+  if (isIntervalSchedule(s)) return s.enabled ? 'Stop' : 'Start'
+  return s.enabled ? 'Disable' : 'Enable'
+}
+
+// Interval entries have no expected slot, so the missed-run check cannot speak
+// for them. last_status is the server's health report instead.
+function intervalStatusLabel(s: Schedule): string {
+  if (s.last_status === 'missing-chat') return 'stopped — chat missing'
+  if (s.last_status === 'busy') return 'waiting — chat busy'
+  if (s.last_status === 'running') return 'run in progress…'
+  if (s.last_status === 'error') return 'last run failed'
+  // `_schedule_dispatch_status` reports "skipped" when the run reached the
+  // provider but stopped short of a result: an approval card, an
+  // AskUserQuestion, or a deferred retry after a quota rejection. Without an
+  // arm here it fell through to "waiting for first run", so an automation that
+  // had run many times and was blocked on a prompt read as one that had never
+  // run at all.
+  if (s.last_status === 'skipped') return 'last run needs you — check the chat'
+  if (s.last_status === 'ok') return 'ok'
+  return s.enabled ? 'waiting for first run' : 'never ran'
+}
+
 function frequencyLabel(s: Schedule): string {
   if (s.frequency === 'manual') return 'Manual (run on click only)'
+  if (s.frequency === 'interval') return `Every ${s.interval_minutes} min`
   if (s.frequency === 'monthly') return `Monthly, day ${s.day_of_month}`
   if (s.frequency === 'weekly') {
     if (s.days_of_week?.length) return `Weekly (${s.days_of_week.join(', ')})`
@@ -1250,6 +1027,7 @@ function startCardEdit(card: Exclude<EditCard, ''>) {
     prompt: schedule.value.prompt,
     timezone: schedule.value.timezone_name,
     frequency: schedule.value.frequency || (schedule.value.days_of_week?.length ? 'weekly' : 'daily'),
+    interval_minutes: schedule.value.interval_minutes || 10,
     days_of_week: schedule.value.days_of_week ? [...schedule.value.days_of_week] : [],
     day_of_month: schedule.value.day_of_month ?? null,
     contextKey: contextKeyFor(schedule.value),
@@ -1274,10 +1052,11 @@ async function saveCardEdit() {
     workspace: d.workspace,
     title: d.title,
     description: d.description,
-    time: d.frequency === 'manual' ? '' : d.time,
+    time: d.frequency === 'manual' || d.frequency === 'interval' ? '' : d.time,
     prompt: d.prompt,
     timezone: d.timezone,
     frequency: d.frequency,
+    interval_minutes: d.frequency === 'interval' ? d.interval_minutes : undefined,
     days_of_week: d.frequency === 'weekly' && d.days_of_week.length > 0 ? d.days_of_week : null,
     day_of_month: d.frequency === 'monthly' ? d.day_of_month : null,
     model: d.model,
@@ -1333,7 +1112,22 @@ async function runNow() {
   if (startingBySchedule.value.has(scheduleKey)) return
   startingBySchedule.value = new Set([...startingBySchedule.value, scheduleKey])
   try {
-    const result = await store.runScheduleNow(scheduleKey)
+    let result
+    try {
+      result = await store.runScheduleNow(scheduleKey)
+    } catch (e) {
+      // An interval run into a chat that is already streaming is refused
+      // rather than queued behind the live turn. Say so instead of failing
+      // silently, which read as "the button does nothing".
+      await store.fetchSchedules()
+      projectStore.pushErrorToast(
+        'Run not started',
+        e instanceof Error && e.message
+          ? e.message
+          : 'The target chat has a turn in flight — try again when it finishes.',
+      )
+      return
+    }
     await store.fetchSchedules()
     if (result.chat_id) {
       runningBySchedule.value = { ...runningBySchedule.value, [scheduleKey]: result.chat_id }
@@ -1408,9 +1202,9 @@ async function onToggleEnabled() {
 
 async function onDelete() {
   if (!schedule.value) return
-  if (!await askConfirm('Delete this schedule? It will stop running.', {
-    title: 'Delete schedule',
-    confirmLabel: 'Delete schedule',
+  if (!await askConfirm('Delete this automation? It will stop running.', {
+    title: 'Delete automation',
+    confirmLabel: 'Delete automation',
     destructive: true,
   })) return
   const id = schedule.value.schedule_id
@@ -1578,6 +1372,8 @@ function closeSchedule() {
 }
 .form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group label { font-size: var(--text-xs); color: var(--fg2); }
+.field-hint { margin: 4px 0 0; font-size: var(--text-xs); }
+.field-hint--warn { color: var(--warning); }
 .form-group input, .form-group select, .form-group textarea {
   padding: 6px 10px;
   border: 1px solid var(--border);
@@ -1740,26 +1536,10 @@ function closeSchedule() {
   .system-workspace-control { grid-template-columns: 1fr; }
 }
 
-/* ── New-automation type toggle ────────────────────────────────── */
-.type-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.type-active {
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 600;
-}
-.type-hint { margin-bottom: 12px; }
-
-.checkbox-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  cursor: pointer;
-}
-.checkbox-line input { flex-shrink: 0; }
-
-.ov-when--muted { color: var(--fg3); }
+/* The "what is this page" disclosure above the new-automation form. Every
+   other .field-info sits inline next to a heading; this one is the only block
+   on its line, so it needs its own bottom margin. */
+.field-info--block { margin-bottom: 12px; }
 
 /* ── Overview (next up + missed) ─────────────────────────────────
    Aligned to HomeRecentChats .home-tier language: header is a mono tier

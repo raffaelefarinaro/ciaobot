@@ -294,6 +294,88 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
     assert guide == Path(pcm._config.agent_root("work")) / "CLAUDE.md"
 
 
+@pytest.mark.asyncio
+async def test_archive_postprocess_system_chat_never_writes_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system-schedule chat keeps its insights but may not write memory.
+
+    The nightly curation chat's transcript contains the curation prompt's own
+    rules; extracting them as "Decisions" auto-promoted the machinery's
+    self-description into the bounded regions. Insights still run (the archive
+    is the audit trail of the unattended run) but memory proposals and the
+    project-doc fold are disabled.
+    """
+    pcm = _make_manager(tmp_path)
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
+    )
+    project = pcm.create_project("curation-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Memory curation")
+    chat.schedule_id = "system-memory-curation@work"
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-system",
+            turn_count=3,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls, "insights must still run for system chats"
+    assert calls[0]["memory_proposals_enabled"] is False
+    assert calls[0]["project_doc_path"] == ""
+
+
+@pytest.mark.asyncio
+async def test_archive_postprocess_user_chat_keeps_memory_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The system-chat gate must not disable memory writes for user chats."""
+    pcm = _make_manager(tmp_path)
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
+    )
+    project = pcm.create_project("user-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="ordinary chat")
+    chat.schedule_id = "sched-abc123"
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-user",
+            turn_count=3,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls
+    assert calls[0]["memory_proposals_enabled"] is True
+
+
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -384,231 +466,30 @@ async def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert archived[0]["project_id"] == project.project_id
 
 
-async def test_archiving_supervisor_also_archives_delegate_subchats(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q2-delegate-archive", workspace="work")
-    parent = pcm.create_chat(project.project_id, title="supervisor")
-    child = pcm.create_chat(
-        project.project_id,
-        title="subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-
-    cap = _EventCapture(pcm)
-    await pcm.archive_chat(parent.chat_id)
-
-    assert pcm.get_chat(parent.chat_id).archived is True
-    assert pcm.get_chat(child.chat_id).archived is True
-    archived_ids = [
-        event["chat_id"]
-        for event in cap.drain()
-        if event.get("type") == "chat_archived"
-    ]
-    assert archived_ids == [parent.chat_id, child.chat_id]
-
-
-async def test_archive_cascade_reaches_nested_delegate_descendants(tmp_path: Path) -> None:
-    """Delegates cannot nest today, but the cascade walks the whole tree so a
-    registry that does contain a grandchild still archives cleanly."""
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q2-nested-archive", workspace="work")
-    parent = pcm.create_chat(project.project_id, title="supervisor")
-    child = pcm.create_chat(
-        project.project_id,
-        title="subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-    grandchild = pcm.create_chat(
-        project.project_id,
-        title="sub-subchat",
-        spawned_from_chat_id=child.chat_id,
-    )
-    unrelated = pcm.create_chat(project.project_id, title="unrelated")
-
-    await pcm.archive_chat(parent.chat_id)
-
-    assert pcm.get_chat(child.chat_id).archived is True
-    assert pcm.get_chat(grandchild.chat_id).archived is True
-    assert pcm.get_chat(unrelated.chat_id).archived is False
-
-
-async def test_archive_cascade_postprocesses_each_subchat(
+async def test_archive_route_returns_the_postprocess_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every auto-archived subchat gets its own post-archive processing, and a
-    subchat that fails to archive neither strands its siblings nor swallows the
-    supervisor's own outcome (which is what drives the caller's post-processing).
-    """
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q2-cascade-postprocess", workspace="work")
-    parent = pcm.create_chat(project.project_id, title="supervisor")
-    good = pcm.create_chat(
-        project.project_id,
-        title="healthy subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-    bad = pcm.create_chat(
-        project.project_id,
-        title="failing subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
+    """The response carries the pipeline's opening state, not just a bare ok.
 
-    # An empty chat archives to None, which would skip post-processing
-    # entirely; stub the transcript write so each chat yields a real outcome.
-    def fake_archive_session(*, ctx: object, **_kwargs: object) -> Path:
-        chat_id = ctx.key  # type: ignore[attr-defined]
-        if chat_id == bad.chat_id:
-            raise RuntimeError("transcript write failed")
-        return tmp_path / f"{chat_id}.md"
-
-    monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
-
-    postprocessed: list[str] = []
-    monkeypatch.setattr(
-        pcm,
-        "run_archive_postprocess",
-        lambda chat_id, outcome, chat_meta, project_meta: postprocessed.append(chat_id),
-    )
-
-    result = await pcm.archive_chat(parent.chat_id)
-
-    assert result is not None
-    assert result.outcome is not None
-    # The supervisor's post-processing is the caller's job, so only the
-    # cascaded subchat is handled here.
-    assert postprocessed == [good.chat_id]
-    assert pcm.get_chat(parent.chat_id).archived is True
-    assert pcm.get_chat(good.chat_id).archived is True
-    # The failure is skipped, not retried — but it is reported, not swallowed.
-    # A half-archived delegate (MCP grant revoked, `archived` never set) cannot
-    # be healed by _reconcile_half_archived_chats, so a bare ok would leave the
-    # user with no way to know it needs attention.
-    assert pcm.get_chat(bad.chat_id).archived is False
-    assert result.archived_ids() == [good.chat_id]
-    assert result.failed_ids() == [bad.chat_id]
-    failed_row = next(row for row in result.delegates if row.chat_id == bad.chat_id)
-    assert failed_row.archived is False
-    assert "transcript write failed" in failed_row.error
-
-
-async def test_archive_stops_a_running_delegate_before_snapshotting_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Ordering is the whole point, not just that both steps happen.
-
-    Archiving snapshots the transcript, revokes the MCP grant and deletes the
-    provider session blob. A delegate still mid-turn at that moment loses
-    whatever it emits next, into a chat that can no longer be continued. So the
-    stop has to land first — and because the archive is immediate rather than
-    deferred, the cascade has to report that it discarded a running turn.
-    """
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q2-stop-before-archive", workspace="work")
-    parent = pcm.create_chat(project.project_id, title="supervisor")
-    running = pcm.create_chat(
-        project.project_id,
-        title="busy subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-    idle = pcm.create_chat(
-        project.project_id,
-        title="idle subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-
-    calls: list[str] = []
-    live = {running.chat_id}
-
-    # A live turn is exactly "the broker has a stream for this chat".
-    real_get = pcm._broker.get
-    monkeypatch.setattr(
-        pcm._broker,
-        "get",
-        lambda chat_id: object() if chat_id in live else real_get(chat_id),
-    )
-
-    async def fake_stop(chat_id: str) -> bool:
-        calls.append(f"stop:{chat_id}")
-        live.discard(chat_id)
-        return True
-
-    monkeypatch.setattr(pcm, "stop_chat", fake_stop)
-
-    def fake_archive_session(*, ctx: object, **_kwargs: object) -> Path:
-        chat_id = ctx.key  # type: ignore[attr-defined]
-        calls.append(f"archive:{chat_id}")
-        return tmp_path / f"{chat_id}.md"
-
-    monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
-    monkeypatch.setattr(
-        pcm, "run_archive_postprocess", lambda *_a, **_k: None
-    )
-
-    result = await pcm.archive_chat(parent.chat_id)
-
-    assert result is not None
-    # The running delegate's turn ends before its transcript is written.
-    assert calls.index(f"stop:{running.chat_id}") < calls.index(
-        f"archive:{running.chat_id}"
-    )
-    # An idle delegate is not stopped at all — nothing to stop.
-    assert f"stop:{idle.chat_id}" not in calls
-    # Only the delegate that was actually running is reported as interrupted,
-    # and both still end up archived.
-    assert result.stopped_ids() == [running.chat_id]
-    assert sorted(result.archived_ids()) == sorted([running.chat_id, idle.chat_id])
-    assert pcm.get_chat(running.chat_id).archived is True
-    assert pcm.get_chat(idle.chat_id).archived is True
-
-
-async def test_archive_route_reports_the_cascade_per_subchat(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The response has to name what happened, not answer a bare ok.
-
-    The PWA marks children archived from `archived_chat_ids`; a delegate the
-    server skipped must stay out of it, or the client hides a chat that is still
-    streaming and spending tokens.
+    The client that archived clears its pane as soon as this resolves, so a
+    `chat_postprocess` event emitted a moment later would be missed and the
+    chat would settle showing nothing about what Ciaobot took from it.
     """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-archive-report", workspace="work")
-    parent = pcm.create_chat(project.project_id, title="supervisor")
-    good = pcm.create_chat(
-        project.project_id,
-        title="healthy subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
-    bad = pcm.create_chat(
-        project.project_id,
-        title="failing subchat",
-        spawned_from_chat_id=parent.chat_id,
-    )
+    chat = pcm.create_chat(project.project_id, title="chat")
 
-    live = {good.chat_id}
-    real_get = pcm._broker.get
-    monkeypatch.setattr(
-        pcm._broker,
-        "get",
-        lambda chat_id: object() if chat_id in live else real_get(chat_id),
-    )
-
-    async def fake_stop(chat_id: str) -> bool:
-        live.discard(chat_id)
-        return True
-
-    monkeypatch.setattr(pcm, "stop_chat", fake_stop)
-
+    # An empty chat archives to None, which would skip post-processing
+    # entirely; stub the transcript write so it yields a real outcome.
     def fake_archive_session(*, ctx: object, **_kwargs: object) -> Path:
-        chat_id = ctx.key  # type: ignore[attr-defined]
-        if chat_id == bad.chat_id:
-            raise RuntimeError("transcript write failed")
-        return tmp_path / f"{chat_id}.md"
+        return tmp_path / f"{ctx.key}.md"  # type: ignore[attr-defined]
 
     monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
+
     def fake_postprocess(chat_id: str, *_args: object, **_kwargs: object) -> None:
-        chat = pcm.get_chat(chat_id)
-        assert chat is not None
-        chat.postprocess = {
+        target = pcm.get_chat(chat_id)
+        assert target is not None
+        target.postprocess = {
             "state": "running",
             "step": "insights",
             "expected": ["insights"],
@@ -624,27 +505,19 @@ async def test_archive_route_reports_the_cascade_per_subchat(
     request = Request({
         "type": "http",
         "method": "POST",
-        "path": f"/api/chats/{parent.chat_id}/archive",
+        "path": f"/api/chats/{chat.chat_id}/archive",
         "headers": [],
-        "path_params": {"chat_id": parent.chat_id},
+        "path_params": {"chat_id": chat.chat_id},
         "app": app,
     })
     response = await chat_archive(request)
     payload = json.loads(response.body)
 
     assert payload["ok"] is True
+    assert payload["archived_to"] is not None
     assert payload["postprocess"]["state"] == "running"
     assert payload["postprocess"]["step"] == "insights"
-    # The supervisor and the subchat that made it, and nothing else.
-    assert payload["archived_chat_ids"] == [parent.chat_id, good.chat_id]
-    assert bad.chat_id not in payload["archived_chat_ids"]
-    assert payload["stopped_chat_ids"] == [good.chat_id]
-    assert payload["failed_chat_ids"] == [bad.chat_id]
-    rows = {row["chat_id"]: row for row in payload["subchats"]}
-    assert rows[good.chat_id]["archived"] is True
-    assert rows[good.chat_id]["stopped_mid_turn"] is True
-    assert rows[bad.chat_id]["archived"] is False
-    assert "transcript write failed" in rows[bad.chat_id]["error"]
+    assert pcm.get_chat(chat.chat_id).archived is True
 
 
 async def test_delete_and_archive_reclaim_opencode_sessions(

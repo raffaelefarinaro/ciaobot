@@ -45,7 +45,6 @@ from ciao.jsonio import write_private_text
 from ciao.memory_tool import resolve_region
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import WorkspaceConfig
-from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -66,10 +65,19 @@ from ciao.providers.opencode import (
 )
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
+    DEFAULT_INTERVAL_MINUTES,
+    FREQUENCIES,
+    INTERVAL_FREQUENCY,
     ScheduleEntry,
     compute_last_expected_run,
     compute_next_run,
+    is_interval,
     normalize_archive_policy,
+    normalize_interval_minutes,
+    publish_automations_changed,
+    stamp_fallback_project,
+    wall_clock_time_error,
+    wall_clock_time_value_error,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -840,9 +848,6 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
-        # App-wide fallback when a workspace's default_model is empty, so the
-        # PWA can label "Inherit default (<model>)" instead of a vague hint.
-        "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
     }
 
@@ -1604,6 +1609,22 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(config))
 
 
+def _gws_manual_pkce_store(request: Request):
+    """Return the app's manual-flow PKCE verifier store, creating one on first use.
+
+    Mirrors :func:`_gws_relogin_manager`: lazily attached so a bare test app
+    (only ``config`` on ``app.state``) still works, while ``main.py`` wires
+    the shared instance at startup. See ``ManualPkceStore`` (issue #354).
+    """
+    store = getattr(request.app.state, "gws_manual_pkce_store", None)
+    if store is None:
+        from ciao.gws_auth import ManualPkceStore
+
+        store = ManualPkceStore()
+        request.app.state.gws_manual_pkce_store = store
+    return store
+
+
 async def gws_auth_url(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -1629,12 +1650,19 @@ async def gws_auth_url(request: Request) -> JSONResponse:
             return JSONResponse({"error": "client_secret.json missing client_id"}, status_code=400)
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
+        # PKCE (issue #354): this manual/paste flow cannot validate `state` on
+        # paste-back (the user, not the browser, carries the code across the
+        # trust boundary), so a code_challenge is the RFC 8252 remedy. The
+        # verifier is held server-side, keyed by profile, until the matching
+        # exchange call.
+        flow_id, code_verifier = _gws_manual_pkce_store(request).start(profile)
         auth_url = gws_auth.build_auth_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scopes=gws_auth.scopes_for_profile(profile),
+            code_challenge=gws_auth.code_challenge_s256(code_verifier),
         )
-        return JSONResponse({"auth_url": auth_url})
+        return JSONResponse({"auth_url": auth_url, "flow_id": flow_id})
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
@@ -1647,6 +1675,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         body = await request.json()
         profile = body.get("profile")
         code_or_url = body.get("code")
+        flow_id = body.get("flow_id")
     except Exception:
         return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
@@ -1656,6 +1685,8 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
 
     if not code_or_url:
         return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
+    if flow_id is not None and not isinstance(flow_id, str):
+        return JSONResponse({"error": "Invalid flow ID"}, status_code=400)
 
     config_dir = _gws_profile_config_dir(config, profile)
     if config_dir is None:
@@ -1668,6 +1699,53 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
         code = gws_auth.extract_code_from_input(code_or_url)
+        # The flow ID binds this exchange to the exact auth URL that produced
+        # the pasted code. Without it, an old client must not accidentally use
+        # another tab's verifier.
+        pkce_store = _gws_manual_pkce_store(request)
+        if flow_id:
+            pkce_status = pkce_store.status(flow_id, profile)
+        else:
+            pkce_status = "none"
+            if pkce_store.status_for_profile(profile) == "active":
+                return JSONResponse(
+                    {"error": "This sign-in flow needs a flow ID. Start manual connect again."},
+                    status_code=400,
+                )
+        if flow_id and pkce_status == "none":
+            # An explicit flow ID the store does not know cannot mean "this
+            # flow never used PKCE" — the client only has an ID because the
+            # auth URL it came from carried a challenge. The usual cause is a
+            # server restart between building that URL and pasting the code
+            # back, which drops the in-memory verifier. Exchanging anyway sends
+            # a challenged code with no verifier, which Google must reject, so
+            # the user would see `invalid_grant` instead of what to do next.
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in flow is no longer available (the server "
+                        "restarted before the code was pasted back). Start "
+                        "manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
+        if pkce_status == "expired":
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in link expired before the code was pasted "
+                        "back. Start manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
+        if pkce_status == "superseded":
+            return JSONResponse(
+                {"error": "This sign-in flow was replaced. Start manual connect again."},
+                status_code=400,
+            )
+        code_verifier = pkce_store.peek(flow_id, profile) if pkce_status == "active" else None
         # Token exchange + credential write happen off the event loop; the
         # helper never logs the code, tokens, or secret.
         await asyncio.to_thread(
@@ -1676,7 +1754,16 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             profile,
             code=code,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
+        # Retire the flow now that its code is spent. Only on success: a failed
+        # exchange (wrong code, transient error) must keep the verifier so the
+        # paste can be retried. Leaving it active held a spent secret for the
+        # rest of its TTL and, because `status_for_profile` then still reported
+        # "active", refused any flow-ID-less exchange for this profile in the
+        # meantime.
+        if flow_id:
+            pkce_store.consume(flow_id, profile)
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
         # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
@@ -2428,7 +2515,6 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -2475,13 +2561,6 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
-    if "control_surface" in body:
-        surface = str(body.get("control_surface") or "").strip()
-        if surface not in {"", "legacy", "mcp", "auto"}:
-            return JSONResponse(
-                {"error": "control_surface must be legacy, mcp, auto, or empty"},
-                status_code=400,
-            )
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2492,15 +2571,6 @@ async def chat_detail(request: Request) -> JSONResponse:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
-        if chat is not None and "control_surface" in body:
-            changed = chat.control_surface != surface
-            chat.control_surface = surface
-            if changed:
-                pcm._revoke_mcp_chat(chat_id)
-                provider_service = pcm._providers.pop(chat_id, None)
-                if provider_service is not None:
-                    asyncio.create_task(provider_service.disconnect())
-                pcm._save(reason="chat_control_surface")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2719,25 +2789,12 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    result = await pcm.archive_chat(chat_id)
-    outcome = result.outcome if result is not None else None
+    outcome = await pcm.archive_chat(chat_id)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
-    # Report the cascade per subchat rather than a bare ok. The client marks
-    # only what `archived_chat_ids` confirms — a delegate the server skipped is
-    # still live, and hiding it from the sidebar while it streams and spends
-    # tokens is worse than leaving the row visible. `stopped_chat_ids` is what
-    # the user is warned about; `failed_chat_ids` are the subchats they may
-    # still need to deal with by hand.
-    delegates = result.delegates if result is not None else []
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
-        # A chat with an empty transcript yields no ArchiveOutcome but is still
-        # archived, so this is keyed off the cascade running at all.
-        "archived_chat_ids": (
-            ([chat_id] + result.archived_ids()) if result is not None else []
-        ),
         # The initiating client clears the active pane as soon as this response
         # arrives. Return the lifecycle record as well as publishing it over
         # /ws/events, so that client cannot miss the first "running" state in
@@ -2747,9 +2804,6 @@ async def chat_archive(request: Request) -> JSONResponse:
             if chat_meta and chat_meta.postprocess
             else None
         ),
-        "stopped_chat_ids": result.stopped_ids() if result is not None else [],
-        "failed_chat_ids": result.failed_ids() if result is not None else [],
-        "subchats": [row.to_dict() for row in delegates],
     })
 
 
@@ -3652,6 +3706,19 @@ async def chat_subagents(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse([])
 
+    # ``?agent_id=`` narrows the response to one agent. The read-only subagent
+    # view shows a single transcript and polls it while the agent works;
+    # without this it re-fetched and re-rendered every subagent the chat ever
+    # spawned on every tick. Narrowing skips the sibling transcript reads
+    # entirely rather than filtering after the fact.
+    # Normalised once, here. The SDK and the opencode tree key agents by the
+    # bare id while the local-transcript fallback uses the file stem
+    # ("agent-a319…"), and both forms reach the client — so a prefixed id
+    # arriving here matched nothing, the narrow SDK read came back empty, and
+    # the request fell through to the whole-directory fallback it exists to
+    # avoid, on every poll.
+    wanted_agent_id = (request.query_params.get("agent_id") or "").strip().removeprefix("agent-")
+
     config = request.app.state.config
     if getattr(chat, "provider", "claude") == "opencode":
         opencode_entries: list[dict] = []
@@ -3672,6 +3739,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
             if not agent_id:
+                continue
+            if wanted_agent_id and agent_id.removeprefix("agent-") != wanted_agent_id:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
@@ -3699,35 +3768,60 @@ async def chat_subagents(request: Request) -> JSONResponse:
     resolver = getattr(pcm, "_agent_root_for_chat", None)
     agent_root = resolver(chat_id) if resolver is not None else None
 
-    def _finalize(entries: list[dict]) -> JSONResponse:
-        _merge_subagent_dispatch_meta(
-            entries, chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    async def _finalize(entries: list[dict]) -> JSONResponse:
+        # Catch-all for the local-transcript fallbacks, which read the whole
+        # session directory and cannot narrow at the source. Those entries are
+        # keyed by file stem ("agent-a319…") while the SDK and the route use
+        # the bare id, so compare on the bare form or the filter drops the
+        # agent it was asked for. `wanted_agent_id` is already bare.
+        if wanted_agent_id:
+            entries = [
+                e
+                for e in entries
+                if str(e.get("agent_id", "")).removeprefix("agent-") == wanted_agent_id
+            ]
+        # Off the loop: this walks the whole parent session JSONL, which on a
+        # long Claude chat is tens of MB, and the read-only subagent view polls
+        # this endpoint every 4 seconds. Done inline it stalled every in-flight
+        # stream for the length of the parse. `_running_subagent_rows` already
+        # does the identical work in a thread.
+        await asyncio.to_thread(
+            _merge_subagent_dispatch_meta,
+            entries,
+            chat.session_id,
+            Path(config.workspace_root),
+            agent_root=agent_root,
         )
         return JSONResponse(entries)
 
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return _finalize(
+        return await _finalize(
             _local_subagent_transcripts(
                 chat.session_id, Path(config.workspace_root), agent_root=agent_root
             )
         )
 
-    try:
-        agent_ids = list_subagents(chat.session_id, directory=workspace)
-    except (FileNotFoundError, ValueError):
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    if wanted_agent_id:
+        # Skip discovery: the caller already knows the id, and list_subagents
+        # only exists to enumerate the siblings we are deliberately not reading.
+        agent_ids = [wanted_agent_id]
+    else:
+        try:
+            agent_ids = list_subagents(chat.session_id, directory=workspace)
+        except (FileNotFoundError, ValueError):
+            return await _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
-    except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return _finalize(
-            _local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
+        except Exception:  # noqa: BLE001 — defensive against SDK surprises
+            return await _finalize(
+                _local_subagent_transcripts(
+                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
+                )
             )
-        )
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -3750,7 +3844,126 @@ async def chat_subagents(request: Request) -> JSONResponse:
             chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
 
-    return _finalize(result)
+    return await _finalize(result)
+
+
+async def running_subagents(request: Request) -> JSONResponse:
+    """Subagents working right now, per chat, for the sidebar's subagent rows.
+
+    ``/api/chats/{id}/subagents`` is the transcript endpoint: it renders every
+    subagent a chat ever spawned, which is far too much to poll for a sidebar
+    that only shows live work. This returns dispatch metadata alone (no
+    messages) and only for chats the manager already considers active, so the
+    cost is one JSONL parse per working chat rather than one per chat in the
+    registry.
+
+    Shape: ``{"chats": {chat_id: [{agent_id, description, subagent_type,
+    status, is_async, turn_index}]}}``. Chats with nothing running are omitted
+    entirely, which is what lets the client drop their rows.
+
+    For Claude chats this is the set the parent session can name — in practice
+    background dispatches, because a foreground Task only appears in the parent
+    file once it has already finished (see
+    ``subagent_tracking.running_agents``). Foreground work is visible in the
+    chat's own live trace instead, since the turn that spawned it is still
+    streaming.
+    """
+    pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
+    out: dict[str, list[dict]] = {}
+    scanned: list[tuple[str, Any]] = []
+    for chat_id in pcm.active_chat_ids():
+        chat = pcm.get_chat(chat_id)
+        if chat is None or chat.archived or not chat.session_id:
+            continue
+        scanned.append((chat_id, chat))
+    # Gathered, not awaited one at a time. Each scan is an independent thread
+    # hop over that chat's own session file (or an independent opencode read),
+    # so a serial loop cost N full parses of wall clock every four seconds
+    # while anything was working. `return_exceptions` preserves the per-chat
+    # tolerance the loop had: one unreadable session must not blank the
+    # sidebar for the others.
+    results = await asyncio.gather(
+        *(_running_subagent_rows(pcm, config, chat) for _cid, chat in scanned),
+        return_exceptions=True,
+    )
+    for (chat_id, _chat), rows in zip(scanned, results):
+        if isinstance(rows, BaseException):
+            logger.warning(
+                "running-subagent scan failed for chat %s", chat_id, exc_info=rows
+            )
+            continue
+        if rows:
+            out[chat_id] = rows
+    return JSONResponse({"chats": out})
+
+
+async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
+    """Live subagents for one chat, without loading any transcript."""
+    provider = getattr(chat, "provider", "claude")
+    if provider == "opencode":
+        provider_service = pcm._providers.get(chat.chat_id)
+        live_provider = provider_service.provider if provider_service is not None else None
+        if (
+            isinstance(live_provider, OpencodeProvider)
+            and live_provider.has_live_server
+            and live_provider.current_session_id == chat.session_id
+        ):
+            collab_tree = await live_provider.read_live_collab_tree()
+        else:
+            collab_tree = await OpencodeProvider.read_collab_tree(
+                config.workspace_root, chat.session_id
+            )
+        rows: list[dict] = []
+        for item in collab_tree:
+            info = item.get("info")
+            info = info if isinstance(info, dict) else {}
+            agent_id = str(info.get("id") or "")
+            if not agent_id:
+                continue
+            messages = item.get("messages")
+            messages = messages if isinstance(messages, list) else []
+            if _opencode_child_status(messages) != "running":
+                continue
+            rows.append({
+                "agent_id": agent_id,
+                "description": str(info.get("title") or ""),
+                "subagent_type": "opencode",
+                "is_async": True,
+                "status": "running",
+                "turn_index": _opencode_child_turn_index(info, chat),
+            })
+        return rows
+
+    if provider != "claude":
+        return []
+    resolver = getattr(pcm, "_agent_root_for_chat", None)
+    agent_root = resolver(chat.chat_id) if resolver is not None else None
+    path = subagent_tracking.find_parent_session_file(
+        chat.session_id, Path(config.workspace_root), agent_root=agent_root
+    )
+    if path is None:
+        return []
+    def _scan() -> list[subagent_tracking.SubagentInfo]:
+        # Both halves belong off the event loop. running_agents() is not a
+        # cheap filter over the parsed state: it stats and tail-reads each
+        # running agent's own transcript, and this endpoint is polled by the
+        # sidebar for every working chat.
+        state = subagent_tracking.parse_session_subagents(path)
+        return subagent_tracking.running_agents(path, state)
+
+
+    return [
+        {
+            "agent_id": info.agent_id,
+            "description": info.description,
+            "subagent_type": info.subagent_type,
+            "is_async": info.is_async,
+            "status": info.status,
+            "turn_index": info.turn_index,
+        }
+        for info in await asyncio.to_thread(_scan)
+    ]
 
 
 def _merge_subagent_dispatch_meta(
@@ -4989,7 +5202,13 @@ def _enrich_schedule(
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
-        entry_dict["context_available"] = chat is not None
+        # An interval entry whose chat was archived or deleted is still
+        # dispatchable while its project resolves — the run continues in a
+        # replacement chat — so do not mark it unavailable and send the user to
+        # re-pick a target they do not need to change.
+        entry_dict["context_available"] = chat is not None or (
+            is_interval(entry) and pcm.resolve_automation_project(entry) is not None
+        )
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)
@@ -5002,6 +5221,8 @@ def _enrich_schedule(
     entry_dict["last_expected_run"] = (
         last_expected.isoformat() if last_expected is not None else None
     )
+    # Interval entries never report a missed run: compute_last_expected_run
+    # returns None for them, so this stays False by construction.
     missed = False
     if last_expected is not None:
         expected_day = last_expected.date().isoformat()
@@ -5119,6 +5340,31 @@ async def create_schedule(request: Request) -> JSONResponse:
     mode = state.get_mode(ctx)
 
     frequency = body.get("frequency", "weekly")
+    if frequency not in FREQUENCIES:
+        return JSONResponse(
+            {"error": f"unknown frequency '{frequency}'"}, status_code=400
+        )
+    # Interval cadence is measured from the last dispatch, so it needs no time
+    # of day — but it does need a cadence and a target, since an entry with
+    # neither would tick forever against nothing.
+    interval_minutes = 0
+    if frequency == INTERVAL_FREQUENCY:
+        try:
+            interval_minutes = normalize_interval_minutes(
+                body.get("interval_minutes", DEFAULT_INTERVAL_MINUTES)
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not web_chat_id and not web_project_id:
+            return JSONResponse(
+                {"error": "interval schedules require web_chat_id or web_project_id"},
+                status_code=400,
+            )
+        if web_chat_id and pcm.get_chat(web_chat_id) is None:
+            return JSONResponse(
+                {"error": "web_chat_id must point to an existing chat"},
+                status_code=400,
+            )
     run_at_date = body.get("run_at_date")
     # Reject one-off schedules pointed at a past datetime — they would
     # never auto-fire, and silently keeping them around is worse than 400.
@@ -5144,9 +5390,15 @@ async def create_schedule(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-    # Manual schedules don't auto-fire, so `time` is optional. For everything
-    # else we still require it (create will happily take "" but then the entry
-    # would never tick).
+    # Manual and interval schedules don't need a time of day. For every other
+    # cadence the entry is unusable without one: compute_next_run returns None,
+    # tick() never matches, and the row sits there reading as enabled while
+    # silently never firing. PATCH has always rejected this — and, because it
+    # re-validates the whole entry, an entry created this way could not even be
+    # paused afterwards. Same gate, same message, on the create door.
+    time_error = wall_clock_time_value_error(frequency, str(body.get("time") or ""))
+    if time_error:
+        return JSONResponse({"error": time_error}, status_code=400)
     provider = (body.get("provider") or "").strip()
     if provider and provider not in supported_providers():
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
@@ -5162,6 +5414,20 @@ async def create_schedule(request: Request) -> JSONResponse:
     target_project = pcm.get_project(web_project_id) if web_project_id else None
     if workspace not in known_workspaces and web_project_id:
         workspace = target_project.workspace if target_project else ""
+    if workspace not in known_workspaces and web_chat_id:
+        # A chat-bound entry has no project id to stamp from, but it still
+        # needs a workspace: `resolve_automation_project` is what lets an
+        # interval run continue in a replacement chat once the target chat is
+        # archived or deleted, and with neither field set it returns None and
+        # the entry is disabled instead of re-homed. Derive it from the chat's
+        # own project, which is what the loop routes always did.
+        target_chat = pcm.get_chat(web_chat_id)
+        chat_project = (
+            pcm.get_project(target_chat.project_id)
+            if target_chat is not None and target_chat.project_id
+            else None
+        )
+        workspace = getattr(chat_project, "workspace", "") or ""
     entry = sm.create(
         daily_time_utc=body.get("time") or "",
         prompt=body["prompt"],
@@ -5173,6 +5439,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         days_of_week=body.get("days_of_week"),
         thread_id=body.get("thread_id"),
         frequency=frequency,
+        interval_minutes=interval_minutes,
         day_of_month=body.get("day_of_month"),
         run_at_date=run_at_date,
         web_chat_id=web_chat_id,
@@ -5183,6 +5450,11 @@ async def create_schedule(request: Request) -> JSONResponse:
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
     )
+    # Records where a chat-bound entry re-homes once its chat is deleted; must
+    # be captured while that chat still exists. See stamp_fallback_project.
+    if stamp_fallback_project(entry, pcm):
+        sm.replace(entry)
+    publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
 
 
@@ -5198,6 +5470,18 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         if "paused" in str(exc).lower():
             return JSONResponse({"error": str(exc)}, status_code=409)
         raise
+    # Interval entries refuse rather than queue: a manual run into a chat that
+    # is already streaming would stack a second prompt behind the live turn.
+    if result.get("status") == "busy":
+        return JSONResponse(
+            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            status_code=409,
+        )
+    if result.get("status") == "missing-chat":
+        return JSONResponse(
+            {"error": "target chat no longer exists", **result}, status_code=409
+        )
+    publish_automations_changed(request.app.state.project_chat_manager)
     return JSONResponse(result, status_code=201)
 
 
@@ -5207,6 +5491,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if request.method == "DELETE":
         sm = request.app.state.schedule_manager
         ok = sm.delete(schedule_id)
+        publish_automations_changed(request.app.state.project_chat_manager)
         return JSONResponse({"ok": ok})
     # PATCH
     store = request.app.state.schedule_manager._store
@@ -5231,7 +5516,21 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if "chat_id" in body:
         entry.chat_id = body["chat_id"]
     if "frequency" in body:
+        if body["frequency"] not in FREQUENCIES:
+            return JSONResponse(
+                {"error": f"unknown frequency '{body['frequency']}'"}, status_code=400
+            )
         entry.frequency = body["frequency"]
+        # Switching to interval without naming a cadence would leave 0 stored,
+        # which interval_delta floors to one minute — far faster than anything
+        # the caller asked for. Seed the default instead.
+        if is_interval(entry) and not entry.interval_minutes:
+            entry.interval_minutes = DEFAULT_INTERVAL_MINUTES
+    if "interval_minutes" in body:
+        try:
+            entry.interval_minutes = normalize_interval_minutes(body["interval_minutes"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "day_of_month" in body:
         entry.day_of_month = body["day_of_month"]
     if "run_at_date" in body:
@@ -5269,6 +5568,15 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
+    # Never store an automation that cannot run. Shared with the MCP write path
+    # (CiaoControlPlane.schedule_update) so the two cannot drift.
+    time_error = wall_clock_time_error(entry)
+    if time_error:
+        return JSONResponse({"error": time_error}, status_code=400)
+    # Retargeting the chat moves where this entry re-homes, so the fallback has
+    # to move with it — otherwise it keeps pointing at the previous chat's
+    # project. Also clears it when the entry becomes project-bound.
+    stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
         store.replace(entry)
     except ValueError as exc:
@@ -5278,46 +5586,68 @@ async def schedule_detail(request: Request) -> JSONResponse:
         # caller would otherwise get a 500 for asking something answerable.
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
+    publish_automations_changed(pcm)
     return JSONResponse(_enrich_schedule(entry, pcm))
 
 
-# ── Loops ────────────────────────────────────────────────────────────────
-# In-chat loops: re-dispatch a prompt into one fixed chat every N minutes.
-# Runtime start/stop state lives in the LoopManager (autostart decides what
-# runs at boot), so PATCH {"running": bool} toggles the manager, everything
-# else edits the persisted entry.
+# ── Loops (compatibility) ────────────────────────────────────────────────
+# Loops were folded into schedules as the `interval` cadence. These routes stay
+# for one release so a PWA build cached before the merge — or another device
+# still running the old app — keeps working: they translate the legacy Loop
+# shape to and from an interval schedule. Nothing in the current frontend calls
+# them. Remove them, and the `loops_changed` event, in the release after next.
 
-def _enrich_loop(entry, manager, pcm=None) -> dict:
-    """Serialize a LoopEntry and attach computed fields (running, context_label, next_run)."""
-    entry_dict = asdict(entry)
-    running = manager.is_running(entry.loop_id)
-    entry_dict["running"] = running
-    chat = pcm.get_chat(entry.web_chat_id) if pcm else None
-    entry_dict["context_label"] = chat.title if chat else entry.web_chat_id
-    next_run = None
-    if running:
-        if entry.last_run_at:
-            try:
-                last = datetime.fromisoformat(entry.last_run_at)
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
-                next_run = (last + entry.interval()).isoformat()
-            except ValueError:
-                pass
-        else:
-            next_run = datetime.now(UTC).isoformat(timespec="seconds")
-    entry_dict["next_run"] = next_run
-    return entry_dict
+def _loop_view(entry: ScheduleEntry, pcm=None) -> dict:
+    """Render an interval schedule in the retired Loop shape."""
+    chat = pcm.get_chat(entry.web_chat_id) if pcm and entry.web_chat_id else None
+    next_run = compute_next_run(entry)
+    return {
+        "loop_id": entry.schedule_id,
+        "prompt": entry.prompt,
+        "web_chat_id": entry.web_chat_id or "",
+        "web_project_id": entry.web_project_id or "",
+        "workspace": entry.workspace,
+        "created_at": entry.created_at,
+        "interval_minutes": entry.interval_minutes,
+        "title": entry.title,
+        # The merged primitive has one flag where loops had two, so both legacy
+        # fields report it: a stopped entry neither ticks now nor resumes later.
+        "autostart": entry.enabled,
+        "running": entry.enabled,
+        "last_run_at": entry.last_dispatched_at,
+        "last_status": entry.last_status,
+        "scope": entry.scope,
+        "context_label": chat.title if chat else (entry.web_chat_id or ""),
+        "next_run": next_run.isoformat() if next_run is not None else None,
+    }
+
+
+def _interval_entries(sm) -> list[ScheduleEntry]:
+    return [entry for entry in sm.list_entries() if is_interval(entry)]
+
+
+def _interval_entry(sm, loop_id: str) -> ScheduleEntry | None:
+    entry = sm._store.get(loop_id)
+    return entry if entry is not None and is_interval(entry) else None
 
 
 async def list_loops(request: Request) -> JSONResponse:
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    return JSONResponse([_enrich_loop(entry, lm, pcm) for entry in lm.list()])
+    # Only chat-bound entries, matching the MCP `loops_list` compatibility view.
+    # A loop was always bound to a fixed chat, so the cached pre-upgrade PWA on
+    # the other end of this route assumes `web_chat_id` is set: handed a
+    # project-bound interval it renders an "unavailable chat" row that cannot be
+    # repaired by editing, because `web_project_id` keeps taking precedence.
+    return JSONResponse([
+        _loop_view(entry, pcm)
+        for entry in _interval_entries(sm)
+        if entry.web_chat_id and not entry.web_project_id
+    ])
 
 
 async def create_loop(request: Request) -> JSONResponse:
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
@@ -5325,51 +5655,63 @@ async def create_loop(request: Request) -> JSONResponse:
     if not prompt:
         return JSONResponse({"error": "prompt is required"}, status_code=400)
     web_chat_id = (body.get("web_chat_id") or "").strip()
-    if not web_chat_id:
-        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
-    chat = pcm.get_chat(web_chat_id)
+    chat = pcm.get_chat(web_chat_id) if web_chat_id else None
     if chat is None:
-        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+        return JSONResponse(
+            {"error": "web_chat_id must point to an existing chat"}, status_code=400
+        )
     try:
-        interval_minutes = int(body.get("interval_minutes", 10))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
-    if interval_minutes < 1:
-        return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+        interval_minutes = normalize_interval_minutes(
+            body.get("interval_minutes", DEFAULT_INTERVAL_MINUTES)
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    # A loop inherits the workspace of its chat's project, same as a schedule.
-    loop_project_id = getattr(chat, "project_id", "") or ""
-    loop_project = pcm.get_project(loop_project_id) if loop_project_id else None
-    entry = lm.create(
+    project_id = getattr(chat, "project_id", "") or ""
+    project = pcm.get_project(project_id) if project_id else None
+    state = request.app.state.state_store
+    entry = sm.create(
+        daily_time_utc="",
         prompt=prompt,
-        web_chat_id=web_chat_id,
+        # Empty model/mode is what makes each run inherit the target chat.
+        model="",
+        mode=state.get_mode(ChatContext(chat_id=0)),
+        chat_id=0,
+        frequency=INTERVAL_FREQUENCY,
         interval_minutes=interval_minutes,
+        web_chat_id=web_chat_id,
         title=(body.get("title") or "").strip(),
-        # Starting implies autostart, so a running loop survives a restart
-        # instead of going quietly dead (see CiaoControlPlane.loop_create).
-        autostart=bool(body.get("autostart")) or bool(body.get("start")),
-        web_project_id=loop_project_id,
-        workspace=getattr(loop_project, "workspace", "") or "",
+        workspace=getattr(project, "workspace", "") or "",
     )
-    if body.get("start"):
-        lm.start_loop(entry.loop_id)
-    publish_loops_changed(pcm)
-    return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
+    # Loops recorded the chat's project only so a lost chat could be replaced
+    # there; on a schedule web_project_id means "new chat per run", so it is
+    # carried as the fixed-chat fallback instead — the same shape migrate_loops
+    # uses. Without it a loop created in a non-General project by a cached
+    # pre-upgrade PWA would re-home into General when its chat was deleted.
+    stamp_fallback_project(entry, pcm)
+    if not (body.get("autostart") or body.get("start")):
+        entry.enabled = False
+    sm.replace(entry)
+    publish_automations_changed(pcm)
+    return JSONResponse(_loop_view(entry, pcm), status_code=201)
 
 
 async def loop_detail(request: Request) -> JSONResponse:
-    """Handle PATCH (update / start / stop) and DELETE for a single loop."""
+    """Handle PATCH (update / start / stop) and DELETE for one interval entry."""
     loop_id = request.path_params["loop_id"]
-    lm = request.app.state.loop_manager
+    sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    if request.method == "DELETE":
-        deleted = lm.delete(loop_id)
-        publish_loops_changed(pcm)
-        return JSONResponse({"ok": deleted})
-    # PATCH
-    entry = lm.get(loop_id)
+    # Resolve before doing anything, DELETE included. This route's contract is
+    # interval entries only, but DELETE used to hand the raw id straight to the
+    # shared schedule store — so an ordinary wall-clock schedule's id passed to
+    # the deprecated loops route deleted that schedule.
+    entry = _interval_entry(sm, loop_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if request.method == "DELETE":
+        deleted = sm.delete(loop_id)
+        publish_automations_changed(pcm)
+        return JSONResponse({"ok": deleted})
     body = await request.json()
     if "prompt" in body:
         prompt = (body["prompt"] or "").strip()
@@ -5380,79 +5722,58 @@ async def loop_detail(request: Request) -> JSONResponse:
         entry.title = (body["title"] or "").strip()
     if "interval_minutes" in body:
         try:
-            interval_minutes = int(body["interval_minutes"])
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
-        if interval_minutes < 1:
-            return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
-        entry.interval_minutes = interval_minutes
+            entry.interval_minutes = normalize_interval_minutes(body["interval_minutes"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "web_chat_id" in body:
         web_chat_id = (body["web_chat_id"] or "").strip()
         if not web_chat_id or pcm.get_chat(web_chat_id) is None:
-            return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+            return JSONResponse(
+                {"error": "web_chat_id must point to an existing chat"}, status_code=400
+            )
         entry.web_chat_id = web_chat_id
-    if "autostart" in body:
-        entry.autostart = bool(body["autostart"])
-    lm.replace(entry)
-    if "running" in body:
-        if body["running"]:
-            chat = pcm.get_chat(entry.web_chat_id)
-            if chat is None:
-                project = pcm._resolve_loop_project(entry)
-                if project is None:
-                    # Nothing left to dispatch into: the target chat is gone and
-                    # the loop's project/workspace no longer resolves. Starting
-                    # it would mark it running while every tick no-ops.
-                    return JSONResponse(
-                        {
-                            "error": (
-                                "This loop's chat and project are both gone. "
-                                "Point it at an existing chat before starting it."
-                            )
-                        },
-                        status_code=409,
+        # Retargeting moves where this entry re-homes.
+        stamp_fallback_project(entry, pcm)
+    # `autostart` and `running` were separate flags; both now set `enabled`.
+    for key in ("autostart", "running"):
+        if key in body:
+            entry.enabled = bool(body[key])
+    if entry.enabled and pcm.get_chat(entry.web_chat_id) is None:
+        if pcm.resolve_automation_project(entry) is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "This automation's chat and project are both gone. "
+                        "Point it at an existing chat before starting it."
                     )
-                new_chat = pcm.create_chat(
-                    project.project_id,
-                    title=entry.title or f"Loop: {entry.prompt[:30]}",
-                )
-                entry.web_chat_id = new_chat.chat_id
-                lm.replace(entry)
-            elif chat.archived:
-                # The target chat was archived (e.g. by an auto-archive
-                # policy) while the loop was stopped. Resuming into a dead
-                # chat would just auto-stop again on the next tick, so fork
-                # a fresh chat from the archived transcript and re-point the
-                # loop at it instead.
-                try:
-                    new_chat = pcm.continue_archived_chat(entry.web_chat_id)
-                except ValueError as exc:
-                    return JSONResponse({"error": str(exc)}, status_code=409)
-                entry.web_chat_id = new_chat.chat_id
-                lm.replace(entry)
-            lm.start_loop(loop_id)
-        else:
-            lm.stop_loop(loop_id)
-    publish_loops_changed(pcm)
-    return JSONResponse(_enrich_loop(entry, lm, pcm))
+                },
+                status_code=409,
+            )
+    sm.replace(entry)
+    publish_automations_changed(pcm)
+    return JSONResponse(_loop_view(entry, pcm))
 
 
 async def run_loop_now(request: Request) -> JSONResponse:
-    """Fire one loop iteration immediately (works even when stopped)."""
+    """Fire one interval run immediately (works while the entry is stopped)."""
     loop_id = request.path_params["loop_id"]
-    lm = request.app.state.loop_manager
-    try:
-        result = await lm.run_now(loop_id)
-    except ValueError:
+    sm = request.app.state.schedule_manager
+    if _interval_entry(sm, loop_id) is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    result = await sm.dispatch_now(loop_id)
+    payload = {**result, "loop_id": loop_id}
     if result.get("status") == "busy":
         return JSONResponse(
-            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            {"error": "chat has a turn in flight; retry when it finishes", **payload},
             status_code=409,
         )
     if result.get("status") == "missing-chat":
-        return JSONResponse({"error": "target chat no longer exists", **result}, status_code=409)
-    return JSONResponse(result, status_code=201)
+        return JSONResponse(
+            {"error": "target chat no longer exists", **payload}, status_code=409
+        )
+    publish_automations_changed(request.app.state.project_chat_manager)
+    return JSONResponse(payload, status_code=201)
+
 
 
 # ── Models ───────────────────────────────────────────────────────────────
@@ -5567,6 +5888,12 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},
+        # Per-provider default execution (permission) mode for new chats, as
+        # stored ("manual" / "auto" / "bypass"; missing = app default auto).
+        "provider_default_modes": {
+            provider: ("manual" if mode == "normal" else mode)
+            for provider, mode in (s.provider_default_modes or {}).items()
+        },
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider routine models, as stored (missing = provider default).
@@ -5791,19 +6118,7 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"chats": [], "attention_count": 0})
-
     chats = pcm.list_chats()
-    # Delegate completion is internal model-to-model traffic: it wakes the
-    # supervisor, so the PWA deliberately does not report a nested delegate as
-    # a second unread chat. Keep the tray feed on the same rule. An archived or
-    # missing supervisor makes the delegate an orphan, which remains a normal
-    # visible chat and may be unread.
-    active_chat_ids = {
-        candidate.chat_id
-        for candidate in chats
-        if not candidate.archived
-    }
-
     rows: list[dict[str, object]] = []
     attention_count = 0
     for chat in chats:
@@ -5814,11 +6129,7 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
-        nested_delegate = bool(
-            getattr(chat, "spawned_from_chat_id", "")
-            and getattr(chat, "spawned_from_chat_id", "") in active_chat_ids
-        )
-        unread = not nested_delegate and bool(activity) and activity > read
+        unread = bool(activity) and activity > read
         needs_input = _menubar_chat_needs_input(
             chat.pending_question, getattr(chat, "pending_permission", "")
         )

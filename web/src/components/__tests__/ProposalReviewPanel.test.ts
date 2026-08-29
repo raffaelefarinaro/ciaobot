@@ -462,8 +462,8 @@ describe('workspace scoping', () => {
     })
     const projects = useProjectStore()
     projects.workspaces = [
-      { name: 'personal', vault_root: '/p', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
-      { name: 'work', vault_root: '/w', default_provider: 'claude', default_model: 'sonnet', gws_profile: '' },
+      { name: 'personal', vault_root: '/p', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '/w', default_provider: 'claude', gws_profile: '' },
     ] as never
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()

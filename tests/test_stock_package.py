@@ -60,14 +60,19 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
 
 
-def test_stock_curation_prompt_consolidation_contract() -> None:
-    """The nightly curator consolidates regions itself, with guardrails.
+def _curation_skill_text() -> str:
+    return (
+        resources.files("ciao.stock")
+        .joinpath("skills", "memory-curation", "SKILL.md")
+        .read_text(encoding="utf-8")
+    )
 
-    It used to be forbidden from touching regions, so an over-cap region
-    dead-ended at "needs a human pass" and the user was always in the loop.
-    The contract now: consolidate at/above ~85%, log every removal to the
-    undo file, queue uncertain removals as [review] yes/no questions, never
-    promote NEW facts unattended.
+
+def test_stock_curation_prompt_invokes_the_skill() -> None:
+    """The schedule prompt is a dispatcher; the procedure lives in the skill.
+
+    The old 5K-character single-paragraph prompt was brittle and duplicated
+    the memory agent's contract; the skill file is the one canonical copy.
     """
     stock = resources.files("ciao.stock")
     schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
@@ -77,18 +82,35 @@ def test_stock_curation_prompt_consolidation_contract() -> None:
         if entry["schedule_id"] == "system-memory-curation"
     )
 
+    assert "memory-curation" in prompt
+    assert "one-line no-op" in prompt
+    # The procedure itself must not be inlined any more.
+    assert len(prompt) < 1200
+
+
+def test_stock_curation_skill_consolidation_contract() -> None:
+    """The nightly curator consolidates regions itself, with guardrails.
+
+    It used to be forbidden from touching regions, so an over-cap region
+    dead-ended at "needs a human pass" and the user was always in the loop.
+    The contract: consolidate at/above ~85%, log every removal to the
+    undo file, queue uncertain removals as [review] yes/no questions, never
+    promote NEW facts unattended.
+    """
+    skill = _curation_skill_text()
+
     # Consolidation is allowed, bounded by the undo log.
-    assert "consolidate that region now" in prompt
-    assert "Workspace/Memory-Consolidations.md" in prompt
+    assert "consolidate that region now" in skill
+    assert "Workspace/Memory-Consolidations.md" in skill
     # Uncertain removals become reviewable questions, not deletions.
-    assert "[review] Keep" in prompt
-    assert "Memory-Proposals.md" in prompt
+    assert "[review] Keep" in skill
+    assert "Memory-Proposals.md" in skill
     # Promotion of new facts stays user-reviewed; over-cap has named options.
-    assert "Do not promote new facts into the bounded" in prompt
-    assert "CIAO_MEMORY_CHAR_LIMIT" in prompt
+    assert "Do not promote new facts into the bounded" in skill
+    assert "CIAO_MEMORY_CHAR_LIMIT" in skill
 
 
-def test_stock_curation_prompt_files_discovered_bounded_facts() -> None:
+def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
     """A bounded-region fact found by reading transcripts must enter the queue.
 
     Chats without a session-insights section never ran archive-time routing,
@@ -99,19 +121,27 @@ def test_stock_curation_prompt_files_discovered_bounded_facts() -> None:
     and the source label is a plain chat id — $(), backticks, and quotes
     interpolate even inside double quotes.
     """
-    stock = resources.files("ciao.stock")
-    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
-    prompt = next(
-        entry["prompt"]
-        for entry in schedules["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
+    skill = _curation_skill_text()
 
-    assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in prompt
-    assert "<chat title>" not in prompt
-    assert "--text-file <fact-file>" in prompt
-    assert "no review path" in prompt
-    assert "dedupes" in prompt
+    assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in skill
+    assert "<chat title>" not in skill
+    assert "--text-file <fact-file>" in skill
+    assert "no review path" in skill
+    assert "dedupes" in skill
+
+
+def test_stock_curation_skill_carries_the_new_passes() -> None:
+    """Temporal re-verification, structured learnings, queue/log separation,
+    log rotation, and alias upkeep all live in the skill."""
+    skill = _curation_skill_text()
+
+    assert "aging_state_entries" in skill
+    assert "retrieved_recently" in skill
+    assert "(xN)" in skill and "x3" in skill
+    assert "never append pass reports" in skill
+    assert "Curation-Log.md" in skill
+    assert "search: false" in skill
+    assert "aliases:" in skill
 
 
 def test_stock_memory_agent_role_matches_curator_contract() -> None:

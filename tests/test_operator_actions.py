@@ -1041,13 +1041,13 @@ def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> Non
     for name in ("personal", "work"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    config.env_source = {"CLAUDE_DEFAULT_MODEL_WORK": "opus", "CIAO_VAULT_ROOT": "x"}
+    config.env_source = {"CIAO_DISALLOWED_TOOLS_WORK": "Bash", "CIAO_VAULT_ROOT": "x"}
 
     actions = [a for a in detect_actions(_context(tmp_path, config=config))
                if a.kind == "legacy-env-ignored"]
 
     assert len(actions) == 1
-    assert "CLAUDE_DEFAULT_MODEL_WORK" in actions[0].detail
+    assert "CIAO_DISALLOWED_TOOLS_WORK" in actions[0].detail
     # A variable that IS still read must not be dragged in.
     assert "CIAO_VAULT_ROOT" not in actions[0].detail
     assert not actions[0].run_label

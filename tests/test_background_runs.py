@@ -792,10 +792,10 @@ async def test_background_wake_queues_behind_a_live_turn(
     assert recorder.started == []
 
 
-async def test_background_wake_publishes_its_kind(
+async def test_background_wake_publishes_its_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One event shape for both wake sources, discriminated on `kind`."""
+    """A coalesced wake announces itself on /ws/events for the PWA."""
     monkeypatch.setattr(
         "ciao.web.project_chats._BACKGROUND_WAKE_WINDOW_SECONDS", 0.05
     )
@@ -817,9 +817,9 @@ async def test_background_wake_publishes_its_kind(
     )
     await asyncio.sleep(0.3)
 
-    reported = [e for e in published if e.get("type") == "chat_delegates_reported"]
+    reported = [e for e in published if e.get("type") == "chat_runs_reported"]
     assert len(reported) == 1
-    assert reported[0]["kind"] == "background"
+    assert reported[0]["delivery"] == "queued"
     assert reported[0]["count"] == 1
 
 
@@ -939,7 +939,6 @@ def _plane(manager: ProjectChatManager, runner: BackgroundRunner | None) -> Ciao
         ),
         project_chat_manager=manager,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
         background_runner=runner,
     )
 

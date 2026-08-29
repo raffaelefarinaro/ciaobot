@@ -12,13 +12,13 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 
 - **Workspace** — a life area (personal, work, a client). It owns its own vault (`<workspace>/memory-vault/` on a fresh install), its own projects, and its default model. Switch workspaces in the sidebar — the Home lanes swap with it.
 - **Project** — a folder + doc (`projects/active/<name>/<name>.md`) for vault-backed projects. Its frontmatter `description:` is injected as `[Project context: …]` into every turn, and the doc's body stays out of the prompt until the agent opens it. A project created from the PWA's **+ New Project** is lightweight (name + context only) until it gains a vault folder.
-- **Chat** — turns, tool calls, and file touches in one project. Fork it, delegate parallel subchats to it, or loop a prompt inside it.
+- **Chat** — turns, tool calls, and file touches in one project. Fork it, watch the subagents it spawns, or re-run a prompt inside it on a cadence.
 
 ![Workspace → Project → Chat hierarchy](docs/diagrams/workspace-hierarchy.svg)
 
-> **PWA preview:** Home lanes + chat with a pinned doc. Wireframe placeholder until a real light-mode capture lands at `docs/screenshots/pwa-overview.png` (see `docs/screenshots/pwa-overview.svg`).
+> **PWA preview:** The home screen brings workspaces, projects, attention queues, and recent chats together in one focused console.
 >
-> ![Ciaobot PWA overview — wireframe placeholder](docs/screenshots/pwa-overview.svg)
+> ![Ciaobot PWA overview](docs/screenshots/pwa-overview.png)
 
 ## Install
 
@@ -93,7 +93,7 @@ Self-heal without silent edits: `ciao memory-audit` is read-only — it reports 
 
 Stock Claude Code ships skills and tools for scheduling, diagnostics, and settings that clash with the PWA. Ciaobot hides the ones the PWA already owns and keeps everything you added.
 
-- We turn off the **cloud routines** skill (`schedule` — CronCreate/CronDelete/CronList) and the **interval loop** skill (`loop` — ScheduleWakeup) — the PWA's **Automations** page owns schedules (`ciao/schedules.py`) and loops (`ciao/loops.py`) instead.
+- We turn off the **cloud routines** skill (`schedule` — CronCreate/CronDelete/CronList) and the **interval loop** skill (`loop` — ScheduleWakeup) — the PWA's **Automations** page owns every cadence (`ciao/schedules.py`) instead.
 - We turn off the **settings/diagnostics** skills (`update-config`, `fewer-permission-prompts`, `doctor`) — **Settings** in the PWA is the surface for models, auth, and health (`ciao os-audit`).
 - We turn off the **design-system sync** skill (`design-sync`) — the PWA has its own `DESIGN.md` tokens; the upstream DesignSync tool is denied.
 - We turn off the **bundled run stubs** (`run`, `run-skill-generator`) — Ciaobot uses per-project `.claude/skills/` equivalents instead.
@@ -147,7 +147,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 - Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Delegates: a chat's agent spawns writable delegate chats (own model, own session, full tool access) to work in parallel; capped at 6 per chat, no nesting.
+- Subagents: the agents a chat dispatches for parallel work appear as rows under it in the sidebar while they run, and each one's conversation is readable in a read-only view.
 
 **Files, documents, and voice**
 
@@ -167,7 +167,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 **Automations**
 
 - Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat (with a durable `schedule_id` backlink so banners survive later runs).
-- Loops: re-run a prompt inside one chat every N minutes, keeping context between iterations. Marked `↻` in the sidebar; PWA owns them — the harness's own `/schedule` and `/loop` skills are removed and denied so automations land in Ciaobot instead of a cloud routine it cannot see.
+- Interval automations: re-run a prompt every N minutes — inside one chat, keeping its context and model between runs, or in a fresh chat each time. Marked `↻` in the sidebar; PWA owns them — the harness's own `/schedule` and `/loop` skills are removed and denied so automations land in Ciaobot instead of a cloud routine it cannot see.
 - System routines ship enabled (memory curation, workspace hygiene, skill evolution); every run is visible under **Settings → Automation**.
 
 **Extensibility — skills, subagents, commands**
@@ -217,7 +217,7 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. Repairs low-risk link/index drift, then verifies the rest. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
 
-Your own schedules live alongside these in the workspace (`.runtime/schedules.json`), with in-chat loops in `.runtime/loops.json`; both are managed from the UI's Automations page. Packaged **skills** (Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).
+Your own automations live alongside these in the workspace (`.runtime/schedules.json`), whatever their cadence, and are managed from the UI's Automations page. Packaged **skills** (Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).
 
 ## Providers
 

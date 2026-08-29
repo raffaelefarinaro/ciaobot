@@ -1,5 +1,107 @@
 # Changelog
 
+## v0.12.0 - 2026-08-29
+
+### Added
+- feat(mcp): lazy tool discovery to cut per-chat schema injection (`b1a51f6f`)
+- feat: make the MCP control plane mandatory and remove the legacy surface (`ced87eb8`)
+- feat: add PKCE to the manual GWS OAuth flows (`dd97e728`)
+- feat: replace delegate subchats with read-only subagent subchat views (`de29119c`)
+- feat: replace delegate subchats with read-only subagent subchat views (#369) (`9ac5c920`)
+- feat(settings): use provider model and permission defaults (`eb7e19ac`)
+- Give bounded memory a temporal model: learned-at stamps and an aging audit (`7c385670`)
+- Add a retrieval eval suite and a live-vault probe runbook (`f8b1fd58`)
+- Move the nightly curation procedure into a memory-curation stock skill (`6328b359`)
+- Fact-augmented insight extraction: feed region entries and an entity roster to the one-shot (`9c56a46c`)
+- Document the memory system's design rationale; plain-language user surfaces (`e078fafd`)
+
+### Changed
+- Merge pull request #364 from raffaelefarinaro/chore/sync-develop-v0.11.0 (`3430c6d6`)
+- refactor: merge loops into schedules as an interval cadence (`935a060e`)
+- Merge pull request #365 from raffaelefarinaro/raffaelefarinaro/mcp_lazy (`c00bc725`)
+- Merge pull request #367 from raffaelefarinaro/fix/client-mode-notification-backlog-replay (`5c27520d`)
+- Merge remote-tracking branch 'origin/develop' into raffaelefarinaro/merge_loops (`b22d041e`)
+- Merge develop into subagents_subchats; drop delegate tools from _TOOL_GROUPS (`f3423e35`)
+- Merge remote-tracking branch 'origin/develop' into raffaelefarinaro/mcp_mandatory (`448d25ce`)
+- Merge remote-tracking branch 'origin/develop' into raffaelefarinaro/mcp_mandatory (`78ddba68`)
+- Merge pull request #366 from raffaelefarinaro/raffaelefarinaro/mcp_mandatory (`14b1d797`)
+- Merge remote-tracking branch 'origin/develop' into raffaelefarinaro/merge_loops (`ed04d1e9`)
+- Merge remote-tracking branch 'origin/develop' into raffaelefarinaro/merge_loops (`76922d17`)
+- Merge pull request #370 from raffaelefarinaro/raffaelefarinaro/merge_loops (`409fc4b6`)
+- Remove opencode plugin mention (`390cd8ce`)
+- Apply v0.12.0 release review findings (`f7f8320e`)
+- Restore the subagent subchat views dropped by merge ed04d1e9 (`d3debf20`)
+- Narrow the subagent poll, drain stale rows, add a merge replay (`6c753bc0`)
+- Merge fix/restore-subagent-subchats into develop (`c504b79a`)
+- Structure learnings entries so recurrence and citations are mechanical (`34273c24`)
+- Reconcile new region facts against existing entries at write time (`ee6a022f`)
+- Centralise the re-home fallback instead of stamping it per call site (`9b486bfa`)
+- Collapse the five copies of the fixed-chat rule; nine review findings (`fd7193b6`)
+
+### Fixed
+- Restore the subagent subchat views dropped by merge `ed04d1e9`: the sidebar
+  rows, the read-only `/chat/:chatId/subagent/:agentId` transcript view, and the
+  running-subagent polling. Their backend half had shipped with no caller.
+- Chat-bound automations created from the PWA were stored without a workspace,
+  so the first archive of their chat disabled them permanently instead of
+  forking a replacement.
+- Editing an interval automation to a daily/weekly/monthly cadence could save it
+  with no time, leaving it enabled but unable to ever fire.
+- `ciao gws-auth-helper --redirect-url` always failed with `invalid_grant`: it
+  generated a fresh PKCE verifier instead of using the one that produced the
+  authorization URL.
+- The read-only subagent view re-fetched every subagent the chat ever spawned on
+  a 4s timer; it now polls only the agent being viewed.
+- Sidebar subagent rows could keep spinning after their work finished.
+- fix: require project docs for project memories (`a7c819ca`)
+- fix(web): fail closed on the GWS one-click guard when node status is unknown (`88b5cff4`)
+- fix: validate record() inputs and guard the tally cache in proposal_outcomes (`73a8ff3a`)
+- fix: stop proposing merges between two-character vocabulary tags (`c7d4c205`)
+- fix(desktop): stop the notification tail replaying the host backlog (`bd2ab83a`)
+- fix(desktop): say which engine lookup failed, not just that one did (`02c78bdd`)
+- fix: persist MCP failures and repair test imports (`fd502a4a`)
+- fix(web): ignore stale subagent polls (`b84e7a7d`)
+- fix: keep concurrent GWS PKCE flows isolated (`bdb04b36`)
+- fix: satisfy GWS OAuth mypy check (`1fe9f4e0`)
+- fix: make tests a package for conftest imports (`f23052b1`)
+- fix(desktop): name the real Start tray item in the splash hint (`0745d1f5`)
+- Fix deferred v0.11.0 review findings (#351, #352, #353, #354) (`8071ccf8`)
+- fix(schedules): hold system-routine catch-up for 24h after first setup (`4e4c419d`)
+- fix(deps): address security advisories (`2c1e2e67`)
+- fix: adapt shutdown hooks to starlette lifespan (`1f2f8666`)
+- fix(desktop): add macOS microphone entitlement (`d3b9880e`)
+- Fix subagent-view navigation and drop the stale ctx-attn rule (`9222dda4`)
+- Restore the stale-subagent-poll guard; make check-merges fail loudly (`c4609abe`)
+- Close the MCP twin of the schedule-time guard; keep the verifier on retry (`3204b329`)
+- Keep a migrated loop's project as a re-home fallback; reject unknown flow IDs (`21828dcb`)
+- Do not let a finished interval run revert a mid-run target edit (`fbb77f51`)
+- Apply the operator's Claude default; stamp the fallback on new legacy loops (`eedd3665`)
+- Retire a spent PKCE flow; stamp the re-home fallback on current creation (`0e1ffb71`)
+- Backfill the re-home fallback; cover the MCP paths; harden the helper (`38f9dd04`)
+- Fix the release-blocking GWS connect, 14 more review findings, and two UX bugs (`216b004e`)
+- Stop offering auto-archive where the dispatcher refuses to honour it (`ddfb2f51`)
+- Make Manual mode actually ask; validate the loops route before deleting (`3af8d125`)
+- Stop system-schedule chats writing memory; fix idx-0 and add temporal tags to extraction (`615b1466`)
+- Sweep empty proposal-batch headers; keep memory bookkeeping out of the search index (`df3941d4`)
+- Close the paraphrase-recall gap and log retrieval for decay-by-disuse (`9ff91afd`)
+- Repoint the two remaining curation-contract tests at the skill file (`9fa2b710`)
+- Fix mypy: don't reuse the Literal-typed region name in the reconcile loop (`0150453f`)
+- Classify "not logged in" provider errors as auth (`b749d3f2`)
+- Center the unread dot on the card heading centerline (`1d40d0a3`)
+- Keep personal names and local paths out of public fixtures and docs (`113d8b92`)
+- Extraction bullets are final statements: no mid-bullet self-correction (`2cc1698b`)
+- Apply v0.12.0 post-cut review findings: reconcile safety, audit correlation, mode carve-out sharing (`21ac3e08`)
+- Second review pass: fit context block into the model budget, settle opted-out FTS rows, scope reserved names, harden disuse matching (`d2a689e2`)
+- Scrub remaining personal names from public sources and fixtures (`73652390`)
+- Third review pass: fail-closed key prefixes, reserve-aware Apple budgets, drop the counter commit gate (`9a90d823`)
+
+### Maintenance
+- test: stop the rotation fixture racing the clock (`6430e8ba`)
+- build: let the desktop gate run without a bundled runtime (`00d2f1f3`)
+- test: pass PKCE flow ID through expiry case (`5a46c4a2`)
+- docs: add sanitized PWA overview screenshot (`c84e3fb8`)
+- docs: record the migrated-loop re-home fallback in ARCHITECTURE (`da99199f`)
+
 ## v0.11.0 - 2026-08-27
 
 ### Added

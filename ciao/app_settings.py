@@ -15,7 +15,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ciao import provider_registry
 
@@ -32,6 +32,41 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
         for provider_id, value in raw.items()
         if str(provider_id) in known and isinstance(value, str) and value.strip()
     }
+
+
+# Execution (permission) modes a provider default may pin. ``manual`` is the
+# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
+# ``plan`` stays chat-only and is not a settings default.
+_MODES = ("manual", "auto", "bypass")
+
+
+def _clean_default_modes(raw: object) -> dict[str, str]:
+    """Normalize a ``{provider: mode}`` map, dropping junk and bad modes."""
+    if not isinstance(raw, dict):
+        return {}
+    known = set(provider_registry.provider_ids())
+    return {
+        str(provider_id): str(mode).strip()
+        for provider_id, mode in raw.items()
+        if str(provider_id) in known
+        and isinstance(mode, str)
+        and mode.strip() in _MODES
+    }
+
+
+# Every per-provider nested map, with the cleaner that normalizes it. One
+# table rather than a `nested_fields` set, a parallel key tuple, and a third
+# `if key in {...}` branch in `update`: those three had already drifted —
+# `provider_default_modes` was missing from the set, so it landed in
+# `string_fields` and survived a reload only because the dict failed the
+# incidental `isinstance(value, str)` check. A new knob added to one list and
+# not the others is silently dropped on every restart, with no error anywhere.
+_NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
+    "provider_default_models": _clean_provider_map,
+    "provider_default_thinking": _clean_provider_map,
+    "provider_insights_models": _clean_provider_map,
+    "provider_default_modes": _clean_default_modes,
+}
 
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
@@ -77,6 +112,11 @@ class AppSettings:
     # the PWA.
     provider_default_models: dict[str, str] | None = None
 
+    # Per-provider default execution (permission) mode for new chats. Missing
+    # entry = the env-backed ``claude_mode`` (auto), for every provider. Same
+    # nested-map rationale as ``provider_default_models``.
+    provider_default_modes: dict[str, str] | None = None
+
     # Per-provider default thinking level for new chats. Missing entry = the
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
@@ -104,26 +144,17 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        nested_fields = {
-            "provider_default_models",
-            "provider_default_thinking",
-            "provider_insights_models",
-        }
         string_fields = {
             field.name
             for field in fields(AppSettings)
-            if field.name not in nested_fields
+            if field.name not in _NESTED_CLEANERS
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
-        for key in (
-            "provider_default_models",
-            "provider_default_thinking",
-            "provider_insights_models",
-        ):
-            cleaned = _clean_provider_map(raw.get(key))
+        for key, cleaner in _NESTED_CLEANERS.items():
+            cleaned = cleaner(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
         return settings
@@ -148,14 +179,25 @@ class AppSettingsStore:
         for key, value in changes.items():
             if key not in known:
                 continue
-            if key in {
-                "provider_default_models",
-                "provider_default_thinking",
-                "provider_insights_models",
-            }:
+            if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
-                setattr(self.settings, key, _clean_provider_map(value))
+                # Modes carry a closed vocabulary, so a bad one is a 400 rather
+                # than a value the cleaner silently drops. The cleaner itself
+                # still comes from the table — carving this key out of it was
+                # exactly the drift the table exists to prevent.
+                if key == "provider_default_modes":
+                    unknown = sorted(
+                        str(mode)
+                        for mode in value.values()
+                        if not isinstance(mode, str)
+                        or (mode.strip() and mode.strip() not in _MODES)
+                    )
+                    if unknown:
+                        raise ValueError(
+                            f"{key} entries must be one of {', '.join(_MODES)}"
+                        )
+                setattr(self.settings, key, _NESTED_CLEANERS[key](value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -201,6 +243,12 @@ class AppSettingsStore:
         config.provider_default_models = dict(s.provider_default_models or {})
         config.provider_default_thinking = dict(s.provider_default_thinking or {})
         config.provider_insights_models = dict(s.provider_insights_models or {})
+        # Modes carry the PWA-facing "manual" through as the BridgeMode
+        # "normal" the providers understand.
+        config.provider_default_modes = {
+            provider: ("normal" if mode == "manual" else mode)
+            for provider, mode in (s.provider_default_modes or {}).items()
+        }
         for descriptor in provider_registry.descriptors():
             current = _default_model_settings(config, descriptor)
             if current is None:

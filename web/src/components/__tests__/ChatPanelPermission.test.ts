@@ -95,8 +95,8 @@ async function mountLayout(seed: { permissions?: Array<ReturnType<typeof makePer
   }] as unknown as typeof store.chats
   store.activeChatId = CHAT_ID
   store.workspaces = [
-    { name: 'personal', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
-    { name: 'work', vault_root: '', default_provider: 'claude', default_model: '', gws_profile: '' },
+    { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
   ]
   store.activeWorkspace = 'personal'
   store.bootstrapped = true
@@ -105,7 +105,6 @@ async function mountLayout(seed: { permissions?: Array<ReturnType<typeof makePer
 
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
 
   const { default: ChatLayout } = await import('../ChatLayout.vue')
   const wrapper = mount(ChatLayout, {

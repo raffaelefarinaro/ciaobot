@@ -75,7 +75,6 @@ def _service(tmp_path: Path, *, mode: str = "auto") -> tuple[CiaoMcpService, _Fa
     config = SimpleNamespace(
         state_path=tmp_path / ".runtime" / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
     )
     service = CiaoMcpService(config)
     control_plane = _FakeControlPlane(mode=mode)
@@ -569,7 +568,6 @@ async def _assert_current_project_action_is_deferred(action: str) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="token-1",
@@ -642,7 +640,6 @@ def _chat_create_control_plane(
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace() if schedule_manager is None else schedule_manager,
-        loop_manager=SimpleNamespace(),
     )
 
 
@@ -757,7 +754,6 @@ def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=schedules,
-        loop_manager=SimpleNamespace(),
     )
     principal = _chat_create_principal()
 
@@ -822,6 +818,65 @@ def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> N
     assert result["data"]["web_chat_id"] == "chat-fixed"
     assert result["data"]["web_project_id"] is None
     assert result["data"]["workspace"] == "work"
+
+
+def test_schedule_create_with_chat_id_records_the_rehome_fallback(
+    tmp_path: Path,
+) -> None:
+    """The MCP creator stamped no fallback, so a deleted chat lost the project.
+
+    `web_project_id` cannot carry this — on an interval entry it means "a new
+    chat per run" and outranks the fixed chat — so the bound chat's own project
+    is recorded separately, and only while that chat still exists. Without it
+    the unattended run re-homes into the workspace's General.
+    """
+    pcm = _work_project_pcm()
+    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
+    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+
+    result = control_plane.schedule_create(
+        _chat_create_principal(project_id="project-work", workspace="work"),
+        prompt="Continue this thread weekly.",
+        daily_time="08:00",
+        timezone="UTC",
+        frequency="weekly",
+        chat_id="chat-fixed",
+    )
+
+    # Read the persisted row, not the payload: the stamp lands after `create`
+    # and is only useful if it was written back.
+    stored = schedules._store.get(result["data"]["schedule_id"])
+    assert stored is not None
+    assert stored.fallback_project_id == "project-work"
+
+
+def test_mcp_loop_create_and_retarget_keep_the_rehome_fallback_in_step(
+    tmp_path: Path,
+) -> None:
+    """Retargeting must move the fallback, not leave it on the old project."""
+    pcm = _work_project_pcm()
+    chats = {
+        "chat-a": SimpleNamespace(chat_id="chat-a", project_id="project-work"),
+        "chat-b": SimpleNamespace(
+            chat_id="chat-b", project_id="project-work-general"
+        ),
+    }
+    pcm.get_chat = lambda cid: chats.get(cid)  # type: ignore[method-assign]
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+
+    created = control_plane.loop_create(
+        principal, chat_id="chat-a", prompt="watch the queue", interval_minutes=15
+    )
+    loop_id = created["data"]["loop_id"]
+    assert schedules._store.get(loop_id).fallback_project_id == "project-work"
+
+    control_plane.loop_update(principal, loop_id, chat_id="chat-b")
+
+    assert schedules._store.get(loop_id).fallback_project_id == (
+        "project-work-general"
+    )
 
 
 # ── workspace boundary for schedule targeting ────────────────────────────
@@ -1038,7 +1093,6 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     pcm = SimpleNamespace(
         update_chat=lambda cid, **kwargs: SimpleNamespace(
             chat_id=cid,
-            control_surface="",
             to_dict=lambda local=True: {"chat_id": cid, **kwargs},
         ),
         is_session_local=lambda c: True,
@@ -1050,7 +1104,6 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = _chat_create_principal()
 
@@ -1060,8 +1113,9 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
-def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> None:
-    from ciao.loops import LoopManager, LoopStore
+def _interval_control_plane(tmp_path: Path):
+    """A control plane whose caller is a chat in the `work` workspace."""
+    from ciao.schedules import ScheduleManager, ScheduleStore
 
     pcm = _ChatCreatePcm()
     pcm.projects["project-work"] = SimpleNamespace(
@@ -1074,28 +1128,96 @@ def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> 
         if cid == "chat-work"
         else None
     )
-    manager = LoopManager(store=LoopStore(tmp_path))
     config = SimpleNamespace(
         workspace=lambda name: object() if name in {"personal", "work"} else None
     )
     control_plane = CiaoControlPlane(
         config,
         project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
-        loop_manager=manager,
+        schedule_manager=ScheduleManager(store=ScheduleStore(tmp_path)),
     )
     principal = _chat_create_principal(
         chat_id="chat-work",
         project_id="project-work",
         workspace="work",
     )
+    return control_plane, principal
+
+
+def test_interval_schedule_defaults_to_caller_and_stamps_workspace(
+    tmp_path: Path,
+) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Check PRs",
+        frequency="interval",
+        interval_minutes=15,
+        chat_id="chat-work",
+    )
+
+    data = result["data"]
+    assert data["frequency"] == "interval"
+    assert data["interval_minutes"] == 15
+    assert data["web_chat_id"] == "chat-work"
+    assert data["workspace"] == "work"
+    # Empty model is what makes each run inherit the target chat's settings.
+    assert data["model"] == ""
+    # No wall-clock slot, so a next run is still reported (cadence from now).
+    assert data["next_run"]
+
+
+def test_interval_schedule_rejects_a_cadence_below_the_floor(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            principal,
+            prompt="Check PRs",
+            frequency="interval",
+            interval_minutes=0,
+            chat_id="chat-work",
+        )
+    assert excinfo.value.code == "invalid_interval"
+
+
+def test_unknown_frequency_is_refused(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            principal, prompt="p", frequency="hourly", chat_id="chat-work"
+        )
+    assert excinfo.value.code == "invalid_frequency"
+
+
+def test_deprecated_loop_create_makes_an_interval_schedule(tmp_path: Path) -> None:
+    """The retired `loop` tool stays wired for one release."""
+    control_plane, principal = _interval_control_plane(tmp_path)
 
     result = control_plane.loop_create(principal, "", "Check PRs", interval_minutes=15)
 
-    assert result["data"]["web_chat_id"] == "chat-work"
-    assert result["data"]["web_project_id"] == "project-work"
-    assert result["data"]["workspace"] == "work"
-    assert result["data"]["interval_minutes"] == 15
+    data = result["data"]
+    assert data["web_chat_id"] == "chat-work"
+    assert data["workspace"] == "work"
+    assert data["interval_minutes"] == 15
+    # start defaults to True, and `autostart` reports the same one flag.
+    assert data["running"] is True and data["autostart"] is True
+
+    # The same entry is a first-class schedule.
+    listed = control_plane.schedules_list(principal)["data"]
+    assert [row["schedule_id"] for row in listed] == [data["loop_id"]]
+    assert listed[0]["frequency"] == "interval"
+
+
+def test_deprecated_loop_create_without_start_stays_stopped(tmp_path: Path) -> None:
+    control_plane, principal = _interval_control_plane(tmp_path)
+
+    result = control_plane.loop_create(
+        principal, "", "Check PRs", autostart=False, start=False
+    )
+    assert result["data"]["running"] is False
 
 
 @pytest.mark.asyncio
@@ -1107,12 +1229,7 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
 
     async def _archive_chat(cid: str) -> SimpleNamespace:
         archived_calls.append(cid)
-        return SimpleNamespace(
-            outcome=SimpleNamespace(path=Path("/tmp/chat.md")),
-            delegates=[],
-            stopped_ids=lambda: [],
-            failed_ids=lambda: [],
-        )
+        return SimpleNamespace(path=Path("/tmp/chat.md"))
 
     fake_pcm = SimpleNamespace(
         archive_chat=_archive_chat,
@@ -1123,7 +1240,6 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
         config,
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
     control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
@@ -1167,7 +1283,6 @@ def test_project_and_chat_resolution_defaults() -> None:
         config,
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     principal = McpPrincipal(
         token_id="t1",
@@ -1222,7 +1337,6 @@ def _workspace_control_plane(tmp_path: Path, *, workspaces: tuple[str, ...] = ("
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
     return plane, config, refreshes
 
@@ -1298,7 +1412,6 @@ def test_gws_status_reports_connected_profile(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1353,7 +1466,6 @@ def test_gws_status_reports_needs_relogin(tmp_path: Path) -> None:
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1412,7 +1524,6 @@ def test_gws_status_suppresses_debounced_invalid_reading(tmp_path: Path) -> None
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1452,7 +1563,6 @@ def test_gws_status_reports_unknown_health_as_not_connected(tmp_path: Path) -> N
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1512,7 +1622,6 @@ def test_gws_status_reports_stale_reading_as_not_connected(tmp_path: Path) -> No
         config,
         project_chat_manager=pcm,
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
     )
 
     result = plane.gws_status(_chat_create_principal())
@@ -1534,7 +1643,6 @@ def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:
         principal,
         name="research",
         default_provider="opencode",
-        default_model="opencode/big-pickle",
         gws_profile="work",
         disallowed_tools=["Bash"],
         color="cyan",
@@ -1617,7 +1725,6 @@ def test_discover_project_servers_reports_env_and_observed_tools(
     config = SimpleNamespace(
         state_path=runtime / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
         workspace_root=workspace,
     )
     service = CiaoMcpService(config)
@@ -1663,7 +1770,6 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     config = SimpleNamespace(
         state_path=runtime / "state.json",
         pwa_port=18443,
-        mcp_enabled=True,
         workspace_root=workspace,
     )
     service = CiaoMcpService(config)
@@ -1671,6 +1777,226 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["tools"] == ["mcp__notion__search"]
     assert "Stdio" in result["tools_note"]
+
+
+def _lazy_service(
+    tmp_path: Path, *, lazy: bool = True, mode: str = "auto"
+) -> tuple[CiaoMcpService, _FakeControlPlane]:
+    config = SimpleNamespace(
+        state_path=tmp_path / ".runtime" / "state.json",
+        pwa_port=18443,
+        mcp_lazy_tools=lazy,
+    )
+    service = CiaoMcpService(config)
+    control_plane = _FakeControlPlane(mode=mode)
+    service.bind(control_plane)  # type: ignore[arg-type]
+    return service, control_plane
+
+
+def test_tool_groups_cover_every_registered_tool(tmp_path: Path) -> None:
+    """A tool absent from _TOOL_GROUPS is unreachable through tools_search.
+
+    tools_search advertises its catalog from the group map, so a new tool that
+    nobody added to a group would be hidden from tools/list and invisible to
+    discovery at the same time.
+    """
+    service, _control_plane = _service(tmp_path)
+    grouped = {
+        name for names in mcp_server._TOOL_GROUPS.values() for name in names
+    }
+    registered = service._tool_names - mcp_server._META_TOOLS
+
+    assert grouped == registered
+    # One group each; the description would list a tool twice otherwise.
+    flat = [n for names in mcp_server._TOOL_GROUPS.values() for n in names]
+    assert len(flat) == len(set(flat))
+
+
+def test_lazy_listing_hides_the_bulk_but_keeps_destructive_tools(
+    tmp_path: Path,
+) -> None:
+    """Destructive tools must stay named in tools/list.
+
+    Auto-approval is a static name allowlist on the provider side, so a
+    destructive tool reached through tools_call would inherit the dispatcher's
+    approval instead of raising its own card.
+    """
+    service, _control_plane = _service(tmp_path)
+    listed = {tool.name for tool in asyncio.run(service._list_visible_tools())}
+
+    assert {"tools_search", "tools_call"} <= listed
+    assert {"context_get", "memory_status", "vault_search"} <= listed
+    assert service._destructive_tool_names() <= listed
+    # The rest of the catalog is registered but not listed.
+    assert "chat_send" in service._tool_names
+    assert "chat_send" not in listed
+    assert "schedule" not in listed
+    assert len(listed) < len(service._tool_names)
+    assert set(service.status()["listed_tools"]) == listed
+    assert service.status()["lazy_tools"] is True
+
+
+def test_lazy_listing_off_lists_the_whole_catalog(tmp_path: Path) -> None:
+    service, _control_plane = _lazy_service(tmp_path, lazy=False)
+    tools = asyncio.run(service.server.list_tools())
+
+    assert {tool.name for tool in tools} == service._tool_names
+    assert service.status()["lazy_tools"] is False
+
+
+def test_tools_search_returns_schemas_for_a_group(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    result = asyncio.run(service._tools_search("loops"))
+
+    assert result["ok"] is True
+    names = {row["name"] for row in result["data"]["tools"]}
+    assert names == set(mcp_server._TOOL_GROUPS["loops"])
+    row = next(r for r in result["data"]["tools"] if r["name"] == "loop")
+    assert row["group"] == "loops"
+    assert row["listed"] is False
+    assert "action" in row["input_schema"]["properties"]
+    # loop_action is destructive, so it is already listed.
+    assert next(
+        r for r in result["data"]["tools"] if r["name"] == "loop_action"
+    )["listed"] is True
+
+
+def test_tools_search_without_a_query_returns_the_summary_catalog(
+    tmp_path: Path,
+) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    result = asyncio.run(service._tools_search(""))
+
+    catalog = result["data"]["catalog"]
+    assert result["data"]["matched"] == 0
+    assert {row["name"] for row in catalog} == (
+        service._tool_names - mcp_server._META_TOOLS
+    )
+    # Summaries only — the point is not to pay for the schemas here.
+    assert all("input_schema" not in row for row in catalog)
+    assert all(row["summary"] for row in catalog)
+
+
+def test_tools_search_falls_back_to_the_catalog_on_no_match(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    result = asyncio.run(service._tools_search("zzzz-nothing"))
+
+    assert result["data"]["matched"] == 0
+    assert result["data"]["catalog"]
+
+
+def test_tools_search_description_lists_every_group_and_tool() -> None:
+    description = mcp_server._tools_search_description()
+
+    for group, names in mcp_server._TOOL_GROUPS.items():
+        assert group in description
+        for name in names:
+            assert name in description
+
+
+def test_tools_call_dispatches_and_records_the_inner_tool_name(
+    tmp_path: Path,
+) -> None:
+    service, control_plane = _service(tmp_path)
+    token, _ = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    with _client(service) as client:
+        called = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "tools_call",
+                "arguments": {
+                    "name": "schedule",
+                    "arguments": {"action": "create", "prompt": "do a thing"},
+                },
+            },
+        )
+
+    assert called.status_code == 200
+    payload = called.json()["result"]["structuredContent"]
+    assert payload["ok"] is True
+    assert control_plane.create_calls == 1
+    # Telemetry and the status panel must see the real tool, not the wrapper.
+    record = json.loads(
+        service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert record["tool"] == "schedule"
+    assert record["chat_id"] == "chat-1"
+    assert record["status"] == "ok"
+
+
+def test_tools_call_still_honours_plan_mode(tmp_path: Path) -> None:
+    service, control_plane = _service(tmp_path, mode="plan")
+    token, _ = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    with _client(service) as client:
+        called = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "tools_call",
+                "arguments": {
+                    "name": "schedule",
+                    "arguments": {"action": "create", "prompt": "do a thing"},
+                },
+            },
+        )
+
+    payload = called.json()["result"]["structuredContent"]
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "plan_mode_read_only"
+    assert control_plane.create_calls == 0
+
+
+def test_tools_call_refuses_destructive_meta_and_unknown_names(
+    tmp_path: Path,
+) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    destructive = asyncio.run(service._tools_call("chat_delete", {"chat_id": "c1"}))
+    assert destructive["ok"] is False
+    assert destructive["error"]["code"] == "invalid_request"
+    assert "directly by name" in destructive["error"]["message"]
+
+    # Every name the dispatcher accepts is already auto-approved, so it opens
+    # no hole the provider policy did not already grant.
+    reachable = {
+        name
+        for name in service._tool_names
+        if not service._dispatch_refusal(name)
+    }
+    assert reachable <= set(AUTO_APPROVED_MCP_TOOLS)
+
+    assert asyncio.run(service._tools_call("tools_call", {}))["ok"] is False
+    assert asyncio.run(service._tools_call("", {}))["ok"] is False
+    unknown = asyncio.run(service._tools_call("nope", {}))
+    assert unknown["ok"] is False
+    assert "tools_search" in unknown["error"]["message"]
+
+
+def test_tools_call_reports_bad_arguments_as_invalid_request(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    result = asyncio.run(service._tools_call("chat_send", {"nonsense": 1}))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "invalid_request"
 
 
 def test_auto_approved_policy_matches_tool_annotations() -> None:
@@ -1682,7 +2008,11 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     ``_DESTRUCTIVE`` one still raises an approval card.
     """
     source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    declared = re.findall(r'@tool\(name="([a-z_]+)", annotations=(_[A-Z]+)', source)
+    # Both the single-line decorators and the multi-line ones (tools_search /
+    # tools_call pass an explicit description=).
+    declared = re.findall(
+        r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source
+    )
     assert declared, "no annotated @tool declarations found in ciao/mcp_server.py"
 
     expected = [name for name, ann in declared if ann in {"_READ", "_WRITE"}]
@@ -1717,7 +2047,6 @@ def _file_surface_plane(
         config,
         project_chat_manager=_StreamPcm(stream),
         schedule_manager=SimpleNamespace(),
-        loop_manager=SimpleNamespace(),
         connection_tracker=connection_tracker,
     )
 

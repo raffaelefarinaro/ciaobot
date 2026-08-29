@@ -127,7 +127,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
             "name": "client-a",
             "vault_root": "client-a",
             "default_provider": "claude",
-            "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
             "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         },
@@ -138,7 +137,9 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     names = [workspace["name"] for workspace in data["workspaces"]]
     assert "client-a" in names
     assert config.workspace("client-a").default_provider == "claude"
-    assert config.default_model_for_workspace("client-a") == "kimi-k2.7-code:cloud"
+    # The workspace no longer pins a model; new chats inherit the provider
+    # default (claude_default_model).
+    assert config.default_model_for_workspace("client-a") == "opus"
     assert config.disallowed_tools_for_workspace("client-a") == [
         "mcp__claude_ai_Slack",
         "Bash",
@@ -155,7 +156,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "name": "client-a",
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
-        "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "allowed_mcp_servers": None,
         "gws_profile": "work",
@@ -172,10 +172,9 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
 
     patch = client.patch(
         "/api/workspaces/client-a",
-        json={"default_model": "sonnet", "disallowed_tools": "mcp__example,Bash"},
+        json={"disallowed_tools": "mcp__example,Bash"},
     )
     assert patch.status_code == 200
-    assert config.workspace("client-a").default_model == "sonnet"
     assert config.disallowed_tools_for_workspace("client-a") == ["mcp__example", "Bash"]
 
     delete = client.delete("/api/workspaces/client-a")
@@ -190,7 +189,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "name": "personal",
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
-            "default_model": "",
             "disallowed_tools": None,
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
@@ -218,7 +216,7 @@ def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
     existing.vault_root = str(tmp_path / "external-vault")
     patched = client.patch(
         "/api/workspaces/research",
-        json={"vault_root": "../outside", "default_model": "sonnet"},
+        json={"vault_root": "../outside", "gws_profile": "work"},
     )
     assert patched.status_code == 200
     assert config.workspace("research").vault_root == str(
@@ -314,7 +312,6 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
                     "name": "personal",
                     "vault_root": "memory-vault/personal",
                     "default_provider": "ollama",
-                    "default_model": "qwen3:latest",
                     "model_bucket": "big",
                     "gws_profile": "personal",
                 },
@@ -342,7 +339,7 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
     # A save that omits the provider keeps working despite the stale record.
     untouched = client.patch(
         "/api/workspaces/personal",
-        json={"default_model": "sonnet"},
+        json={"gws_profile": "personal"},
     )
     assert untouched.status_code == 200
 
@@ -453,7 +450,7 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     # Other fields can update without resetting color.
     keep = client.patch(
         "/api/workspaces/client-a",
-        json={"default_model": "sonnet"},
+        json={"gws_profile": "work"},
     )
     assert keep.status_code == 200
     assert config.workspace("client-a").color == "emerald"
@@ -685,6 +682,19 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert "accounts.google.com/o/oauth2/auth" in resp.json()["auth_url"]
     assert "client_id=test-client-id" in resp.json()["auth_url"]
+    flow_id = resp.json()["flow_id"]
+    assert flow_id
+
+    # PKCE (issue #354): the manual/paste flow cannot validate `state` on
+    # paste-back, so the auth URL must carry a code_challenge, and the
+    # verifier that produced it must be the one sent at exchange time below.
+    from urllib.parse import parse_qs, urlparse
+
+    from ciao import gws_auth
+
+    auth_query = parse_qs(urlparse(resp.json()["auth_url"]).query)
+    assert auth_query["code_challenge_method"] == ["S256"]
+    challenge = auth_query["code_challenge"][0]
 
     # 3. Test exchange code
     # Mock urllib.request.urlopen to return tokens
@@ -700,10 +710,12 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
             pass
 
     mock_called = False
+    captured_body = {}
     def mock_urlopen(req, *args, **kwargs):
         nonlocal mock_called
         mock_called = True
         assert req.full_url == "https://oauth2.googleapis.com/token"
+        captured_body["data"] = req.data.decode("utf-8")
         return MockResponse()
 
     import urllib.request
@@ -712,10 +724,17 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     # Use a redirect URL as input
     resp = client.post(
         "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=test-code"}
+        json={"profile": "personal", "code": "http://localhost/?code=test-code", "flow_id": flow_id}
     )
     assert resp.status_code == 200
     assert mock_called is True
+
+    # The verifier generated for the auth-url call above must be the one
+    # actually sent to the token endpoint, and it must derive the same
+    # challenge that was on the auth URL.
+    sent_verifier = parse_qs(captured_body["data"])["code_verifier"][0]
+    assert gws_auth.code_challenge_s256(sent_verifier) == challenge
+
     data = resp.json()
     profiles = {p["name"]: p for p in data["profiles"]}
     assert profiles["personal"]["configured"] is True
@@ -771,7 +790,7 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
     import ciao.gws_auth
     monkeypatch.setattr(
         ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
     )
 
     class _FakeMonitor:
@@ -816,7 +835,7 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor_cls, "check_once", loud)
     monkeypatch.setattr(
         ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
     )
 
     resp = client.post(
@@ -824,6 +843,264 @@ def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
         json={"profile": "personal", "code": "test-code"},
     )
     assert resp.status_code == 200
+
+
+def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, monkeypatch):
+    """A verifier that expired between auth-url and paste-back must fail
+    loudly with a "restart the flow" message (issue #354 code review) —
+    Google is still holding a code_challenge for this profile, so silently
+    omitting code_verifier would surface a confusing invalid_grant instead.
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
+    assert resp.status_code == 200
+    flow_id = resp.json()["flow_id"]
+
+    # Simulate the TTL elapsing before the user pastes the code back.
+    store = client.app.state.gws_manual_pkce_store
+    for flow_id, (profile, verifier, _expires_at, _status) in list(store._pending.items()):
+        store._pending[flow_id] = (profile, verifier, 0.0, "active")
+
+    exchange_called = False
+
+    def unexpected_exchange(*args, **kwargs):
+        nonlocal exchange_called
+        exchange_called = True
+        return {"ok": True, "email": "should-not-be-reached@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=stale-code",
+            "flow_id": flow_id,
+        },
+    )
+    assert resp.status_code == 400
+    assert "expired" in resp.json()["error"].lower()
+    assert exchange_called is False
+
+
+def test_a_successful_exchange_retires_its_pkce_flow(tmp_path, monkeypatch):
+    """`peek` is non-destructive so a mistyped paste can be retried, which
+    means nothing retired a flow that actually succeeded — it stayed "active"
+    for the rest of its TTL. That held a spent secret, and because
+    `status_for_profile` still reported "active" it also refused any later
+    flow-ID-less exchange for the profile (the cached pre-PKCE client path).
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        gws_auth, "exchange_and_store",
+        lambda config, profile, *, code, redirect_uri, code_verifier=None: {
+            "ok": True, "email": "x@y"
+        },
+    )
+
+    flow_id = client.post(
+        "/api/integrations/gws/auth-url", json={"profile": "personal"}
+    ).json()["flow_id"]
+    store = client.app.state.gws_manual_pkce_store
+    assert store.status_for_profile("personal") == "active"
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=good",
+            "flow_id": flow_id,
+        },
+    )
+    assert resp.status_code == 200
+
+    # Spent: verifier gone, and no longer blocking the profile.
+    assert store.peek(flow_id, "personal") is None
+    assert store.status_for_profile("personal") != "active"
+    # A legacy client with no flow_id can exchange again straight away.
+    assert client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "http://localhost/?code=legacy"},
+    ).status_code == 200
+
+
+def test_a_failed_exchange_keeps_its_pkce_flow_for_a_retry(tmp_path, monkeypatch):
+    """The other half: only success retires the flow."""
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(config, profile, *, code, redirect_uri, code_verifier=None):
+        raise ValueError("wrong code")
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", _boom)
+
+    flow_id = client.post(
+        "/api/integrations/gws/auth-url", json={"profile": "personal"}
+    ).json()["flow_id"]
+    store = client.app.state.gws_manual_pkce_store
+    verifier = store.peek(flow_id, "personal")
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=typo",
+            "flow_id": flow_id,
+        },
+    )
+    assert resp.status_code == 400
+    assert store.peek(flow_id, "personal") == verifier
+
+
+def test_gws_exchange_rejects_an_explicit_but_unknown_flow_id(tmp_path, monkeypatch):
+    """A restart between auth-url and paste-back must not exchange blindly.
+
+    The client only holds a flow_id because the auth URL it came from carried
+    a PKCE challenge, so an id the store no longer knows cannot mean "this flow
+    never used PKCE" — that reading is only safe when no id was sent at all.
+    Exchanging anyway sends a challenged code with no verifier, which Google
+    must reject, and the user sees `invalid_grant` instead of what to do next.
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
+    flow_id = resp.json()["flow_id"]
+
+    # What a server restart looks like to the next request: the browser still
+    # has its flow_id, the new in-memory store has nothing.
+    client.app.state.gws_manual_pkce_store._pending.clear()
+
+    exchange_called = False
+
+    def unexpected_exchange(*args, **kwargs):
+        nonlocal exchange_called
+        exchange_called = True
+        return {"ok": True, "email": "should-not-be-reached@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=challenged-code",
+            "flow_id": flow_id,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "start manual connect again" in resp.json()["error"].lower()
+    assert exchange_called is False
+
+
+def test_gws_exchange_without_a_pending_pkce_flow_omits_verifier(tmp_path, monkeypatch):
+    """A profile that never called auth-url through this store (legacy
+    client, or a flow superseded by a later start) must still exchange
+    normally, with no code_verifier sent — the same behavior as before PKCE
+    existed."""
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict = {}
+
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
+        captured["code_verifier"] = code_verifier
+        return {"ok": True, "email": "x@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", fake_exchange)
+
+    # No prior call to /auth-url for this profile.
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "http://localhost/?code=some-code"},
+    )
+    assert resp.status_code == 200
+    assert captured["code_verifier"] is None
 
 
 def test_gws_profile_payload_uses_granted_scopes_for_chips_and_purpose(tmp_path):

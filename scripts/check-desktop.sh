@@ -41,6 +41,39 @@ if [[ -n "$missing" ]]; then
   exit 1
 fi
 
+# Tauri resolves every bundle.resources path while running the build script, so
+# an absent desktop/runtime aborts `cargo fmt`/`clippy`/`test` before a single
+# check runs — the gate is unusable on a fresh checkout. CI builds the real
+# runtime first (.github/workflows/ci.yml), but that downloads a pinned CPython
+# and takes minutes, which is more than this gate is for. A placeholder
+# satisfies the path lookup; none of the Rust checks read its contents.
+RUNTIME="$DESKTOP/runtime"
+PLACEHOLDER="$RUNTIME/README.txt"
+if [[ ! -d "$RUNTIME" ]]; then
+  mkdir -p "$RUNTIME"
+  cat > "$PLACEHOLDER" <<'EOF'
+Placeholder created by scripts/check-desktop.sh so Tauri can resolve the
+`../runtime` resource path. The real bundled Python runtime is built by
+scripts/build-bundled-runtime.sh. An app bundled against this placeholder has
+no engine inside it: resolve_ciao() finds no Contents/Resources/ciao-runtime/
+bin/ciao and reports "Ciaobot engine unavailable".
+EOF
+fi
+
+# Tested against the tree, not against a flag set earlier in *this* run. The
+# placeholder is never cleaned up and desktop/runtime/ is gitignored, so a
+# one-shot flag warned only on the very first invocation and every later run
+# printed an unqualified "signed, and runnable" for a bundle with no engine in
+# it — on the runs where that mattered most.
+runtime_note() {
+  [[ -f "$PLACEHOLDER" && ! -x "$RUNTIME/bin/ciao" ]] || return 0
+  echo
+  echo "Note: desktop/runtime holds only the placeholder this script creates."
+  echo "The Rust checks above are unaffected, but any .app built from this tree"
+  echo "has no engine bundled. Run scripts/build-bundled-runtime.sh for a real"
+  echo "one before installing or shipping this bundle."
+}
+
 step() { printf '\n=== %s ===\n' "$1"; }
 
 step "sidecar build (swiftc, aarch64)"
@@ -58,6 +91,7 @@ step "cargo test"
 if [[ "$FAST" -eq 1 ]]; then
   echo
   echo "Desktop gate passed (--fast: bundle build skipped)."
+  runtime_note
   exit 0
 fi
 
@@ -82,3 +116,4 @@ codesign -v "$APP" || { echo "FAIL: bundle signature invalid" >&2; exit 1; }
 
 echo
 echo "Desktop gate passed: sidecar bundled, aarch64, signed, and runnable."
+runtime_note

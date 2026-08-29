@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -66,6 +67,7 @@ from ciao.web.routes_api import (
     chat_stop,
     chat_new_session,
     chat_subagents,
+    running_subagents,
     chat_speak,
     chat_voice,
     chats_mark_all_read,
@@ -173,6 +175,8 @@ from ciao.web.routes_push import (
 )
 from ciao.web.security import SecurityHeadersMiddleware
 
+logger = logging.getLogger(__name__)
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -261,6 +265,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/native/sessions", native_sessions, methods=["GET"]),
         Route("/api/chats/{chat_id}/reentry-summary", chat_reentry_summary, methods=["POST"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
+        Route("/api/subagents/running", running_subagents, methods=["GET"]),
         Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
@@ -289,7 +294,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        # Loops — in-chat interval automations (Automations page)
+        # Loops — retired; interval schedules now cover them. Kept for one
+        # release so a PWA build cached before the merge keeps working.
         Route("/api/loops", list_loops, methods=["GET"]),
         Route("/api/loops", create_loop, methods=["POST"]),
         Route("/api/loop-run/{loop_id}", run_loop_now, methods=["POST"]),
@@ -437,6 +443,16 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             else:
                 yield
         finally:
+            for callback in getattr(_app.state, "shutdown_callbacks", ()):
+                # One failing callback must not skip the ones after it, nor the
+                # client pool below. Shutdown is the last chance to terminate
+                # provider subprocesses and background runs; leaking them
+                # because an earlier hook raised is how a restart ends up with
+                # orphan processes.
+                try:
+                    await callback()
+                except Exception:
+                    logger.exception("Shutdown callback failed")
             # Release the client-mode keep-alive pool. A no-op on a host node,
             # which never opens it.
             await close_shared_client()

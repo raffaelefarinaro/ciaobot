@@ -52,6 +52,15 @@ def test_base_id_survives_fan_out() -> None:
     assert system_base_id("") == ""
 
 
+def test_is_system_schedule_id() -> None:
+    from ciao.schedules import is_system_schedule_id
+
+    assert is_system_schedule_id("system-memory-curation") is True
+    assert is_system_schedule_id("system-memory-curation@work") is True
+    assert is_system_schedule_id("sched-ee193709") is False
+    assert is_system_schedule_id("") is False
+
+
 def test_stagger_shifts_later_rows_and_wraps() -> None:
     assert _stagger_time("00:01", 0) == "00:01"
     assert _stagger_time("00:01", 1) == "00:08"

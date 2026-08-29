@@ -32,7 +32,7 @@ Example `.runtime/workspaces.json`:
   {
     "name": "default",
     "vault_root": "memory-vault",
-    "default_model": "opus",
+    "default_provider": "claude",
     "gws_profile": "personal",
     "color": "pink",
     "disallowed_tools": []
@@ -40,7 +40,7 @@ Example `.runtime/workspaces.json`:
   {
     "name": "client-a",
     "vault_root": "vaults/client-a",
-    "default_model": "sonnet",
+    "default_provider": "opencode",
     "gws_profile": "work",
     "color": "cyan",
     "disallowed_tools": ["mcp__claude_ai_Slack", "mcp__claude_ai_Salesforce"]
@@ -62,15 +62,15 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 Useful `.env` settings:
 
 - `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
-- `CLAUDE_DEFAULT_MODEL_PERSONAL` and `CLAUDE_DEFAULT_MODEL_WORK`: legacy defaults for the built-in personal/work workspaces.
-- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` and `default_model` per workspace.
+- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
 
-Each provider has its own default model and thinking level for new chats, set
-in Settings → Models → defaults per provider. A Claude model alias
+Each provider has its own default model and thinking level for new chats, set in
+Settings → Models, and its own default permission mode, set in
+Settings → Providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`) is a real Claude model id; opencode resolves its
-own defaults from the signed-in account's catalog.
-
-The chat picker can still override the workspace default for a specific chat.
+own defaults from the signed-in account's catalog. The permission mode chooses
+how much a chat may do without asking: manual (ask for every action), auto
+(allow safe work, ask on risky actions), or bypass (allow everything).
 
 ## API Keys and Secrets
 

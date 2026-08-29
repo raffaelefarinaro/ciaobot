@@ -20,7 +20,6 @@ describe('ProjectSidebar chat actions', () => {
       name: 'personal',
       vault_root: '/tmp/vault',
       default_provider: 'claude',
-      default_model: 'sonnet',
       gws_profile: '',
     }]
     store.projects = [{
@@ -192,18 +191,19 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('collapses and expands a supervisor subchat group', async () => {
+  it('collapses and expands a chat\'s running-subagent group', async () => {
     const store = useProjectStore()
-    store.chats.push({
-      ...store.chats[0],
-      chat_id: 'subchat-5678-efgh',
-      title: 'Child chat',
-      spawned_from_chat_id: chatId,
-      created_at: '2026-07-29T00:01:00Z',
-    })
+    store.runningSubagents = {
+      [chatId]: [
+        { agent_id: 'a1b2c3d4', description: 'Sweep the callers', subagent_type: 'Explore', status: 'running' },
+      ],
+    }
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: { template: '<div />' } }],
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
+      ],
     })
     await router.push('/')
     await router.isReady()
@@ -216,8 +216,13 @@ describe('ProjectSidebar chat actions', () => {
       },
     })
 
+    // The chat row plus its one subagent row (which reuses .chat-item).
     expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    const toggle = wrapper.get('[aria-label="Collapse subchats for Copy me"]')
+    const row = wrapper.get('.subagent-item')
+    expect(row.text()).toContain('Sweep the callers')
+    expect(row.attributes('href')).toBe(`/chat/${chatId}/subagent/a1b2c3d4`)
+
+    const toggle = wrapper.get('[aria-label="Collapse subagents for Copy me"]')
     expect(toggle.attributes('aria-expanded')).toBe('true')
 
     await toggle.trigger('click')
@@ -225,19 +230,46 @@ describe('ProjectSidebar chat actions', () => {
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
     expect(toggle.attributes('aria-expanded')).toBe('false')
 
-    store.activeChatId = 'subchat-5678-efgh'
+    // Opening the subagent's own view must reopen the group it lives in.
+    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
     await nextTick()
 
     expect(wrapper.findAll('.chat-item')).toHaveLength(2)
     expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('.subagent-item').classes()).toContain('active')
 
-    await toggle.trigger('click')
+    wrapper.unmount()
+  })
+
+  // A finished subagent is not archived and leaves no row behind: the poll
+  // stops listing it, and the transcript stays in the chat's Activity trace.
+  it('drops a subagent row once the agent stops running', async () => {
+    const store = useProjectStore()
+    store.runningSubagents = {
+      [chatId]: [{ agent_id: 'a1b2c3d4', description: 'Sweep the callers', status: 'running' }],
+    }
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    expect(wrapper.findAll('.subagent-item')).toHaveLength(1)
+
+    store.runningSubagents = {}
+    await nextTick()
+
+    expect(wrapper.findAll('.subagent-item')).toHaveLength(0)
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
-
-    await toggle.trigger('click')
-
-    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    expect(toggle.attributes('aria-expanded')).toBe('true')
 
     wrapper.unmount()
   })

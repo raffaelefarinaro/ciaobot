@@ -12,14 +12,13 @@ from ciao.web.project_chats import ProjectChatManager
 
 
 def _opencode_workspace(name: str = "work") -> dict[str, WorkspaceConfig]:
-    """A workspace whose default provider is opencode and whose default
-    model is empty ("let the provider pick")."""
+    """A workspace whose default provider is opencode ("let the provider pick
+    its own model")."""
     return {
         name: WorkspaceConfig(
             name=name,
             vault_root=name,
             default_provider="opencode",
-            default_model="",
         )
     }
 
@@ -144,7 +143,6 @@ def test_removed_workspace_provider_does_not_carry_its_model_to_claude(
                 name="work",
                 vault_root="work",
                 default_provider="ollama",
-                default_model="qwen3:latest",
             )
         },
     )

@@ -15,25 +15,6 @@ def _config(**overrides: str) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
-def test_control_surface_defaults_to_mcp(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path))
-    assert config.control_surface == "mcp"
-
-
-def test_control_surface_env_override(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="legacy")
-    assert config.control_surface == "legacy"
-    # "auto" was the user-facing A/B benchmark option; removed with the
-    # benchmark, so the env value now falls back to the mcp default.
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="auto")
-    assert config.control_surface == "mcp"
-
-
-def test_control_surface_invalid_falls_back_to_mcp(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="bogus")
-    assert config.control_surface == "mcp"
-
-
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path))
     assert config.workspace_root == tmp_path.resolve()
@@ -116,14 +97,14 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
             {
                 "name": "home",
                 "vault_root": "memory-vault/home",
-                "default_model": "haiku",
+                "default_provider": "claude",
                 "disallowed_tools": ["Bash", "mcp__example"],
                 "gws_profile": "personal",
             },
             {
                 "name": "client",
                 "vault_root": "/tmp/client-vault",
-                "default_model": "opus",
+                "default_provider": "opencode",
                 "gws_profile": "work",
             },
         ]
@@ -135,9 +116,9 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.workspace_names() == ["home", "client"]
     assert config.workspace("home").vault_root == "memory-vault/home"
     assert config.workspace("home").gws_profile == "personal"
-    assert config.default_model_for_workspace("home") == "haiku"
+    assert config.default_provider_for_workspace("home") == "claude"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
-    assert config.default_model_for_workspace("client") == "opus"
+    assert config.default_provider_for_workspace("client") == "opencode"
     # A workspace with no explicit denylist gets the same defaults whatever it
     # is named — no branch on "personal"/"work" anywhere.
     assert config.disallowed_tools_for_workspace("client") == list(
@@ -154,7 +135,6 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
                 {
                     "name": "default",
                     "vault_root": "memory-vault",
-                    "default_model": "haiku",
                 }
             ]
         ),
@@ -171,7 +151,8 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
         tmp_path / "memory-vault"
     )
     assert config.workspace_vault_root("default") == tmp_path / "memory-vault"
-    assert config.default_model_for_workspace("default") == "haiku"
+    # The workspace no longer pins a model: the claude default applies.
+    assert config.default_model_for_workspace("default") == "opus"
 
 
 def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
@@ -273,3 +254,38 @@ def test_harness_denylist_covers_superseded_bundled_skills() -> None:
     for name in HARNESS_DISABLED_SKILLS:
         assert f"Skill({name})" in entries
     assert harness_skill_overrides() == {name: "off" for name in HARNESS_DISABLED_SKILLS}
+
+
+def test_operator_default_model_applies_to_claude(tmp_path: Path) -> None:
+    """Settings → Models writes every provider into `provider_default_models`.
+
+    Claude is the one provider that also has an env-backed
+    `default_model_config_key`, and checking that key first meant the operator's
+    selection was stored, echoed back by the UI, and then ignored — new chats
+    kept using the old default.
+    """
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    assert config.default_model_for_workspace("default", "claude") == "opus"
+
+    config.provider_default_models = {"claude": "sonnet"}
+
+    assert config.default_model_for_workspace("default", "claude") == "sonnet"
+    assert config.default_model_for_provider("claude") == "sonnet"
+
+
+def test_the_env_default_still_applies_when_no_model_is_selected(
+    tmp_path: Path,
+) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    config.provider_default_models = {}
+
+    assert config.default_model_for_workspace("default", "claude") == "opus"
+
+
+def test_a_selection_for_another_provider_does_not_leak_into_claude(
+    tmp_path: Path,
+) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    config.provider_default_models = {"opencode": "some/other-model"}
+
+    assert config.default_model_for_workspace("default", "claude") == "opus"

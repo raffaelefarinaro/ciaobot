@@ -56,7 +56,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
         "default_provider": provider,
-        "default_model": getattr(workspace, "default_model", ""),
         "disallowed_tools": (
             list(cast(Iterable[Any], getattr(workspace, "disallowed_tools", None)))
             if getattr(workspace, "disallowed_tools", None) is not None
@@ -151,9 +150,6 @@ def workspace_from_request(
         allowed = ", ".join(sorted(available_providers))
         raise ValueError(f"default_provider must be one of: {allowed}")
     provider = requested_provider
-    default_model = str(
-        data.get("default_model", existing.default_model if existing else "")
-    ).strip()
     if "disallowed_tools" in data:
         disallowed_tools = parse_disallowed_tools_value(data.get("disallowed_tools"))
     elif existing is not None:
@@ -191,7 +187,6 @@ def workspace_from_request(
             else config.stored_workspace_vault_root(name)
         ),
         default_provider=provider,
-        default_model=default_model,
         disallowed_tools=disallowed_tools,
         allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),

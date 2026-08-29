@@ -159,10 +159,10 @@ vi.mock('../../lib/api', () => {
       default: 'sonnet',
       provider_models: {
         claude: ['haiku', 'sonnet', 'opus', 'fable'],
-        opencode: ['opus', 'sonnet', 'haiku'],
+        opencode: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
-      opencode_models: ['opus', 'sonnet', 'haiku'],
+      opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
     },
     '/api/projects': [],
@@ -607,11 +607,13 @@ describe('component mount smoke', () => {
     await nextTick()
 
     // The panel is one voice per vendor: a bare tier is Anthropic, a prefixed
-    // entry routes to that provider's app-server.
+    // entry routes to that provider's app-server. The opencode section lists
+    // that account's real catalog (`providerID/modelID`) — it used to show the
+    // Anthropic tiers prefixed, i.e. `opencode:opus`, which is not a model.
     const opusOption = critiqueSelector.findAll('.model-selector__item')
       .find((el) => el.text() === 'opus')
     const opencodeOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'opencode:opus')
+      .find((el) => el.text() === 'openai/gpt-5.6-luna')
     expect(opusOption).toBeTruthy()
     expect(opencodeOption).toBeTruthy()
 
@@ -621,9 +623,9 @@ describe('component mount smoke', () => {
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'opus,opencode:opus',
+      critique_models: 'opus,opencode:openai/gpt-5.6-luna',
     })
-    expect(wrapper.text()).toContain('opencode:opus')
+    expect(wrapper.text()).toContain('opencode:openai/gpt-5.6-luna')
     wrapper.unmount()
   })
 
@@ -669,7 +671,6 @@ describe('component mount smoke', () => {
         name: 'legacy',
         vault_root: 'memory-vault/legacy',
         default_provider: 'ollama',
-        default_model: 'qwen3:latest',
         gws_profile: '',
       }],
       active: 'legacy',
@@ -715,7 +716,6 @@ describe('component mount smoke', () => {
         name: 'personal',
         vault_root: 'memory-vault/personal',
         default_provider: 'claude',
-        default_model: '',
         gws_profile: '',
       }],
       active: 'personal',
@@ -830,19 +830,19 @@ describe('component mount smoke', () => {
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
     const opencodeOption = opencodeSelector.findAll('.model-selector__item')
-      .find((el) => el.attributes('data-model') === 'opus')
+      .find((el) => el.attributes('data-model') === 'openai/gpt-5.6-luna')
     expect(opencodeOption).toBeTruthy()
     await opencodeOption!.trigger('click')
     await flushPromises()
     // Per-provider default models go through the provider_default_models map.
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      provider_default_models: { opencode: 'opus' },
+      provider_default_models: { opencode: 'openai/gpt-5.6-luna' },
     })
 
     wrapper.unmount()
   })
 
-  it('SettingsView no longer offers a per-provider default mode', async () => {
+  it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -853,11 +853,10 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The default execution mode is fixed at auto for every provider; the
-    // per-provider "Default mode" selector is gone.
-    const modeSelect = wrapper.find('.routine-select[data-provider="opencode"]')
-    expect(modeSelect.exists()).toBe(false)
-    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Default mode')).toBe(false)
+    // The permission-mode selector is back: manual / auto / bypass per provider.
+    expect(wrapper.findAll('span.ws-label').some((el) => el.text() === 'Permission mode')).toBe(true)
+    const modeLabels = wrapper.findAll('select option').map((el) => el.text())
+    expect(modeLabels.join('\n')).toContain('Bypass — allow everything')
 
     wrapper.unmount()
   })

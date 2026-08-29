@@ -79,6 +79,11 @@ def harness_skill_overrides() -> dict[str, str]:
 MCP_SERVER_NAME = "ciaobot"
 
 AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
+    # The lazy-discovery pair. tools_call only ever dispatches to the rest of
+    # this tuple: it refuses every _DESTRUCTIVE tool, so its reach is exactly
+    # the set already auto-approved here. See ciao/mcp_server.py.
+    "tools_search",
+    "tools_call",
     "context_get",
     "memory_status",
     "memory_update",
@@ -99,8 +104,6 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "chat_handover",
     "chat_fork",
     "chat_archive",
-    "delegate_spawn",
-    "delegates_list",
     # Only the read half of the background_run trio. Starting and cancelling a
     # command are ``_DESTRUCTIVE`` and still raise an approval card: an
     # auto-approved arbitrary-command tool would bypass the very classifier a
@@ -108,6 +111,8 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "background_run_status",
     "schedules_list",
     "schedule",
+    # Deprecated aliases onto interval schedules; still auto-approved while
+    # they exist so a model reaching for the old name is not a friction wall.
     "loops_list",
     "loop",
     "file_surface",
@@ -117,3 +122,16 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
 def auto_approved_mcp_tool_names(server: str = MCP_SERVER_NAME) -> list[str]:
     """Fully-qualified SDK tool names for the auto-approved control plane."""
     return [f"mcp__{server}__{name}" for name in AUTO_APPROVED_MCP_TOOLS]
+
+
+# The modes whose contract allows acting without asking, and therefore the only
+# modes where the AUTO_APPROVED_MCP_TOOLS list applies. `plan` is "propose,
+# don't act" — an allow rule would punch a hole in it. `normal` is what the PWA
+# labels "Manual — ask for every action", and pre-approving the list quietly
+# broke that promise: no card for `memory_update`, `chat_send` or `schedule` —
+# and `schedule` is an escalation, not just a write, because an automation run
+# is dispatched `unattended`, which forces `bypass`. A one-minute interval
+# created without a card buys unprompted arbitrary tool use every minute — the
+# exact thing the operator chose Manual mode to prevent. Shared here so the
+# Claude and opencode providers cannot drift apart on the carve-out.
+CONTROL_PLANE_PREAPPROVED_MODES: frozenset[str] = frozenset({"auto", "bypass"})

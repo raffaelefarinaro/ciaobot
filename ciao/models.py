@@ -9,7 +9,6 @@ from typing import Literal
 from ciao import provider_registry
 
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
-ControlSurface = Literal["legacy", "mcp", "auto"]
 MessagePhase = Literal["commentary", "final_answer"]
 
 
@@ -117,19 +116,15 @@ class AgentRequest:
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
-    # Agent-facing Ciaobot control surface. ``mcp`` is the default managed
-    # connection, ``legacy`` preserves the CLI/skill path (hidden fallback),
-    # and ``auto`` lets the application select the measured winner/fallback.
-    # The engine always sets this explicitly on build_agent_request; the
-    # default here only keeps the dataclass consistent with the new default.
-    control_surface: ControlSurface = "mcp"
-    # Ephemeral managed-process MCP credentials. They are deliberately kept
-    # out of ``extra_env`` so normal model-created shell commands never see
-    # the bearer token. Providers translate these fields into their native
-    # MCP configuration immediately before spawning the process.
+    # Ephemeral managed-process MCP credentials. The Ciaobot MCP control plane
+    # is the only agent-facing control surface, so a request always carries a
+    # url/token pair -- ``build_agent_request`` raises rather than dispatch a
+    # turn without one. They are deliberately kept out of ``extra_env`` so
+    # normal model-created shell commands never see the bearer token.
+    # Providers translate these fields into their native MCP configuration
+    # immediately before spawning the process.
     mcp_url: str = ""
     mcp_token: str = ""
-    mcp_required: bool = False
     # Stable routing context is committed to the chat registry only after the
     # provider reports a native session. Keeping these values on the request
     # lets a pre-session failure retry with the full capsule.

@@ -25,15 +25,25 @@ from ciao.fts_search import (
     get_db_path,
     index_vault,
     init_db,
+    record_search_hits,
     search_vault,
     vault_key_prefix,
 )
-from ciao.loops import publish_loops_changed
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import resolve_region, update_region
-from ciao.models import ControlSurface
-from ciao.web.project_chats import UnknownModelError, _MAX_ACTIVE_DELEGATES
-from ciao.schedules import ScheduleEntry, compute_next_run
+from ciao.web.project_chats import UnknownModelError
+from ciao.schedules import (
+    DEFAULT_INTERVAL_MINUTES,
+    FREQUENCIES,
+    INTERVAL_FREQUENCY,
+    ScheduleEntry,
+    compute_next_run,
+    is_interval,
+    normalize_interval_minutes,
+    publish_automations_changed,
+    stamp_fallback_project,
+    wall_clock_time_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +140,6 @@ class CiaoControlPlane:
         *,
         project_chat_manager: Any,
         schedule_manager: Any,
-        loop_manager: Any,
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
         connection_tracker: Any | None = None,
@@ -139,7 +148,6 @@ class CiaoControlPlane:
         self.config = config
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
-        self.loops = loop_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
         self._deferred_actions: dict[str, dict[str, Any]] = {}
@@ -389,8 +397,6 @@ class CiaoControlPlane:
             "chat": chat.to_dict(local=self.pcm.is_session_local(chat)) if chat else None,
             "provider": principal.provider,
             "role": principal.role,
-            "control_surface": getattr(chat, "control_surface", "")
-            or getattr(self.config, "control_surface", "legacy"),
         })
 
     def system_status_get(self, principal: McpPrincipal) -> dict[str, Any]:
@@ -545,7 +551,6 @@ class CiaoControlPlane:
         *,
         name: str,
         default_provider: str = "claude",
-        default_model: str = "",
         gws_profile: str = "",
         disallowed_tools: Any = _UNSET,
         color: str = "",
@@ -556,7 +561,6 @@ class CiaoControlPlane:
         data: dict[str, Any] = {
             "name": name,
             "default_provider": default_provider,
-            "default_model": default_model,
             "gws_profile": gws_profile,
         }
         if disallowed_tools is not _UNSET:
@@ -646,6 +650,11 @@ class CiaoControlPlane:
             )
         finally:
             conn.close()
+        # Retrieval telemetry for the decay-by-disuse audit: which notes recall
+        # actually uses. Best-effort; never blocks the search result.
+        record_search_hits(
+            Path(self.config.state_path).parent, query, [row["path"] for row in rows]
+        )
         return _ok(rows)
 
     def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
@@ -777,7 +786,6 @@ class CiaoControlPlane:
         provider: str | None = None,
         model: str | None = None,
         mode: str | None = None,
-        control_surface: ControlSurface | None = None,
         prompt: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
@@ -786,9 +794,6 @@ class CiaoControlPlane:
         chat = self.pcm.create_chat(
             project.project_id, title=title, provider=provider, model=model, mode=mode
         )
-        if control_surface is not None:
-            chat.control_surface = control_surface
-            self.pcm._save()
         result = chat.to_dict(local=True)
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True
@@ -813,7 +818,6 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
-        control_surface: str | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
@@ -835,28 +839,6 @@ class CiaoControlPlane:
         )
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
-        if control_surface is not None:
-            if control_surface not in {"", "legacy", "mcp", "auto"}:
-                raise ControlPlaneError("invalid_control_surface", "Use legacy, mcp, auto, or empty inheritance.")
-            old_surface = updated.control_surface
-            updated.control_surface = control_surface
-            if old_surface != control_surface:
-                async def _disconnect_after_turn() -> None:
-                    while chat_id in self.pcm.active_chat_ids():
-                        await asyncio.sleep(0.25)
-                    self.pcm._revoke_mcp_chat(chat_id)
-                    provider_service = self.pcm._providers.pop(chat_id, None)
-                    if provider_service is not None:
-                        await provider_service.disconnect()
-
-                if chat_id == principal.chat_id:
-                    asyncio.create_task(_disconnect_after_turn())
-                else:
-                    self.pcm._revoke_mcp_chat(chat_id)
-                    provider_service = self.pcm._providers.pop(chat_id, None)
-                    if provider_service is not None:
-                        asyncio.create_task(provider_service.disconnect())
-            self.pcm._save()
         result = updated.to_dict(local=self.pcm.is_session_local(updated))
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True
@@ -976,23 +958,13 @@ class CiaoControlPlane:
         project = self._project(principal, chat.project_id)
 
         async def _archive() -> dict[str, Any]:
-            result = await self.pcm.archive_chat(target_id)
-            outcome = result.outcome if result is not None else None
+            outcome = await self.pcm.archive_chat(target_id)
             if outcome is not None:
                 self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
-            payload: dict[str, Any] = {
+            return {
                 "chat_id": target_id,
                 "archived_to": str(outcome.path) if outcome else None,
             }
-            # Delegate subchats are archived with their supervisor, and a
-            # mid-turn one is stopped to get there. Report that to the agent
-            # for the same reason the PWA gets it: a discarded turn and a
-            # subchat left running are both things the caller must know.
-            if result is not None and result.delegates:
-                payload["subchats"] = [row.to_dict() for row in result.delegates]
-                payload["stopped_chat_ids"] = result.stopped_ids()
-                payload["failed_chat_ids"] = result.failed_ids()
-            return payload
 
         if target_id == principal.chat_id:
             # Archiving the calling chat tears down its own tool caller, so it
@@ -1018,103 +990,6 @@ class CiaoControlPlane:
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
-
-    # ---- delegates -----------------------------------------------------
-
-    def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
-        return {
-            "chat_id": chat.chat_id,
-            "title": chat.title,
-            "provider": chat.provider,
-            "model": chat.model,
-            "delegation_id": chat.delegation_id,
-            "archived": chat.archived,
-            "running": streaming,
-            "created_at": chat.created_at,
-            "last_activity_at": chat.last_activity_at,
-        }
-
-    def delegate_spawn(
-        self,
-        principal: McpPrincipal,
-        *,
-        prompt: str,
-        title: str = "",
-        provider: str | None = None,
-        model: str | None = None,
-        mode: str | None = None,
-        delegation_id: str = "",
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Spawn a writable delegate chat that wakes this chat when it finishes."""
-        parent = self._chat(principal, "")
-        # Server-side recursion guard. CIAO_DELEGATE_OF tells a delegate what it
-        # is, but a child could unset its own env, so the authoritative check is
-        # the calling chat's own lineage.
-        if parent.spawned_from_chat_id:
-            raise ControlPlaneError(
-                "nested_delegate_forbidden",
-                "A delegate cannot spawn delegates. Report back to your "
-                "supervisor instead.",
-            )
-        if not prompt.strip():
-            raise ControlPlaneError("empty_prompt", "prompt is required.")
-        requested_mode = mode
-        mode = self._child_mode(principal, mode)
-        active = self.pcm.active_delegate_count(parent.chat_id)
-        if active >= _MAX_ACTIVE_DELEGATES:
-            raise ControlPlaneError(
-                "delegate_limit_reached",
-                f"{active} delegates are already running (limit "
-                f"{_MAX_ACTIVE_DELEGATES}). Wait for one to report before "
-                f"spawning another.",
-            )
-        project = self._resolve_project(principal, project_id)
-        try:
-            chat = self.pcm.create_chat(
-                project.project_id,
-                title=title.strip() or "Delegate",
-                provider=provider,
-                model=model,
-                mode=mode,
-                spawned_from_chat_id=parent.chat_id,
-                delegation_id=delegation_id.strip(),
-            )
-        except UnknownModelError as exc:
-            # Only the model failure is a model problem; an unknown provider
-            # or bucket raises ValueError before model validation and must
-            # keep its own identity at the MCP boundary (invalid_request)
-            # instead of being relabeled invalid_model (#259).
-            raise ControlPlaneError("invalid_model", str(exc)) from exc
-        # Same start/queue split as chat_send: a brand-new chat is never
-        # streaming, so this normally starts immediately.
-        if self.pcm.queue_message(chat.chat_id, prompt.strip()):
-            send_status = "queued"
-        else:
-            self.pcm.start_stream(chat.chat_id, prompt.strip())
-            send_status = "started"
-        result = chat.to_dict(local=True)
-        result["send_status"] = send_status
-        result["active_delegates"] = active + 1
-        if requested_mode and requested_mode != mode:
-            result["mode_clamped"] = True
-            result["requested_mode"] = requested_mode
-        return _ok(result)
-
-    def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
-        """List delegates spawned by a chat, with which ones are still running."""
-        parent_id = self._chat_id(principal, chat_id)
-        running = set(self.pcm.active_chat_ids())
-        rows = [
-            self._delegate_payload(c, streaming=c.chat_id in running)
-            for c in self.pcm.delegates_for_chat(parent_id)
-        ]
-        return _ok({
-            "chat_id": parent_id,
-            "delegates": rows,
-            "active": sum(1 for r in rows if r["running"] and not r["archived"]),
-            "limit": _MAX_ACTIVE_DELEGATES,
-        })
 
     # ---- background command runs ----------------------------------------
 
@@ -1289,6 +1164,25 @@ class CiaoControlPlane:
             # Re-stamp from the resolved project (same as the HTTP route).
             workspace = self._workspace(principal, project.workspace)
 
+        frequency = str(values.get("frequency") or "weekly")
+        if frequency not in FREQUENCIES:
+            raise ControlPlaneError(
+                "invalid_frequency",
+                f"frequency must be one of {', '.join(sorted(FREQUENCIES))}.",
+            )
+        # Interval cadence needs minutes, not a time of day.
+        interval_minutes = 0
+        if frequency == INTERVAL_FREQUENCY:
+            # `or DEFAULT` would rescue a rejected 0 into a valid cadence, so
+            # only an absent value falls back.
+            supplied_interval = values.get("interval_minutes")
+            if supplied_interval is None:
+                supplied_interval = DEFAULT_INTERVAL_MINUTES
+            try:
+                interval_minutes = normalize_interval_minutes(supplied_interval)
+            except ValueError as exc:
+                raise ControlPlaneError("invalid_interval", str(exc)) from exc
+
         now = datetime.now(UTC).isoformat(timespec="seconds")
         entry = ScheduleEntry(
             schedule_id="preview",
@@ -1301,7 +1195,8 @@ class CiaoControlPlane:
             mode=str(values.get("mode") or "auto"),  # type: ignore[arg-type]
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
             days_of_week=list(values.get("days_of_week") or []),
-            frequency=str(values.get("frequency") or "weekly"),
+            frequency=frequency,
+            interval_minutes=interval_minutes,
             day_of_month=values.get("day_of_month"),
             run_at_date=values.get("run_at_date"),
             web_chat_id=web_chat_id,
@@ -1311,6 +1206,13 @@ class CiaoControlPlane:
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
         )
+        # Same gate `schedule_update` applies, on the create door. A model
+        # emitting `daily_time: "9:30"` (no leading zero) or "25:00" otherwise
+        # got a stored entry that `tick()` compares against "%H:%M" and never
+        # matches — reported as healthy by `next_run` and silently dead.
+        time_error = wall_clock_time_error(entry)
+        if time_error:
+            raise ControlPlaneError("invalid_time", time_error)
         return _ok(self._schedule_payload(entry))
 
     def schedule_create(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
@@ -1325,6 +1227,7 @@ class CiaoControlPlane:
             timezone_name=preview["timezone_name"],
             days_of_week=preview["days_of_week"],
             frequency=preview["frequency"],
+            interval_minutes=preview["interval_minutes"],
             day_of_month=preview["day_of_month"],
             run_at_date=preview["run_at_date"],
             web_chat_id=preview["web_chat_id"],
@@ -1335,6 +1238,11 @@ class CiaoControlPlane:
             title=preview["title"],
             description=str(values.get("description") or ""),
         )
+        # Where a chat-bound entry re-homes once its chat is deleted; only
+        # capturable while that chat still exists. See stamp_fallback_project.
+        if stamp_fallback_project(entry, self.pcm):
+            self.schedules.replace(entry)
+        publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(entry))
 
     def _schedule(self, principal: McpPrincipal, schedule_id: str) -> ScheduleEntry:
@@ -1442,31 +1350,116 @@ class CiaoControlPlane:
         unknown = sorted(set(normalized) - known)
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
+        if "frequency" in normalized and normalized["frequency"] not in FREQUENCIES:
+            raise ControlPlaneError(
+                "invalid_frequency",
+                f"frequency must be one of {', '.join(sorted(FREQUENCIES))}.",
+            )
+        if "interval_minutes" in normalized:
+            try:
+                normalized["interval_minutes"] = normalize_interval_minutes(
+                    normalized["interval_minutes"]
+                )
+            except ValueError as exc:
+                raise ControlPlaneError("invalid_interval", str(exc)) from exc
         updated = replace(entry, **normalized)
+        # Switching to interval without naming a cadence would leave 0 stored,
+        # which interval_delta floors to one minute -- far faster than asked.
+        if is_interval(updated) and not updated.interval_minutes:
+            updated.interval_minutes = DEFAULT_INTERVAL_MINUTES
+        # The mirror of the REST route's guard. Moving an interval entry (or a
+        # migrated loop) to a wall-clock cadence leaves daily_time_utc empty,
+        # and compute_next_run cannot parse it -- the automation would report
+        # as enabled and never dispatch.
+        time_error = wall_clock_time_error(updated)
+        if time_error:
+            raise ControlPlaneError("invalid_time", time_error)
+        # A changed chat/project binding moves where this entry re-homes.
+        stamp_fallback_project(updated, self.pcm)
         self.schedules.replace(updated)
+        publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
+
+    _RUN_REFUSALS: dict[str, tuple[str, str]] = {
+        "busy": (
+            "schedule_busy",
+            "The target chat has a turn in flight; retry when it finishes.",
+        ),
+        "missing-chat": (
+            "schedule_target_missing",
+            "The target chat no longer exists and could not be re-homed.",
+        ),
+    }
+
+    def _raise_if_run_refused(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Turn a non-dispatching ``dispatch_now`` outcome into an error.
+
+        An interval entry refuses rather than queues, and reports that through
+        ``status`` rather than by raising. Wrapping it in ``_ok`` told the
+        model the run had started when nothing was dispatched — the REST twin
+        answers 409 for exactly these two, so the tool surface has to agree.
+        """
+        refusal = self._RUN_REFUSALS.get(str(result.get("status") or ""))
+        if refusal is not None:
+            raise ControlPlaneError(refusal[0], refusal[1])
+        return result
 
     async def schedule_run(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
         self._schedule(principal, schedule_id)
-        return _ok(await self.schedules.dispatch_now(schedule_id))
+        result = self._raise_if_run_refused(await self.schedules.dispatch_now(schedule_id))
+        publish_automations_changed(self.pcm)
+        return _ok(result)
 
     def schedule_delete(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" or not entry.removable:
             raise ControlPlaneError("schedule_not_removable", "This schedule cannot be removed.")
-        return _ok({"deleted": self.schedules.delete(schedule_id), "schedule_id": schedule_id})
+        deleted = self.schedules.delete(schedule_id)
+        publish_automations_changed(self.pcm)
+        return _ok({"deleted": deleted, "schedule_id": schedule_id})
+
+    # ---- loops (compatibility) -----------------------------------------
+    # Loops became the `interval` cadence of a schedule. These methods keep the
+    # retired tool surface working for one release by translating to and from
+    # interval schedules; the `schedule` tool with frequency="interval" is the
+    # real API. Remove them, and the `loop*` MCP tools, in the release after
+    # next.
+
+    def _loop_payload(self, entry: ScheduleEntry) -> dict[str, Any]:
+        """An interval schedule rendered in the retired Loop shape."""
+        return {
+            "loop_id": entry.schedule_id,
+            "schedule_id": entry.schedule_id,
+            "prompt": entry.prompt,
+            "web_chat_id": entry.web_chat_id or "",
+            "web_project_id": entry.web_project_id or "",
+            "workspace": entry.workspace,
+            "created_at": entry.created_at,
+            "interval_minutes": entry.interval_minutes,
+            "title": entry.title,
+            # One flag replaced two: a stopped entry neither ticks now nor
+            # resumes on the next boot, so both legacy fields report it.
+            "autostart": entry.enabled,
+            "running": entry.enabled,
+            "last_run_at": entry.last_dispatched_at,
+            "last_status": entry.last_status,
+            "scope": entry.scope,
+        }
+
+    def _interval_entries(self) -> list[ScheduleEntry]:
+        return [entry for entry in self.schedules.list_entries() if is_interval(entry)]
 
     def loops_list(self, principal: McpPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         rows = []
-        for entry in self.loops.list():
+        for entry in self._interval_entries():
+            if not entry.web_chat_id:
+                continue
             try:
                 self._chat(principal, entry.web_chat_id)
             except ControlPlaneError:
                 continue
-            row = asdict(entry)
-            row["running"] = self.loops.is_running(entry.loop_id)
-            rows.append(row)
+            rows.append(self._loop_payload(entry))
         return _ok(rows)
 
     def loop_create(
@@ -1474,7 +1467,7 @@ class CiaoControlPlane:
         principal: McpPrincipal,
         chat_id: str = "",
         prompt: str = "",
-        interval_minutes: int = 10,
+        interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
         title: str = "",
         autostart: bool = False,
         start: bool = True,
@@ -1483,78 +1476,126 @@ class CiaoControlPlane:
         text = prompt.strip()
         if not text:
             raise ControlPlaneError("empty_prompt", "Prompt is required.")
-        entry = self.loops.create(
+        try:
+            minutes = normalize_interval_minutes(interval_minutes)
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_interval", str(exc)) from exc
+        entry = self.schedules.create(
+            daily_time_utc="",
             prompt=text,
+            # Empty model/mode is what makes each run inherit the target chat's
+            # own settings, which is how loops always behaved.
+            model="",
+            mode="auto",
+            chat_id=0,
+            frequency=INTERVAL_FREQUENCY,
+            interval_minutes=minutes,
             web_chat_id=chat.chat_id,
-            interval_minutes=max(1, int(interval_minutes)),
             title=title,
-            # `start` runs it now; `autostart` re-arms it on boot. Starting a
-            # loop without the latter gives you one that ticks until the next
-            # restart and is then silently dead, which is the "model says
-            # running, loop isn't" failure one level down — so starting implies
-            # both. A caller wanting a one-session loop can stop it.
-            autostart=autostart or start,
-            web_project_id=chat.project_id,
             workspace=project.workspace,
         )
-        # ``autostart`` only governs server boot, so without this a freshly
-        # created loop sat at "stopped" while the model cheerfully reported it
-        # was running.
-        if start:
-            self.loops.start_loop(entry.loop_id)
-        payload = asdict(entry)
-        payload["running"] = self.loops.is_running(entry.loop_id)
-        publish_loops_changed(self.pcm)
-        return _ok(payload)
+        # `start` and `autostart` collapsed into `enabled`: the split existed so
+        # a loop could tick until the next restart and then be silently dead,
+        # which is the "model says running, loop isn't" failure it was meant to
+        # prevent. Either flag now means "run it".
+        stamp_fallback_project(entry, self.pcm)
+        if not (start or autostart):
+            entry.enabled = False
+        self.schedules.replace(entry)
+        publish_automations_changed(self.pcm)
+        return _ok(self._loop_payload(entry))
 
-    def _loop(self, principal: McpPrincipal, loop_id: str) -> Any:
-        entry = self.loops.get(loop_id)
+    def _loop(self, principal: McpPrincipal, loop_id: str) -> ScheduleEntry:
+        entry = next(
+            (item for item in self._interval_entries() if item.schedule_id == loop_id),
+            None,
+        )
         if entry is None:
             raise ControlPlaneError("loop_not_found", f"Loop '{loop_id}' was not found.")
-        self._chat(principal, entry.web_chat_id)
+        # Same workspace boundary `_schedule` enforces. Loops always carried a
+        # `web_chat_id`, so the chat check below was the only scope check they
+        # ever needed; interval schedules can be project-bound and carry none,
+        # which left this deprecated surface as an unguarded second door onto
+        # another workspace's automations — and both `loop` and `loop_action`
+        # are auto-approved, so no card would have been raised either.
+        if entry.workspace and entry.workspace != principal.workspace:
+            raise ControlPlaneError(
+                "workspace_forbidden", "Loop belongs to another workspace."
+            )
+        # Packaged routines are read-only through `schedule`/`schedule_action`
+        # (`system_schedule_read_only` / `schedule_not_removable`). Every
+        # `_loop` caller mutates, runs, or deletes, so refuse them outright
+        # here rather than let the deprecated shape reach a row the supported
+        # surface protects. No packaged routine is interval-cadenced today;
+        # this keeps that from silently becoming a hole if one ever is.
+        if entry.scope == "system" or not entry.removable:
+            raise ControlPlaneError(
+                "system_schedule_read_only",
+                "This is a system routine; manage it with `schedule`, not `loop`.",
+            )
+        if entry.web_chat_id:
+            self._chat(principal, entry.web_chat_id)
         return entry
 
     def loop_update(self, principal: McpPrincipal, loop_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._loop(principal, loop_id)
-        aliases = {"chat_id": "web_chat_id"}
-        normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
-        if "web_chat_id" in normalized:
-            chat, project = self._chat_scope(principal, str(normalized["web_chat_id"]))
-            normalized["web_chat_id"] = chat.chat_id
-            normalized["web_project_id"] = chat.project_id
-            normalized["workspace"] = project.workspace
-        known = set(entry.__dataclass_fields__)
-        unknown = sorted(set(normalized) - known)
+        supplied = {key: value for key, value in changes.items() if value is not None}
+        unknown = sorted(
+            set(supplied)
+            - {"chat_id", "web_chat_id", "prompt", "title", "interval_minutes", "autostart"}
+        )
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown loop fields: {', '.join(unknown)}")
-        if "interval_minutes" in normalized:
-            normalized["interval_minutes"] = max(1, int(normalized["interval_minutes"]))
-        updated = replace(entry, **normalized)
-        self.loops.replace(updated)
-        publish_loops_changed(self.pcm)
-        return _ok(asdict(updated))
+        target_chat = supplied.pop("chat_id", None) or supplied.pop("web_chat_id", None)
+        if target_chat is not None:
+            chat, project = self._chat_scope(principal, str(target_chat))
+            entry.web_chat_id = chat.chat_id
+            entry.workspace = project.workspace
+            # Retargeting moves where this entry re-homes.
+            stamp_fallback_project(entry, self.pcm)
+        if "prompt" in supplied:
+            entry.prompt = str(supplied["prompt"])
+        if "title" in supplied:
+            entry.title = str(supplied["title"])
+        if "interval_minutes" in supplied:
+            try:
+                entry.interval_minutes = normalize_interval_minutes(
+                    supplied["interval_minutes"]
+                )
+            except ValueError as exc:
+                raise ControlPlaneError("invalid_interval", str(exc)) from exc
+        if "autostart" in supplied:
+            entry.enabled = bool(supplied["autostart"])
+        self.schedules.replace(entry)
+        publish_automations_changed(self.pcm)
+        return _ok(self._loop_payload(entry))
 
     def loop_start(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        self._loop(principal, loop_id)
-        entry = self.loops.start_loop(loop_id)
-        publish_loops_changed(self.pcm)
-        return _ok(asdict(entry))
+        entry = self._loop(principal, loop_id)
+        entry.enabled = True
+        self.schedules.replace(entry)
+        publish_automations_changed(self.pcm)
+        return _ok(self._loop_payload(entry))
 
     def loop_stop(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        self._loop(principal, loop_id)
-        self.loops.stop_loop(loop_id)
-        publish_loops_changed(self.pcm)
+        entry = self._loop(principal, loop_id)
+        entry.enabled = False
+        self.schedules.replace(entry)
+        publish_automations_changed(self.pcm)
         return _ok({"loop_id": loop_id, "running": False})
 
     async def loop_run(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
-        return _ok(await self.loops.run_now(loop_id))
+        result = self._raise_if_run_refused(await self.schedules.dispatch_now(loop_id))
+        publish_automations_changed(self.pcm)
+        return _ok({**result, "loop_id": loop_id})
 
     def loop_delete(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
-        deleted = self.loops.delete(loop_id)
-        publish_loops_changed(self.pcm)
+        deleted = self.schedules.delete(loop_id)
+        publish_automations_changed(self.pcm)
         return _ok({"deleted": deleted, "loop_id": loop_id})
+
 
     # ---- workspace files/assets ---------------------------------------
 

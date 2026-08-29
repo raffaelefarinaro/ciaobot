@@ -54,7 +54,6 @@ export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
   default_provider: WorkspaceProvider
-  default_model: string
   disallowed_tools?: string[] | null
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
@@ -64,8 +63,6 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
-  // App-wide fallback model used when a workspace's default_model is empty.
-  app_default_model?: string
   provider_options?: WorkspaceProviderOption[]
 }
 
@@ -98,6 +95,10 @@ export interface McpStatus {
   url?: string
   tool_count: number
   tools?: string[]
+  // Lazy discovery: `tools` is everything registered and callable, while
+  // `listed_tools` is the subset a chat sees in tools/list up front.
+  lazy_tools?: boolean
+  listed_tools?: string[]
   env_path?: string
   project_servers?: McpProjectServer[]
   active_sessions?: number
@@ -150,10 +151,6 @@ export interface ChatInfo {
   // Provider-native thinking/reasoning level ('' = provider default).
   // Allowed values per provider come from ModelsResponse.thinking_levels.
   thinking_level?: string
-  // Ciaobot control surface. Engine-controlled now (MCP by default, with a
-  // legacy fallback); no longer user-set from the PWA. Kept on ChatInfo
-  // because the engine still returns/persists it, preserving round-trip typing.
-  control_surface?: '' | 'legacy' | 'mcp'
   session_id: string
   created_at: string
   archived: boolean
@@ -193,12 +190,6 @@ export interface ChatInfo {
   // because a schedule spawns a new chat each time).
   schedule_id?: string
   schedule_title?: string
-  // Set when this chat was spawned as a delegate by another chat's agent. The
-  // sidebar nests delegates under their supervisor; the engine wakes the
-  // supervisor with a fresh turn when a delegate finishes.
-  spawned_from_chat_id?: string
-  // Shared tag across delegates dispatched as one batch.
-  delegation_id?: string
   // What the post-archive pipeline is doing, or did. Present only on archived
   // chats that ran it. Drives the greyed activity signal and the settled
   // "here is what was learned from this chat" line.
@@ -224,20 +215,6 @@ export interface ChatPostprocess {
   updated_at?: string
   /** Set when a server restart killed the pipeline mid-flight. */
   interrupted?: boolean
-}
-
-// One sidebar chat row. Delegates follow their supervisor and render indented,
-// so the list stays a single flat v-for instead of a nested one.
-export interface ChatRow {
-  chat: ChatInfo
-  isDelegate: boolean
-}
-
-// One sidebar stack. The supervisor remains the visible anchor and its
-// delegate chats can be expanded beneath it as a single group.
-export interface ChatGroup {
-  chat: ChatInfo
-  delegates: ChatInfo[]
 }
 
 export interface ChatRetryInfo {
@@ -304,6 +281,24 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number
+}
+
+// One live subagent from `/api/subagents/running`. Same dispatch metadata as
+// SubagentTranscript, minus the transcript: the sidebar only needs to name the
+// agent and say it is working, and polling full transcripts for every working
+// chat would be far more than that costs.
+export interface RunningSubagent {
+  agent_id: string
+  description?: string
+  subagent_type?: string
+  is_async?: boolean
+  status?: 'running' | 'completed' | 'failed' | ''
+  turn_index?: number | null
+}
+
+/** `GET /api/subagents/running`. Chats with nothing running are omitted. */
+export interface RunningSubagentsResponse {
+  chats?: Record<string, RunningSubagent[]>
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
@@ -401,10 +396,10 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'projects_reordered'; workspace: string; order: string[] }
-  // A loop was created, edited, started, stopped, or deleted. Carries no
-  // payload: the client refetches /api/loops, which is the only place the
+  // An automation was created, edited, paused, resumed, or deleted. Carries no
+  // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
-  | { type: 'loops_changed' }
+  | { type: 'schedules_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
@@ -479,7 +474,17 @@ export interface Schedule {
   // because context_label is always set, so its truthiness says nothing
   // about whether the target is still there.
   context_available?: boolean
-  frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once'
+  // 'interval' is the sub-day cadence that replaced loops: it fires
+  // interval_minutes after its last run rather than at a time of day.
+  frequency: 'daily' | 'weekly' | 'monthly' | 'manual' | 'once' | 'interval'
+  interval_minutes: number
+  // Outcome of the most recent interval run. Interval entries have no expected
+  // wall-clock slot, so `missed` is always false for them and this is what
+  // reports their health instead. Empty on wall-clock schedules.
+  // 'skipped' is what the dispatcher records when a run reached the provider
+  // but stopped short of a result (approval card, AskUserQuestion, deferred
+  // retry) — see project_chats._schedule_dispatch_status.
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -499,24 +504,6 @@ export interface Schedule {
   scope?: string
   editable?: boolean
   removable?: boolean
-}
-
-// In-chat loop: re-dispatches its prompt into one fixed chat every N minutes.
-export interface Loop {
-  loop_id: string
-  prompt: string
-  web_chat_id: string
-  created_at: string
-  interval_minutes: number
-  title: string
-  autostart: boolean
-  last_run_at: string
-  last_status: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
-  scope?: 'user' | 'system'
-  // Computed server-side
-  running: boolean
-  context_label: string
-  next_run: string | null
 }
 
 // ── Status & Models ─────────────────────────────────────────────────────
@@ -556,6 +543,9 @@ export interface RoutineSettings {
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>
+  // Per-provider default execution (permission) mode for new chats:
+  // manual | auto | bypass. Missing = the app default (auto).
+  provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
   // Per-provider session-insights models; missing = provider default.
@@ -947,21 +937,9 @@ export interface ActionResult {
   [key: string]: unknown
 }
 
-/** Per-subchat row in the archive cascade response. */
-export interface ArchivedSubchat {
-  chat_id: string
-  archived: boolean
-  stopped_mid_turn: boolean
-  error: string
-}
-
 /**
  * `POST /api/chats/{id}/archive`.
  *
- * Archiving a supervisor cascades to its delegate subchats, and the cascade can
- * partly fail. The id lists are the contract that matters: mark archived only
- * what `archived_chat_ids` names, because a subchat missing from it is still
- * streaming, and hiding it would leave it burning tokens out of sight.
  * The fields are optional so a client talking to an older host (or through the
  * node proxy) degrades to "the chat I asked for" instead of breaking.
  */
@@ -969,10 +947,6 @@ export interface ArchiveChatResponse {
   ok?: boolean
   archived_to?: string | null
   postprocess?: ChatPostprocess | null
-  archived_chat_ids?: string[]
-  stopped_chat_ids?: string[]
-  failed_chat_ids?: string[]
-  subchats?: ArchivedSubchat[]
 }
 
 /** One commit row in the update modal, from ciao/package_version.py. */

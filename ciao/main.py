@@ -17,8 +17,7 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.loops import LoopEntry, LoopManager, LoopStore
-from ciao.schedules import ScheduleManager, ScheduleStore
+from ciao.schedules import ScheduleManager, ScheduleStore, migrate_loops
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
@@ -499,6 +498,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     transcript_root = config.logs_root / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
+    # Loops were folded into schedules as the `interval` cadence. Import any
+    # legacy `.runtime/loops.json` before the store is read, so a device
+    # upgrading (or syncing that file in from one that has not upgraded yet)
+    # keeps its automations instead of losing them silently.
+    try:
+        migrate_loops(config.state_path.parent)
+    except Exception:
+        logger.warning("Could not import legacy loops.json", exc_info=True)
+
     # `workspace_names` is read on every list, not captured once, so adding a
     # workspace produces its per-workspace system routines without a restart.
     schedule_store = ScheduleStore(
@@ -529,8 +537,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # Persist only if the entry still exists: a "once" schedule may have
             # been consumed (replace-then-delete) before this background task
             # resolves, and replace() upserts — writing here would resurrect it.
-            if schedule_store.get(entry.schedule_id) is not None:
-                schedule_store.replace(entry)
+            #
+            # Write only the field this function owns, onto a freshly read row.
+            # `entry` is the snapshot taken when the run started, and a run can
+            # stream for minutes: replacing the whole row with it reverted any
+            # edit the user made meanwhile (a Stop, a new prompt, a new
+            # interval), and did so *before* `_run_interval`'s own re-read, so
+            # that function's documented "the user's edit survives" guarantee
+            # was reading an already-clobbered row.
+            latest = schedule_store.get(entry.schedule_id)
+            if latest is not None:
+                latest.last_run_chat_id = result["chat_id"]
+                schedule_store.replace(latest)
         return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):
@@ -546,41 +564,34 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.node_state import NodeStateManager
     node_state_manager = NodeStateManager(config.state_path.parent)
 
+    # An interval schedule bound to an existing chat can only dispatch into a
+    # live, non-archived one. Treat an archived (or deleted) target as
+    # dispatchable while its project still resolves — the dispatcher forks or
+    # opens a replacement chat there — and as undispatchable otherwise, so the
+    # entry is disabled instead of erroring every interval with "Cannot send
+    # messages to an archived chat" (issue #126).
+    def _interval_target_dispatchable(entry) -> bool:
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if not chat_id:
+            return True  # project-bound: a fresh chat is created per run
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and not chat.archived:
+            return True
+        return pcm.resolve_automation_project(entry) is not None
+
     schedule_manager = ScheduleManager(
         store=schedule_store,
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
         is_node_active=node_state_manager.is_active,
-    )
-
-    # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
-    # run with the chat's own model/mode (no override), and skip (not queue)
-    # when the chat still has a turn in flight.
-    async def _dispatch_loop(entry):
-        return await pcm.dispatch_loop(entry, entry.prompt)
-
-    # A loop can only dispatch into a live, non-archived chat. Treat an
-    # archived (or deleted) target as not-dispatchable so LoopManager
-    # auto-stops the loop instead of erroring every interval with
-    # "Cannot send messages to an archived chat" (issue #126).
-    def _loop_target_dispatchable(target: LoopEntry) -> bool:
-        chat = pcm.get_chat(target.web_chat_id)
-        if chat is not None and not chat.archived:
-            return True
-        return pcm._resolve_loop_project(target) is not None
-
-    loop_manager = LoopManager(
-        store=LoopStore(config.state_path.parent),
-        dispatch=_dispatch_loop,
         chat_busy=pcm.chat_stream_active,
-        chat_exists=_loop_target_dispatchable,
-        is_node_active=node_state_manager.is_active,
+        chat_dispatchable=_interval_target_dispatchable,
     )
 
-    # Background command runs (issue #282): a subprocess-only sibling of
-    # delegates. Completions wake the chat that started the run through the
-    # same coalescing path delegates use.
+    # Background command runs (issue #282): one command, no model in the loop.
+    # Completions wake the chat that started the run after a short coalescing
+    # window, so a batch finishing together produces one turn.
     from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
 
     def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
@@ -601,13 +612,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         on_finish=_background_finished,
     )
 
-    # Create and wire up web app. MCP stays available while legacy remains
-    # the default so controlled A/B runs can select a surface per chat.
+    # Create and wire up web app. The MCP control plane is mandatory for chat;
+    # first-run setup is the one state without one, and a chat attempted there
+    # fails loudly rather than running an agent that cannot reach Ciaobot.
     from ciao.mcp_server import CiaoMcpService
 
     mcp_service = None
     control_plane = None
-    if bool(getattr(config, "mcp_enabled", True)) and not getattr(config, "bootstrap_mode", False):
+    if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
@@ -621,9 +633,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     except Exception:
         logger.warning("Could not backfill schedule project names", exc_info=True)
+    # Same window, for the other half of the routing state: a chat-bound entry
+    # written before `stamp_fallback_project` existed records no re-home
+    # target, and that is only readable off the bound chat while it exists.
+    try:
+        schedule_manager.backfill_fallback_projects(pcm)
+    except Exception:
+        logger.warning("Could not backfill schedule fallback projects", exc_info=True)
 
     app.state.schedule_manager = schedule_manager
-    app.state.loop_manager = loop_manager
     app.state.background_runner = background_runner
     # Lets the wake flusher defer runs to the runner when the restart drain
     # blocks delivery, so the next start replays those wakes.
@@ -658,7 +676,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             config,
             project_chat_manager=pcm,
             schedule_manager=schedule_manager,
-            loop_manager=loop_manager,
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
@@ -693,7 +710,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     pcm.clear_notifications_cb = _clear_notifications
 
     # Google Workspace token health + server-managed re-login (issue #145).
-    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager
+    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager, ManualPkceStore
 
     app.state.gws_health_monitor = GwsHealthMonitor(
         config,
@@ -702,6 +719,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         runtime_root=config.state_path.parent,
     )
     app.state.gws_relogin_manager = GwsReloginManager(config)
+    # PKCE verifier store for the manual/paste OAuth flow (issue #354).
+    app.state.gws_manual_pkce_store = ManualPkceStore()
 
     # Wire push delivery into the broker drive task so a successful turn
     # notifies subscribed devices even when no WebSocket client is connected.
@@ -808,14 +827,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # done; the post-setup restart (no longer in bootstrap mode) starts them.
     if getattr(config, "bootstrap_mode", False):
         logger.info(
-            "Bootstrap mode: holding schedule/loop dispatch until setup completes."
+            "Bootstrap mode: holding schedule dispatch until setup completes."
         )
     else:
+        # One ticker for every cadence. Interval entries resume on their own
+        # within an interval of boot; they are excluded from the catch-up pass
+        # because replaying intervals missed during downtime is worthless.
         schedule_manager.start()
-        # Loops with autostart begin running now; manually-started loops stay
-        # stopped until started from the Automations page. No catch-up pass:
-        # missed poll iterations from downtime are worthless, cadence just resumes.
-        loop_manager.start()
 
         # Resolve any background run left non-terminal by a crash (the
         # graceful path terminates them on shutdown, so this normally finds
@@ -833,9 +851,23 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
         # serving requests.
+        #
+        # Right after a first-time setup the onboarding chat should be the only
+        # new conversation: within the post-setup grace window, system routines
+        # are skipped here and simply fire at their next regular tick, instead
+        # of all replaying their missed runs in parallel at first launch.
+        from ciao.setup_marker import catch_up_grace_active
+
+        grace_active = catch_up_grace_active(config.state_path.parent)
+        if grace_active:
+            logger.info(
+                "Post-setup grace window active: holding system-routine "
+                "catch-up; routines fire at their next regular tick."
+            )
+
         async def _run_catch_up() -> None:
             try:
-                fired = await schedule_manager.catch_up()
+                fired = await schedule_manager.catch_up(skip_system=grace_active)
                 if fired:
                     logger.info("Schedule catch-up fired %d schedule(s): %s",
                                 len(fired), ", ".join(fired))
@@ -1153,8 +1185,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         if services:
             await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
 
-    app.add_event_handler("shutdown", _shutdown_providers)
-
     async def _shutdown_background_runs() -> None:
         # Terminate every live background command before the loop closes. This
         # is what makes "a restart does not leak orphan processes" true on the
@@ -1166,7 +1196,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
-    app.add_event_handler("shutdown", _shutdown_background_runs)
+    app.state.shutdown_callbacks = [_shutdown_providers, _shutdown_background_runs]
 
     try:
         await server.serve()

@@ -181,8 +181,44 @@ def test_default_mode_for_provider_builtin_defaults(tmp_path):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    # Every provider always starts on the app-wide auto default; there is no
-    # per-provider override surface anymore.
+    # With no operator pin, every provider starts on the app-wide auto default.
     assert config.default_mode_for_provider("opencode") == "auto"
     assert config.default_mode_for_provider("claude") == "auto"
-    assert not hasattr(config, "provider_default_modes")
+
+
+def test_provider_default_modes_roundtrip(tmp_path):
+    from ciao.config import CiaoConfig
+
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    # The PWA-facing "manual" persists as stored and applies to the live
+    # config as the BridgeMode "normal" the providers understand.
+    store.update({"provider_default_modes": {"claude": "manual", "opencode": "bypass"}})
+    assert store.settings.provider_default_modes == {
+        "claude": "manual",
+        "opencode": "bypass",
+    }
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+    store.apply_to_config(config)
+    assert config.default_mode_for_provider("claude") == "normal"
+    assert config.default_mode_for_provider("opencode") == "bypass"
+
+
+def test_provider_default_modes_reject_bad_values(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="must be one of"):
+        store.update({"provider_default_modes": {"claude": "yolo"}})
+    with pytest.raises(ValueError, match="must be an object"):
+        store.update({"provider_default_modes": "bypass"})
+    # Junk on load is dropped, not fatal.
+    path = tmp_path / "app_settings.json"
+    path.write_text(
+        json.dumps({"provider_default_modes": {"claude": "plan", "opencode": "manual", "x": "auto"}})
+    )
+    fresh = AppSettingsStore(path)
+    assert fresh.settings.provider_default_modes == {"opencode": "manual"}

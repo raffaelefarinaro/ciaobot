@@ -5,14 +5,11 @@ an agent-facing adapter over the same Python managers used by the PWA; it is
 not a second API implementation and it never asks a model to edit `.runtime`
 JSON directly.
 
-MCP is the default control surface for the two supported providers, Claude and
-OpenCode. `legacy` (the
-CLI/direct-file path) is retained as a hidden fallback: it is still selectable
-via `CIAO_CONTROL_SURFACE=legacy` or the per-chat `control_surface` field, and
-it is used automatically when the MCP server is unavailable. The PWA no longer
-exposes a per-chat surface selector; the transport is engine-controlled. `auto`
-uses `.runtime/control_surface_decision.json` per provider and resolves to
-legacy when the decision is missing, tied, partial, or invalid.
+MCP is the only control surface for the two supported providers, Claude and
+OpenCode, and it is mandatory. There is no CLI/direct-file fallback, no
+`CIAO_CONTROL_SURFACE` setting, and no per-chat surface field: a chat whose
+control plane is unavailable fails the turn with a visible error rather than
+running an agent that cannot reach Ciaobot.
 
 ## Process and trust model
 
@@ -35,14 +32,13 @@ flowchart LR
   They are not placed in the normal model shell environment. Claude receives
   the token in the SDK MCP header configuration; opencode receives equivalent
   scoped process configuration.
-- Because MCP is the default transport, a chat whose MCP server or token is
-  unavailable degrades gracefully to the legacy path with a logged WARNING,
-  rather than failing the turn. This keeps the app usable during bootstrap or
-  when `CIAO_MCP_ENABLED=false`. The `GET /api/mcp/status` readiness display
-  (Settings) and server logs make the fallback observable. A mid-turn outage
-  of an already-live MCP session surfaces through the CLI/tool-call error path
-  and server logs rather than a strict-config launch failure (see the note on
-  `strict_mcp_config` below).
+- Because MCP is the only transport, a chat whose MCP service or project is
+  unavailable fails the turn: `build_agent_request` raises
+  `McpUnavailableError`, which is published as a normal failed turn with a
+  logged ERROR. The `GET /api/mcp/status` readiness display (Settings) and
+  server logs show the cause. A mid-turn outage of an already-live MCP session
+  surfaces through the CLI/tool-call error path and server logs rather than a
+  strict-config launch failure (see the note on `strict_mcp_config` below).
 - Plan-mode chats cannot call mutating tools. Tool results use stable
   `{ok,data}` / `{ok:false,error}` envelopes, and inputs are validated again by
   the domain manager.
@@ -132,11 +128,11 @@ with its own shell and filesystem is not duplicated as an MCP tool:
 `system` key. `capabilities_get`, `automation_runs_list`, `debug_issues_get`,
 `agent_context_get`, `chat_mark_read`, `package_status_get`, and the deferred
 `lifecycle_*` tools were dropped as host/PWA concerns. Retry, new-session,
-and the schedule/loop lifecycle verbs are folded into parameterized tools
+and the schedule lifecycle verbs are folded into parameterized tools
 (`chat_retry` with an `action`, `chat_handover` with empty provider/model for
-an in-place new session, `schedule_action`, `loop_action`). The
-schedule/loop/project create/update/restore verbs are folded into `schedule`,
-`loop`, and `project` tools with an `action` param; complete/delete are folded
+an in-place new session, `schedule_action`). The
+schedule/project create/update/restore verbs are folded into `schedule`
+and `project` tools with an `action` param; complete/delete are folded
 into `project_action`. `workspace_update`, `workspace_delete`,
 `project_files_list`, and `adversarial_review` were moved to the PWA / CLI /
 skill surface (admin or redundant with native tools).
@@ -150,17 +146,23 @@ skill surface (admin or redundant with native tools).
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
-| Delegates | `delegate_spawn`, `delegates_list` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
-| Loops | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
+| Loops (deprecated) | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
 | Workspace files | `file_surface` |
 
-`loop` with `action="create"` starts the cadence immediately (`start=true` by
-default) and returns the real `running` flag. `autostart` is a separate axis: it only decides
-whether the loop comes back up after a server restart. They were previously
-conflated, so a loop created with `autostart=true` reported as running while the
-PWA banner correctly said `stopped`.
+**Sub-day recurrence** is `schedule` with `frequency="interval"` and
+`interval_minutes`. Combined with `chat_id` it keeps one conversation going and
+inherits that chat's model and mode; combined with `project_id` it opens a
+fresh chat per run.
+
+The `loops_list` / `loop` / `loop_action` tools are **deprecated** and translate
+onto interval schedules for one release. Loops were a separate primitive with
+two runtime flags — `start` (tick now) and `autostart` (come back after a
+restart) — which were routinely conflated: a loop created with
+`autostart=true` reported as running while the PWA banner correctly said
+`stopped`. The merged primitive has one `enabled` flag, and both legacy fields
+report it.
 
 **Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
 SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
@@ -231,14 +233,14 @@ Claude managed provider, both of which decisively favored MCP:
 
 - Ollama `minimax-m3:cloud` (production opus-tier): legacy 51/60 (85%) vs MCP
   59/60 (98.3%), higher score, zero quota blocks. The legacy hand-editing path
-  was materially less reliable (`loop_create` persisted 0/4, `vault_write`
+  was materially less reliable (loop creation persisted 0/4, `vault_write`
   content dropped).
 - OpenRouter `anthropic/claude-sonnet-5`: legacy 60/60 vs MCP 60/60, MCP faster
   with 75% fewer tool calls (+9.56).
 
 MCP is at least as correct, materially faster, and far cheaper on tool calls.
-The default applies server-wide via `config.control_surface` rather than per
-provider. `legacy` remains the hidden fallback described above.
+It is now the only surface: the `legacy` path was removed after this
+evaluation.
 
 ### Historical / retired provider evaluation (2026-07-18)
 
@@ -249,15 +251,11 @@ provider. `legacy` remains the hidden fallback described above.
 This is the historical Codex provider evaluation; Codex is no longer a
 supported Ciaobot runtime provider.
 
-The former `auto` path was a per-chat value, not a server default: a chat on
-`auto` resolved at
-dispatch through `.runtime/control_surface_decision.json`
-(`ciao/control_surfaces.py`), which records the promoted per-provider decision
-from the latest release evaluation, and falls back to `legacy` when no provider
-has been promoted. As of the record below no provider has been promoted through
-the formal 240-turn release evaluation, so `auto` resolves to `legacy`. This is
-independent of the default
-above: the default governs chats that do not opt into `auto`.
+The former `auto` path was a per-chat value that resolved at dispatch through
+`.runtime/control_surface_decision.json`, falling back to `legacy` when no
+provider had been promoted. No provider was ever promoted through the formal
+240-turn release evaluation, and both the `auto` and `legacy` surfaces have
+since been removed.
 
 The retired-provider release run attempted all 120 turns. Three final scenario pairs were
 hard-blocked after the workspace exhausted its credits, leaving 57 evaluable

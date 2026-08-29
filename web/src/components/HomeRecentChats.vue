@@ -172,7 +172,7 @@
 
           <!-- Chats whose archive POST is in flight. The panel already closed
                optimistically; this queue is where the chat lives while the engine
-               finishes the transcript write and delegate cascade. -->
+               finishes the transcript write. -->
           <div v-if="lane.archivingChats.length" class="home-tier home-tier--archiving">
             <div class="home-tier-label"><span>archiving</span></div>
             <div
@@ -434,7 +434,7 @@ function makeLane(
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsInput(chatId),
-      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasActiveDelegates(chatId),
+      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasRunningSubagents(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
     archivingChats: (workspace && workspace !== 'unknown' && archivingChatsByWorkspace.value.get(workspace)) || [],
@@ -460,9 +460,8 @@ function laneHasChats(lane: HomeLane): boolean {
   return lane.chats.length > 0
 }
 
-// Derived from the same chat set as the rows beneath it. workspaceNeedsInput()
-// counts nested delegates, which activeChatsAll deliberately excludes, so using
-// it here made the header claim a chat needs you with no row to answer.
+// Derived from the same chat set as the rows beneath it, so the header can
+// never claim a chat needs you with no row to answer.
 function laneNeedsCount(lane: HomeLane): number {
   return lane.tiers.needsYou.length
 }
@@ -1307,6 +1306,10 @@ defineExpose({ onArrow })
   margin-left: auto;
   color: var(--fg2);
   font-size: var(--text-xs);
+  /* The card heading top-aligns its children, so this smaller text needs the
+     title's first-line height (1.35 x text-sm) to share its centerline — and
+     the unread dot's (see .chat-signals--card in ChatSignals.vue). */
+  line-height: calc(1.35 * var(--text-sm));
 }
 
 .home-chat-project {

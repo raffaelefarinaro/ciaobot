@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -15,14 +16,64 @@ logger = logging.getLogger(__name__)
 # Directory-based type inference (similar to vault_index.py)
 EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
 
+# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Indexing them made the proposals queue and the curation logs rank above real
+# notes for ordinary recall queries — the memory system's paperwork must never
+# compete with the memories it manages. Matched only directly under a
+# `Workspace/` directory — where the pipeline writes them — so a user's own
+# note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
+# stays searchable.
+RESERVED_UNINDEXED_FILES = frozenset(
+    {
+        "memory-proposals.md",
+        "memory-consolidations.md",
+        "curation-log.md",
+        "weekly-review-log.md",
+    }
+)
+
+
+def _is_reserved_bookkeeping(rel_to_root: Path) -> bool:
+    """True for the memory pipeline's own files, exactly where it writes them.
+
+    ``rel_to_root`` is the path relative to the indexed root (the vault). The
+    pipeline only ever writes these files at ``<vault>/Workspace/<name>``, so
+    the match is exact: a user's note under any other directory that happens
+    to be named ``workspace`` (``projects/acme/workspace/Curation-Log.md``)
+    stays searchable.
+    """
+    return (
+        len(rel_to_root.parts) == 2
+        and rel_to_root.parts[0].casefold() == "workspace"
+        and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
+    )
+
+
+def _settle_excluded_row(
+    conn: sqlite3.Connection, fts_table: str, meta_table: str, rel_str: str, mtime: float
+) -> None:
+    """Remove an excluded note's searchable row but keep its meta row fresh.
+
+    The meta row's mtime is what lets every later pass skip re-reading and
+    re-parsing the file — opted-out notes are often the vault's largest
+    (rolled log archives), and index_vault runs on every vault_search call.
+    """
+    conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+    conn.execute(
+        f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
+        (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
+    )
+
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
 # Every stored key is a path relative to the key base, so no key can begin with
 # a separator: this prefix matches no row. It is the fail-closed answer for a
 # vault whose rows have no identifying prefix, where the alternative ("" — match
-# everything) leaked one workspace's notes into another's search.
-_NO_MATCH_KEY_PREFIX = os.sep
+# everything) leaked one workspace's notes into another's search. Public so
+# callers of vault_key_prefix can recognise the fail-closed answer by name
+# instead of re-deriving the sentinel's value.
+NO_MATCH_KEY_PREFIX = os.sep
 
 
 def get_db_path() -> Path:
@@ -126,6 +177,23 @@ def _parse_title(text: str, filename_stem: str) -> str:
     return filename_stem
 
 
+def _search_opted_out(text: str) -> bool:
+    """True when a note's frontmatter carries ``search: false``.
+
+    The general escape hatch behind ``RESERVED_UNINDEXED_FILES``: any note can
+    take itself out of recall (rolled log archives, scratch files) without the
+    engine having to learn its name.
+    """
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return False
+    try:
+        fm = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return False
+    return isinstance(fm, dict) and fm.get("search") is False
+
+
 def _public_snippet(raw: str) -> str:
     """Keep only FTS-highlighted lines in a returned search snippet.
 
@@ -222,6 +290,13 @@ def _index_directory(
         # spelled lowercase by OKF and titlecase by this vault's history)
         if rel.name.casefold() in exclude_files:
             continue
+        # The memory pipeline's own bookkeeping, but only where the pipeline
+        # writes it — a user note elsewhere sharing the name stays indexed.
+        # Checked against the indexed root, not the key base: keys may carry
+        # an install-root prefix, but the pipeline's write location is always
+        # `<root>/Workspace/`.
+        if _is_reserved_bookkeeping(md_path.relative_to(root_dir)):
+            continue
 
         found_paths.add(rel_str)
 
@@ -239,6 +314,13 @@ def _index_directory(
             text = md_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             logger.warning("FTS search: failed to read %s", md_path)
+            continue
+
+        if _search_opted_out(text):
+            # Remove any FTS rows indexed before the note opted out, but keep
+            # (and refresh) the meta row so the mtime short-circuit above
+            # stops every later pass from re-reading the file.
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
             continue
 
         title = _parse_title(text, md_path.stem)
@@ -279,8 +361,11 @@ def _index_directory(
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
         removed_count += 1
 
-    if indexed_count > 0 or removed_count > 0:
-        conn.commit()
+    # Unconditional: committing with no pending writes is a no-op under the
+    # default transaction control every caller uses, and a counter-based gate
+    # silently rolls back any write path that forgets to reach it — the
+    # opt-out settle had exactly that bug.
+    conn.commit()
 
     return indexed_count, removed_count
 
@@ -347,8 +432,17 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     the same base as the rest.
     """
     base = _key_base(vault_root, path_base)
-    prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
-    return _NO_MATCH_KEY_PREFIX if prefix is None else prefix
+    # Compare unresolved first, exactly as the key-writing loop does
+    # (_scope_prefix's own contract): a vault reached through a symlink under
+    # the base writes keys spelled with the symlink, and resolving both sides
+    # here returned NO_MATCH for those rows — every search of that workspace
+    # failed closed forever despite a healthy index. The resolved comparison
+    # stays as a fallback for callers that spell the same real paths
+    # differently (e.g. /var vs /private/var on macOS).
+    prefix = _scope_prefix(Path(vault_root), Path(base))
+    if prefix is None:
+        prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
+    return NO_MATCH_KEY_PREFIX if prefix is None else prefix
 
 
 def index_file(
@@ -381,6 +475,35 @@ def index_file(
         mtime = stat.st_mtime
     except OSError:
         return False
+
+    if not is_log:
+        try:
+            rel_to_root = file_path.relative_to(vault_root)
+        except ValueError:
+            # A non-log file that cannot be placed under the vault root (a
+            # symlinked or differently-normalized vault_root spelling): the
+            # reserved-bookkeeping check would run against a base-relative
+            # key it can never match (fail open), and any row written here
+            # would sit outside the bulk pass's scoped prune. Fail closed:
+            # index nothing.
+            return False
+        if _is_reserved_bookkeeping(rel_to_root):
+            # Force-indexing must honour the same exclusions as the bulk pass,
+            # and clean up rows written before the file became excluded. Both
+            # rows go: the bulk pass never records these files in found_paths,
+            # so a kept meta row would be pruned on the next pass anyway.
+            conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+            conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
+            conn.commit()
+            return False
+        if _search_opted_out(text):
+            # Same settle as the bulk pass: drop the searchable row but keep
+            # the meta row fresh, so the next index_vault does not re-read the
+            # whole file (the bulk pass keeps opted-out notes in found_paths,
+            # so the prune spares this row).
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
+            conn.commit()
+            return False
 
     title = _parse_title(text, file_path.stem)
 
@@ -442,6 +565,13 @@ def search(
     try:
         cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
+        if not rows and len(words) > 1:
+            # AND-of-all-words returns nothing for paraphrase queries ("how
+            # much do I charge per hour" — no note holds every word). Degrade
+            # to OR and let BM25 rank the notes matching the distinctive
+            # terms; a weaker match beats an empty answer for recall.
+            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit))
+            rows = cursor.fetchall()
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
@@ -500,6 +630,80 @@ def search_logs(
     what a not-yet-migrated root and every per-root ``index_file`` write produce.
     """
     return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+
+
+# ── Retrieval telemetry (decay-by-disuse signal) ───────────────────────────
+#
+# Every vault_search result set is appended here so the memory audit can tell
+# which notes recall actually uses. A note that is both stale and never
+# retrieved is the strongest demotion candidate the nightly curator sees.
+# Strictly best-effort and signal-only: nothing reads this to delete anything.
+
+SEARCH_HITS_NAME = "vault_search_hits.jsonl"
+_HITS_MAX_BYTES = 1 * 1024 * 1024
+_HITS_KEEP_LINES = 2000
+
+
+def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
+    """Append one search's returned note paths to the hits log. Never raises."""
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = runtime_dir / SEARCH_HITS_NAME
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "query": query[:200],
+            "paths": paths[:50],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if path.stat().st_size > _HITS_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 — telemetry must never break search
+        logger.debug("Could not record search hits", exc_info=True)
+
+
+def read_search_hit_paths(
+    runtime_dir: Path, *, since_days: int = 90
+) -> set[str] | None:
+    """Note paths returned by any search in the window; None when no log exists.
+
+    None matters: an install that never wrote the log has no retrieval
+    evidence, and the audit must not read that absence as "never retrieved".
+    """
+    path = runtime_dir / SEARCH_HITS_NAME
+    if not path.exists():
+        return None
+    cutoff = datetime.now(timezone.utc).timestamp() - since_days * 86400
+    hits: set[str] = set()
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                # One junk line must not void the audit's whole stale-notes
+                # section (the caller wraps this in a broad advisory except).
+                continue
+            try:
+                ts = datetime.fromisoformat(str(record.get("ts", ""))).timestamp()
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            paths = record.get("paths", [])
+            if not isinstance(paths, list):
+                continue
+            for item in paths:
+                if isinstance(item, str):
+                    hits.add(item)
+    except OSError:
+        return None
+    return hits
 
 
 def logs_key_prefix(logs_root: Path, path_base: Path | None) -> str:

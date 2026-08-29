@@ -21,6 +21,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from ciao.control_plane import (
@@ -29,6 +30,8 @@ from ciao.control_plane import (
     McpPrincipal,
     _UNSET,
 )
+from ciao.execution_modes import MCP_SERVER_NAME
+from ciao.schedules import DEFAULT_INTERVAL_MINUTES
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -130,6 +133,102 @@ _DESTRUCTIVE = ToolAnnotations(
     openWorldHint=False,
 )
 
+# ── lazy tool discovery ──────────────────────────────────────────────────
+# Every schema returned by ``tools/list`` is injected into every chat's
+# context window whether the turn uses it or not: the full catalog is ~37KB
+# of JSON, ~9k tokens, per chat. Only a small core is listed eagerly; the
+# rest are reached through ``tools_search`` (schemas on demand) and
+# ``tools_call`` (dispatch by name).
+#
+# This is list-side only. Hidden tools stay registered, so authentication,
+# plan-mode gating, and telemetry are unchanged, and a client that already
+# knows a name can still call it directly.
+#
+# Groups follow the control-plane domains so one ``tools_search`` pulls
+# everything a task needs in a single round trip.
+_TOOL_GROUPS: dict[str, tuple[str, ...]] = {
+    "context": ("context_get",),
+    "memory": ("memory_status", "memory_update"),
+    "vault": ("vault_search",),
+    "gws": ("gws_status",),
+    "projects": ("projects_list", "project_get", "project", "project_action"),
+    "workspaces": ("workspaces_list", "workspace_create"),
+    "chats": (
+        "chats_list",
+        "chat_get",
+        "chat_create",
+        "chat_update",
+        "chat_send",
+        "chat_continue",
+        "chat_retry",
+        "chat_handover",
+        "chat_fork",
+        "chat_archive",
+        "chat_stop",
+        "chat_delete",
+    ),
+    "background": (
+        "background_run_start",
+        "background_run_status",
+        "background_run_cancel",
+    ),
+    "schedules": ("schedules_list", "schedule", "schedule_action"),
+    "loops": ("loops_list", "loop", "loop_action"),
+    "files": ("file_surface",),
+}
+
+_GROUP_OF_TOOL: dict[str, str] = {
+    name: group for group, names in _TOOL_GROUPS.items() for name in names
+}
+
+# The discovery pair. They are never hidden and never dispatchable.
+_META_TOOLS: frozenset[str] = frozenset({"tools_search", "tools_call"})
+
+# Listed eagerly alongside the meta pair: the three reads a turn needs to
+# orient itself before it knows which group it wants.
+_CORE_TOOLS: frozenset[str] = frozenset(
+    {"context_get", "memory_status", "vault_search"}
+)
+
+
+def _tools_search_description() -> str:
+    """Build the ``tools_search`` description from the group map.
+
+    The catalog of names lives in the description rather than in a call
+    result so the model knows what exists without a round trip; only the
+    schemas are deferred. Generated so it cannot drift from _TOOL_GROUPS.
+    """
+    groups = "; ".join(
+        f"{group} ({', '.join(names)})" for group, names in _TOOL_GROUPS.items()
+    )
+    return (
+        "Reveal the Ciaobot tools that tools/list does not show, then run one "
+        "with tools_call.\n\n"
+        "Ciaobot's catalog is too large to inject into every turn, so only a "
+        "core is listed and the rest are described here on demand. Pass a "
+        "group name for every schema in that group, a tool name for one "
+        "schema, or free text to match names and descriptions. With no "
+        "argument you get a one-line summary of each hidden tool.\n\n"
+        f"Groups: {groups}."
+    )
+
+
+_TOOLS_CALL_DESCRIPTION = (
+    "Run a Ciaobot tool by name, including the ones tools/list does not "
+    "show.\n\n"
+    "Call tools_search first for the tool's schema; ``arguments`` is the "
+    "object that schema describes. Tools flagged destructive are always "
+    "listed and must be called under their own name -- this dispatcher "
+    "refuses them so their approval prompt cannot be routed around."
+)
+
+
+def _summarize(description: str) -> str:
+    """First sentence-ish of a tool docstring, for the catalog listing."""
+    first = (description or "").strip().split("\n\n", 1)[0]
+    return " ".join(first.split())[:180]
+
+
 # Create-time defaults for the merged `schedule` and `loop` tools. Their
 # signatures default every field to None instead, so an "update" can tell a
 # field the caller left out from one the caller set to the create default.
@@ -152,10 +251,12 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "archive_policy": "manual",
     "workspace": "",
 }
+# Retained for the deprecated `loop` tool; the merged `schedule` tool takes
+# interval_minutes through _SCHEDULE_CREATE_DEFAULTS-less None handling.
 _LOOP_CREATE_DEFAULTS: dict[str, Any] = {
     "prompt": "",
     "chat_id": "",
-    "interval_minutes": 10,
+    "interval_minutes": DEFAULT_INTERVAL_MINUTES,
     "title": "",
     "autostart": False,
     "start": True,
@@ -273,6 +374,8 @@ class CiaoMcpService:
         self.registry = McpSessionRegistry()
         self.control_plane: CiaoControlPlane | None = None
         self._tool_names: set[str] = set()
+        self._tool_annotations: dict[str, ToolAnnotations | None] = {}
+        self.lazy_tools = bool(getattr(config, "mcp_lazy_tools", True))
         self._last_error = ""
         self._telemetry_path = Path(config.state_path).parent / "mcp_tool_calls.jsonl"
         issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
@@ -282,7 +385,9 @@ class CiaoMcpService:
                 "Use these tools for Ciaobot memory, vault, projects, chats, "
                 "schedules, loops, files, and application state. Prefer them "
                 "over curl, the ciao CLI, or direct .runtime edits. All paths "
-                "are relative to the active workspace or vault."
+                "are relative to the active workspace or vault. Most of the "
+                "catalog is not listed: call tools_search to get the schemas "
+                "for a group, then tools_call to run one."
             ),
             host="127.0.0.1",
             streamable_http_path="/",
@@ -297,6 +402,10 @@ class CiaoMcpService:
             ),
         )
         self._register_tools()
+        if self.lazy_tools:
+            # Replace the handler FastMCP installed in _setup_handlers. The
+            # tool manager keeps every tool; only the listing is filtered.
+            self.server._mcp_server.list_tools()(self._list_visible_tools)
         self.http_app = self.server.streamable_http_app()
 
     def bind(self, control_plane: CiaoControlPlane) -> None:
@@ -324,11 +433,15 @@ class CiaoMcpService:
     def status(self) -> dict[str, Any]:
         workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
         return {
-            "enabled": bool(getattr(self.config, "mcp_enabled", True)),
+            # Retained for the PWA status payload's shape. The control plane is
+            # mandatory, so a live service is by definition enabled.
+            "enabled": True,
             "url": self.url,
             "bound": self.control_plane is not None,
             "tool_count": len(self._tool_names),
             "tools": sorted(self._tool_names),
+            "lazy_tools": self.lazy_tools,
+            "listed_tools": sorted(self._visible_tool_names()),
             "last_error": self._last_error,
             "env_path": str(_workspace_env_path(workspace_root)),
             "project_servers": self._discover_project_mcp_servers(),
@@ -905,10 +1018,257 @@ class CiaoMcpService:
         name = str(kwargs.get("name") or (args[0] if args else ""))
         if name:
             self._tool_names.add(name)
+            self._tool_annotations[name] = kwargs.get("annotations")
         return self.server.tool(*args, **kwargs)
+
+    # ── lazy tool discovery ──────────────────────────────────────────────
+
+    def _destructive_tool_names(self) -> set[str]:
+        return {
+            name
+            for name, annotations in self._tool_annotations.items()
+            if annotations is _DESTRUCTIVE
+        }
+
+    def _visible_tool_names(self) -> set[str]:
+        """Names ``tools/list`` reports.
+
+        Destructive tools stay listed on purpose. Auto-approval is a static
+        name allowlist on the provider side (``AUTO_APPROVED_MCP_TOOLS``), so
+        a tool reached through ``tools_call`` would inherit the dispatcher's
+        approval instead of its own. Keeping them named — and refusing them in
+        the dispatcher — keeps that boundary exactly where it is today.
+        """
+        if not self.lazy_tools:
+            return set(self._tool_names)
+        keep = _META_TOOLS | _CORE_TOOLS | self._destructive_tool_names()
+        return {name for name in self._tool_names if name in keep}
+
+    async def _list_visible_tools(self) -> list[Any]:
+        visible = self._visible_tool_names()
+        return [
+            tool for tool in await self.server.list_tools() if tool.name in visible
+        ]
+
+    def _describe_tool(self, tool: Any, *, visible: set[str]) -> dict[str, Any]:
+        annotations = self._tool_annotations.get(tool.name)
+        return {
+            "name": tool.name,
+            "group": _GROUP_OF_TOOL.get(tool.name, ""),
+            "description": tool.description or "",
+            "input_schema": tool.inputSchema,
+            "destructive": annotations is _DESTRUCTIVE,
+            "read_only": annotations is _READ,
+            "listed": tool.name in visible,
+        }
+
+    async def _tools_search(self, query: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        principal = self._principal_or_none()
+        status = "ok"
+        try:
+            visible = self._visible_tool_names()
+            catalog = [
+                tool
+                for tool in await self.server.list_tools()
+                if tool.name not in _META_TOOLS
+            ]
+            term = (query or "").strip().lower()
+            if not term:
+                data: dict[str, Any] = {
+                    "query": "",
+                    "matched": 0,
+                    "catalog": [
+                        {
+                            "name": tool.name,
+                            "group": _GROUP_OF_TOOL.get(tool.name, ""),
+                            "listed": tool.name in visible,
+                            "summary": _summarize(tool.description or ""),
+                        }
+                        for tool in sorted(catalog, key=lambda t: t.name)
+                    ],
+                }
+                return {"ok": True, "data": data}
+
+            if term in _TOOL_GROUPS:
+                hits = [t for t in catalog if _GROUP_OF_TOOL.get(t.name) == term]
+            else:
+                # Substring, not exact-then-fallback. The merged tools are
+                # named `schedule`, `project`, and `loop` — the most natural
+                # one-word query for each domain — so stopping at the exact hit
+                # returned one schema and hid `schedules_list` /
+                # `schedule_action` from a model that had no other way to learn
+                # they exist. (An exact name is a substring of itself, so this
+                # one test covers both.)
+                hits = [t for t in catalog if term in t.name]
+                if not hits:
+                    hits = [
+                        t for t in catalog if term in (t.description or "").lower()
+                    ][:8]
+
+            if not hits:
+                return {
+                    "ok": True,
+                    "data": {
+                        "query": query,
+                        "matched": 0,
+                        "catalog": [
+                            {
+                                "name": tool.name,
+                                "group": _GROUP_OF_TOOL.get(tool.name, ""),
+                                "listed": tool.name in visible,
+                                "summary": _summarize(tool.description or ""),
+                            }
+                            for tool in sorted(catalog, key=lambda t: t.name)
+                        ],
+                    },
+                }
+            return {
+                "ok": True,
+                "data": {
+                    "query": query,
+                    "matched": len(hits),
+                    "tools": [
+                        self._describe_tool(tool, visible=visible)
+                        for tool in sorted(hits, key=lambda t: t.name)
+                    ],
+                },
+            }
+        except Exception:  # noqa: BLE001 - tool boundary must be fail-safe
+            status = "error"
+            raise
+        finally:
+            self._record_tool_call(
+                name="tools_search",
+                principal=principal,
+                status=status,
+                error_code="internal_error" if status == "error" else "",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+    async def _tools_call(
+        self, name: str, arguments: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        target = (name or "").strip()
+        refusal = self._dispatch_refusal(target)
+        if refusal:
+            self._record_tool_call(
+                name="tools_call",
+                principal=self._principal_or_none(),
+                status="error",
+                error_code="invalid_request",
+                duration_ms=0,
+            )
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_request",
+                    "message": refusal,
+                    "retryable": False,
+                },
+            }
+        # The tool manager validates ``arguments`` against the tool's own
+        # signature and runs the registered coroutine, so the inner _invoke
+        # still applies the principal, plan-mode gate, and telemetry under the
+        # real tool name. Private only because FastMCP exposes no public
+        # "call without converting the result" entry point.
+        try:
+            value = await self.server._tool_manager.call_tool(
+                target,
+                arguments or {},
+                context=self.server.get_context(),
+                convert_result=False,
+            )
+        except ToolError as exc:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_request",
+                    "message": f"{target}: {exc}",
+                    "retryable": False,
+                },
+            }
+        if isinstance(value, dict):
+            return value
+        return {"ok": True, "data": value}
+
+    def _denied_by_workspace(self, target: str) -> bool:
+        """Whether this workspace's ``disallowed_tools`` blocks ``target``.
+
+        The harness denylist is enforced by exact tool name on the provider
+        side (``ClaudeAgentOptions.disallowed_tools``), so it never sees a call
+        routed through ``tools_call`` — the dispatcher runs the target's
+        coroutine in-process under its own name. Re-checking here keeps the
+        deprecated indirection from becoming a way around an operator's
+        per-workspace denylist. Unknown principal or an unreadable denylist
+        falls through to "not denied": this is a second line, and the first
+        one still applies to every direct call.
+        """
+        principal = self._principal_or_none()
+        if principal is None:
+            return False
+        try:
+            denied = set(
+                self.config.disallowed_tools_for_workspace(principal.workspace)
+            )
+        except Exception:  # noqa: BLE001 — a broken denylist must not 500 a call
+            logger.exception("Could not resolve the workspace denylist")
+            return False
+        return bool(
+            denied & {target, f"mcp__{MCP_SERVER_NAME}__{target}", f"mcp__{MCP_SERVER_NAME}"}
+        )
+
+    def _dispatch_refusal(self, target: str) -> str:
+        """Why ``tools_call`` will not run ``target``, or "" if it will."""
+        if not target:
+            return "tools_call needs the name of a Ciaobot tool."
+        if target in _META_TOOLS:
+            return f"{target} cannot dispatch to itself."
+        if target not in self._tool_names:
+            return (
+                f"Unknown Ciaobot tool {target!r}. "
+                "Call tools_search with no argument for the catalog."
+            )
+        if target in self._destructive_tool_names():
+            return (
+                f"{target} is destructive and is listed in tools/list. "
+                "Call it directly by name so its approval prompt is raised."
+            )
+        if self._denied_by_workspace(target):
+            return f"{target} is disallowed in this workspace."
+        return ""
+
+    def _principal_or_none(self) -> McpPrincipal | None:
+        try:
+            return self._principal()
+        except ControlPlaneError:
+            return None
 
     def _register_tools(self) -> None:  # noqa: C901 - catalog is intentionally explicit
         tool = self._tool
+
+        # ── lazy discovery pair ──────────────────────────────────────────
+        # Declared first so they lead AUTO_APPROVED_MCP_TOOLS, which mirrors
+        # this file's declaration order.
+        @tool(
+            name="tools_search",
+            annotations=_READ,
+            structured_output=True,
+            description=_tools_search_description(),
+        )
+        async def tools_search(query: str = "") -> dict[str, Any]:
+            return await self._tools_search(query)
+
+        @tool(
+            name="tools_call",
+            annotations=_WRITE,
+            structured_output=True,
+            description=_TOOLS_CALL_DESCRIPTION,
+        )
+        async def tools_call(
+            name: str, arguments: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            return await self._tools_call(name, arguments)
 
         @tool(name="context_get", annotations=_READ, structured_output=True)
         async def context_get() -> dict[str, Any]:
@@ -1086,7 +1446,6 @@ class CiaoMcpService:
         async def workspace_create(
             name: str,
             default_provider: str = "claude",
-            default_model: str = "",
             gws_profile: str = "",
             disallowed_tools: Any = _UNSET,
             color: str = "",
@@ -1097,7 +1456,6 @@ class CiaoMcpService:
                 name: Letters, numbers, dashes, or underscores. The vault
                     folder is the standard one under the vault root.
                 default_provider: claude or opencode.
-                default_model: Empty inherits the app-wide default.
                 gws_profile: Linked Google Workspace profile, or empty.
                 disallowed_tools: Extra tools to deny in this workspace;
                     null resets the workspace-specific list to inherited defaults.
@@ -1109,7 +1467,6 @@ class CiaoMcpService:
                     p,
                     name=name,
                     default_provider=default_provider,
-                    default_model=default_model,
                     gws_profile=gws_profile,
                     disallowed_tools=disallowed_tools,
                     color=color,
@@ -1139,7 +1496,6 @@ class CiaoMcpService:
             provider: str | None = None,
             model: str | None = None,
             mode: str | None = None,
-            control_surface: str | None = None,
             prompt: str | None = None,
         ) -> dict[str, Any]:
             """Create a fresh chat, optionally sending its first prompt in the same call.
@@ -1165,7 +1521,6 @@ class CiaoMcpService:
                     provider=provider,
                     model=model,
                     mode=mode,
-                    control_surface=control_surface,  # type: ignore[arg-type]
                     prompt=prompt,
                 ),
                 mutating=True,
@@ -1180,7 +1535,6 @@ class CiaoMcpService:
             mode: str | None = None,
             thinking_level: str | None = None,
             project_id: str | None = None,
-            control_surface: str | None = None,
         ) -> dict[str, Any]:
             """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
             return await self._invoke(
@@ -1194,7 +1548,6 @@ class CiaoMcpService:
                     mode=mode,
                     thinking_level=thinking_level,
                     project_id=project_id,
-                    control_surface=control_surface,
                 ),
                 mutating=True,
             )
@@ -1290,76 +1643,6 @@ class CiaoMcpService:
                 "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
             )
 
-        @tool(name="delegate_spawn", annotations=_WRITE, structured_output=True)
-        async def delegate_spawn(
-            prompt: str,
-            title: str = "",
-            provider: str | None = None,
-            model: str | None = None,
-            mode: str | None = None,
-            delegation_id: str = "",
-            project_id: str | None = None,
-        ) -> dict[str, Any]:
-            """Spawn a delegate chat to do real work, and get woken when it finishes.
-
-            A delegate is a normal Ciaobot chat with full tool access (edit,
-            bash, git) running on the model you pick. This call does NOT block:
-            it returns as soon as the delegate starts. End your turn after
-            spawning — say what you dispatched and that you will report back.
-            Do not poll. When the delegate finishes, Ciaobot sends you a fresh
-            turn summarizing it, and you review then.
-
-            Use this for work that takes a while and produces artifacts: fixing
-            issues, migrations, parallel investigations. For a quick second
-            opinion inside the current turn, use adversarial_review instead,
-            which returns inline.
-
-            When several delegates will touch the same repo, give each one an
-            isolated git worktree and state that path in its prompt, or they
-            will fight over the same checkout.
-
-            Args:
-                prompt: The delegate's full brief. It cannot see this chat, so
-                    include everything: goal, repo path, constraints, and what
-                    "done" means.
-                title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
-                model: Model for the delegate, e.g. a cheaper or specialized
-                    one. Must be in the configured model set for the resolved
-                    provider (Anthropic or opencode
-                    tier alias). Unknown ids are rejected with `invalid_model`
-                    and a list of valid alternatives. Omit to inherit the
-                    workspace default.
-                delegation_id: Shared tag for delegates dispatched as one
-                    batch, so their completion reports group together.
-            """
-            return await self._invoke(
-                "delegate_spawn",
-                lambda cp, p: cp.delegate_spawn(
-                    p,
-                    prompt=prompt,
-                    title=title,
-                    provider=provider,
-                    model=model,
-                    mode=mode,
-                    delegation_id=delegation_id,
-                    project_id=project_id,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="delegates_list", annotations=_READ, structured_output=True)
-        async def delegates_list(chat_id: str = "") -> dict[str, Any]:
-            """List delegates spawned by a chat and which are still running.
-
-            To read a delegate's real transcript, take its session_id from
-            chat_get and read that provider session's JSONL — chat_get itself
-            returns metadata only, never messages. Stop a runaway delegate with
-            chat_stop.
-            """
-            return await self._invoke(
-                "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
-            )
-
         # ── background command runs ──────────────────────────────────────
         # Deliberately _DESTRUCTIVE rather than _WRITE (issue #282 proposed
         # _WRITE, describing it as "Auto-mode approval required"). In this
@@ -1381,7 +1664,7 @@ class CiaoMcpService:
             when it exits.
 
             Sits between a plain `nohup` (survives the turn, but you lose track
-            of it) and delegate_spawn (a whole chat with a model loop). Use it
+            of it) and a full agent loop. Use it
             when the work is a single script that takes minutes: a fetch, a
             build, a data enrichment pass. There is no model in the loop and no
             tool access — it runs the command, nothing else.
@@ -1454,6 +1737,7 @@ class CiaoMcpService:
             daily_time: str | None = None,
             timezone: str | None = None,
             frequency: str | None = None,
+            interval_minutes: int | None = None,
             days_of_week: list[str] | None = None,
             day_of_month: int | None = None,
             run_at_date: str | None = None,
@@ -1507,11 +1791,23 @@ class CiaoMcpService:
                     Ciaobot clears the consumed error log after a clean run
                     that uses one.
                 daily_time: Local HH:MM in `timezone`, default "09:00"
-                    (persisted as the legacy field daily_time_utc).
+                    (persisted as the legacy field daily_time_utc). Ignored for
+                    frequency="interval", which has no time of day.
                 timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
                     the user's local timezone unless they ask for UTC.
-                frequency: "daily" | "weekly" | "monthly" | "manual" | "once";
-                    default "weekly".
+                frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
+                    "interval"; default "weekly". Use "interval" for sub-day
+                    recurrence ("every 30 minutes") — see interval_minutes.
+                interval_minutes: interval only — whole minutes between runs,
+                    minimum 1, default 10. Combine with chat_id for a cadence
+                    that keeps one conversation going (each run inherits that
+                    chat's model and mode; the schedule's own model/provider are
+                    ignored), or with project_id for a fresh chat per run. Give
+                    the prompt a short fixed no-change response for a no-op run,
+                    so repeated runs stay cheap and scannable. A run that comes
+                    due while the target chat is still streaming is skipped and
+                    retried on the next tick, not queued; intervals missed while
+                    the server was down are not replayed.
                 days_of_week: weekly only — lowercase "mon".."sun".
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
@@ -1543,7 +1839,8 @@ class CiaoMcpService:
 
             An enabled schedule with a missed latest occurrence (e.g. the
             server was off) runs once on startup; older missed intervals are
-            not replayed.
+            not replayed. Interval schedules are excluded from that catch-up:
+            their cadence simply resumes.
             """
             # Snapshot the caller's arguments before any other local exists.
             # Doing it first is what keeps helper locals out of the payload: a
@@ -1620,7 +1917,12 @@ class CiaoMcpService:
 
         @tool(name="loops_list", annotations=_READ, structured_output=True)
         async def loops_list() -> dict[str, Any]:
-            """List in-chat loops in the active workspace."""
+            """DEPRECATED — use `schedules_list` and read the interval entries.
+
+            Loops became the `interval` cadence of a schedule. This lists the
+            interval schedules bound to a chat in the active workspace, in the
+            retired loop shape, and will be removed.
+            """
             return await self._invoke("loops_list", lambda cp, p: cp.loops_list(p))
 
         @tool(name="loop", annotations=_WRITE, structured_output=True)
@@ -1634,36 +1936,38 @@ class CiaoMcpService:
             start: bool | None = None,
             loop_id: str = "",
         ) -> dict[str, Any]:
-            """Create or update an in-chat loop.
+            """DEPRECATED — call `schedule` with frequency="interval" instead.
 
-            A loop re-sends one prompt into a fixed chat every N minutes,
-            retaining that chat's context. Use a loop rather than a schedule
-            for sub-day recurrence that needs one conversation's continuity;
-            use a schedule instead when each run should get a fresh project chat.
+            Loops became one cadence of the schedule primitive. Prefer:
+            `schedule(action="create", frequency="interval",
+            interval_minutes=N, chat_id=..., prompt=...)`, which does the same
+            thing, reports the same fields as every other automation, and can
+            also open a fresh chat per run (pass project_id instead of
+            chat_id). This tool remains for one release and will be removed.
+
+            It creates or updates an interval schedule bound to one chat: the
+            prompt is re-sent into that chat every N minutes, retaining its
+            context and running with that chat's own model and mode.
 
             action:
-                "create" — create an interval loop and (by default) start it
-                    immediately.
-                "update" — update an existing loop's fields. Pass loop_id to
-                    target it; all other fields are optional overrides.
+                "create" — create an interval entry and (by default) start it.
+                "update" — update an existing entry. Pass loop_id to target it;
+                    all other fields are optional overrides.
 
             Args (create):
                 chat_id: An existing chat id, or omit / pass empty / "this" for
                     the calling chat. If you must target another chat, resolve
                     its id via chats_list first — chat titles aren't unique.
                 prompt: Give a short, fixed no-change response for a no-op
-                    tick, so repeated iterations stay cheap and scannable.
-                interval_minutes: There is no model field — each iteration
-                    uses the target chat's current model and mode.
-                autostart: Only controls whether the loop starts again on
-                    server boot. It does NOT start the loop now — `start`
-                    does that.
-                start: True (default) begins the cadence immediately, so the
-                    first tick fires within a minute. Pass False only when the
-                    user asked for a loop they will start by hand later; say
-                    which you did instead of claiming a stopped loop is
-                    running. The returned payload carries the real `running`
-                    flag — report that, not your intent.
+                    run, so repeated runs stay cheap and scannable.
+                interval_minutes: Whole minutes, minimum 1, default 10. There
+                    is no model field — each run uses the target chat's current
+                    model and mode.
+                autostart, start: These collapsed into one enabled flag when
+                    loops merged into schedules. Either being true means "run
+                    it"; only both false leaves it stopped. The returned
+                    payload carries the real `running` flag — report that, not
+                    your intent.
 
             Args (update): loop_id is required; every other field is unset by
                 default and only a field you pass is changed. `start` is
@@ -1671,11 +1975,13 @@ class CiaoMcpService:
                 (same as loop_action), and the returned payload carries the
                 resulting `running` flag.
 
-            If the target chat is busy when a tick fires, that iteration is
+            If the target chat is busy when a run comes due, that run is
             skipped and retried on the next tick (not queued). If the target
-            chat is missing or archived, the loop stops. Loops do not catch
-            up missed ticks after downtime (unlike schedules, which fire once
-            for a missed occurrence on startup).
+            chat is gone, the run continues in a replacement chat in the same
+            project, or the entry is disabled when no project resolves either.
+            Interval entries do not catch up runs missed during downtime
+            (unlike wall-clock schedules, which fire once for a missed
+            occurrence on startup).
             """
             # Snapshot the arguments before any other local exists, so no helper
             # local can leak into the control-plane payload.
@@ -1736,13 +2042,17 @@ class CiaoMcpService:
 
         @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
         async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
-            """Run one lifecycle action on an in-chat loop.
+            """DEPRECATED — use `schedule_action` on the interval schedule.
+
+            Loops became interval schedules, and their ids are schedule ids:
+            `schedule_action(schedule_id=..., action="pause"|"resume"|"run"
+            |"delete")` is the replacement. This tool remains for one release.
 
             action:
-                "start"  — start the loop's runtime cadence.
-                "stop"   — stop the cadence without deleting it.
-                "run"    — run one iteration immediately.
-                "delete" — delete the loop (destructive).
+                "start"  — start the cadence (same as schedule_action resume).
+                "stop"   — stop it without deleting (same as pause).
+                "run"    — run once immediately.
+                "delete" — delete the entry (destructive).
             """
             dispatch = {
                 "start": lambda cp, p: cp.loop_start(p, loop_id),

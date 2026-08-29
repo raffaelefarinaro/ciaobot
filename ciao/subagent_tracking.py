@@ -301,6 +301,49 @@ def has_finished_transcript(
     return record is not None and _is_final_answer_record(record)
 
 
+def running_agents(
+    parent_path: Path,
+    state: SessionSubagentState,
+    *,
+    now: float | None = None,
+    idle_seconds: float = FINISHED_AGENT_IDLE_SECONDS,
+    only_async: bool = False,
+) -> list[SubagentInfo]:
+    """Subagents still running, per the parent *and* their transcripts.
+
+    ``running_background_agents`` counts these; the sidebar needs to name them,
+    which is why this returns the rows.
+
+    ``only_async`` narrows to background dispatches *before* the transcript
+    check rather than after it. Each check is a stat plus a tail read of that
+    agent's own JSONL, so filtering afterwards paid for every foreground agent
+    the parent ever recorded — work whose result is then thrown away.
+
+    Note what the parent session can and cannot see. An agent only enters
+    ``state.subagents`` when its ``tool_result`` lands, carrying the
+    ``agentId``. For a background dispatch that is the launch receipt, so it is
+    recorded while it runs. For a *foreground* Task the result is the agent's
+    own completion, so by the time the parent file names it, it is already
+    done — a running foreground agent is therefore invisible here, by
+    construction, not by omission. That work is visible in the parent's own
+    live trace instead, because the turn that spawned it is still streaming.
+
+    The transcript-idle fallback applies to every kind: a parent turn killed
+    mid-dispatch never writes the ``tool_result`` (or the
+    ``<task-notification>``) that would move the status off "running", so
+    without it a dead row would sit in the sidebar forever.
+    """
+    return [
+        info
+        for info in state.subagents.values()
+        if info.status == "running"
+        and (info.is_async or not only_async)
+        and not has_finished_transcript(
+            parent_path, info.agent_id, now=now, idle_seconds=idle_seconds
+        )
+    ]
+
+
 def running_background_agents(
     parent_path: Path,
     state: SessionSubagentState,
@@ -309,13 +352,13 @@ def running_background_agents(
     idle_seconds: float = FINISHED_AGENT_IDLE_SECONDS,
 ) -> int:
     """Background agents still running, per the parent *and* their transcripts."""
-    return sum(
-        1
-        for info in state.subagents.values()
-        if info.is_async
-        and info.status == "running"
-        and not has_finished_transcript(
-            parent_path, info.agent_id, now=now, idle_seconds=idle_seconds
+    return len(
+        running_agents(
+            parent_path,
+            state,
+            now=now,
+            idle_seconds=idle_seconds,
+            only_async=True,
         )
     )
 

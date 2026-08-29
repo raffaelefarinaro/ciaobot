@@ -105,7 +105,6 @@ async function mountPanel(): Promise<VueWrapper> {
   store.bootstrapped = true
 
   const taskStore = useTaskStore()
-  vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {

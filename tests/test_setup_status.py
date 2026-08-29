@@ -288,6 +288,7 @@ def test_claude_auth_status_parses_logged_in_json(monkeypatch) -> None:
         "unparseable": False,
         "email": "a@example.com",
         "org_name": "Org",
+        "cli_too_old": False,
     }
 
 
@@ -316,6 +317,70 @@ def test_claude_auth_status_missing_binary_is_not_authenticated(monkeypatch) -> 
         lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
     )
     assert claude_auth_status("/missing")["logged_in"] is False
+
+
+def test_claude_auth_status_detects_unknown_auth_subcommand(monkeypatch) -> None:
+    """An old CLI without `claude auth` must be told apart from signed-out
+    (issue #354): it still fails closed on `logged_in`, but flags
+    `cli_too_old` instead of leaving the caller to mistake it for a real
+    "not signed in" reading."""
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout="", stderr="error: unknown command 'auth'", returncode=1
+        ),
+    )
+    status = claude_auth_status("/claude")
+    assert status["logged_in"] is False
+    assert status["cli_too_old"] is True
+
+
+def test_claude_auth_status_unknown_subcommand_detected_on_stdout(monkeypatch) -> None:
+    """Some CLIs print the unknown-command message to stdout, not stderr."""
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout="Unrecognized command: auth", stderr="", returncode=1
+        ),
+    )
+    assert claude_auth_status("/claude")["cli_too_old"] is True
+
+
+def test_claude_auth_status_other_nonzero_exit_is_not_cli_too_old(monkeypatch) -> None:
+    """A generic failure (e.g. a real error) must not be misread as an old CLI."""
+    monkeypatch.setattr(
+        "ciao.setup_status.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout="", stderr="permission denied", returncode=1
+        ),
+    )
+    status = claude_auth_status("/claude")
+    assert status["logged_in"] is False
+    assert status["cli_too_old"] is False
+
+
+def test_setup_status_reports_cli_too_old_as_actionable_and_still_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    """The wizard must not report "signed out" for a CLI that cannot even run
+    `claude auth status` (issue #354) — it should point at upgrading instead,
+    while still keeping `ok=False` (fail closed)."""
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda binary, env=None: {
+            "logged_in": False,
+            "unparseable": False,
+            "email": "",
+            "org_name": "",
+            "cli_too_old": True,
+        },
+    )
+    config = _config(tmp_path)
+    claude = setup_status(config, env={})["providers"]["claude"]
+    assert claude["ok"] is False
+    assert claude["auth"] == "missing"
+    assert "too old" in claude["detail"].lower()
+    assert "upgrade" in claude["detail"].lower()
 
 
 def test_setup_status_explains_desktop_login_is_app_private(tmp_path, monkeypatch) -> None:

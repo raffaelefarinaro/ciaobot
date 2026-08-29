@@ -65,7 +65,11 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
-from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
+from ciao.execution_modes import (
+    CONTROL_PLANE_PREAPPROVED_MODES,
+    auto_approved_mcp_tool_names,
+    harness_skill_overrides,
+)
 from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import (
     build_foreground_bash_hook,
@@ -514,9 +518,7 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using Claude Code CLI: %s", system_cli)
 
 
-        system_prompt = system_prompt_payload(
-            "", control_surface=request.control_surface
-        )
+        system_prompt = system_prompt_payload("")
 
         options = ClaudeAgentOptions(
             model=requested_model,
@@ -540,7 +542,7 @@ class ClaudeProvider(BaseSDKProvider):
             # all 68 workspace skills and 8 agents still resolve with this
             # set). Used to drop the bundled `schedule` / `loop` skills out of
             # the model's context entirely, since Ciaobot's own schedules and
-            # loops supersede them. See HARNESS_DISABLED_SKILLS.
+            # automations supersede them. See HARNESS_DISABLED_SKILLS.
             settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
             # The request already carries the provider-neutral context capsule.
             # Keep hooks for process behavior only; injecting context here as
@@ -593,19 +595,21 @@ class ClaudeProvider(BaseSDKProvider):
             # ``mcp_servers``, so strict mode silently suppressed all of them.
             # Connectors are always allowed (Ciaobot no longer ships an opinion
             # on them); they must stay loaded so they remain reachable. The
-            # ciaobot server is still injected above, and a server that is
-            # unavailable at spawn time already degrades to the legacy surface
-            # in ProjectChatManager.
+            # The ciaobot server is still injected above; a chat whose
+            # control plane is unavailable never reaches this point, because
+            # ProjectChatManager refuses to build the request at all.
 
             # Pre-approve the non-destructive half of our own control plane.
             # Auto mode's classifier escalates every MCP tool that isn't
-            # readOnlyHint, so "create the loop you just asked me for" raised
+            # readOnlyHint, so "create the automation you just asked me for" raised
             # an Approve/Deny card. These names bypass the PermissionGate;
             # destructive tools (delete/stop/lifecycle) are absent from the
-            # policy and still prompt. See AUTO_APPROVED_MCP_TOOLS in
-            # ciao/execution_modes.py. Plan mode is excluded: its contract is
-            # "propose, don't act", and an allow rule would punch a hole in it.
-            if request.mode != "plan":
+            # policy and still prompt. Scoped to the modes whose contract
+            # allows acting without asking — the rationale (why `plan` and
+            # `normal` are excluded, and why `schedule` in particular is an
+            # escalation) lives beside the shared constant in
+            # ciao/execution_modes.py.
+            if request.mode in CONTROL_PLANE_PREAPPROVED_MODES:
                 options.allowed_tools = auto_approved_mcp_tool_names()
         if system_cli:
             options.cli_path = system_cli

@@ -187,19 +187,19 @@
         <button
           class="archive-btn touch-hit"
           @click="doArchive"
-          :title="archiveActionLabel"
-          :aria-label="archiveActionLabel"
+          :title="ARCHIVE_ACTION_LABEL"
+          :aria-label="ARCHIVE_ACTION_LABEL"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
       </template>
     </PaneHeader>
 
-    <!-- Context bar: what this chat is attached to — a supervisor, subchats,
-         loops, schedules. These were four sibling banner blocks, each a v-for,
-         so a chat with all four opened with its first message below the fold.
-         Collapsed it is one line of counted chips; expanded it is the same
-         detail rows with the same actions. -->
+    <!-- Context bar: what this chat is attached to — its automations. These
+         were sibling banner blocks, each a v-for, so a chat with all of them
+         opened with its first message below the fold. Collapsed it is one line
+         of counted chips; expanded it is the same detail rows with the same
+         actions. -->
     <div v-if="contextRelations.length" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
       <button
         type="button"
@@ -216,60 +216,21 @@
           <span v-if="rel.glyph" class="ctx-chip-glyph" :class="{ live: rel.live }" aria-hidden="true">{{ rel.glyph }}</span>
           {{ rel.label }}
         </span>
-        <span v-if="contextNeedsAttention" class="ctx-attn" title="A subchat needs you">needs you</span>
       </button>
 
       <div v-if="contextExpanded" class="ctx-detail">
-        <div v-if="delegateParent" class="loop-banner-row">
-          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-          <span class="loop-banner-text">
-            Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
-          </span>
-          <router-link
-            :to="`/chat/${delegateParent.chat_id}`"
-            class="btn-small loop-banner-manage"
-          >Open parent</router-link>
-        </div>
-
-        <div
-          v-for="child in delegateChildren"
-          :key="child.chat_id"
-          class="loop-banner-row"
-        >
-          <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
-          <!-- State comes from ChatSignals, not prose: this row used to spell
-               out "· working" / "· needs input", which was a fourth, divergent
-               rendering of the same facts the sidebar and home already draw. -->
-          <span class="loop-banner-text">
-            Subchat
-            <strong :class="{ 'subchat-unread': store.chatUnread(child.chat_id) > 0 }">{{ child.title || 'untitled' }}</strong>
-          </span>
-          <ChatSignals :chat-id="child.chat_id" density="row" />
-          <router-link
-            :to="`/chat/${child.chat_id}`"
-            class="btn-small loop-banner-manage"
-          >Open</router-link>
-        </div>
-
-        <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
-          <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-          <span class="loop-banner-text">
-            <strong>{{ l.title || 'Loop' }}</strong>
-            · every {{ l.interval_minutes }}m
-            · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
-            <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
-          </span>
-          <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
-          <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-        </div>
-
         <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-          <AppIcon class="loop-banner-ico" name="clock" :size="18" />
+          <!-- Interval entries keep the cycle glyph loops used; everything else
+               keeps the clock, so the cadence reads before the text does. -->
+          <span v-if="s.frequency === 'interval'" class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+          <AppIcon v-else class="loop-banner-ico" name="clock" :size="18" />
           <span class="loop-banner-text">
-            <strong>{{ s.title || 'Schedule' }}</strong>
+            <strong>{{ s.title || 'Automation' }}</strong>
             · {{ scheduleCadence(s) }}
-            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.last_status === 'busy'"> (waiting, chat busy)</template>
+            <template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
           </span>
+          <button class="btn-small" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
           <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
           <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
         </div>
@@ -393,7 +354,7 @@
               </div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
-            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
+            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" :chat-id="chat.chat_id" />
             <div v-if="item.outputs?.length" class="trace-files">
               <button
                 v-for="(f, fi) in item.outputs"
@@ -431,12 +392,13 @@
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
               <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
-                <!-- Loop/schedule tick, not something the reader typed. Without
-                     this the two are indistinguishable in the transcript. -->
+                <!-- An automation's tick, not something the reader typed.
+                     Without this the two are indistinguishable in the
+                     transcript. -->
                 <span
                   v-if="item.msg.unattended"
                   class="unattended-mark"
-                  title="Sent automatically by a loop or schedule"
+                  title="Sent automatically by an automation"
                 >&#10227; auto</span>
                 <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
@@ -728,7 +690,7 @@
           </div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
-          <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
+          <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" :chat-id="chat.chat_id" />
         </div>
       </div>
 
@@ -1220,13 +1182,12 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
-import type { AgentAssetsResponse, CommandsResponse, Loop, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import ChatSignals from './ChatSignals.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
-import { archiveActionLabel as archiveLabel, archiveConfirmMessage } from '../lib/archiveCopy'
+import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon, { type AppIconName } from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1596,15 +1557,12 @@ function saveEditQueue(chatId: string, entryId: string) {
   cancelEditQueue()
 }
 
-// Loops bound to this chat (loop-driven chats get a banner with controls).
 const taskStore = useTaskStore()
-const chatLoops = computed(() =>
-  taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
-)
-// Schedules linked to this chat: either the chat carries a schedule_id
-// backlink (project schedules, stamped at creation) or the schedule pins
-// this chat via web_chat_id (fixed-chat schedules). Mirrors the loop banner
-// but durable across runs because each run stamps the backlink on the chat.
+// Automations linked to this chat: either the chat carries a schedule_id
+// backlink (project schedules, stamped at creation) or the automation pins
+// this chat via web_chat_id (fixed-chat schedules, and every interval entry
+// that replaced a loop). Durable across runs because each run stamps the
+// backlink on the chat.
 const chatSchedules = computed(() => {
   const cid = chat.value?.chat_id
   const sid = chat.value?.schedule_id
@@ -1613,21 +1571,8 @@ const chatSchedules = computed(() => {
   )
 })
 
-// Delegate lineage banners (same visual language as loop/schedule banners).
-// Parent link when this chat was spawned; children list when this chat is a
-// supervisor. Archived children stay out of the strip.
-const delegateParent = computed(() => {
-  const parentId = chat.value?.spawned_from_chat_id
-  if (!parentId) return null
-  return store.chats.find(c => c.chat_id === parentId) || null
-})
-const delegateChildren = computed(() => {
-  const cid = chat.value?.chat_id
-  return cid ? store.activeDelegatesFor(cid) : []
-})
-
 // ── Context bar ─────────────────────────────────────────────────────
-// One counted chip per relation, so four v-for banner blocks can never again
+// One counted chip per relation, so the v-for banner blocks can never again
 // push the transcript below the fold. Detail rows live behind the disclosure.
 const contextExpanded = ref(false)
 
@@ -1640,34 +1585,30 @@ interface ContextRelation {
 
 const contextRelations = computed<ContextRelation[]>(() => {
   const rels: ContextRelation[] = []
-  if (delegateParent.value) {
-    rels.push({ key: 'parent', label: 'delegate', glyph: '↳' })
+  // Interval entries get their own chip with the cycle glyph: "this chat
+  // re-runs itself" is a different fact from "something fires here at 09:00",
+  // and collapsing them into one count hid it.
+  const intervals = chatSchedules.value.filter(s => s.frequency === 'interval')
+  const timed = chatSchedules.value.filter(s => s.frequency !== 'interval')
+  if (intervals.length) {
+    const label = intervals.length === 1
+      ? `every ${intervals[0].interval_minutes}m`
+      : `${intervals.length} interval runs`
+    rels.push({
+      key: 'intervals',
+      label,
+      glyph: '↻',
+      live: intervals.some(s => s.enabled),
+    })
   }
-  if (delegateChildren.value.length) {
-    const n = delegateChildren.value.length
-    rels.push({ key: 'children', label: `${n} subchat${n === 1 ? '' : 's'}`, glyph: '↳' })
-  }
-  if (chatLoops.value.length) {
-    const running = chatLoops.value.some(l => l.running)
-    const label = chatLoops.value.length === 1
-      ? `loop ${chatLoops.value[0].interval_minutes}m`
-      : `${chatLoops.value.length} loops`
-    rels.push({ key: 'loops', label, glyph: '↻', live: running })
-  }
-  if (chatSchedules.value.length) {
-    const label = chatSchedules.value.length === 1
-      ? `scheduled ${scheduleCadence(chatSchedules.value[0])}`
-      : `${chatSchedules.value.length} schedules`
+  if (timed.length) {
+    const label = timed.length === 1
+      ? `scheduled ${scheduleCadence(timed[0])}`
+      : `${timed.length} schedules`
     rels.push({ key: 'schedules', label })
   }
   return rels
 })
-
-// Surfaced on the collapsed bar so a blocked subchat is never hidden behind a
-// disclosure. Same rule as everywhere else: filled means it needs the user.
-const contextNeedsAttention = computed(() =>
-  delegateChildren.value.some(c => store.chatNeedsInput(c.chat_id)),
-)
 
 // ── Action dock ─────────────────────────────────────────────────────
 // Six independent v-if blocks used to stack between the transcript and the
@@ -1727,62 +1668,27 @@ const dockDeferred = computed<DockItem[]>(() => {
   return items
 })
 
-const activeDelegateCount = computed(() => {
-  const cid = chat.value?.chat_id
-  // store.activeDelegatesFor is the single definition; the inline copy here
-  // dropped the local !== false guard and over-counted remote subchats.
-  return cid ? store.activeDelegatesFor(cid).length : 0
-})
-// Subchats working right now. Archiving stops them rather than waiting, so the
-// confirm dialog has to name them before the user commits. Background agents
-// count as working: they outlive the turn that spawned them, so a subchat with
-// no live turn can still have real work in flight.
-const busyDelegateCount = computed(() => {
-  const cid = chat.value?.chat_id
-  if (!cid) return 0
-  return store.activeDelegatesFor(cid).filter(
-    d => store.isChatStreaming(d.chat_id) || store.chatHasBackgroundAgents(d.chat_id),
-  ).length
-})
-const archiveActionLabel = computed(() => archiveLabel(activeDelegateCount.value))
 onMounted(() => {
-  taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
 })
-async function toggleLoop(l: Loop) {
-  await taskStore.updateLoop(l.loop_id, { running: !l.running })
-}
 
-// Lightweight 30-second tick powering the "next in Xm" countdown in the loop
-// banner.  Only runs while there are running loops bound to this chat.
+// Lightweight 30-second tick powering the "next in Xm" countdown in the
+// automation banner. Only runs while this chat has a live automation.
 const loopNow = ref(Date.now())
 let loopTick: ReturnType<typeof setInterval> | null = null
-watch([chatLoops, chatSchedules], ([loops, scheds]) => {
-  const hasRunning = loops.some(l => l.running)
+watch(chatSchedules, (scheds) => {
   const hasScheduled = scheds.some(s => s.enabled && s.next_run)
-  if ((hasRunning || hasScheduled) && !loopTick) {
+  if (hasScheduled && !loopTick) {
     loopNow.value = Date.now()
     loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasRunning && !hasScheduled && loopTick) {
+  } else if (!hasScheduled && loopTick) {
     clearInterval(loopTick)
     loopTick = null
   }
 }, { immediate: true })
 onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
 
-function loopCountdown(l: Loop): string {
-  if (!l.next_run) return ''
-  // Touch loopNow so Vue re-evaluates when the tick fires.
-  const diffMs = new Date(l.next_run).getTime() - loopNow.value
-  if (diffMs <= 0) return 'soon'
-  const mins = Math.ceil(diffMs / 60_000)
-  if (mins < 60) return `in ${mins}m`
-  const hrs = Math.floor(mins / 60)
-  const rm = mins % 60
-  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
-}
-
-// ── Schedule banner helpers ──
+// ── Automation banner helpers ──
 const scheduleRunningId = ref<string | null>(null)
 function scheduleCadence(s: Schedule): string {
   const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
@@ -1796,6 +1702,7 @@ function scheduleCadence(s: Schedule): string {
     }
     case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
     case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
+    case 'interval': return `every ${s.interval_minutes}m`
     case 'manual': return 'manual'
     default: return s.frequency
   }
@@ -1814,9 +1721,16 @@ async function runScheduleNow(s: Schedule) {
   scheduleRunningId.value = s.schedule_id
   try {
     await taskStore.runScheduleNow(s.schedule_id)
+  } catch {
+    // An interval run into a chat that is already streaming is refused rather
+    // than queued. Nothing to surface here beyond clearing the button.
   } finally {
     scheduleRunningId.value = null
   }
+}
+
+async function toggleScheduleEnabled(s: Schedule) {
+  await taskStore.updateSchedule(s.schedule_id, { enabled: !s.enabled })
 }
 const project = computed(() => store.activeProject)
 
@@ -4168,8 +4082,7 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  const message = archiveConfirmMessage(activeDelegateCount.value, busyDelegateCount.value)
-  if (!await askConfirm(message, {
+  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
     title: 'Archive chat',
     confirmLabel: 'Archive',
   })) return
@@ -6018,7 +5931,7 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
-/* Marks a turn fired by a loop or schedule. Accent-coloured so it reads as a
+/* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
   color: var(--accent);
@@ -7373,7 +7286,7 @@ details[open] > .activity-summary::before {
   color: var(--fg);
 }
 
-/* ── Loop banner ── */
+/* ── Automation banner ── */
 /* ── Context bar ─────────────────────────────────────────────────────
    Collapsed: one line of counted chips. Expanded: the detail rows, which
    keep the original .loop-banner-row layout and actions. */
@@ -7418,21 +7331,8 @@ details[open] > .activity-summary::before {
   font-weight: 700;
   line-height: 1;
 }
-/* A running loop is the one thing here that is actively happening. */
+/* A live automation is the one thing here that is actively happening. */
 .ctx-chip-glyph.live { color: var(--accent); }
-/* Filled, because it means the user is the blocker — same rule as the
-   sidebar, home lanes and the action dock. */
-.ctx-attn {
-  margin-left: auto;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--bg);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  white-space: nowrap;
-}
-:global(:root.theme-light) .ctx-attn { color: var(--fg); }
 .ctx-detail {
   display: flex;
   flex-direction: column;
@@ -7462,6 +7362,5 @@ details[open] > .activity-summary::before {
 
 /* Chat-level unread is title weight everywhere; chatUnread() is binary so a
    digit could only ever read "1". */
-.loop-banner-text strong.subchat-unread { font-weight: 700; }
 .loop-banner-manage { text-decoration: none; }
 </style>

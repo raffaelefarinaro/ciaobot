@@ -21,20 +21,11 @@
     <span
       v-else-if="primarySignal === 'agents'"
       class="chat-signal chat-signal--agents"
-      :title="`${backgroundCount} background agents running`"
-      :aria-label="`${backgroundCount} background agents running`"
+      :title="agentsTitle"
+      :aria-label="agentsTitle"
     >
       <span class="activity-spinner" aria-hidden="true" />
-      <span v-if="density === 'card' && backgroundCount > 1" class="chat-signal-count">{{ backgroundCount }}</span>
-    </span>
-    <span
-      v-else-if="primarySignal === 'delegates'"
-      class="chat-signal chat-signal--delegates"
-      title="Sub-chats are still working"
-      aria-label="Sub-chats are still working"
-    >
-      <span class="activity-spinner activity-spinner--delegates" aria-hidden="true" />
-      <span v-if="density === 'card'" class="chat-signal-label">sub-chats working</span>
+      <span v-if="density === 'card' && agentCount > 1" class="chat-signal-count">{{ agentCount }}</span>
     </span>
     <span
       v-else-if="primarySignal === 'retry'"
@@ -56,11 +47,11 @@
     </span>
 
     <span
-      v-if="loopSummary"
-      class="chat-signal chat-signal--loop"
-      :class="{ stopped: !loopSummary.running }"
-      :title="loopTitle"
-      :aria-label="loopTitle"
+      v-if="intervalSummary"
+      class="chat-signal chat-signal--interval"
+      :class="{ stopped: !intervalSummary.running }"
+      :title="intervalTitle"
+      :aria-label="intervalTitle"
     >↻</span>
 
     <span
@@ -92,9 +83,17 @@ const taskStore = useTaskStore()
 
 const needsInput = computed(() => store.chatNeedsInput(props.chatId))
 const working = computed(() => store.isChatStreaming(props.chatId))
-const backgroundCount = computed(() => Number(store.backgroundAgents[props.chatId] || 0))
-const hasBackgroundAgents = computed(() => store.chatHasBackgroundAgents(props.chatId))
-const hasActiveDelegates = computed(() => store.chatHasActiveDelegates(props.chatId))
+// Subagents working for this chat. Two sources for the same fact, on
+// different clocks: the watcher's own count (pushed over /ws/events) and the
+// sidebar's running-subagent poll. Take the larger rather than picking a side,
+// so the row never reads idle just because one of them has not ticked yet.
+const agentCount = computed(() => Math.max(
+  Number(store.backgroundAgents[props.chatId] || 0),
+  store.runningSubagentsFor(props.chatId).length,
+))
+const agentsTitle = computed(() =>
+  agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,
+)
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
@@ -106,23 +105,29 @@ const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying
 
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'working' | 'agents' | 'delegates' | 'retry' | 'tidying' | null>(() => {
+const primarySignal = computed<'needs' | 'working' | 'agents' | 'retry' | 'tidying' | null>(() => {
   if (needsInput.value) return 'needs'
   if (working.value) return 'working'
-  if (hasBackgroundAgents.value) return 'agents'
-  if (hasActiveDelegates.value) return 'delegates'
+  if (agentCount.value > 0) return 'agents'
   if (props.density === 'row' && retryPending.value) return 'retry'
   if (tidying.value) return 'tidying'
   return null
 })
 
-const loopSummary = computed(() => taskStore.loopsByChat.get(props.chatId) || null)
-const loopTitle = computed(() => {
-  if (!loopSummary.value) return ''
-  const label = loopSummary.value.count > 1 ? `${loopSummary.value.count} loops` : 'A loop'
-  return loopSummary.value.running
+// Interval automations bound to this chat -- the "this chat re-runs itself"
+// marker. Distinct from a time-of-day schedule, which is not a property of the
+// chat in the same way.
+const intervalSummary = computed(
+  () => taskStore.intervalsByChat.get(props.chatId) || null,
+)
+const intervalTitle = computed(() => {
+  if (!intervalSummary.value) return ''
+  const label = intervalSummary.value.count > 1
+    ? `${intervalSummary.value.count} interval automations`
+    : 'An interval automation'
+  return intervalSummary.value.running
     ? `${label} running in this chat`
-    : `${label} attached to this chat (stopped)`
+    : `${label} attached to this chat (paused)`
 })
 </script>
 
@@ -160,6 +165,14 @@ const loopTitle = computed(() => {
   box-shadow: 0 0 4px var(--error, #f44336);
 }
 
+/* Card headings top-align their row so a two-line title can wrap, which
+   leaves this box only as tall as its dot — the dot then rides high next to
+   the meta text. Match the title's first line (1.35 x text-sm, see
+   .home-chat-title in HomeRecentChats.vue) so the dot centers on the row. */
+.chat-signals--card {
+  min-height: calc(1.35 * var(--text-sm));
+}
+
 /* A small squared tag, not a pill. The design this came from used a 4px radius
    deliberately: the pill shape reads as a count badge, and counts mean something
    else in this vocabulary. */
@@ -189,24 +202,8 @@ const loopTitle = computed(() => {
    already said working. Kept in sync with .activity-spinner in ChatPanel.vue —
    if that changes, change this. */
 .chat-signal--working,
-.chat-signal--agents,
-.chat-signal--delegates {
+.chat-signal--agents {
   gap: var(--space-1);
-}
-
-/* Sub-chats working, not this chat directly: a hollow ring instead of the
-   solid dot used for .activity-spinner, so a supervisor whose delegate is
-   busy reads as related-but-distinct from the chat's own direct activity. */
-.activity-spinner--delegates {
-  box-sizing: border-box;
-  background: transparent;
-  border: 2px solid var(--accent);
-  box-shadow: none;
-}
-
-.activity-spinner--delegates::before {
-  background: transparent;
-  border: 1px solid var(--accent);
 }
 
 .activity-spinner {
@@ -291,13 +288,13 @@ const loopTitle = computed(() => {
   100% { transform: scale(1.9); opacity: 0; }
 }
 
-.chat-signal--loop {
+.chat-signal--interval {
   color: var(--accent);
   font-size: var(--text-lg);
   font-weight: 700;
 }
 
-.chat-signal--loop.stopped {
+.chat-signal--interval.stopped {
   color: var(--fg3);
 }
 
