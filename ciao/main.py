@@ -623,6 +623,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     except Exception:
         logger.warning("Could not backfill schedule project names", exc_info=True)
+    # Same window, for the other half of the routing state: a chat-bound entry
+    # written before `stamp_fallback_project` existed records no re-home
+    # target, and that is only readable off the bound chat while it exists.
+    try:
+        schedule_manager.backfill_fallback_projects(pcm)
+    except Exception:
+        logger.warning("Could not backfill schedule fallback projects", exc_info=True)
 
     app.state.schedule_manager = schedule_manager
     app.state.background_runner = background_runner

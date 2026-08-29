@@ -644,3 +644,47 @@ def test_rehome_falls_back_to_general_when_the_project_is_gone(tmp_path: Path) -
         )
 
     assert _PCM().resolve_automation_project(entry).project_id == "proj-general"
+
+
+def test_backfill_stamps_the_rehome_fallback_on_pre_existing_entries(
+    tmp_path: Path,
+) -> None:
+    """Entries written before the stamp existed are only repairable now.
+
+    The MCP `schedule`/`loop` creators recorded no fallback at all, so a
+    chat-bound entry created that way re-homes into the workspace's General
+    once its chat is deleted — and by then the chat's project is unknowable.
+    The startup backfill closes that window while the chat is still there.
+    """
+    store = ScheduleStore(tmp_path)
+    bound = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-a",
+    )
+    project_bound = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15,
+        web_project_id="proj-b",
+    )
+    gone = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-gone",
+    )
+
+    class _PCM:
+        def get_chat(self, chat_id: str):
+            if chat_id == "chat-a":
+                return type("C", (), {"project_id": "proj-a"})()
+            return None
+
+    manager = ScheduleManager(store=store, dispatch_to_web=lambda *a, **k: None)
+    assert manager.backfill_fallback_projects(_PCM()) == 1
+
+    assert store.get(bound.schedule_id).fallback_project_id == "proj-a"
+    # A project-bound entry names where its runs go; nothing to fall back to.
+    assert store.get(project_bound.schedule_id).fallback_project_id == ""
+    # The window has closed on this one: guessing would be worse than General.
+    assert store.get(gone.schedule_id).fallback_project_id == ""
+
+    # Idempotent, and it never overwrites a fallback that is already recorded.
+    assert manager.backfill_fallback_projects(_PCM()) == 0

@@ -64,7 +64,6 @@ class _ProjectChats:
             return _Project(project_id, "General" if project_id == "proj-1" else "Other")
         return None
 
-
     def find_project(self, name: str, workspace: str):
         return _Project() if name == "General" else None
 
@@ -504,10 +503,10 @@ def test_converting_to_project_bound_clears_the_fallback(client: TestClient) -> 
     """A project entry already names where its runs go."""
     schedule_id = _create_interval(client)["schedule_id"]
 
-    client.patch(
+    assert client.patch(
         f"/api/schedules/{schedule_id}",
         json={"web_project_id": "proj-1", "web_chat_id": None},
-    )
+    ).status_code == 200
 
     stored = next(
         e for e in client.app.state.schedule_manager.list_entries()

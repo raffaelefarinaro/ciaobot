@@ -147,7 +147,11 @@ def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
 
     Takes ``pcm`` rather than living on it: the only thing needed is
     ``get_chat``, and a free function keeps the duck-typed managers in the
-    tests honest instead of forcing every stub to grow a method.
+    tests honest instead of forcing every stub to grow a method. A manager
+    without ``get_chat`` is read as "cannot see the chat" rather than raised
+    through: this runs inside every schedule write, and turning a stub's
+    missing method into a 500 on create would be a worse failure than leaving
+    one entry's fallback unstamped.
 
     A project-bound entry clears the field — ``web_project_id`` already names
     where its runs go, and a stale fallback under it would only mislead.
@@ -158,7 +162,8 @@ def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
     if web_project_id or not web_chat_id:
         resolved = ""
     else:
-        chat = pcm.get_chat(web_chat_id) if pcm is not None else None
+        get_chat = getattr(pcm, "get_chat", None)
+        chat = get_chat(web_chat_id) if get_chat is not None else None
         # A chat we cannot see right now (already gone, or not local) tells us
         # nothing new — keep whatever was captured while it existed rather than
         # blanking the entry's only re-home target.
@@ -1103,6 +1108,35 @@ class ScheduleManager:
             stamped += 1
         if stamped:
             logger.info("Recorded the target project name on %d schedule(s)", stamped)
+        return stamped
+
+    def backfill_fallback_projects(self, pcm) -> int:
+        """Stamp the re-home fallback on chat-bound entries that never got one.
+
+        Same window as ``backfill_project_names``: ``fallback_project_id`` can
+        only be read off the bound chat while that chat still exists, and the
+        entries this repairs are exactly the ones whose chat has not been
+        deleted yet. Without it, every chat-bound schedule written before
+        ``stamp_fallback_project`` existed — the MCP `schedule`/`loop` creators
+        stamped nothing at all — keeps an empty fallback until someone happens
+        to edit it, and deleting its chat first re-homes the unattended run
+        into the workspace's General instead of the project it lived in.
+
+        Only fills blanks: a non-empty fallback is the user's own binding (or a
+        migrated loop's original project) and is left alone, since refreshing
+        it here would silently follow a chat that had since moved.
+        """
+        stamped = 0
+        for entry in self.list_entries():
+            if entry.fallback_project_id or entry.web_project_id:
+                continue
+            if not entry.web_chat_id:
+                continue
+            if stamp_fallback_project(entry, pcm):
+                self.replace(entry)
+                stamped += 1
+        if stamped:
+            logger.info("Recorded the re-home fallback on %d schedule(s)", stamped)
         return stamped
 
     def delete(self, schedule_id: str) -> bool:
