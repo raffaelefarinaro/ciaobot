@@ -56,6 +56,7 @@ from ciao.web.routes_api import (
     chat_fork,
     chat_handover,
     chat_images,
+    chat_attachments_upload,
     chat_mark_read,
     chat_mark_unread,
     chat_messages,
@@ -269,6 +270,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
+        Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.

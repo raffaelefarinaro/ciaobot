@@ -27,6 +27,7 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import (
     _read_upload_limited,
+    chat_attachments_upload,
     desktop_drop_import,
     project_files_list,
     project_files_upload,
@@ -81,6 +82,7 @@ def _make_client(pcm: ProjectChatManager, config: CiaoConfig) -> TestClient:
         routes=[
             Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
             Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+            Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
             Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         ]
     )
@@ -410,6 +412,100 @@ def test_upload_route_round_trip(tmp_path: Path) -> None:
     assert (folder / "a.md").read_bytes() == b"alpha"
 
 
+def test_chat_document_upload_uses_mocked_converter_and_removes_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+    chat = pcm.create_chat(project.project_id, title="Document")
+    seen: list[Path] = []
+
+    def fake_convert(source: Path) -> str:
+        seen.append(source)
+        assert source.exists()
+        return "# Converted\n"
+
+    monkeypatch.setattr("ciao.web.project_chats.convert_document", fake_convert)
+    response = _make_client(pcm, pcm._config).post(
+        f"/api/chats/{chat.chat_id}/attachments",
+        files={"file": ("report.docx", b"source", "application/octet-stream")},
+    )
+    assert response.status_code == 200
+    entry = response.json()["saved"][0]
+    assert entry["original_path"] is None
+    assert entry["markdown_path"].endswith("/report.md")
+    assert (folder / "report.md").read_text(encoding="utf-8") == "# Converted\n"
+    assert not seen[0].exists()
+    assert not (folder / "report.docx").exists()
+
+
+def test_chat_document_upload_rejects_path_components(
+    tmp_path: Path,
+) -> None:
+    _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+    with pytest.raises(ValueError, match="invalid filename"):
+        pcm.save_chat_attachment_upload(project.project_id, b"source", "../report.docx")
+
+
+def test_chat_document_upload_does_not_follow_markdown_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _make_work_project(tmp_path, "symlink-test")
+    outside = tmp_path / "outside.md"
+    folder.joinpath("report.md").symlink_to(outside)
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "symlink-test")
+    monkeypatch.setattr("ciao.web.project_chats.convert_document", lambda source: "# safe\n")
+
+    entry = pcm.save_chat_attachment_upload(project.project_id, b"source", "report.docx")
+
+    assert entry["markdown_path"].endswith("/report-2.md")
+    assert not outside.exists()
+    assert folder.joinpath("report-2.md").read_text(encoding="utf-8") == "# safe\n"
+
+
+def test_chat_attachment_upload_rejects_project_without_folder(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("No folder", "work")
+    chat = pcm.create_chat(project.project_id, title="No folder")
+
+    response = _make_client(pcm, pcm._config).post(
+        f"/api/chats/{chat.chat_id}/attachments",
+        files={"file": ("report.docx", b"source", "application/octet-stream")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "project has no active folder for converted documents"
+
+
+def test_native_document_drop_uses_chat_project_and_excludes_converted_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _make_work_project(tmp_path, "first")
+    second = _make_work_project(tmp_path, "second")
+    pcm = _make_manager(tmp_path)
+    first_project = next(p for p in pcm.list_projects() if p.vault_folder == "first")
+    second_project = next(p for p in pcm.list_projects() if p.vault_folder == "second")
+    chat = pcm.create_chat(first_project.project_id, title="Drop test")
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"%PDF")
+    monkeypatch.setattr("ciao.web.project_chats.convert_document", lambda path: "# converted\n")
+    grant_id = _write_desktop_drop_grant(pcm._config, [source])
+
+    body = _make_client(pcm, pcm._config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": second_project.project_id, "chat_id": chat.chat_id},
+    ).json()
+
+    assert body["paths"] == []
+    assert body["attachments"][0]["markdown_path"].startswith(str(first))
+    assert (first / "report.md").exists()
+    assert not (second / "report.md").exists()
+
+
 def test_native_desktop_drop_returns_full_host_path_and_image_ref(
     tmp_path: Path,
 ) -> None:
@@ -629,7 +725,7 @@ def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:
 
 
 def test_native_desktop_drop_keeps_a_staged_non_image_copy(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A staged non-image is the agent's only readable handle, so it survives.
 
@@ -637,9 +733,10 @@ def test_native_desktop_drop_keeps_a_staged_non_image_copy(
     keep the non-image copy (the agent is handed its path to keep reading)
     while the image copies, whose bytes are in media_root, are deleted.
     """
+    _make_work_project(tmp_path, "drop-test")
     pcm = _make_manager(tmp_path)
     config = pcm._config
-    project = next(iter(pcm.list_projects()))
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "drop-test")
     chat = pcm.create_chat(project.project_id, title="Drop test")
     grant_dir = config.state_path.parent / "desktop-drop-grants"
     grant_id = str(uuid.uuid4())
@@ -661,6 +758,10 @@ def test_native_desktop_drop_keeps_a_staged_non_image_copy(
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        "ciao.web.project_chats.convert_document",
+        lambda source: "# Converted PDF\n",
+    )
     client = _make_client(pcm, config)
 
     response = client.post(
@@ -675,8 +776,11 @@ def test_native_desktop_drop_keeps_a_staged_non_image_copy(
     assert response.status_code == 200
     body = response.json()
     assert len(body["image_refs"]) == 1
-    assert body["paths"] == [str(staged_doc)]
+    assert body["paths"] == []
     assert body["errors"] == []
+    assert body["attachments"][0]["original_path"] == str(staged_doc.resolve())
+    assert body["attachments"][0]["markdown_path"].endswith("/report.md")
+    assert (tmp_path / "memory-vault" / "work" / "projects" / "active" / "drop-test" / "report.md").exists()
     # The image copy is gone; the agent's non-image handle is still readable.
     assert not staged_image.exists()
     assert staged_doc.exists()

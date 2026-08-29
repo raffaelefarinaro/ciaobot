@@ -22,6 +22,7 @@ dependencies = [
   "cryptography==50.0.0",
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
+  "firecrawl-anydoc>=0.2.4,<0.3.0",
 ]
 
 [project.optional-dependencies]

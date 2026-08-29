@@ -28,6 +28,7 @@ EXPECTED_SYSTEM_SCHEDULES = {
     "system-install-health",
     "system-workspace-hygiene",
     "system-skill-evolution",
+    "system-reviews-hygiene",
 }
 
 PRIVATE_MARKERS = {

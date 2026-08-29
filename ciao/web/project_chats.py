@@ -108,6 +108,7 @@ from ciao.web.chat_broker import (
     reorder_pending_list,
 )
 from ciao.web.file_snapshots import SnapshotStore
+from ciao.web.document_conversion import convert_document, is_anydoc_document
 
 logger = logging.getLogger(__name__)
 
@@ -8348,6 +8349,56 @@ class ProjectChatManager:
                 return candidate.resolve()
         return None
 
+    def active_project_vault_dir(self, project_id: str) -> Path | None:
+        project = self._projects.get(project_id)
+        if project is None or not project.vault_folder:
+            return None
+        root = self._vault_active_root(project.workspace).resolve()
+        candidate = (root / project.vault_folder).resolve()
+        return candidate if candidate.is_dir() and candidate.is_relative_to(root) else None
+
+    def convert_chat_document(self, project_id: str, source: Path, *, output_stem: str | None = None) -> dict[str, str]:
+        vault_dir = self.active_project_vault_dir(project_id)
+        if vault_dir is None:
+            raise LookupError("project has no active folder for converted documents")
+        stem = output_stem or source.stem
+        target = vault_dir / f"{stem}.md"
+        n = 2
+        while os.path.lexists(target):
+            target = vault_dir / f"{stem}-{n}.md"
+            n += 1
+        markdown = convert_document(source)
+        while True:
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                target = vault_dir / f"{stem}-{n}.md"
+                n += 1
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(markdown)
+            break
+        return {"original_path": str(source.resolve()), "markdown_path": str(target.resolve())}
+
+    def save_chat_attachment_upload(self, project_id: str, data: bytes, filename: str) -> dict:
+        if (
+            not filename
+            or "\x00" in filename
+            or not filename.isprintable()
+            or Path(filename).name != filename
+            or filename.startswith(".")
+        ):
+            raise ValueError("invalid filename")
+        if not is_anydoc_document(filename):
+            entry = self.save_project_file_upload(project_id, data, filename)
+            return {**entry, "original_path": entry["absolute_path"], "markdown_path": None}
+        import tempfile
+        with tempfile.NamedTemporaryFile(prefix="ciao-document-", suffix=Path(filename).suffix) as source:
+            source.write(data)
+            source.flush()
+            entry = self.convert_chat_document(project_id, Path(source.name), output_stem=Path(filename).stem)
+        return {**entry, "original_path": None, "original_filename": filename}
+
     def list_project_files(self, project_id: str) -> list[dict]:
         """List files under the project's vault folder, recursive, sorted by mtime desc.
 
@@ -8430,16 +8481,25 @@ class ProjectChatManager:
             raise ValueError("file too large")
         # Collision: foo.png -> foo-2.png -> foo-3.png ...
         target = vault_dir / base
-        if target.exists():
-            stem = Path(base).stem
-            n = 2
+        stem = Path(base).stem
+        n = 2
+        if os.path.lexists(target):
             while True:
                 candidate = vault_dir / f"{stem}-{n}{ext}"
-                if not candidate.exists():
+                if not os.path.lexists(candidate):
                     target = candidate
                     break
                 n += 1
-        target.write_bytes(data)
+        while True:
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                target = vault_dir / f"{Path(base).stem}-{n}{ext}"
+                n += 1
+                continue
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+            break
         resolved = target.resolve()
         # Project uploads are narrower than the generic file editor: the
         # resolved target must remain inside this project's vault folder.

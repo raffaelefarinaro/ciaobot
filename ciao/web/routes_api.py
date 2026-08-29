@@ -43,6 +43,7 @@ from ciao import provider_registry
 from ciao import vault_rehome
 from ciao.jsonio import write_private_text
 from ciao.memory_tool import resolve_region
+from ciao.web.document_conversion import is_anydoc_document
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import WorkspaceConfig
 from ciao.models import THINKING_LEVELS, ChatContext
@@ -2104,6 +2105,27 @@ async def project_files_upload(request: Request) -> JSONResponse:
             errors.append({"filename": filename, "error": str(exc)})
     return JSONResponse({"saved": saved, "errors": errors})
 
+async def chat_attachments_upload(request: Request) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
+    chat = pcm.get_chat(request.path_params["chat_id"])
+    if chat is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    form = await request.form()
+    saved, errors = [], []
+    for key in form:
+        upload = form[key]
+        if not hasattr(upload, "read"):
+            continue
+        filename = getattr(upload, "filename", "") or ""
+        try:
+            data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
+            saved.append(pcm.save_chat_attachment_upload(chat.project_id, data, filename))
+        except LookupError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except (ValueError, RuntimeError) as exc:
+            errors.append({"filename": filename, "error": str(exc)})
+    return JSONResponse({"saved": saved, "errors": errors})
+
 
 _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
@@ -2299,7 +2321,14 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
 
     if not is_client:
         pcm = request.app.state.project_chat_manager
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            _clear_desktop_drop_staging(request, grant_id)
+            return JSONResponse({"error": "chat not found"}, status_code=404)
+        project_id = chat.project_id
         host_image_refs: list[str] = []
+        attachments: list[dict] = []
+        converted_paths: set[Path] = set()
         if image_paths and pcm.get_chat(chat_id) is None:
             errors.extend(
                 {"filename": path.name, "error": "chat not found"}
@@ -2322,10 +2351,18 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     )
                 except ValueError as exc:
                     errors.append({"filename": path.name, "error": str(exc)})
+        for path in regular_paths:
+            if is_anydoc_document(path.name):
+                try:
+                    attachments.append(pcm.convert_chat_document(project_id, path))
+                    converted_paths.add(path)
+                except (OSError, LookupError, RuntimeError, ValueError) as exc:
+                    errors.append({"filename": path.name, "error": str(exc)})
         _clear_desktop_drop_staging(request, grant_id)
         return JSONResponse(
             {
-                "paths": [str(path) for path in regular_paths],
+                "paths": [str(path) for path in regular_paths if path not in converted_paths],
+                "attachments": attachments,
                 "image_refs": host_image_refs,
                 "errors": errors,
             }
@@ -2442,7 +2479,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 )
             if files:
                 response = await client.post(
-                    f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
+                    f"{host_url.rstrip('/')}/api/chats/{chat_id}/attachments",
                     headers=headers,
                     files=files,
                 )
@@ -2454,9 +2491,10 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                         else "host file upload failed"
                     )
                 imported_paths.extend(
-                    str(entry["absolute_path"])
+                    str(path)
                     for entry in payload.get("saved", [])
-                    if entry.get("absolute_path")
+                    for path in (entry.get("original_path"), entry.get("markdown_path"))
+                    if path
                 )
                 errors.extend(
                     {

@@ -4135,6 +4135,8 @@ type DroppedProjectFile = {
   path: string
   vault_path: string
   absolute_path?: string
+  original_path?: string | null
+  markdown_path?: string | null
 }
 
 type ProjectUploadResult = {
@@ -4151,6 +4153,7 @@ type NativeFileDropDetail = {
 
 type NativeFileDropResult = {
   paths?: string[]
+  attachments?: { original_path?: string | null; markdown_path?: string | null }[]
   image_refs?: string[]
   errors?: { filename: string; error: string }[]
   error?: string
@@ -4183,7 +4186,9 @@ async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void>
     for (const failure of result.errors || []) {
       store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
     }
-    const paths = result.paths || []
+    const paths = (result.attachments || []).flatMap((entry) =>
+      [entry.original_path, entry.markdown_path].filter((path): path is string => Boolean(path)))
+    paths.push(...(result.paths || []))
     if (paths.length) {
       insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
     }
@@ -4233,7 +4238,7 @@ async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
   }
   const form = new FormData()
   files.forEach((file, index) => form.append(`file${index}`, file, file.name))
-  const response = await fetch(`/api/projects/${project.value.project_id}/files`, {
+  const response = await fetch(`/api/chats/${chat.value.chat_id}/attachments`, {
     method: 'POST',
     credentials: 'same-origin',
     body: form,
@@ -4246,8 +4251,9 @@ async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
     store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
   }
   return (result.saved || []).flatMap((file) => {
-    const path = file.absolute_path || file.vault_path
-    return path ? [path] : []
+    const paths = [file.original_path, file.markdown_path]
+    return (paths.some(Boolean) ? paths : [file.absolute_path || file.vault_path])
+      .filter((path): path is string => Boolean(path))
   })
 }
 
