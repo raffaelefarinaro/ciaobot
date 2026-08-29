@@ -513,3 +513,61 @@ def test_converting_to_project_bound_clears_the_fallback(client: TestClient) -> 
         if e.schedule_id == schedule_id
     )
     assert stored.fallback_project_id == ""
+
+
+def test_auto_archive_is_normalised_away_on_a_fixed_chat_interval(
+    client: TestClient,
+) -> None:
+    """The dispatcher refuses to archive these, so storing `auto` is a lie.
+
+    Archiving the chat an interval is bound to makes the next run fork a
+    replacement and archive that too — forever. Normalising at the store means
+    no write path can persist a setting nothing honours.
+    """
+    schedule_id = _create_interval(client, archive_policy="auto")["schedule_id"]
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.archive_policy == "manual"
+
+
+def test_a_project_bound_interval_keeps_auto_archive(client: TestClient) -> None:
+    """It opens a fresh chat per run, which is exactly what auto-archive is for."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+        "archive_policy": "auto",
+    })
+    assert resp.status_code == 201, resp.text
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == resp.json()["schedule_id"]
+    )
+    assert stored.archive_policy == "auto"
+
+
+def test_retargeting_onto_a_fixed_chat_drops_auto_archive(client: TestClient) -> None:
+    """The binding can become unsupported after creation, not just at it."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p",
+        "frequency": INTERVAL_FREQUENCY,
+        "interval_minutes": 5,
+        "web_project_id": "proj-1",
+        "archive_policy": "auto",
+    })
+    schedule_id = resp.json()["schedule_id"]
+
+    client.patch(
+        f"/api/schedules/{schedule_id}",
+        json={"web_project_id": None, "web_chat_id": "chat-idle"},
+    )
+
+    stored = next(
+        e for e in client.app.state.schedule_manager.list_entries()
+        if e.schedule_id == schedule_id
+    )
+    assert stored.archive_policy == "manual"

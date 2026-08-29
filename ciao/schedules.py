@@ -139,6 +139,38 @@ def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) ->
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def supports_auto_archive(entry: "ScheduleEntry") -> bool:
+    """False for an interval entry bound to a fixed chat.
+
+    The point of that binding is one conversation carried across runs, and
+    ``_rehome_interval_chat`` forks a replacement whenever it finds the target
+    archived — so archiving after a clean run makes the next run fork, run, and
+    archive again, forever. A project-bound interval entry opens a fresh chat
+    per run and is exactly what auto-archive is for, so only the fixed-chat
+    binding is excluded.
+    """
+    return not (
+        getattr(entry, "frequency", "") == INTERVAL_FREQUENCY
+        and getattr(entry, "web_chat_id", "")
+        and not getattr(entry, "web_project_id", "")
+    )
+
+
+def normalize_auto_archive(entry: "ScheduleEntry") -> bool:
+    """Force ``manual`` where auto-archive cannot work. Returns if it changed.
+
+    The dispatcher already refuses to archive these, so storing ``auto`` only
+    produced a setting the UI displayed and honoured nowhere. Normalising at the
+    store means every write path — REST, MCP, both legacy loop routes, and a
+    retarget that turns a project entry into a fixed-chat one — lands on the
+    same answer, rather than each remembering to check.
+    """
+    if supports_auto_archive(entry) or getattr(entry, "archive_policy", "") != "auto":
+        return False
+    entry.archive_policy = "manual"
+    return True
+
+
 def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
     """Keep ``fallback_project_id`` in step with ``web_chat_id``.
 
@@ -710,11 +742,15 @@ class ScheduleStore:
         )
         with self._lock:
             data = self._load()
+            normalize_auto_archive(entry)
             data.setdefault("schedules", []).append(self._serialize_entry(entry))
             self._save(data)
         return entry
 
     def replace(self, entry: ScheduleEntry) -> None:
+        # Both write doors normalise, so no caller can persist an auto-archive
+        # policy the dispatcher will refuse to honour.
+        normalize_auto_archive(entry)
         with self._lock:
             if entry.scope == "system":
                 self._replace_system_state(entry)

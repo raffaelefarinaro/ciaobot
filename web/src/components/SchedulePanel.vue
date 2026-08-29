@@ -348,18 +348,22 @@
 
           <dl v-if="editingCard !== 'advanced'" class="prop-rows">
             <div class="prop-row">
-              <dt>Archive</dt><dd>{{ archiveLabel(schedule.archive_policy) }}</dd>
+              <dt>Archive</dt><dd>{{ scheduleSupportsAutoArchive(schedule) ? archiveLabel(schedule.archive_policy) : 'manual (keeps the bound chat)' }}</dd>
             </div>
           </dl>
 
           <div v-else class="card-form">
-            <div class="form-group">
+            <div v-if="editSupportsAutoArchive" class="form-group">
               <label>Archive behavior</label>
               <select v-model="editData.archive_policy">
                 <option value="manual">Manual, keep as normal chat</option>
                 <option value="auto">Automatically archive routine results</option>
               </select>
             </div>
+            <p v-else class="hint">
+              Runs into one existing chat, so the conversation is kept —
+              auto-archive does not apply to this binding.
+            </p>
             <p class="hint">
               Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or
               anything useful for the user to judge, the chat stays visible.
@@ -862,6 +866,23 @@ function showsTimeOfDay(s: Schedule): boolean {
 const editShowsTimeOfDay = computed(
   () => editData.value.frequency !== 'manual' && editData.value.frequency !== 'interval',
 )
+
+// Archiving the chat an interval is bound to makes the next run fork a
+// replacement and archive that too, so the dispatcher refuses to archive these.
+// The setting was still offered and still rendered as "automatic", describing
+// behaviour that never happened. A project-bound interval opens a fresh chat
+// per run and is exactly what auto-archive is for, so only this binding is out.
+const editSupportsAutoArchive = computed(
+  () => !(editData.value.frequency === 'interval'
+    && editData.value.contextKey.startsWith('web:')),
+)
+watch(editSupportsAutoArchive, (supported) => {
+  if (!supported) editData.value.archive_policy = 'manual'
+})
+
+function scheduleSupportsAutoArchive(s: Schedule): boolean {
+  return !(s.frequency === 'interval' && !!s.web_chat_id && !s.web_project_id)
+}
 
 // An interval entry has no `daily_time_utc`, so editing one to a wall-clock
 // cadence starts with the time field empty. Saving that persisted an empty

@@ -73,14 +73,15 @@
         shortly after, never queued.
       </p>
     </div>
-    <div class="form-group">
+    <div v-if="supportsAutoArchive" class="form-group">
       <label>Archive behavior</label>
       <select v-model="archivePolicy">
         <option value="manual">Manual, keep as normal chat</option>
         <option value="auto">Auto, archive if boring</option>
       </select>
     </div>
-    <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
+    <p v-if="supportsAutoArchive" class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
+    <p v-else class="hint">Runs into one existing chat, so the conversation is kept — auto-archive does not apply to this binding.</p>
     <div v-if="frequency === 'once'" class="form-group">
       <label>Date</label>
       <input v-model="runAtDate" type="date" :min="todayDate" required />
@@ -143,6 +144,15 @@ const needsTimeOfDay = computed(
 const inheritsChatModel = computed(
   () => isInterval.value && contextKey.value.startsWith('web:'),
 )
+// Same binding, different consequence: archiving the chat an interval is bound
+// to makes the next run fork a replacement and archive that too, so the
+// dispatcher refuses. Offering the choice anyway stored a setting nothing
+// honoured. (Bound to a project it opens a fresh chat per run, which is what
+// auto-archive is for, so only the fixed-chat case is excluded.)
+const supportsAutoArchive = computed(() => !inheritsChatModel.value)
+watch(supportsAutoArchive, (supported) => {
+  if (!supported) archivePolicy.value = 'manual'
+})
 
 const canSubmit = computed(() => {
   if (!prompt.value || !contextKey.value) return false
