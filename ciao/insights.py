@@ -241,7 +241,8 @@ _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
 The user is the workspace owner. Output Markdown with the exact section headers below.
 Omit a section entirely if empty - do NOT write "none" or "n/a".
-Cite the message index `[idx=N]` for every claim. Do not invent facts.
+Cite the message index `[idx=N]` for every claim. Indices start at 1;
+never cite `[idx=0]`. Do not invent facts.
 Do not summarise the conversation - that is already saved.
 
 Rules:
@@ -251,6 +252,13 @@ Rules:
   entirely rather than fill it with session-local noise — a one-off choice
   about this one repo, a single loop, or a phrasing pushback that was only
   about this session has no place here.
+- If this is a scheduled maintenance session (memory curation, hygiene
+  audits, skill evolution), never extract the session's own operating
+  instructions, prompt rules, or memory-system procedures as facts — they
+  are machinery, not knowledge about the user.
+- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
+  or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
+  destination tag. Never invent a date the transcript does not support.
 - End every bullet with exactly one destination tag, after the citation:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.
@@ -1087,6 +1095,13 @@ Rules:
   rather than fill it with session-local noise — a one-off choice about this
   one repo, a single exchange, or a phrasing pushback that only fixed this
   session has no place here.
+- If this is a scheduled maintenance session (memory curation, hygiene
+  audits, skill evolution), never extract the session's own operating
+  instructions, prompt rules, or memory-system procedures as facts — they
+  are machinery, not knowledge about the user.
+- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
+  or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.
+  Never invent a date the transcript does not support.
 - End every bullet with exactly one destination tag:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.

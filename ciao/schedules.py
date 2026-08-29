@@ -121,6 +121,17 @@ def system_schedule_id(base_id: str, workspace: str) -> str:
     return f"{base_id}{SYSTEM_ID_SEPARATOR}{workspace}"
 
 
+def is_system_schedule_id(schedule_id: str) -> bool:
+    """True when the id names a packaged system schedule, fanned out or not.
+
+    The archive pipeline gates memory writes on this: a system-schedule chat
+    (memory curation, hygiene, skill evolution) is the memory machinery itself,
+    and extracting its own operating rules as facts pollutes the bounded
+    regions with the machinery's self-description.
+    """
+    return system_base_id(schedule_id).startswith("system-")
+
+
 def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) -> str:
     """Offset a fanned-out routine's fire time by whole minutes.
 

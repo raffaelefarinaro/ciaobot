@@ -294,6 +294,88 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
     assert guide == Path(pcm._config.agent_root("work")) / "CLAUDE.md"
 
 
+@pytest.mark.asyncio
+async def test_archive_postprocess_system_chat_never_writes_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system-schedule chat keeps its insights but may not write memory.
+
+    The nightly curation chat's transcript contains the curation prompt's own
+    rules; extracting them as "Decisions" auto-promoted the machinery's
+    self-description into the bounded regions. Insights still run (the archive
+    is the audit trail of the unattended run) but memory proposals and the
+    project-doc fold are disabled.
+    """
+    pcm = _make_manager(tmp_path)
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
+    )
+    project = pcm.create_project("curation-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Memory curation")
+    chat.schedule_id = "system-memory-curation@work"
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-system",
+            turn_count=3,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls, "insights must still run for system chats"
+    assert calls[0]["memory_proposals_enabled"] is False
+    assert calls[0]["project_doc_path"] == ""
+
+
+@pytest.mark.asyncio
+async def test_archive_postprocess_user_chat_keeps_memory_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The system-chat gate must not disable memory writes for user chats."""
+    pcm = _make_manager(tmp_path)
+    pcm._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
+    )
+    project = pcm.create_project("user-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="ordinary chat")
+    chat.schedule_id = "sched-abc123"
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-user",
+            turn_count=3,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert calls
+    assert calls[0]["memory_proposals_enabled"] is True
+
+
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
