@@ -776,8 +776,8 @@ async def plan_region_reconcile(
     from ciao.providers.oneshot import run_oneshot
 
     decisions: dict[str, dict[str, Any]] = {}
-    for region, candidates in by_region.items():
-        entries = entries_by_region[region]
+    for region_name, candidates in by_region.items():
+        entries = entries_by_region[region_name]
         numbered = "\n".join(
             f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
         )
@@ -786,7 +786,7 @@ async def plan_region_reconcile(
             for index, fact in enumerate(candidates)
         )
         prompt = (
-            f"Region `ciao:{region}` current entries:\n{numbered}\n\n"
+            f"Region `ciao:{region_name}` current entries:\n{numbered}\n\n"
             f"Candidate facts:\n{lettered}\n"
         )
         try:
@@ -805,7 +805,7 @@ async def plan_region_reconcile(
         if rows is None:
             logger.info(
                 "memory reconcile: unparseable reply for ciao:%s; using plain adds",
-                region,
+                region_name,
             )
             continue
         for fact, row in zip(candidates, rows):
