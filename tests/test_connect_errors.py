@@ -19,6 +19,7 @@ def test_classify_distinguishes_dns_from_refused_and_auth() -> None:
     assert classify_connection_error("Invalid API key provided") == "auth"
     assert classify_connection_error("401 Unauthorized") == "auth"
     assert classify_connection_error("403 Forbidden") == "auth"
+    assert classify_connection_error("Not logged in. Please run /login") == "auth"
     # Bare status digits inside unrelated text don't trigger a false auth label.
     assert classify_connection_error("Generated 401 tokens") is None
     assert classify_connection_error("failed to fetch") == "connect"
