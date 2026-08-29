@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao.web.project_chats import ProjectChatManager
 from ciao.schedules import (
     INTERVAL_FREQUENCY,
     MIN_INTERVAL_MINUTES,
@@ -482,6 +483,9 @@ def test_migrate_loops_imports_as_interval_schedules(tmp_path: Path) -> None:
     # Legacy loops reused their existing chat; the old project hint must not
     # turn the migrated interval into a new-chat-per-run schedule.
     assert entry.web_project_id is None
+    # ...but it is still the project the loop would have been re-homed into if
+    # its chat went away, so it is kept as the fallback rather than dropped.
+    assert entry.fallback_project_id == "proj-1"
     assert entry.workspace == "work"
     assert entry.title == "PR watcher"
     assert entry.enabled is True
@@ -529,3 +533,63 @@ def test_migrate_loops_skips_a_loop_with_no_target(tmp_path: Path) -> None:
 
 def test_migrate_loops_no_file_is_a_no_op(tmp_path: Path) -> None:
     assert migrate_loops(tmp_path) == 0
+
+
+def test_migrated_loop_rehomes_into_its_own_project_not_general(tmp_path: Path) -> None:
+    """A migrated loop whose chat is deleted must resume where it lived.
+
+    The legacy resolver used the loop's own ``web_project_id`` for this. The
+    interval schema cannot reuse that field (there it means "new chat per run"
+    and outranks the fixed chat), so the value is carried as
+    ``fallback_project_id`` — without it ``resolve_automation_project`` falls
+    straight through to the workspace's General and the unattended prompt runs
+    in the wrong project context.
+    """
+    _write_loops(tmp_path, [{
+        "loop_id": "loop-rehome",
+        "prompt": "p",
+        "web_chat_id": "chat-gone",
+        "web_project_id": "proj-original",
+        "workspace": "work",
+    }])
+    migrate_loops(tmp_path)
+    entry = ScheduleStore(tmp_path).get("loop-rehome")
+
+    class _Project:
+        def __init__(self, pid: str, name: str) -> None:
+            self.project_id, self.name, self.workspace = pid, name, "work"
+
+    class _PCM:
+        _projects = {
+            "proj-original": _Project("proj-original", "Original"),
+            "proj-general": _Project("proj-general", "General"),
+        }
+        resolve_automation_project = (
+            ProjectChatManager.resolve_automation_project
+        )
+
+    assert _PCM().resolve_automation_project(entry).project_id == "proj-original"
+
+
+def test_rehome_falls_back_to_general_when_the_project_is_gone(tmp_path: Path) -> None:
+    _write_loops(tmp_path, [{
+        "loop_id": "loop-orphan",
+        "prompt": "p",
+        "web_chat_id": "chat-gone",
+        "web_project_id": "proj-deleted",
+        "workspace": "work",
+    }])
+    migrate_loops(tmp_path)
+    entry = ScheduleStore(tmp_path).get("loop-orphan")
+
+    class _Project:
+        def __init__(self, pid: str, name: str) -> None:
+            self.project_id, self.name, self.workspace = pid, name, "work"
+
+    class _PCM:
+        _projects = {"proj-general": _Project("proj-general", "General")}
+        resolve_automation_project = (
+            ProjectChatManager.resolve_automation_project
+        )
+
+    assert _PCM().resolve_automation_project(entry).project_id == "proj-general"

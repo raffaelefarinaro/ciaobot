@@ -1710,6 +1710,24 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
                     {"error": "This sign-in flow needs a flow ID. Start manual connect again."},
                     status_code=400,
                 )
+        if flow_id and pkce_status == "none":
+            # An explicit flow ID the store does not know cannot mean "this
+            # flow never used PKCE" — the client only has an ID because the
+            # auth URL it came from carried a challenge. The usual cause is a
+            # server restart between building that URL and pasting the code
+            # back, which drops the in-memory verifier. Exchanging anyway sends
+            # a challenged code with no verifier, which Google must reject, so
+            # the user would see `invalid_grant` instead of what to do next.
+            return JSONResponse(
+                {
+                    "error": (
+                        "This sign-in flow is no longer available (the server "
+                        "restarted before the code was pasted back). Start "
+                        "manual connect again for a fresh link."
+                    )
+                },
+                status_code=400,
+            )
         if pkce_status == "expired":
             return JSONResponse(
                 {

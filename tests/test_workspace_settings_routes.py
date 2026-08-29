@@ -901,6 +901,64 @@ def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, 
     assert exchange_called is False
 
 
+def test_gws_exchange_rejects_an_explicit_but_unknown_flow_id(tmp_path, monkeypatch):
+    """A restart between auth-url and paste-back must not exchange blindly.
+
+    The client only holds a flow_id because the auth URL it came from carried
+    a PKCE challenge, so an id the store no longer knows cannot mean "this flow
+    never used PKCE" — that reading is only safe when no id was sent at all.
+    Exchanging anyway sends a challenged code with no verifier, which Google
+    must reject, and the user sees `invalid_grant` instead of what to do next.
+    """
+    from ciao import gws_auth
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
+    flow_id = resp.json()["flow_id"]
+
+    # What a server restart looks like to the next request: the browser still
+    # has its flow_id, the new in-memory store has nothing.
+    client.app.state.gws_manual_pkce_store._pending.clear()
+
+    exchange_called = False
+
+    def unexpected_exchange(*args, **kwargs):
+        nonlocal exchange_called
+        exchange_called = True
+        return {"ok": True, "email": "should-not-be-reached@example.com"}
+
+    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={
+            "profile": "personal",
+            "code": "http://localhost/?code=challenged-code",
+            "flow_id": flow_id,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "start manual connect again" in resp.json()["error"].lower()
+    assert exchange_called is False
+
+
 def test_gws_exchange_without_a_pending_pkce_flow_omits_verifier(tmp_path, monkeypatch):
     """A profile that never called auth-url through this store (legacy
     client, or a flow superseded by a later start) must still exchange

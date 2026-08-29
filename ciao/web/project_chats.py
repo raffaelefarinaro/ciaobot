@@ -8152,10 +8152,21 @@ class ProjectChatManager:
         or workspace we still know about, and callers treat that as "disable
         this entry" — re-homing it into an arbitrary project would run the
         user's prompt against the wrong workspace, unattended.
+
+        Order matters: the primary binding, then the fixed-chat fallback, then
+        the workspace's General. Each step is a weaker claim about where the
+        user meant this to run.
         """
         web_project_id = getattr(entry, "web_project_id", "") or ""
         if web_project_id and web_project_id in self._projects:
             return self._projects[web_project_id]
+        # A fixed-chat entry can name a re-home project without becoming a
+        # project entry (see ScheduleEntry.fallback_project_id). Migrated loops
+        # carry their original project here; without this they would land in
+        # General and run the user's prompt in the wrong project context.
+        fallback_project_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_project_id and fallback_project_id in self._projects:
+            return self._projects[fallback_project_id]
         workspace = getattr(entry, "workspace", "") or ""
         if workspace:
             for p in self._projects.values():

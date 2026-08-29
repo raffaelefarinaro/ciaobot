@@ -213,6 +213,11 @@ def migrate_loops(runtime_root: Path) -> int:
             # the old project hint: on interval schedules that means a fresh
             # chat per run and takes precedence over web_chat_id.
             web_project_id=None,
+            # The loop's project was its re-home target when the fixed chat
+            # went away (legacy `_resolve_loop_project`). Dropping it entirely
+            # sent those runs to the workspace's General instead, so keep it as
+            # the fallback it always was.
+            fallback_project_id=str(item.get("web_project_id") or ""),
             workspace=str(item.get("workspace") or ""),
             title=str(item.get("title") or ""),
             last_dispatched_at=str(item.get("last_run_at") or ""),
@@ -504,6 +509,14 @@ class ScheduleEntry:
     # to the same project and repair the id. Empty for entries created before
     # this field existed; those still fall back to General.
     web_project_name: str = ""
+    # Where to re-home a *fixed-chat* entry whose target chat is gone, without
+    # turning it into a project entry. On an interval schedule `web_project_id`
+    # is the primary binding and means "a fresh chat per run", which takes
+    # precedence over `web_chat_id` — so a loop's project hint could not simply
+    # be carried into that field during migration without changing what the
+    # automation does. It is kept here instead: consulted only as a fallback,
+    # never as a target. Empty means fall back to the workspace's General.
+    fallback_project_id: str = ""
     # Workspace the schedule belongs to (e.g. "acme" | "home" | "default"). Project IDs
     # regenerate per device on fresh init, so web_project_id goes stale across
     # devices; this field lets the resolver re-target the right General project
