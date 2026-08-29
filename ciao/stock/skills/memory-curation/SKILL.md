@@ -73,4 +73,14 @@ Review `Workspace/Skill-Proposals/`. A proposal already implemented, or one you 
 
 ## 8. Report
 
-Append the pass report to `Workspace/Curation-Log.md` and reply with: processed counts, changed files, per touched region chars before → after with what was merged/dropped/moved and the undo-log path, and — listed in full, one numbered line each — every cross-project fact left queued for a bounded region, so the user can reply naming which to promote.
+Two audiences, two registers.
+
+**The log** (`Workspace/Curation-Log.md`): append the full technical pass report — processed counts, changed files, per touched region chars before → after with what was merged/dropped/moved, and the undo-log path.
+
+**The chat reply** (what the user actually reads): plain language, no jargon, no file paths unless the user must open one, no internal terms like "bounded region", "proposal kind", or "undo log" without saying what they mean. Structure it as:
+
+1. **What I did** — one short line per action, in everyday words ("Merged two duplicate notes about your insights model", "Retired 1 expired fact", not "consolidated ciao:memory 2431→2205 chars").
+2. **What needs you** — every cross-project fact waiting for approval, one numbered line each, quoted in full, ending with how to act ("reply with the numbers to remember, or 'skip the rest'"). If a question is queued ("should I drop X?"), ask it as a plain yes/no.
+3. **Nothing else.** If a section is empty, leave it out. If nothing at all happened, the whole reply is one line ("Nothing new to file today — memory is tidy.").
+
+The test for the reply: someone who has never read the docs should understand every sentence and know exactly what, if anything, they are being asked to do.
