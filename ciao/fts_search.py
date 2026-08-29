@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 # Directory-based type inference (similar to vault_index.py)
 EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
 
+# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Indexing them made the proposals queue and the curation logs rank above real
+# notes for ordinary recall queries — the memory system's paperwork must never
+# compete with the memories it manages.
+RESERVED_UNINDEXED_FILES = frozenset(
+    {
+        "memory-proposals.md",
+        "memory-consolidations.md",
+        "curation-log.md",
+        "weekly-review-log.md",
+    }
+)
+
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
@@ -124,6 +137,23 @@ def _parse_title(text: str, filename_stem: str) -> str:
     if h:
         return h.group(1).strip()
     return filename_stem
+
+
+def _search_opted_out(text: str) -> bool:
+    """True when a note's frontmatter carries ``search: false``.
+
+    The general escape hatch behind ``RESERVED_UNINDEXED_FILES``: any note can
+    take itself out of recall (rolled log archives, scratch files) without the
+    engine having to learn its name.
+    """
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return False
+    try:
+        fm = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return False
+    return isinstance(fm, dict) and fm.get("search") is False
 
 
 def _public_snippet(raw: str) -> str:
@@ -241,6 +271,12 @@ def _index_directory(
             logger.warning("FTS search: failed to read %s", md_path)
             continue
 
+        if _search_opted_out(text):
+            # Dropped from the found set so the prune below removes any rows
+            # indexed before the note opted out.
+            found_paths.discard(rel_str)
+            continue
+
         title = _parse_title(text, md_path.stem)
 
         # Delete old index entry if it exists
@@ -300,7 +336,7 @@ def index_vault(
         meta_table="vault_meta",
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
-        exclude_files=set(GENERATED_VAULT_FILES),
+        exclude_files=set(GENERATED_VAULT_FILES) | RESERVED_UNINDEXED_FILES,
         path_base=path_base,
     )
 
@@ -380,6 +416,17 @@ def index_file(
         stat = file_path.stat()
         mtime = stat.st_mtime
     except OSError:
+        return False
+
+    if not is_log and (
+        file_path.name.casefold() in RESERVED_UNINDEXED_FILES
+        or _search_opted_out(text)
+    ):
+        # Force-indexing must honour the same exclusions as the bulk pass, and
+        # clean up rows written before the file became excluded.
+        conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+        conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
+        conn.commit()
         return False
 
     title = _parse_title(text, file_path.stem)

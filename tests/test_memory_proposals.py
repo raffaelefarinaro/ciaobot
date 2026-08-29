@@ -1073,6 +1073,64 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
     assert (explicit_dir / "memory-vault" / "Workspace" / "Memory-Proposals.md").is_file()
 
 
+def test_removing_last_bullet_sweeps_its_batch_header(tmp_path: Path) -> None:
+    """Dismissing a batch's only bullet removes the batch header too.
+
+    Before the sweep, every fully-dismissed batch left its ``## <timestamp>``
+    header behind; a real queue accumulated 29 empty batches out of 30.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    proposals = [
+        mp.MemoryProposal(target="review", text="lone fact one", source_section="Decisions"),
+    ]
+    out = mp.append_proposals(proposals, vault, source_path=None)
+    assert out is not None
+    out2 = mp.append_proposals(
+        [mp.MemoryProposal(target="review", text="second batch fact", source_section="Decisions")],
+        vault,
+        source_path=None,
+    )
+    assert out2 is not None
+
+    removed = mp.remove_proposal_by_substring(out, "lone fact one")
+    assert removed is not None
+
+    text = out.read_text(encoding="utf-8")
+    # One batch header remains (the second batch still has its bullet).
+    assert len(re.findall(r"^## \d{4}-", text, re.MULTILINE)) == 1
+    assert "second batch fact" in text
+
+
+def test_sweep_keeps_batches_with_bullets_or_prose(tmp_path: Path) -> None:
+    """The sweep only removes headers over all-blank sections.
+
+    A timestamped section that carries prose (agents have appended notes into
+    the queue) was written by someone else and is not the sweep's to delete.
+    """
+    lines = [
+        "# Memory Proposals",
+        "",
+        "## 2026-08-01T00:00:00+00:00 — from `a.md`",
+        "",
+        "- [review] pending fact  _(from: Decisions)_",
+        "",
+        "## 2026-08-02T00:00:00+00:00 — from `b.md`",
+        "",
+        "",
+        "## 2026-08-03T00:00:00+00:00 — from `c.md`",
+        "",
+        "Some hand-written note under a timestamp.",
+        "",
+    ]
+    swept = mp._sweep_empty_batches(lines)
+    text = "\n".join(swept)
+    assert "2026-08-01" in text  # has a bullet
+    assert "2026-08-02" not in text  # empty: swept
+    assert "2026-08-03" in text  # has prose: kept
+    assert "Some hand-written note" in text
+
+
 def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
     """Blank decisions record nothing; unreadable sidecar lines never crash."""
     from ciao.cli import _memory_proposal_add_command

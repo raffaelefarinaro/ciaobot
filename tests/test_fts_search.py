@@ -518,3 +518,60 @@ def test_logs_key_prefix_names_the_archive_in_both_layouts(
     outside_prefix = fts_search.logs_key_prefix(outside, install)
     assert fts_search.search_logs(db_conn, "findme", path_prefix=outside_prefix) == []
     assert len(fts_search.search_logs(db_conn, "findme")) == 1
+
+
+def test_bookkeeping_files_are_never_indexed(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """The memory pipeline's own queue and logs stay out of recall.
+
+    Indexed, they ranked above real notes for ordinary queries — the proposals
+    queue was a top-3 result for "fiancee" on a live vault.
+    """
+    workspace = temp_vault / "Workspace"
+    workspace.mkdir()
+    (workspace / "Memory-Proposals.md").write_text(
+        "# Memory Proposals\n\n- [review] the wedding venue is Tortoreto\n",
+        encoding="utf-8",
+    )
+    (workspace / "Curation-Log.md").write_text(
+        "# Curation Log\n\nProcessed wedding proposals.\n", encoding="utf-8"
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "wedding", limit=10)]
+    assert not any("Memory-Proposals" in p or "Curation-Log" in p for p in paths)
+    assert any("Ciaobot-Search" in p for p in paths)  # real notes still hit
+
+
+def test_search_false_frontmatter_opts_a_note_out(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """`search: false` removes a note from the index, including old rows."""
+    note = temp_vault / "Scratch.md"
+    note.write_text("# Scratch\nA wedding scratchpad.\n", encoding="utf-8")
+    fts_search.index_vault(db_conn, temp_vault)
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "scratchpad")]
+    assert any("Scratch" in p for p in paths)
+
+    time.sleep(0.01)
+    note.write_text(
+        "---\nsearch: false\n---\n# Scratch\nA wedding scratchpad.\n",
+        encoding="utf-8",
+    )
+    os.utime(note, (time.time() + 5, time.time() + 5))
+    fts_search.index_vault(db_conn, temp_vault)
+    assert fts_search.search_vault(db_conn, "scratchpad") == []
+
+
+def test_index_file_honours_exclusions(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Force-indexing a reserved or opted-out file removes its rows instead."""
+    workspace = temp_vault / "Workspace"
+    workspace.mkdir()
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("# Memory Proposals\n\n- [review] secret pending fact\n", encoding="utf-8")
+
+    assert fts_search.index_file(db_conn, temp_vault, queue) is False
+    assert fts_search.search_vault(db_conn, "secret pending") == []

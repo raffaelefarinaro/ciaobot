@@ -520,6 +520,35 @@ def append_proposals(
 # Matches a bullet written by ``MemoryProposal.as_bullet``.
 _BULLET_RE = re.compile(r"^- \[[^\]]+\] (.+?)  _\(from: [^)]*\)_\s*$")
 
+# Matches a timestamped batch header written by ``_proposals_header_block``.
+_BATCH_HEADER_RE = re.compile(r"^## \d{4}-\d{2}-\d{2}T\S+")
+
+
+def _sweep_empty_batches(lines: list[str]) -> list[str]:
+    """Drop timestamped batch headers whose bullets are all gone.
+
+    Dismissal removes bullets one line at a time, so the last dismissal in a
+    batch left its ``## <timestamp>`` header behind forever; on a real queue
+    29 of 30 batches were empty headers plus blank lines. Precision-first:
+    only a header this module wrote (the timestamp shape) whose whole section
+    is blank is swept — a section holding any other text was written by a
+    hand or an agent and is not this function's to delete.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if _BATCH_HEADER_RE.match(line):
+            end = index + 1
+            while end < len(lines) and not lines[end].startswith("## "):
+                end += 1
+            if all(not item.strip() for item in lines[index + 1:end]):
+                index = end
+                continue
+        out.append(line)
+        index += 1
+    return out
+
 
 def _existing_proposal_texts(file_text: str) -> set[str]:
     """Return the set of proposal texts already recorded in the file."""
@@ -866,6 +895,7 @@ def remove_proposal_by_substring(
     if bullet is None:
         return None
     del lines[candidates[0]]
+    lines = _sweep_empty_batches(lines)
     proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return bullet.kind, bullet.text
 
