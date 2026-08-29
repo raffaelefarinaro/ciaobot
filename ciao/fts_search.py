@@ -274,11 +274,6 @@ def _index_directory(
 
     found_paths: set[str] = set()
     indexed_count = 0
-    # Rows settled without being (re)indexed: an opted-out note's FTS removal
-    # plus meta refresh. Counted separately because these writes must commit
-    # even when nothing else changed in the pass — the old code routed them
-    # through the prune, whose counter reached the commit gate below.
-    settled_count = 0
 
     # Walk directory
     for md_path in root_dir.rglob(file_pattern):
@@ -326,7 +321,6 @@ def _index_directory(
             # (and refresh) the meta row so the mtime short-circuit above
             # stops every later pass from re-reading the file.
             _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
-            settled_count += 1
             continue
 
         title = _parse_title(text, md_path.stem)
@@ -367,8 +361,11 @@ def _index_directory(
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
         removed_count += 1
 
-    if indexed_count > 0 or removed_count > 0 or settled_count > 0:
-        conn.commit()
+    # Unconditional: committing with no pending writes is a no-op under the
+    # default transaction control every caller uses, and a counter-based gate
+    # silently rolls back any write path that forgets to reach it — the
+    # opt-out settle had exactly that bug.
+    conn.commit()
 
     return indexed_count, removed_count
 
@@ -435,7 +432,16 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     the same base as the rest.
     """
     base = _key_base(vault_root, path_base)
-    prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
+    # Compare unresolved first, exactly as the key-writing loop does
+    # (_scope_prefix's own contract): a vault reached through a symlink under
+    # the base writes keys spelled with the symlink, and resolving both sides
+    # here returned NO_MATCH for those rows — every search of that workspace
+    # failed closed forever despite a healthy index. The resolved comparison
+    # stays as a fallback for callers that spell the same real paths
+    # differently (e.g. /var vs /private/var on macOS).
+    prefix = _scope_prefix(Path(vault_root), Path(base))
+    if prefix is None:
+        prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
     return NO_MATCH_KEY_PREFIX if prefix is None else prefix
 
 
@@ -474,7 +480,13 @@ def index_file(
         try:
             rel_to_root = file_path.relative_to(vault_root)
         except ValueError:
-            rel_to_root = rel
+            # A non-log file that cannot be placed under the vault root (a
+            # symlinked or differently-normalized vault_root spelling): the
+            # reserved-bookkeeping check would run against a base-relative
+            # key it can never match (fail open), and any row written here
+            # would sit outside the bulk pass's scoped prune. Fail closed:
+            # index nothing.
+            return False
         if _is_reserved_bookkeeping(rel_to_root):
             # Force-indexing must honour the same exclusions as the bulk pass,
             # and clean up rows written before the file became excluded. Both

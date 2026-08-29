@@ -653,6 +653,26 @@ def test_fit_transcript_drops_oldest_lines_and_keeps_the_newest(
     assert len(fitted) <= 25
 
 
+def test_fit_transcript_reserves_room_for_the_context_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Ten 10-char lines; a 35-char budget fits three, but a 10-char reserve
+    # (the known-context block prepended after fitting) leaves room for two.
+    lines = [f"{i:09d}" for i in range(10)]
+    monkeypatch.setenv("CIAO_INSIGHTS_MAX_INPUT_CHARS", "35")
+    fitted, dropped = insights._fit_transcript("\n".join(lines), reserve=10)
+    assert fitted.splitlines() == lines[-2:]
+    assert dropped == 8
+    assert len(fitted) + 10 <= 35
+
+
+def test_fit_apple_input_reserve_matches_an_explicit_smaller_budget() -> None:
+    payload = "\n".join(f"line-{i}" for i in range(20))
+    assert native_sidecar.fit_apple_input(
+        payload, max_chars=40, reserve=10
+    ) == native_sidecar.fit_apple_input(payload, max_chars=30)
+
+
 def test_max_input_chars_ignores_junk_and_nonpositive_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1127,6 +1147,33 @@ def test_known_context_block_carries_regions_and_roster(tmp_path):
     # Absent inputs mean no context section at all, not an empty header.
     assert _known_context_block(None, None) == ""
     assert _known_context_block(tmp_path / "missing.md", tmp_path / "nope") == ""
+
+
+def test_known_context_block_truncates_at_a_line_boundary(tmp_path, monkeypatch):
+    """An oversized block is cut between lines, never mid-entry.
+
+    The block is presented as trusted reference data, so a truncated entry
+    (or half a person's name) must never survive the cap.
+    """
+    from ciao import memory_tool as mt
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    mt.write_region(
+        guide,
+        "memory",
+        [f"Entry number {i} carries some detail." for i in range(40)],
+    )
+    monkeypatch.setattr(insights, "_KNOWN_CONTEXT_MAX_CHARS", 200)
+
+    block = insights._known_context_block(guide, None)
+    assert block.startswith("## Known context")
+    assert block.endswith("\n\n")
+    assert len(block) <= 200 + len("\n\n")
+    entry_lines = [l for l in block[:-2].splitlines() if l.startswith("- ")]
+    assert entry_lines, "some entries must survive the cut"
+    assert all(l.endswith("carries some detail.") for l in entry_lines)
 
 
 def test_text_user_prompt_prepends_context():

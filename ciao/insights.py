@@ -994,13 +994,12 @@ async def _run_model_with_retry(
     reserve = len(context_block)
     if native_sidecar.is_apple_model(model):
         payload, dropped = native_sidecar.fit_apple_input(
-            filtered_jsonl,
-            max_chars=max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - reserve),
+            filtered_jsonl, reserve=reserve
         )
-        budget = native_sidecar.APPLE_MAX_INPUT_CHARS
+        budget = max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - reserve)
     else:
         payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-        budget = _max_input_chars()
+        budget = max(0, _max_input_chars() - reserve)
     if dropped:
         logger.info(
             "Insights transcript over the %d-char budget; dropped %d oldest line(s)",
@@ -1073,14 +1072,13 @@ async def _call_text_model(
         # Reserve room for the context block prepended by _text_user_prompt —
         # the fitted body plus the block must stay within the Apple window.
         apple_body, dropped = native_sidecar.fit_apple_input(
-            body,
-            max_chars=max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - len(context_block)),
+            body, reserve=len(context_block)
         )
         if dropped:
             logger.info(
                 "Apple insights transcript over the %d-char budget; "
                 "dropped %d oldest line(s)",
-                native_sidecar.APPLE_MAX_INPUT_CHARS,
+                max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - len(context_block)),
                 dropped,
             )
         return await native_sidecar.respond(

@@ -89,7 +89,7 @@ def test_event_shaped_ignores_durable_state() -> None:
         [
             "User prefers concise answers and no em-dashes.",
             "The user runs macOS 27 with Homebrew at /opt/homebrew.",
-            "Raffa is a PM at Scandit and owns SparkScan.",
+            "The user is a PM at Acme and owns the Falcon project.",
             "Assistant behaviour is configured through skills, not prompts.",
             "The assistant uses concise language for code reviews.",
         ],
@@ -340,7 +340,7 @@ def test_audit_entries_reports_every_region(tmp_path: Path) -> None:
     report = audit_entries(
         {
             "memory": ["User said: \"switch that\" -> assistant changed the slug."],
-            "profile": ["Raffa writes without em-dashes."],
+            "profile": ["The user writes without em-dashes."],
         },
         workspace_dir=workspace,
     )

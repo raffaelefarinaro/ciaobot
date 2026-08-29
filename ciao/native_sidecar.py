@@ -431,13 +431,21 @@ def _remember_model_failure(reason: str, *, force: bool = False) -> None:
     )
 
 
-def fit_apple_input(text: str, *, max_chars: int = APPLE_MAX_INPUT_CHARS) -> tuple[str, int]:
+def fit_apple_input(
+    text: str, *, max_chars: int = APPLE_MAX_INPUT_CHARS, reserve: int = 0
+) -> tuple[str, int]:
     """Keep the newest complete lines within Apple's small input budget.
 
     Returns ``(text, dropped_lines)``. The line-oriented transcript formats
     used by callers stay valid unless one individual record is itself larger
     than the budget, in which case its newest suffix is retained.
+
+    ``reserve`` is subtracted from the budget for prompt text the caller
+    prepends after fitting (e.g. a known-context block), mirroring
+    ``_fit_transcript`` — the clamp lives here so a call site cannot exist
+    without deciding its reserve.
     """
+    max_chars = max(0, max_chars - reserve)
     if len(text) <= max_chars:
         return text, 0
     lines = text.splitlines()

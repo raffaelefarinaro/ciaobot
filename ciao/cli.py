@@ -2393,7 +2393,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
                 vault, workspace="personal", path_prefix=Path(render_prefix)
             )
             report["stale_notes"] = find_stale_notes(
-                entries, vault_root=vault, today=datetime.date.today()
+                entries,
+                vault_root=vault,
+                # The same prefix scan_vault rendered: left to its default,
+                # find_stale_notes only works while its own internal default
+                # happens to equal render_prefix, and a drifted prefix makes
+                # every mtime stat miss silently.
+                path_prefix=Path(render_prefix),
+                today=datetime.date.today(),
             )
             # Decay-by-disuse: mark whether recall has returned each stale
             # note recently. Stale AND unretrieved is the strongest demotion
@@ -2422,12 +2429,15 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
                 normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
                 normalized_prefix = key_prefix.replace(os.sep, "/")
-                # A non-empty prefix that no hit carries means the log's keys
-                # were written against a different base (the audit invoked with
+                # A prefix that no hit carries means the log's keys were
+                # written against a different base (the audit invoked with
                 # another workspace root than the server's). That is missing
                 # evidence, not proof of disuse — marking everything false
-                # would nominate actively-used notes for demotion.
-                if not normalized_prefix or any(
+                # would nominate actively-used notes for demotion. An empty
+                # prefix (vault == workspace root) takes the same rule: every
+                # hit trivially carries it, so marking is skipped only when
+                # the log has no usable hits at all.
+                if any(
                     hit.startswith(normalized_prefix) for hit in normalized_hits
                 ):
                     for finding in report["stale_notes"]["stale_notes"]:
