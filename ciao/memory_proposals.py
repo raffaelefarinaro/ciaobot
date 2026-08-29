@@ -336,6 +336,8 @@ def _promote_to_region(
     promotable = _promotable_text(proposal.text)
     if promotable is None:
         return "unshaped", None
+    from ciao.memory_audit import strip_learned_stamp
+
     try:
         ensure_regions(guide_path)
         region = resolve_region(proposal.target)
@@ -346,13 +348,19 @@ def _promote_to_region(
                 "; ".join(d.message for d in diags),
             )
             return "failed", promotable
-        if promotable in entries:
+        # Compared with stamps stripped: the same fact promoted on two
+        # different days is still the same fact.
+        if promotable in {strip_learned_stamp(entry) for entry in entries}:
             logger.info(
                 "memory apply: dropped exact duplicate %r",
                 promotable[:80],
             )
             return "duplicate", promotable
-        write_region(guide_path, region, entries + [promotable])
+        # The learned-at stamp is system time — when this fact entered the
+        # region — read by the aging audit so unverified old facts surface
+        # for re-verification instead of asserting themselves forever.
+        stamped = f"{promotable} [{date.today().isoformat()}]"
+        write_region(guide_path, region, entries + [stamped])
         return "written", promotable
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
         logger.info("memory apply: falling back to proposals (%s)", exc)

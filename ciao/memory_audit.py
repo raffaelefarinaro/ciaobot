@@ -285,10 +285,79 @@ def find_superseded_state(
     ]
 
 
+# ---- Temporal validity --------------------------------------------------
+#
+# Two stamps, two clocks. `[as-of: YYYY-MM-DD]` is world time: the fact was
+# true as of that date and may have silently changed since. The trailing
+# `[YYYY-MM-DD]` learned-at stamp is system time: when auto-promotion wrote
+# the entry. Both are read here as aging evidence for the curation routine to
+# re-verify — informational, like every age signal in this module, because
+# age alone is never a defect.
+
+_AS_OF_RE = re.compile(r"\[as-of:\s*(\d{4}-\d{2}-\d{2})\]")
+_LEARNED_STAMP_RE = re.compile(r"\s*\[(\d{4}-\d{2}-\d{2})\]\s*$")
+
+# An `[as-of]` fact declares itself a snapshot, so it ages fast; a plain
+# learned-at entry claims to be standing state and gets the default horizon
+# vault notes use.
+AS_OF_AGING_DAYS = 90
+LEARNED_AGING_DAYS = 180
+
+
+def strip_learned_stamp(entry: str) -> str:
+    """The entry text without its trailing learned-at stamp.
+
+    Promotion dedupe compares through this: the same fact promoted on two
+    different days must still count as a duplicate.
+    """
+    return _LEARNED_STAMP_RE.sub("", entry).rstrip()
+
+
+def find_aging_state(
+    region: str,
+    entries: list[str],
+    *,
+    today: datetime.date | None = None,
+) -> list[dict[str, Any]]:
+    """Entries whose declared date has aged past its horizon. Informational."""
+    current = today or datetime.date.today()
+    findings: list[dict[str, Any]] = []
+    for entry in entries:
+        as_of = _AS_OF_RE.search(entry)
+        if as_of:
+            kind, raw, horizon = "as-of", as_of.group(1), AS_OF_AGING_DAYS
+        else:
+            learned = _LEARNED_STAMP_RE.search(entry)
+            if not learned:
+                continue
+            kind, raw, horizon = "learned", learned.group(1), LEARNED_AGING_DAYS
+        try:
+            stamped = datetime.date.fromisoformat(raw)
+        except ValueError:
+            # Shape-valid but impossible date; the expiration-tag checks own
+            # malformed-stamp reporting, aging must not guess.
+            continue
+        age_days = (current - stamped).days
+        if age_days < horizon:
+            continue
+        findings.append(
+            {
+                "region": region,
+                "entry": _excerpt(entry),
+                "kind": kind,
+                "date": raw,
+                "age_days": age_days,
+                "threshold_days": horizon,
+            }
+        )
+    return findings
+
+
 def audit_entries(
     region_entries: dict[str, list[str]],
     *,
     workspace_dir: Path,
+    today: datetime.date | None = None,
 ) -> dict[str, Any]:
     """Run every rot detector over the bounded-memory regions.
 
@@ -298,6 +367,7 @@ def audit_entries(
     event_shaped: list[dict[str, Any]] = []
     stale_paths: list[dict[str, Any]] = []
     superseded: list[dict[str, Any]] = []
+    aging: list[dict[str, Any]] = []
     checked = 0
     unverifiable = 0
 
@@ -312,11 +382,13 @@ def audit_entries(
         superseded.extend(
             find_superseded_state(region, entries, workspace_dir=workspace_dir)
         )
+        aging.extend(find_aging_state(region, entries, today=today))
 
     return {
         "event_shaped_entries": event_shaped,
         "stale_path_entries": stale_paths,
         "superseded_state_candidates": superseded,
+        "aging_state_entries": aging,
         "paths_checked": checked,
         "paths_unverifiable": unverifiable,
     }

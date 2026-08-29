@@ -245,8 +245,13 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
         "person: User Example - the user, product lead.",
     ])
     mem_entries, _diags = mt.read_region(guide, "memory")
-    # Only the state-shaped rule lands in the region, not the chat event.
-    assert "Avoid em dashes; use commas instead." in mem_entries
+    # Only the state-shaped rule lands in the region, not the chat event —
+    # stamped with the learned-at date the aging audit reads.
+    from ciao.memory_audit import strip_learned_stamp
+
+    stripped = [strip_learned_stamp(entry) for entry in mem_entries]
+    assert "Avoid em dashes; use commas instead." in stripped
+    assert any(re.search(r"\[\d{4}-\d{2}-\d{2}\]$", entry) for entry in mem_entries)
     assert all("User said" not in entry for entry in mem_entries)
     profile_entries, _diags = mt.read_region(guide, "profile")
     assert any("User Example" in entry for entry in profile_entries)
@@ -375,7 +380,11 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     )
 
     mem_entries, _diags = mt.read_region(guide, "memory")
-    assert "Avoid em dashes; use commas instead." in mem_entries
+    from ciao.memory_audit import strip_learned_stamp
+
+    assert "Avoid em dashes; use commas instead." in [
+        strip_learned_stamp(entry) for entry in mem_entries
+    ]
     # The promoted correction is not duplicated into the proposals file.
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
@@ -1155,3 +1164,18 @@ def test_record_dismissal_ignores_empty_and_junk_lines(tmp_path: Path) -> None:
     legacy = queue.with_suffix(".dismissed.log")
     legacy.write_text('{"text": "legacy fact", "kind": "memory"}\n', encoding="utf-8")
     assert mp._dismissed_texts(queue) == {"kept fact", "legacy fact"}
+
+
+def test_promote_dedupes_across_learned_stamps(tmp_path: Path) -> None:
+    """The same fact promoted on a different day is still a duplicate."""
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Avoid em dashes; use commas instead. [2026-01-15]"],
+    )
+
+    remaining, promoted = mp.apply_proposals(proposals, guide_path=guide, vault_root=None)
+
+    assert promoted == ["person: User Example - the user, product lead."]
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert len(mem_entries) == 1  # no second copy with a fresh stamp

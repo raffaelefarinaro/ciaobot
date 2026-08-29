@@ -585,3 +585,56 @@ def test_memory_audit_command_stays_quiet_when_under_cap(
     assert exit_code == 0
     assert "over cap" not in out
     assert "consolidate" not in out
+
+
+# ---- Temporal validity -------------------------------------------------
+
+
+def test_find_aging_state_flags_old_as_of_and_learned_stamps() -> None:
+    import datetime as _dt
+
+    from ciao.memory_audit import find_aging_state
+
+    today = _dt.date(2026, 8, 29)
+    entries = [
+        "Quota data unavailable [as-of: 2026-04-01].",  # 150d: aged
+        "New pricing applies [as-of: 2026-08-01].",  # 28d: fresh
+        "Prefers terse replies. [2026-01-01]",  # learned 240d ago: aged
+        "Prefers tables for stats. [2026-08-01]",  # learned 28d ago: fresh
+        "Undated standing rule with no stamps.",
+        "Temporary flag [expires: 2026-12-01].",  # expiry is os-audit's job
+    ]
+    findings = find_aging_state("memory", entries, today=today)
+    kinds = {(f["kind"], f["date"]) for f in findings}
+    assert kinds == {("as-of", "2026-04-01"), ("learned", "2026-01-01")}
+    for finding in findings:
+        assert finding["age_days"] >= finding["threshold_days"]
+
+
+def test_find_aging_state_skips_impossible_dates() -> None:
+    from ciao.memory_audit import find_aging_state
+
+    assert find_aging_state("memory", ["Fact [as-of: 2026-02-30]."]) == []
+
+
+def test_strip_learned_stamp_round_trip() -> None:
+    from ciao.memory_audit import strip_learned_stamp
+
+    assert strip_learned_stamp("Rule text. [2026-08-29]") == "Rule text."
+    assert strip_learned_stamp("Rule text.") == "Rule text."
+    # An as-of tag is world time, not a learned stamp; it stays.
+    assert strip_learned_stamp("Fact [as-of: 2026-04-01].") == "Fact [as-of: 2026-04-01]."
+
+
+def test_audit_entries_reports_aging_state(tmp_path) -> None:
+    import datetime as _dt
+
+    from ciao.memory_audit import audit_entries
+
+    report = audit_entries(
+        {"memory": ["Old snapshot [as-of: 2025-01-01]."], "profile": []},
+        workspace_dir=tmp_path,
+        today=_dt.date(2026, 8, 29),
+    )
+    assert len(report["aging_state_entries"]) == 1
+    assert report["aging_state_entries"][0]["kind"] == "as-of"

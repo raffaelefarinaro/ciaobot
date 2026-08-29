@@ -2443,6 +2443,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         )
         for finding in report["superseded_state_candidates"]:
             print(f"  [{finding['region']}] {finding['subject']}")
+        aging = report.get("aging_state_entries", [])
+        print(f"Aging dated entries to re-verify (informational): {len(aging)}")
+        for finding in aging:
+            print(
+                f"  [{finding['region']}] {finding['kind']} {finding['date']} "
+                f"({finding['age_days']}d ≥ {finding['threshold_days']}d) :: "
+                f"{finding['entry']}"
+            )
         stale = report.get("stale_notes") or {}
         if stale:
             print(
