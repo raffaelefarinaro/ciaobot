@@ -33,12 +33,35 @@ RESERVED_UNINDEXED_FILES = frozenset(
 )
 
 
-def _is_reserved_bookkeeping(rel: Path) -> bool:
-    """True for the memory pipeline's own files under ``Workspace/``."""
+def _is_reserved_bookkeeping(rel_to_root: Path) -> bool:
+    """True for the memory pipeline's own files, exactly where it writes them.
+
+    ``rel_to_root`` is the path relative to the indexed root (the vault). The
+    pipeline only ever writes these files at ``<vault>/Workspace/<name>``, so
+    the match is exact: a user's note under any other directory that happens
+    to be named ``workspace`` (``projects/acme/workspace/Curation-Log.md``)
+    stays searchable.
+    """
     return (
-        len(rel.parts) >= 2
-        and rel.parts[-2].casefold() == "workspace"
-        and rel.name.casefold() in RESERVED_UNINDEXED_FILES
+        len(rel_to_root.parts) == 2
+        and rel_to_root.parts[0].casefold() == "workspace"
+        and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
+    )
+
+
+def _settle_excluded_row(
+    conn: sqlite3.Connection, fts_table: str, meta_table: str, rel_str: str, mtime: float
+) -> None:
+    """Remove an excluded note's searchable row but keep its meta row fresh.
+
+    The meta row's mtime is what lets every later pass skip re-reading and
+    re-parsing the file — opted-out notes are often the vault's largest
+    (rolled log archives), and index_vault runs on every vault_search call.
+    """
+    conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+    conn.execute(
+        f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
+        (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
     )
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
@@ -47,8 +70,10 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 # Every stored key is a path relative to the key base, so no key can begin with
 # a separator: this prefix matches no row. It is the fail-closed answer for a
 # vault whose rows have no identifying prefix, where the alternative ("" — match
-# everything) leaked one workspace's notes into another's search.
-_NO_MATCH_KEY_PREFIX = os.sep
+# everything) leaked one workspace's notes into another's search. Public so
+# callers of vault_key_prefix can recognise the fail-closed answer by name
+# instead of re-deriving the sentinel's value.
+NO_MATCH_KEY_PREFIX = os.sep
 
 
 def get_db_path() -> Path:
@@ -249,6 +274,11 @@ def _index_directory(
 
     found_paths: set[str] = set()
     indexed_count = 0
+    # Rows settled without being (re)indexed: an opted-out note's FTS removal
+    # plus meta refresh. Counted separately because these writes must commit
+    # even when nothing else changed in the pass — the old code routed them
+    # through the prune, whose counter reached the commit gate below.
+    settled_count = 0
 
     # Walk directory
     for md_path in root_dir.rglob(file_pattern):
@@ -267,7 +297,10 @@ def _index_directory(
             continue
         # The memory pipeline's own bookkeeping, but only where the pipeline
         # writes it — a user note elsewhere sharing the name stays indexed.
-        if _is_reserved_bookkeeping(rel):
+        # Checked against the indexed root, not the key base: keys may carry
+        # an install-root prefix, but the pipeline's write location is always
+        # `<root>/Workspace/`.
+        if _is_reserved_bookkeeping(md_path.relative_to(root_dir)):
             continue
 
         found_paths.add(rel_str)
@@ -290,15 +323,10 @@ def _index_directory(
 
         if _search_opted_out(text):
             # Remove any FTS rows indexed before the note opted out, but keep
-            # (and refresh) the meta row: the mtime short-circuit above is what
-            # stops every later pass from re-reading and re-parsing the file —
-            # opted-out notes are often the vault's largest (rolled log
-            # archives), and index_vault runs on every vault_search call.
-            conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
-            conn.execute(
-                f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
-                (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
-            )
+            # (and refresh) the meta row so the mtime short-circuit above
+            # stops every later pass from re-reading the file.
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
+            settled_count += 1
             continue
 
         title = _parse_title(text, md_path.stem)
@@ -339,7 +367,7 @@ def _index_directory(
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
         removed_count += 1
 
-    if indexed_count > 0 or removed_count > 0:
+    if indexed_count > 0 or removed_count > 0 or settled_count > 0:
         conn.commit()
 
     return indexed_count, removed_count
@@ -408,7 +436,7 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     """
     base = _key_base(vault_root, path_base)
     prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
-    return _NO_MATCH_KEY_PREFIX if prefix is None else prefix
+    return NO_MATCH_KEY_PREFIX if prefix is None else prefix
 
 
 def index_file(
@@ -442,13 +470,28 @@ def index_file(
     except OSError:
         return False
 
-    if not is_log and (_is_reserved_bookkeeping(rel) or _search_opted_out(text)):
-        # Force-indexing must honour the same exclusions as the bulk pass, and
-        # clean up rows written before the file became excluded.
-        conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
-        conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
-        conn.commit()
-        return False
+    if not is_log:
+        try:
+            rel_to_root = file_path.relative_to(vault_root)
+        except ValueError:
+            rel_to_root = rel
+        if _is_reserved_bookkeeping(rel_to_root):
+            # Force-indexing must honour the same exclusions as the bulk pass,
+            # and clean up rows written before the file became excluded. Both
+            # rows go: the bulk pass never records these files in found_paths,
+            # so a kept meta row would be pruned on the next pass anyway.
+            conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
+            conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
+            conn.commit()
+            return False
+        if _search_opted_out(text):
+            # Same settle as the bulk pass: drop the searchable row but keep
+            # the meta row fresh, so the next index_vault does not re-read the
+            # whole file (the bulk pass keeps opted-out notes in found_paths,
+            # so the prune spares this row).
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
+            conn.commit()
+            return False
 
     title = _parse_title(text, file_path.stem)
 

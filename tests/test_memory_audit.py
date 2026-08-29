@@ -557,6 +557,72 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in out
 
 
+def test_memory_audit_with_vault_marks_retrieved_stale_notes(
+    tmp_path: Path,
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    """Decay-by-disuse: a stale note in the hits log reads retrieved_recently.
+
+    The hits are stored in the index's key space (workspace-relative, real
+    vault directory name); the audit must rebuild that key from the rendered
+    finding path rather than suffix-matching, and mark nothing when no hit
+    carries this vault's prefix.
+    """
+    import argparse
+    import json as jsonlib
+    from datetime import datetime, timezone
+
+    from ciao.cli import _memory_audit_command
+    from ciao.memory_tool import ensure_regions
+
+    for name in (
+        "CIAO_WORKSPACES",
+        "CIAO_VAULT_ROOT",
+        "CIAO_WORKSPACE",
+        "CIAO_VAULT_MODE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_MEMORY_CHAR_LIMIT",
+        "CIAO_USER_CHAR_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    vault = tmp_path / "memory-vault"
+    people = vault / "People"
+    people.mkdir(parents=True)
+    stale_note = "---\ntype: person\nupdated: 2024-01-01\n---\n# {n}\nOld facts.\n"
+    (people / "Retrieved.md").write_text(stale_note.format(n="Retrieved"), encoding="utf-8")
+    (people / "Forgotten.md").write_text(stale_note.format(n="Forgotten"), encoding="utf-8")
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "q": "retrieved",
+        "paths": ["memory-vault/People/Retrieved.md"],
+    }
+    (runtime / "vault_search_hits.jsonl").write_text(
+        jsonlib.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    _memory_audit_command(
+        argparse.Namespace(
+            workspace=tmp_path, vault_root=vault, json=True, with_vault=True
+        )
+    )
+
+    report = jsonlib.loads(capsys.readouterr().out)
+    by_path = {
+        finding["path"]: finding
+        for finding in report["stale_notes"]["stale_notes"]
+    }
+    assert by_path["memory-vault/People/Retrieved.md"]["retrieved_recently"] is True
+    assert by_path["memory-vault/People/Forgotten.md"]["retrieved_recently"] is False
+
+
 def test_memory_audit_command_stays_quiet_when_under_cap(
     tmp_path: Path,
     capsys: Any,

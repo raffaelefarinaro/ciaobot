@@ -176,7 +176,13 @@ def _known_context_block(
         "## Known context (fetched from the workspace, NOT transcript content)\n"
         + "\n".join(parts)
     )
-    return block[:_KNOWN_CONTEXT_MAX_CHARS] + "\n\n"
+    if len(block) > _KNOWN_CONTEXT_MAX_CHARS:
+        # Cut at a line boundary: a mid-entry or mid-name cut would present a
+        # corrupted entry (or half a person's name) as reference data the
+        # prompt tells the model to trust.
+        cut = block.rfind("\n", 0, _KNOWN_CONTEXT_MAX_CHARS)
+        block = block[:_KNOWN_CONTEXT_MAX_CHARS] if cut <= 0 else block[:cut]
+    return block + "\n\n"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -250,14 +256,18 @@ def _resolve_insights_call(
     return effective_model, provider, note
 
 
-def _fit_transcript(filtered_jsonl: str) -> tuple[str, int]:
+def _fit_transcript(filtered_jsonl: str, *, reserve: int = 0) -> tuple[str, int]:
     """Trim a transcript to the input budget, dropping oldest lines first.
 
     Returns ``(payload, dropped_line_count)``. Newest turns are kept because
     they carry the session's conclusions; the surviving lines keep their
     original ``idx`` values, so the citations the prompt demands stay valid.
+
+    ``reserve`` is subtracted from the budget for prompt text prepended after
+    fitting (the known-context block) — the oversized-input rejection is
+    deliberately not retried, so the first call must already be within budget.
     """
-    budget = _max_input_chars()
+    budget = max(0, _max_input_chars() - reserve)
     if len(filtered_jsonl) <= budget:
         return filtered_jsonl, 0
     lines = filtered_jsonl.splitlines()
@@ -301,6 +311,26 @@ def is_terminal_failure(exc: Exception) -> bool:
     return getattr(exc, "transient", None) is False
 
 
+# Rules shared verbatim by both extraction prompts (JSONL and text mode).
+# Stated once so the two modes cannot drift apart — the same reason the
+# curation contract was collapsed into one skill file.
+_KNOWN_CONTEXT_RULE = """\
+- The user prompt may open with a "Known context" section fetched from the
+  workspace: current always-loaded memory entries and a roster of known
+  people and projects. It is reference data, not transcript content. A fact
+  already covered by a current memory entry must be OMITTED; when the
+  transcript shows a known fact CHANGED, emit the updated fact. A person or
+  project in the roster is never a New entity — only names absent from the
+  roster qualify.
+"""
+
+_FINAL_STATEMENT_RULE = """\
+- Be terse. One line per item where possible. Every bullet is a final
+  statement: never narrate reconsideration, hedging, or self-correction
+  inside a bullet — resolve it first, then write only the surviving fact.
+"""
+
+
 _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
 The user is the workspace owner. Output Markdown with the exact section headers below.
@@ -320,13 +350,7 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
-- The user prompt may open with a "Known context" section fetched from the
-  workspace: current always-loaded memory entries and a roster of known
-  people and projects. It is reference data, not transcript content. A fact
-  already covered by a current memory entry must be OMITTED; when the
-  transcript shows a known fact CHANGED, emit the updated fact. A person or
-  project in the roster is never a New entity — only names absent from the
-  roster qualify.
+""" + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
   destination tag. Never invent a date the transcript does not support.
@@ -355,10 +379,7 @@ Rules:
   Y, and we should keep doing X"). Drop one-off picks about this transcript.
 - When citing a vault link, use a relative Markdown link with the path from the
   vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
-- Be terse. One line per item where possible. Every bullet is a final
-  statement: never narrate reconsideration, hedging, or self-correction
-  inside a bullet — resolve it first, then write only the surviving fact.
-
+""" + _FINAL_STATEMENT_RULE + """
 ## Errors
 - <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
 
@@ -967,11 +988,18 @@ async def _run_model_with_retry(
     trimmed to the configured budget before the first call, so a second
     identical request would fail the same way.
     """
+    # The context block is prepended AFTER fitting, so its length is reserved
+    # here — otherwise the final prompt overshoots the budget the no-retry
+    # oversized-input policy relies on (worst on the small Apple window).
+    reserve = len(context_block)
     if native_sidecar.is_apple_model(model):
-        payload, dropped = native_sidecar.fit_apple_input(filtered_jsonl)
+        payload, dropped = native_sidecar.fit_apple_input(
+            filtered_jsonl,
+            max_chars=max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - reserve),
+        )
         budget = native_sidecar.APPLE_MAX_INPUT_CHARS
     else:
-        payload, dropped = _fit_transcript(filtered_jsonl)
+        payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
         budget = _max_input_chars()
     if dropped:
         logger.info(
@@ -1042,7 +1070,12 @@ async def _call_text_model(
 ) -> str:
     """Run text-mode extraction for ``model`` on a rendered archive body."""
     if native_sidecar.is_apple_model(model):
-        apple_body, dropped = native_sidecar.fit_apple_input(body)
+        # Reserve room for the context block prepended by _text_user_prompt —
+        # the fitted body plus the block must stay within the Apple window.
+        apple_body, dropped = native_sidecar.fit_apple_input(
+            body,
+            max_chars=max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - len(context_block)),
+        )
         if dropped:
             logger.info(
                 "Apple insights transcript over the %d-char budget; "
@@ -1216,13 +1249,7 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
-- The user prompt may open with a "Known context" section fetched from the
-  workspace: current always-loaded memory entries and a roster of known
-  people and projects. It is reference data, not transcript content. A fact
-  already covered by a current memory entry must be OMITTED; when the
-  transcript shows a known fact CHANGED, emit the updated fact. A person or
-  project in the roster is never a New entity — only names absent from the
-  roster qualify.
+""" + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.
   Never invent a date the transcript does not support.
@@ -1245,10 +1272,7 @@ Rules:
   with, not one-off references in this transcript.
 - "Decisions" = choices that set a precedent for future sessions; drop one-off
   picks about this transcript.
-- Be terse. One line per item where possible. Every bullet is a final
-  statement: never narrate reconsideration, hedging, or self-correction
-  inside a bullet — resolve it first, then write only the surviving fact.
-
+""" + _FINAL_STATEMENT_RULE + """
 Your entire response must be Markdown using only the section headers below. Never
 return JSON, a code-fenced transcript, session metadata, or a generic recap.
 

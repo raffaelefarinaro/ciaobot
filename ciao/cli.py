@@ -2385,15 +2385,24 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
         try:
             # The stamp only feeds graph scoping; the staleness detector keys
-            # on type and dates, not workspace.
-            entries = scan_vault(vault, workspace="personal")
+            # on type and dates, not workspace. The render prefix is passed
+            # explicitly so the stored-key rebuild below strips exactly what
+            # scan_vault rendered, instead of hardcoding its default.
+            render_prefix = "memory-vault"
+            entries = scan_vault(
+                vault, workspace="personal", path_prefix=Path(render_prefix)
+            )
             report["stale_notes"] = find_stale_notes(
                 entries, vault_root=vault, today=datetime.date.today()
             )
             # Decay-by-disuse: mark whether recall has returned each stale
             # note recently. Stale AND unretrieved is the strongest demotion
             # candidate; no evidence at all (no hits log yet) marks nothing.
-            from ciao.fts_search import read_search_hit_paths, vault_key_prefix
+            from ciao.fts_search import (
+                NO_MATCH_KEY_PREFIX,
+                read_search_hit_paths,
+                vault_key_prefix,
+            )
 
             # The writer (control_plane.vault_search) appends beside
             # state.json, which honours CIAO_RUNTIME_ROOT — a hardcoded
@@ -2402,22 +2411,31 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             hit_paths = read_search_hit_paths(Path(config.state_path).parent)
             # Compare in the index's own key space: hits are stored relative
             # to the install root with the vault directory's real name, while
-            # scan_vault renders every path under a fixed `memory-vault/`
-            # prefix. Rebuilding the stored key per finding keeps a same-named
-            # note in another workspace (or a vault not named `memory-vault`)
-            # from producing a false match. The fail-closed prefix means this
-            # vault has no identifiable rows: no evidence, so mark nothing.
-            key_base = getattr(config, "workspace_root", None) or vault.parent
-            key_prefix = vault_key_prefix(vault, Path(key_base))
-            if hit_paths is not None and key_prefix != os.sep:
+            # scan_vault renders every path under the render prefix above.
+            # Rebuilding the stored key per finding keeps a same-named note in
+            # another workspace (or a vault not named `memory-vault`) from
+            # producing a false match. The fail-closed prefix means this vault
+            # has no identifiable rows: no evidence, so mark nothing.
+            # workspace_root is a required config field, populated above from
+            # the same value injected into config_source — no fallback.
+            key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
                 normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
                 normalized_prefix = key_prefix.replace(os.sep, "/")
-                for finding in report["stale_notes"]["stale_notes"]:
-                    rendered = str(finding["path"]).replace(os.sep, "/")
-                    rel = rendered.removeprefix("memory-vault/")
-                    finding["retrieved_recently"] = (
-                        normalized_prefix + rel
-                    ) in normalized_hits
+                # A non-empty prefix that no hit carries means the log's keys
+                # were written against a different base (the audit invoked with
+                # another workspace root than the server's). That is missing
+                # evidence, not proof of disuse — marking everything false
+                # would nominate actively-used notes for demotion.
+                if not normalized_prefix or any(
+                    hit.startswith(normalized_prefix) for hit in normalized_hits
+                ):
+                    for finding in report["stale_notes"]["stale_notes"]:
+                        rendered = str(finding["path"]).replace(os.sep, "/")
+                        rel = rendered.removeprefix(render_prefix + "/")
+                        finding["retrieved_recently"] = (
+                            normalized_prefix + rel
+                        ) in normalized_hits
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],

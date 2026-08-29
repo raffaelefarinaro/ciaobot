@@ -1116,13 +1116,13 @@ def test_known_context_block_carries_regions_and_roster(tmp_path):
     mt.write_region(guide, "memory", ["Prefers plain engineering notes."])
     vault = tmp_path / "memory-vault"
     (vault / "People").mkdir(parents=True)
-    (vault / "People" / "Ipek.md").write_text("# Ipek\n", encoding="utf-8")
+    (vault / "People" / "Elena.md").write_text("# Elena\n", encoding="utf-8")
     (vault / "projects" / "active" / "Wedding").mkdir(parents=True)
 
     block = _known_context_block(guide, vault)
     assert block.startswith("## Known context")
     assert "Prefers plain engineering notes." in block
-    assert "Known people: Ipek" in block
+    assert "Known people: Elena" in block
     assert "Known projects: Wedding" in block
     # Absent inputs mean no context section at all, not an empty header.
     assert _known_context_block(None, None) == ""

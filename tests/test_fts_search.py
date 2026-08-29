@@ -584,6 +584,89 @@ def test_search_false_frontmatter_opts_a_note_out(
     assert fts_search.search_vault(db_conn, "scratchpad") == []
 
 
+def test_opt_out_removal_commits_when_it_is_the_only_change(
+    tmp_path: Path, temp_vault: Path
+) -> None:
+    """An opt-out settled as the pass's only change must persist.
+
+    The settle branch bypasses the indexed/removed counters, so it needs its
+    own path to the commit gate — without one, the FTS delete and the meta
+    refresh roll back on close and every later pass re-reads the file and
+    still serves the opted-out content.
+    """
+    db_path = tmp_path / "search.db"
+    note = temp_vault / "Scratch.md"
+    note.write_text("# Scratch\nA wedding scratchpad.\n", encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    fts_search.init_db(conn)
+    fts_search.index_vault(conn, temp_vault)
+    conn.close()
+
+    note.write_text(
+        "---\nsearch: false\n---\n# Scratch\nA wedding scratchpad.\n",
+        encoding="utf-8",
+    )
+    os.utime(note, (time.time() + 5, time.time() + 5))
+    conn = sqlite3.connect(db_path)
+    fts_search.index_vault(conn, temp_vault)  # opt-out is the ONLY change
+    conn.close()
+
+    conn = sqlite3.connect(db_path)  # a fresh connection sees committed state
+    try:
+        assert fts_search.search_vault(conn, "scratchpad") == []
+        # The meta row survived with the new mtime, so the next pass
+        # short-circuits instead of re-reading the file.
+        row = conn.execute(
+            "SELECT mtime FROM vault_meta WHERE path LIKE ?", ("%Scratch.md",)
+        ).fetchone()
+        assert row is not None and row[0] == note.stat().st_mtime
+    finally:
+        conn.close()
+
+
+def test_reserved_names_under_non_vault_workspace_dir_stay_indexed(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Only ``<vault>/Workspace/`` is the pipeline's write location.
+
+    A user's note inside any other directory that happens to be named
+    ``workspace`` (mirroring a code repo, notes about IDE workspaces) must
+    not be silently hidden from search by its basename.
+    """
+    nested = temp_vault / "projects" / "acme" / "workspace"
+    nested.mkdir(parents=True)
+    (nested / "Curation-Log.md").write_text(
+        "# Curation\n\nAcme quarterly curation ceremony notes.\n",
+        encoding="utf-8",
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "ceremony")]
+    assert any("Curation-Log" in p for p in paths)
+
+
+def test_index_file_keeps_meta_row_for_opted_out_note(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Force-indexing an opted-out note settles it like the bulk pass.
+
+    The searchable row goes, but the meta row stays fresh so the next
+    index_vault does not re-read the whole file.
+    """
+    note = temp_vault / "Archive.md"
+    note.write_text(
+        "---\nsearch: false\n---\n# Archive\nRolled wedding log archive.\n",
+        encoding="utf-8",
+    )
+    assert fts_search.index_file(db_conn, temp_vault, note) is False
+    assert fts_search.search_vault(db_conn, "rolled") == []
+    row = db_conn.execute(
+        "SELECT mtime FROM vault_meta WHERE path LIKE ?", ("%Archive.md",)
+    ).fetchone()
+    assert row is not None and row[0] == note.stat().st_mtime
+
+
 def test_index_file_honours_exclusions(
     db_conn: sqlite3.Connection, temp_vault: Path
 ) -> None:
