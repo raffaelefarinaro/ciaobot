@@ -236,12 +236,18 @@ def main_entry(argv: Sequence[str] | None = None) -> int:
             code_verifier=code_verifier,
         )
     except ValueError as exc:
+        # Deliberately keep the parked verifier. The exchange can fail without
+        # Google ever consuming the code — a dropped connection, a transient
+        # 5xx — and that code is still usable. Discarding the only copy of its
+        # verifier here would force the operator back through consent for a
+        # retry that would have worked. Its own expiry window retires it.
         print(f"Error: {exc}")
+        print("The authorization code may still be usable — you can re-run with")
+        print("the same --redirect-url. The parked verifier is kept until it expires.")
         return 1
-    finally:
-        # The code is spent either way — a verifier left on disk could only be
-        # picked up by a later run it does not belong to.
-        _clear_pending_verifier(config_dir)
+    # Spent: the code is single-use, so a verifier left behind could only be
+    # picked up by a later run it does not belong to.
+    _clear_pending_verifier(config_dir)
 
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:

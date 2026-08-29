@@ -40,6 +40,7 @@ from ciao.schedules import (
     is_interval,
     normalize_interval_minutes,
     publish_automations_changed,
+    wall_clock_time_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -1348,6 +1349,13 @@ class CiaoControlPlane:
         # which interval_delta floors to one minute -- far faster than asked.
         if is_interval(updated) and not updated.interval_minutes:
             updated.interval_minutes = DEFAULT_INTERVAL_MINUTES
+        # The mirror of the REST route's guard. Moving an interval entry (or a
+        # migrated loop) to a wall-clock cadence leaves daily_time_utc empty,
+        # and compute_next_run cannot parse it -- the automation would report
+        # as enabled and never dispatch.
+        time_error = wall_clock_time_error(updated)
+        if time_error:
+            raise ControlPlaneError("invalid_time", time_error)
         self.schedules.replace(updated)
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))

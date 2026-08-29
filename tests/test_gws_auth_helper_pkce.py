@@ -151,3 +151,60 @@ def test_the_parked_verifier_is_spent_after_the_exchange(helper_env) -> None:
     )
 
     assert not gws_auth_helper._pending_verifier_path(helper_env.config_dir).exists()
+
+
+def test_a_failed_exchange_keeps_the_verifier_for_a_retry(helper_env, monkeypatch) -> None:
+    """A transient failure need not cost the operator another consent round.
+
+    The exchange can fail without Google consuming the code (dropped
+    connection, 5xx), and that code is still usable — but only with the
+    verifier that produced it.
+    """
+    gws_auth_helper._store_pending_verifier(helper_env.config_dir, "parked-verifier")
+
+    def _boom(**kwargs):
+        raise ValueError("connection reset")
+
+    monkeypatch.setattr(gws_auth_helper.gws_auth, "exchange_code", _boom)
+
+    rc = gws_auth_helper.main_entry(
+        ["personal", "--redirect-url", "http://localhost/?code=x"]
+    )
+
+    assert rc == 1
+    assert (
+        gws_auth_helper._load_pending_verifier(helper_env.config_dir)
+        == "parked-verifier"
+    )
+
+
+def test_the_retry_after_a_failure_succeeds_with_the_same_verifier(
+    helper_env, monkeypatch
+) -> None:
+    gws_auth_helper._store_pending_verifier(helper_env.config_dir, "parked-verifier")
+
+    # Fail once, then let the transport recover. Swapping the stub rather than
+    # calling monkeypatch.undo(), which would also revert the fixture's own
+    # patches and send the helper at the real profile directory.
+    attempts = {"n": 0}
+
+    def _flaky(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ValueError("5xx")
+        helper_env.exchanges.append(kwargs)
+        return {"refresh_token": "rt", "id_token": "", "scope": "s"}
+
+    monkeypatch.setattr(gws_auth_helper.gws_auth, "exchange_code", _flaky)
+
+    assert gws_auth_helper.main_entry(
+        ["personal", "--redirect-url", "http://localhost/?code=x"]
+    ) == 1
+
+    rc = gws_auth_helper.main_entry(
+        ["personal", "--redirect-url", "http://localhost/?code=x"]
+    )
+
+    assert rc == 0
+    assert helper_env.exchanges[-1]["code_verifier"] == "parked-verifier"
+    assert not gws_auth_helper._pending_verifier_path(helper_env.config_dir).exists()

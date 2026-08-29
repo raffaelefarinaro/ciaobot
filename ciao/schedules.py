@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass
@@ -53,6 +54,33 @@ FREQUENCIES = {"daily", "weekly", "monthly", "manual", "once", INTERVAL_FREQUENC
 # 20 seconds, so anything finer would be cadence the scheduler cannot honour.
 MIN_INTERVAL_MINUTES = 1
 DEFAULT_INTERVAL_MINUTES = 10
+
+# Exactly what ``compute_next_run`` can parse out of ``daily_time_utc``.
+_VALID_DAILY_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def wall_clock_time_error(entry: "ScheduleEntry") -> str:
+    """Why this entry's time is unusable, or "" when it is fine.
+
+    A wall-clock cadence needs a time ``compute_next_run`` can parse. Without
+    one it returns ``None`` and ``tick()`` never matches, so the entry sits
+    there reading as enabled and silently never fires — which is exactly where
+    an interval entry lands when it is edited to a wall-clock cadence, since
+    interval and manual entries carry no ``daily_time_utc`` at all.
+
+    Lives here rather than in a route because both write paths need it: the
+    REST ``PATCH /api/schedules/{id}`` and the ``schedule`` MCP tool. Guarding
+    only one of them leaves the other door open.
+    """
+    if getattr(entry, "frequency", "") in {"manual", INTERVAL_FREQUENCY}:
+        return ""
+    if _VALID_DAILY_TIME.match(getattr(entry, "daily_time_utc", "") or ""):
+        return ""
+    return (
+        f"frequency '{entry.frequency}' needs a HH:MM time; "
+        f"got {entry.daily_time_utc!r}"
+    )
+
 
 SYSTEM_STATE_FIELDS = {
     "enabled",
