@@ -489,6 +489,13 @@ def search(
     try:
         cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
+        if not rows and len(words) > 1:
+            # AND-of-all-words returns nothing for paraphrase queries ("how
+            # much do I charge per hour" — no note holds every word). Degrade
+            # to OR and let BM25 rank the notes matching the distinctive
+            # terms; a weaker match beats an empty answer for recall.
+            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit))
+            rows = cursor.fetchall()
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
@@ -547,6 +554,77 @@ def search_logs(
     what a not-yet-migrated root and every per-root ``index_file`` write produce.
     """
     return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+
+
+# ── Retrieval telemetry (decay-by-disuse signal) ───────────────────────────
+#
+# Every vault_search result set is appended here so the memory audit can tell
+# which notes recall actually uses. A note that is both stale and never
+# retrieved is the strongest demotion candidate the nightly curator sees.
+# Strictly best-effort and signal-only: nothing reads this to delete anything.
+
+SEARCH_HITS_NAME = "vault_search_hits.jsonl"
+_HITS_MAX_BYTES = 1 * 1024 * 1024
+_HITS_KEEP_LINES = 2000
+
+
+def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
+    """Append one search's returned note paths to the hits log. Never raises."""
+    try:
+        import json as _json
+
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = runtime_dir / SEARCH_HITS_NAME
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "query": query[:200],
+            "paths": paths[:50],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+        if path.stat().st_size > _HITS_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 — telemetry must never break search
+        logger.debug("Could not record search hits", exc_info=True)
+
+
+def read_search_hit_paths(
+    runtime_dir: Path, *, since_days: int = 90
+) -> set[str] | None:
+    """Note paths returned by any search in the window; None when no log exists.
+
+    None matters: an install that never wrote the log has no retrieval
+    evidence, and the audit must not read that absence as "never retrieved".
+    """
+    import json as _json
+
+    path = runtime_dir / SEARCH_HITS_NAME
+    if not path.exists():
+        return None
+    cutoff = datetime.now(timezone.utc).timestamp() - since_days * 86400
+    hits: set[str] = set()
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = _json.loads(line)
+            except ValueError:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(record.get("ts", ""))).timestamp()
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            for item in record.get("paths", []):
+                if isinstance(item, str):
+                    hits.add(item)
+    except OSError:
+        return None
+    return hits
 
 
 def logs_key_prefix(logs_root: Path, path_base: Path | None) -> str:

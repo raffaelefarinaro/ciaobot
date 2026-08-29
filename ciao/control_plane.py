@@ -25,6 +25,7 @@ from ciao.fts_search import (
     get_db_path,
     index_vault,
     init_db,
+    record_search_hits,
     search_vault,
     vault_key_prefix,
 )
@@ -649,6 +650,11 @@ class CiaoControlPlane:
             )
         finally:
             conn.close()
+        # Retrieval telemetry for the decay-by-disuse audit: which notes recall
+        # actually uses. Best-effort; never blocks the search result.
+        record_search_hits(
+            Path(self.config.state_path).parent, query, [row["path"] for row in rows]
+        )
         return _ok(rows)
 
     def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:

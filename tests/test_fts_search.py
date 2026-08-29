@@ -575,3 +575,47 @@ def test_index_file_honours_exclusions(
 
     assert fts_search.index_file(db_conn, temp_vault, queue) is False
     assert fts_search.search_vault(db_conn, "secret pending") == []
+
+
+def test_multiword_query_degrades_to_or_when_and_finds_nothing(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """Paraphrase queries fall back to OR instead of returning nothing.
+
+    "brother in law" matched zero notes under AND-of-all-words even when a
+    note said "Ipek's brother"; the OR fallback lets BM25 rank the notes
+    holding the distinctive terms.
+    """
+    people = temp_vault / "People"
+    (people / "Burak.md").write_text(
+        "# Burak\nIpek's brother, married to Gizem.", encoding="utf-8"
+    )
+    fts_search.index_vault(db_conn, temp_vault)
+
+    rows = fts_search.search_vault(db_conn, "brother in law")
+    assert any("Burak" in r["path"] for r in rows)
+    # A single-word miss still returns empty (nothing to OR).
+    assert fts_search.search_vault(db_conn, "nonexistentterm") == []
+
+
+def test_search_hit_telemetry_round_trip(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    # No log yet: no evidence, not "never retrieved".
+    assert fts_search.read_search_hit_paths(runtime) is None
+
+    fts_search.record_search_hits(
+        runtime, "wedding venue", ["personal/memory-vault/Wedding.md"]
+    )
+    fts_search.record_search_hits(runtime, "other", [])
+    hits = fts_search.read_search_hit_paths(runtime, since_days=90)
+    assert hits == {"personal/memory-vault/Wedding.md"}
+
+    # Old records age out of the window.
+    assert fts_search.read_search_hit_paths(runtime, since_days=0) == set()
+
+
+def test_record_search_hits_never_raises(tmp_path: Path) -> None:
+    # A file where the directory should be: mkdir fails, the call swallows it.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("x", encoding="utf-8")
+    fts_search.record_search_hits(blocker, "q", ["p"])  # must not raise
