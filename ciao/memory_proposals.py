@@ -1142,7 +1142,8 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     tokens = [t for t in re.split(r"\W+", norm_proposal) if len(t) > 3]
     if len(tokens) < 4:
         return False
-    hits = sum(1 for tok in tokens if tok in norm_content)
+    content_tokens = set(re.split(r"\W+", norm_content))
+    hits = sum(1 for tok in tokens if tok in content_tokens)
     return hits / len(tokens) >= 0.6
 
 
@@ -1180,6 +1181,27 @@ def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> 
     return False
 
 
+def _resolve_doc_path(vault_root: Path, doc_path: str) -> Path:
+    """Resolve *doc_path* against *vault_root*, handling shared-prefix duplication.
+
+    ``doc_path`` may be absolute, vault-relative, or already a full path that
+    starts with the vault's own prefix (so ``vault_root / doc_path`` would
+    duplicate). Try vault-relative first, then the literal path (cwd-relative
+    or absolute), preferring whichever exists.
+    """
+    p = Path(doc_path)
+    if p.is_absolute():
+        return p
+    candidate = vault_root / doc_path
+    if candidate.exists():
+        return candidate
+    if p.exists():
+        return p
+    # Fall back to the vault-relative candidate even when neither exists yet;
+    # the caller will check existence before reading.
+    return candidate
+
+
 def _is_already_applied(
     proposal: MemoryProposal,
     vault_root: Path,
@@ -1203,20 +1225,7 @@ def _is_already_applied(
     if proposal.target == "project":
         doc_path = proposal.payload or project_doc_path
         if doc_path:
-            p = Path(doc_path)
-            if not p.is_absolute():
-                # workspace_vault_root is the vault; the canonical doc is often
-                # vault-relative (e.g. personal/memory-vault/projects/...) or
-                # relative to the vault root.
-                # Try vault_root-relative first, then cwd-relative.
-                candidate = vault_root / doc_path
-                if candidate.exists():
-                    p = candidate
-                else:
-                    # doc_path may already be vault_root-relative with a prefix
-                    # like "personal/memory-vault/projects/..."; vault_root may
-                    # be the vault itself, so join will duplicate. Try as-is.
-                    p = Path(doc_path)
+            p = _resolve_doc_path(vault_root, doc_path)
             if _is_already_in_file(p, proposal.text):
                 return True
     if proposal.target == "people" and vault_root is not None:
@@ -1247,9 +1256,7 @@ def _is_already_applied(
                 if _is_already_in_region(guide_path, region, proposal.text):
                     return True
         if project_doc_path:
-            p = Path(project_doc_path)
-            if not p.is_absolute():
-                p = vault_root / project_doc_path
+            p = _resolve_doc_path(vault_root, project_doc_path)
             if p.exists() and _is_already_in_file(p, proposal.text):
                 return True
     return False
