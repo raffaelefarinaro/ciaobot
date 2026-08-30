@@ -1882,7 +1882,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function syncLatest() {
     if (latestSyncInFlight) return
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    // Do not gate on visibility — answers must appear in the active chat
+    // even while the tab is hidden, otherwise the reply stays invisible
+    // until the user opens the Activity view (visibilitychange).
     latestSyncInFlight = true
     try {
       // Active-only: the server skips the (possibly thousands of) archived
@@ -3964,6 +3966,12 @@ export const useProjectStore = defineStore('projects', () => {
         api.get<ChatInfo[]>('/api/chats?active_only=1')
           .then(c => reconcileActiveChats(c))
           .catch(() => { /* ignore */ })
+        // Ensure the active chat's transcript refreshes even when the tab is
+        // hidden — otherwise the answer stays invisible until the user opens
+        // the Activity view (which fires a visibilitychange).
+        if (msg.chat_id === activeChatId.value) {
+          void reconcileAfterResult(msg.chat_id)
+        }
         break
       }
       case 'chat_subagents_ready': {
