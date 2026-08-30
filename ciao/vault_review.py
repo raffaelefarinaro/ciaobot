@@ -24,6 +24,7 @@ RETENTION_DAYS = 30
 MAX_CANDIDATES = 5
 REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "deleted"})
 DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "archive", "trash", "restore", "delete"})
+DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "archive"})
 _DEFER_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 
 
@@ -104,11 +105,26 @@ def _latest_decisions(root: Path) -> dict[str, dict[str, Any]]:
     return latest
 
 
+def _suppressed(decision: dict[str, Any], now: datetime) -> bool:
+    if decision.get("content_hash") == "":
+        return False
+    disposition = decision.get("disposition")
+    if disposition in {"keep", "archive", "trash", "delete"}:
+        return True
+    if disposition != "defer":
+        return False
+    try:
+        deadline = datetime.fromisoformat(str(decision.get("deferred_until", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return now < deadline
+
+
 def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[str, dict[str, Any]]) -> None:
     lines = ["# Vault Review", "", "Pending note-review candidates. This file is generated from the append-only ledger.", ""]
     for item in candidates:
         decision = decisions.get(item.candidate_id, {})
-        if decision.get("disposition") in {"keep", "archive", "delete"} and decision.get("content_hash") == item.content_hash:
+        if decision.get("content_hash") == item.content_hash and _suppressed(decision, datetime.now(UTC)):
             continue
         reason = ", ".join(item.signals) or "weak provenance"
         lines.append(f"- `{item.path}` [{item.priority}] {reason} (candidate `{item.candidate_id}`)")
@@ -195,17 +211,15 @@ def generate_candidates(
         candidates.append(item)
     candidates.sort(key=lambda item: (-item.priority, item.path))
     decisions = _latest_decisions(root)
-    active = [item for item in candidates if decisions.get(item.candidate_id, {}).get("disposition") != "keep" or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
+    active = [item for item in candidates if not _suppressed(decisions.get(item.candidate_id, {}), now or datetime.now(UTC)) or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
     result = active[: max(1, min(int(max_candidates), 50))]
     _write_queue(root, result, decisions)
     return result
 
 
 def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *, actor: str = "user", defer_days: int = 7) -> dict[str, Any]:
-    if disposition not in DISPOSITIONS:
+    if disposition not in DECISION_DISPOSITIONS:
         raise ValueError(f"unsupported vault review disposition: {disposition}")
-    if disposition == "delete":
-        raise ValueError("permanent deletion requires delete_permanently")
     row = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "path": candidate.path, "content_hash": candidate.content_hash, "disposition": disposition, "actor": actor, "status": "reviewed", "deferred_until": ""}
     if disposition == "defer":
         row["deferred_until"] = (datetime.now(UTC) + timedelta(days=max(1, defer_days))).isoformat().replace("+00:00", "Z")
@@ -223,8 +237,11 @@ def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -
         raise ValueError("candidate changed or no longer exists; regenerate the review")
     destination = trash_dir(root) / f"{candidate.candidate_id}.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
+    from ciao.vault_index import strip_references
+
+    edited_backlinks = strip_references(root, candidate.path)
     shutil.move(str(source), str(destination))
-    metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "trashed_at": _now()}
+    metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "edited_backlinks": edited_backlinks, "trashed_at": _now()}
     destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _append(root, {**metadata, "path": candidate.path, "disposition": "trash", "status": "trashed", "actor": actor})
     return metadata

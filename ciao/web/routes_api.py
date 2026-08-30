@@ -4740,20 +4740,29 @@ async def vault_review(request: Request) -> JSONResponse:
     if not workspace or config.workspace(workspace) is None:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
     try:
-        root = Path(config.agent_vault_root(workspace)).resolve()
+        root = Path(config.workspace_vault_root(workspace)).resolve()
     except (AttributeError, ValueError, OSError):
         root = Path(config.vault_root).resolve()
     from ciao import vault_review as review
 
-    candidates = review.generate_candidates(root, workspace=workspace, max_candidates=50)
+    action = "" if request.method == "GET" else ""
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        action = str(payload.get("action", "") or "")
+    candidates = [] if action in {"restore", "delete"} else review.generate_candidates(root, workspace=workspace, max_candidates=50)
     if request.method == "GET":
         return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
-    try:
-        payload = await request.json()
-    except (ValueError, TypeError):
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    action = str(payload.get("action", "") or "")
+
     candidate_id_value = str(payload.get("candidate_id", "") or "")
+    if action in {"restore", "delete"}:
+        try:
+            result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, "result": result})
     item = next((candidate for candidate in candidates if candidate.candidate_id == candidate_id_value), None)
     if item is None:
         return JSONResponse({"error": "candidate not found or changed"}, status_code=409)

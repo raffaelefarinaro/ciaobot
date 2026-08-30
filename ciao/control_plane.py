@@ -702,7 +702,14 @@ class CiaoControlPlane:
         from ciao import vault_review as review
 
         workspace = self._workspace(principal)
-        root = self._vault_root(principal)
+        resolver = getattr(self.config, "workspace_vault_root", None)
+        root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
+        if action in {"restore", "delete"}:
+            try:
+                result = review.restore_note(root, candidate_id) if action == "restore" else review.delete_permanently(root, candidate_id, confirm=confirm)
+            except ValueError as exc:
+                raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
+            return _ok(result)
         candidates = review.generate_candidates(root, workspace=workspace)
         by_id = {item.candidate_id: item for item in candidates}
         if action == "list":

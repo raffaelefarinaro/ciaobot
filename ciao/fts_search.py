@@ -29,6 +29,7 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "memory-consolidations.md",
         "curation-log.md",
         "weekly-review-log.md",
+        "vault-review.md",
     }
 )
 
