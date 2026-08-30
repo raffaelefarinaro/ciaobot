@@ -109,6 +109,7 @@ from ciao.web.chat_broker import (
     reorder_pending_list,
 )
 from ciao.web.file_snapshots import SnapshotStore
+from ciao.web.document_conversion import convert_document, is_anydoc_document
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +875,10 @@ class ChatInfo:
     # `last_activity_at` so the sidebar's unread tile can show "what finished"
     # without holding the full transcript in memory.
     last_snippet: str = ""
+    # Bounded tail of the final assistant response for automation predicates
+    # that must not decide from the 280-character display snippet.
+    last_response: str = ""
+    last_response_status: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -1331,6 +1336,8 @@ class ProjectChatManager:
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
                 last_snippet=cd.get("last_snippet", ""),
+                last_response=cd.get("last_response", ""),
+                last_response_status=cd.get("last_response_status", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
@@ -1428,6 +1435,8 @@ class ProjectChatManager:
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
                     "last_snippet": c.last_snippet,
+                    "last_response": c.last_response,
+                    "last_response_status": c.last_response_status,
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
@@ -4190,6 +4199,8 @@ class ProjectChatManager:
         chat.pending_question = ""
         chat.pending_permission = ""
         chat.pending_queue = []
+        chat.last_response = ""
+        chat.last_response_status = ""
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -5101,6 +5112,9 @@ class ProjectChatManager:
             raise ValueError("Cannot send messages to an archived chat")
 
         self._get_provider(chat_id)
+        chat.last_response = ""
+        chat.last_response_status = "running"
+        self._save()
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
@@ -6414,8 +6428,18 @@ class ProjectChatManager:
                 # about the persisted attention flag. Clear it here so a
                 # denied-by-teardown prompt doesn't leave the chat stuck
                 # looking like it still needs approval.
-                if chat_meta is not None and chat_meta.pending_permission:
-                    chat_meta.pending_permission = ""
+                if chat_meta is not None:
+                    permission_pending = bool(chat_meta.pending_permission)
+                    chat_meta.last_response = last_assistant_text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                    chat_meta.last_response_status = (
+                        "error" if had_error
+                        else "question" if chat_meta.pending_question
+                        else "permission" if permission_pending
+                        else "success" if last_assistant_text.strip()
+                        else "empty"
+                    )
+                    if permission_pending:
+                        chat_meta.pending_permission = ""
                     self._save()
                 # Always clean up the per-chat stream entry first so subsequent
                 # sends can start a new one immediately.
@@ -7180,6 +7204,8 @@ class ProjectChatManager:
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
                             chat_now.last_snippet = snippet
+                            chat_now.last_response = text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                            chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         self._announce_result_ready(
@@ -8388,6 +8414,56 @@ class ProjectChatManager:
                 return candidate.resolve()
         return None
 
+    def active_project_vault_dir(self, project_id: str) -> Path | None:
+        project = self._projects.get(project_id)
+        if project is None or not project.vault_folder:
+            return None
+        root = self._vault_active_root(project.workspace).resolve()
+        candidate = (root / project.vault_folder).resolve()
+        return candidate if candidate.is_dir() and candidate.is_relative_to(root) else None
+
+    def convert_chat_document(self, project_id: str, source: Path, *, output_stem: str | None = None) -> dict[str, str]:
+        vault_dir = self.active_project_vault_dir(project_id)
+        if vault_dir is None:
+            raise LookupError("project has no active folder for converted documents")
+        stem = output_stem or source.stem
+        target = vault_dir / f"{stem}.md"
+        n = 2
+        while os.path.lexists(target):
+            target = vault_dir / f"{stem}-{n}.md"
+            n += 1
+        markdown = convert_document(source)
+        while True:
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                target = vault_dir / f"{stem}-{n}.md"
+                n += 1
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(markdown)
+            break
+        return {"original_path": str(source.resolve()), "markdown_path": str(target.resolve())}
+
+    def save_chat_attachment_upload(self, project_id: str, data: bytes, filename: str) -> dict:
+        if (
+            not filename
+            or "\x00" in filename
+            or not filename.isprintable()
+            or Path(filename).name != filename
+            or filename.startswith(".")
+        ):
+            raise ValueError("invalid filename")
+        if not is_anydoc_document(filename):
+            entry = self.save_project_file_upload(project_id, data, filename)
+            return {**entry, "original_path": entry["absolute_path"], "markdown_path": None}
+        import tempfile
+        with tempfile.NamedTemporaryFile(prefix="ciao-document-", suffix=Path(filename).suffix) as source:
+            source.write(data)
+            source.flush()
+            entry = self.convert_chat_document(project_id, Path(source.name), output_stem=Path(filename).stem)
+        return {**entry, "original_path": None, "original_filename": filename}
+
     def list_project_files(self, project_id: str) -> list[dict]:
         """List files under the project's vault folder, recursive, sorted by mtime desc.
 
@@ -8470,16 +8546,25 @@ class ProjectChatManager:
             raise ValueError("file too large")
         # Collision: foo.png -> foo-2.png -> foo-3.png ...
         target = vault_dir / base
-        if target.exists():
-            stem = Path(base).stem
-            n = 2
+        stem = Path(base).stem
+        n = 2
+        if os.path.lexists(target):
             while True:
                 candidate = vault_dir / f"{stem}-{n}{ext}"
-                if not candidate.exists():
+                if not os.path.lexists(candidate):
                     target = candidate
                     break
                 n += 1
-        target.write_bytes(data)
+        while True:
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                target = vault_dir / f"{Path(base).stem}-{n}{ext}"
+                n += 1
+                continue
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+            break
         resolved = target.resolve()
         # Project uploads are narrower than the generic file editor: the
         # resolved target must remain inside this project's vault folder.

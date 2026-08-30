@@ -172,3 +172,61 @@ describe('safe markdown rendering', () => {
     expect(html).not.toContain('data-file-path')
   })
 })
+
+describe('chat markdown file links', () => {
+  it('opens a workspace-relative markdown link in the panel instead of the browser', () => {
+    const html = renderMarkdown(
+      'Created and opened [`wedding-speech.md`](personal/memory-vault/Workspace/wedding-speech.md) in the preview panel.',
+    )
+
+    expect(html).toContain('class="file-link"')
+    expect(html).toContain('data-file-path="personal/memory-vault/Workspace/wedding-speech.md"')
+    // The old markup was a relative anchor opened in a new tab, which the
+    // browser resolved against the current /chat/... route.
+    expect(html).not.toContain('href="personal/memory-vault/Workspace/wedding-speech.md"')
+    expect(html).not.toContain('target="_blank"')
+  })
+
+  it('decodes a percent-encoded path into the path the viewer opens', () => {
+    const html = renderMarkdown('[note](Workspace/my%20note.md)')
+
+    expect(html).toContain('data-file-path="Workspace/my note.md"')
+  })
+
+  it('leaves external, absolute and anchor links as ordinary links', () => {
+    const external = renderMarkdown('[docs](https://example.com/guide.md)')
+    expect(external).toContain('href="https://example.com/guide.md"')
+    expect(external).not.toContain('file-link')
+
+    const absolute = renderMarkdown('[root](/etc/hosts)')
+    expect(absolute).toContain('href="/etc/hosts"')
+    expect(absolute).not.toContain('file-link')
+
+    const anchor = renderMarkdown('[section](#results)')
+    expect(anchor).toContain('href="#results"')
+    expect(anchor).not.toContain('file-link')
+  })
+
+  it('leaves a relative web link alone when its last segment is not a filename', () => {
+    const html = renderMarkdown('[page](example.com/pricing)')
+
+    expect(html).not.toContain('file-link')
+  })
+
+  it('leaves a schemeless bare domain alone', () => {
+    // One segment whose dotted suffix passes every path-shape test, so it used
+    // to render as a file-link to a workspace path that does not exist — and
+    // the click went nowhere, since file links deliberately skip target/rel.
+    for (const href of ['anthropic.com', 'example.co.uk', 'docs.example.io']) {
+      const html = renderMarkdown(`[docs](${href})`)
+      expect(html).not.toContain('file-link')
+      expect(html).toContain(`href="${href}"`)
+    }
+  })
+
+  it('still treats a bare filename with a known extension as a file', () => {
+    expect(renderMarkdown('[notes](notes.md)')).toContain('data-file-path="notes.md"')
+    expect(renderMarkdown('[build](Makefile)')).toContain('data-file-path="Makefile"')
+    expect(renderMarkdown('[ignore](.gitignore)')).toContain('data-file-path=".gitignore"')
+  })
+})

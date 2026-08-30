@@ -241,6 +241,7 @@
 
         <!-- Inline comment draft popover -->
         <CommentComposePopover
+          ref="composeDraftRef"
           :anchor="commentDraft && draftAnchor ? draftAnchor : null"
           v-model="composeText"
           :images="commentDraftImages"
@@ -306,6 +307,7 @@ import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
+import { useTypeToComment } from '../composables/useTypeToComment'
 import { formatFileComments } from '../lib/commentContext'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -330,7 +332,10 @@ async function openInMemoryMap(): Promise<void> {
   // that check would leave the map jumping to this note the next time /memory
   // opens — after a navigation the user cancelled.
   if (!(await store.close())) return
-  memoryMapStore.requestFocus(target)
+  // Not `requestFocus`: the map is not mounted yet, so nothing is listening
+  // for the signal, and the graph load it does on arrival clears `selectedId`
+  // anyway. The map drains this once its nodes are placed.
+  memoryMapStore.requestFocusOnOpen(target)
   await router.push('/memory')
 }
 
@@ -902,10 +907,24 @@ const {
   commentDraftImages, editingCommentId, editDraftText, editingCommentImages, editAnchor,
   isHighlightedLine, commentIdForLine, commentLineLabel,
   onCsvCellSelect, onCsvCellActivate, openCommentForSelection, openCommentForCsvCell,
-  cancelComment, saveComment, handleDraftImageUpload, removeDraftImage,
+  cancelComment, saveComment, handleDraftImageUpload, addDraftImages, removeDraftImage,
   cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
+
+const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
+
+// Selecting text and typing (or pasting, or hitting Cmd+D) opens the composer
+// directly, so the "Comment" pill is a hint rather than a required click.
+useTypeToComment({
+  isActive: () => !!selectionAnchor.value && !commentDraft.value,
+  open: (initialText: string) => {
+    if (isCsv.value) openCommentForCsvCell(initialText)
+    else openCommentForSelection(initialText)
+  },
+  dictate: () => nextTick(() => composeDraftRef.value?.toggleDictation()),
+  addImages: (files: File[]) => addDraftImages(files),
+})
 
 const basename = computed(() => {
   const p = store.path

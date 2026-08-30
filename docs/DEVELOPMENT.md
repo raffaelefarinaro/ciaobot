@@ -261,9 +261,10 @@ For HTML artifact changes, keep the preview self-contained: inline scripts/style
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 For sidebar chat-group changes, verify that a chat's subagent disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its subagent rows, and automatically reopens when the open route is one of those subagents.
-For composer drag-and-drop changes, test both local host and remote client roles:
+For composer drag-and-drop changes, test both local host and remote client roles. Document drops preserve host sources and add Markdown companions; remote supported documents persist only Markdown through the dedicated chat endpoint:
 host paths must be absolute, while client files must upload into the active
-project on the host before the returned host path is inserted.
+project on the host before returned original/Markdown paths are inserted. The
+generic ProjectView upload remains unchanged.
 
 ## Quality gates
 

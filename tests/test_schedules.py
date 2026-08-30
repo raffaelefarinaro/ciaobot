@@ -900,6 +900,7 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
         "system-install-health",
         "system-workspace-hygiene",
         "system-skill-evolution",
+        "system-reviews-hygiene",
     }
     assert "system-weekly-review" not in system
     for entry in system.values():

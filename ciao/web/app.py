@@ -56,6 +56,7 @@ from ciao.web.routes_api import (
     chat_fork,
     chat_handover,
     chat_images,
+    chat_attachments_upload,
     chat_mark_read,
     chat_mark_unread,
     chat_messages,
@@ -144,6 +145,7 @@ from ciao.web.routes_api import (
     vault_backlinks,
     vault_delete_note,
     vault_graph,
+    vault_review,
     vault_markdown_paths,
     workspace_binary,
     workspace_file,
@@ -269,6 +271,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
+        Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
@@ -279,6 +282,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/vault-markdown-paths", vault_markdown_paths, methods=["GET"]),
         Route("/api/vault/backlinks", vault_backlinks, methods=["GET"]),
+        Route("/api/vault/review", vault_review, methods=["GET", "POST"]),
         Route("/api/vault/graph", vault_graph, methods=["GET"]),
         Route("/api/vault/note", vault_delete_note, methods=["DELETE"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),

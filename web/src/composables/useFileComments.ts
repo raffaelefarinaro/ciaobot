@@ -388,17 +388,21 @@ export function useFileComments(options: UseFileCommentsOptions) {
     reapplyHighlights()
   }
 
-  async function handleDraftImageUpload(e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement
-    if (!input.files?.length) return
+  async function addDraftImages(files: File[]): Promise<void> {
     const chatId = projectsStore.activeChatId
-    if (!chatId) return
+    if (!chatId || !files.length) return
     try {
-      const refs = await projectsStore.uploadImageRefs(chatId, Array.from(input.files))
+      const refs = await projectsStore.uploadImageRefs(chatId, files)
       commentDraftImages.value.push(...refs)
     } catch (err) {
       console.error('Comment image upload failed:', err)
     }
+  }
+
+  async function handleDraftImageUpload(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement
+    if (!input.files?.length) return
+    await addDraftImages(Array.from(input.files))
     input.value = ''
   }
 
@@ -418,13 +422,13 @@ export function useFileComments(options: UseFileCommentsOptions) {
     if (match) scrollToHighlight(match.id)
   }
 
-  function openCommentForSelection(): void {
+  function openCommentForSelection(initialText = ''): void {
     if (!selectionAnchor.value || !lastSelectionText) return
     closeReadPopover?.()
     draftAnchor.value = toViewportAnchor(selectionAnchor.value)
     commentDraft.value = {
       selection: lastSelectionText,
-      text: '',
+      text: initialText,
       lines: lastSelectionLines,
       cell: null,
     }
@@ -436,13 +440,13 @@ export function useFileComments(options: UseFileCommentsOptions) {
     reapplyHighlights()
   }
 
-  function openCommentForCsvCell(): void {
+  function openCommentForCsvCell(initialText = ''): void {
     if (!selectionAnchor.value || !lastCsvCell) return
     closeReadPopover?.()
     draftAnchor.value = toViewportAnchor(selectionAnchor.value)
     commentDraft.value = {
       selection: lastCsvCell.value,
-      text: '',
+      text: initialText,
       lines: { start: lastCsvCell.row, end: lastCsvCell.row },
       cell: {
         row: lastCsvCell.row,
@@ -593,6 +597,7 @@ export function useFileComments(options: UseFileCommentsOptions) {
     cancelComment,
     saveComment,
     handleDraftImageUpload,
+    addDraftImages,
     removeDraftImage,
     startEditComment,
     cancelEditComment,

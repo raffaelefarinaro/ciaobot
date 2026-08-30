@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ciao import vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
@@ -691,6 +691,67 @@ class CiaoControlPlane:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
 
+    # ---- vault review --------------------------------------------------
+
+    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "", defer_days: int = 7) -> dict[str, Any]:
+        """Inspect candidates or record an explicit, scoped note disposition.
+
+        Destructive operations are intentionally separate from ``decide`` and
+        require a candidate generated from the current content hash.
+        """
+        from ciao import vault_review as review
+
+        workspace = self._workspace(principal)
+        resolver = getattr(self.config, "workspace_vault_root", None)
+        root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if action in {"decide", "trash", "restore", "delete"} and chat is not None:
+            # The CURRENT turn, not the most recent unattended one. Only
+            # unattended turns get a key written, so `max(...)` answered "has
+            # this chat ever run unattended" — one scheduled turn then refused
+            # every later attended trash in that chat, permanently.
+            current_turn = str(max(0, int(chat.user_turn_count) - 1))
+            if chat.user_turn_unattended.get(current_turn):
+                raise ControlPlaneError("unattended_forbidden", "Vault review mutations require an attended turn.")
+        if action in {"restore", "delete"}:
+            try:
+                result = review.restore_note(root, candidate_id) if action == "restore" else review.delete_permanently(root, candidate_id, confirm=confirm)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+            except ValueError as exc:
+                raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
+            return _ok(result)
+        # `list` and `inspect` are declared read-only to the MCP host, so they
+        # must not refresh the queue projection either.
+        candidates = review.generate_candidates(
+            root, workspace=workspace, write_queue=action not in {"list", "inspect"}
+        )
+        by_id = {item.candidate_id: item for item in candidates}
+        if action == "list":
+            return _ok({"candidates": [item.as_dict() for item in candidates]})
+        item = by_id.get(candidate_id)
+        if item is None and path:
+            item = next((candidate for candidate in candidates if candidate.path == path), None)
+        if item is None:
+            raise ControlPlaneError("candidate_not_found", "Review candidate was not found or has changed.")
+        try:
+            if action == "inspect":
+                return _ok(item.as_dict())
+            if action == "decide":
+                result = review.record_decision(root, item, disposition, defer_days=defer_days)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+                return _ok(result)
+            if action == "trash":
+                result = review.trash_note(root, item)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+                return _ok(result)
+            if action == "restore":
+                return _ok(review.restore_note(root, item.candidate_id))
+            if action == "delete":
+                return _ok(review.delete_permanently(root, item.candidate_id, confirm=confirm))
+        except ValueError as exc:
+            raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
+        raise ControlPlaneError("invalid_action", "action must be list, inspect, decide, trash, restore, or delete.")
+
     # ---- projects/chats ------------------------------------------------
 
     def projects_list(self, principal: McpPrincipal, include_completed: bool = False) -> dict[str, Any]:
@@ -771,11 +832,30 @@ class CiaoControlPlane:
                 if self.pcm.get_project(chat.project_id)
                 and self.pcm.get_project(chat.project_id).workspace == principal.workspace
             ]
-        return _ok([chat.to_dict(local=self.pcm.is_session_local(chat)) for chat in chats])
+        return _ok([self._chat_review_dict(chat) for chat in chats])
 
     def chat_get(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
-        return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
+        return _ok(self._chat_review_dict(chat))
+
+    def _chat_review_dict(self, chat: Any) -> dict[str, Any]:
+        """Add reliable state needed by unattended chat cleanup routines."""
+        result = cast(
+            dict[str, Any], chat.to_dict(local=self.pcm.is_session_local(chat))
+        )
+        result["last_response"] = getattr(chat, "last_response", "")
+        result["last_response_status"] = getattr(chat, "last_response_status", "")
+        get_active_stream = getattr(self.pcm, "get_active_stream", None)
+        result["active_turn"] = (
+            get_active_stream(chat.chat_id) is not None
+            if get_active_stream is not None
+            else False
+        )
+        result["needs_attention"] = bool(
+            getattr(chat, "pending_question", "")
+            or getattr(chat, "pending_permission", "")
+        )
+        return result
 
     def chat_create(
         self,
@@ -1550,6 +1630,8 @@ class CiaoControlPlane:
         if target_chat is not None:
             chat, project = self._chat_scope(principal, str(target_chat))
             entry.web_chat_id = chat.chat_id
+            entry.web_project_id = None
+            entry.web_project_name = ""
             entry.workspace = project.workspace
             # Retargeting moves where this entry re-homes.
             stamp_fallback_project(entry, self.pcm)

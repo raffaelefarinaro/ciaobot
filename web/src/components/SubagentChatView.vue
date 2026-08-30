@@ -191,10 +191,15 @@ document.addEventListener('visibilitychange', onVisibilityChange)
 watch(() => [props.chatId, props.agentId], () => {
   pollingSince = 0
   void refresh()
+  store.setSubagentViewActive(props.chatId)
 })
 
-onMounted(() => { void refresh() })
+onMounted(() => {
+  store.setSubagentViewActive(props.chatId)
+  void refresh()
+})
 onBeforeUnmount(() => {
+  store.setSubagentViewActive(null)
   stopPolling()
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })

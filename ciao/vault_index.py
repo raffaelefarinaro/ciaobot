@@ -69,7 +69,45 @@ def is_generated_vault_file(name: str) -> bool:
     return (name or "").casefold() in GENERATED_VAULT_FILES
 
 
-EXCLUDED_PATH_PARTS: set[str] = set()
+# `.vault-trash` is the reversible trash `ciao.vault_review` moves notes into.
+# A trashed note keeps its bytes on disk under an opaque candidate-id filename,
+# so leaving it scannable meant "trash" removed a note from the vault the user
+# sees while it stayed in the Memory Map, the lint counts, and search — under a
+# name nobody could recognise. Matched on any path part, because the trash lives
+# at `Workspace/.vault-trash`, not at the vault root.
+EXCLUDED_PATH_PARTS: set[str] = {".vault-trash"}
+
+# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Indexing them made the proposals queue and the curation logs rank above real
+# notes for ordinary recall queries — the memory system's paperwork must never
+# compete with the memories it manages. Matched only directly under a
+# `Workspace/` directory — where the pipeline writes them — so a user's own
+# note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
+# stays searchable. Shared with `fts_search` so the two cannot drift.
+RESERVED_UNINDEXED_FILES = frozenset(
+    {
+        "memory-proposals.md",
+        "memory-consolidations.md",
+        "curation-log.md",
+        "weekly-review-log.md",
+        "vault-review.md",
+    }
+)
+
+
+def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
+    """True for the memory pipeline's own files, exactly where it writes them.
+
+    ``rel_to_root`` is the path relative to the vault root. The pipeline only
+    ever writes these files at ``<vault>/Workspace/<name>``, so the match is
+    exact: a user's note under any other directory that happens to be named
+    ``workspace`` (``projects/acme/workspace/Curation-Log.md``) stays indexed.
+    """
+    return (
+        len(rel_to_root.parts) in {2, 3}
+        and rel_to_root.parts[-2].casefold() == "workspace"
+        and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
+    )
 
 # Directory-based type inference when frontmatter is missing.
 DIR_TYPE_MAP = {
@@ -235,6 +273,11 @@ def _is_excluded(rel_path: Path) -> bool:
         return True
     # memory-vault/work/Logs (if any), etc.
     if any(p in EXCLUDED_TOP_DIRS for p in parts[1:]):
+        return True
+    # The review queue is a projection of the review ledger, not a note. Left
+    # scannable it became a permanent orphan node in the Memory Map and was
+    # itself counted by the lint that seeds review candidates.
+    if is_reserved_bookkeeping(rel_path):
         return True
     return False
 

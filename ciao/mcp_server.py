@@ -149,7 +149,7 @@ _DESTRUCTIVE = ToolAnnotations(
 _TOOL_GROUPS: dict[str, tuple[str, ...]] = {
     "context": ("context_get",),
     "memory": ("memory_status", "memory_update"),
-    "vault": ("vault_search",),
+    "vault": ("vault_search", "vault_review"),
     "gws": ("gws_status",),
     "projects": ("projects_list", "project_get", "project", "project_action"),
     "workspaces": ("workspaces_list", "workspace_create"),
@@ -1325,6 +1325,26 @@ class CiaoMcpService:
         async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
+
+        @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
+        async def vault_review(
+            action: str = "list", path: str = "", candidate_id: str = "",
+            disposition: str = "", confirm: str = "", defer_days: int = 7,
+        ) -> dict[str, Any]:
+            """List and decide scoped vault-note review candidates.
+
+            The schedule may list candidates only. Trash, restore, and permanent
+            deletion require an explicit attended action; permanent deletion
+            additionally requires the candidate id as confirmation.
+            """
+            return await self._invoke(
+                "vault_review",
+                lambda cp, p: cp.vault_review(
+                    p, action, path=path, candidate_id=candidate_id,
+                    disposition=disposition, confirm=confirm, defer_days=defer_days,
+                ),
+                mutating=action != "list" and action != "inspect",
+            )
 
         @tool(name="gws_status", annotations=_READ, structured_output=True)
         async def gws_status() -> dict[str, Any]:

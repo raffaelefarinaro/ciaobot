@@ -244,6 +244,65 @@ def test_extract_skips_silently_when_archive_missing(
     assert not missing.exists()
 
 
+def test_extract_skips_when_model_returns_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean call with an empty body is "nothing durable", not a failure.
+
+    A no-op maintenance transcript (a nightly curation that found nothing) has
+    no durable signal, and the system prompt tells the model to omit empty
+    sections rather than pad them — so it correctly returns nothing. Recording
+    that as an error put a retry button on a row whose retry can only ever come
+    back empty.
+    """
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    async def empty_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
+        return ""
+
+    with patch.object(insights, "_call_model", side_effect=empty_call):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="dummy",
+            config=_config(),
+            model="deepseek-v4-flash:0731-cloud",
+        ))
+
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "skipped"
+    assert run["error"] is None
+    assert run["extra"]["skip_reason"] == "no durable signal in this session"
+
+
+def test_extract_reports_error_when_the_call_itself_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure path keeps its error status and the upstream reason."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    async def rejecting_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
+        raise RuntimeError("The usage limit has been reached")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    with patch.object(insights, "_call_model", side_effect=rejecting_call), \
+         patch.object(insights.asyncio, "sleep", side_effect=no_sleep):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="dummy",
+            config=_config(),
+            model="deepseek-v4-flash:0731-cloud",
+        ))
+
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "error"
+    assert run["error"] == "The usage limit has been reached"
+
+
 def test_extract_retries_once_then_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

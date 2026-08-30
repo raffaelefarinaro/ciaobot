@@ -62,3 +62,19 @@ export async function requestDesktopPermission(
     return null
   }
 }
+
+/**
+ * Starts the same app+engine update flow as the tray's "Update" item,
+ * confirmation dialog included. Returns false when not running inside the
+ * desktop shell, so callers can fall back to the web update path.
+ */
+export async function triggerDesktopUpdate(): Promise<boolean> {
+  if (!canInvokeTauri()) return false
+  try {
+    await window.__TAURI__!.core.invoke('trigger_app_update')
+    return true
+  } catch (e) {
+    console.error('Could not start desktop update:', e)
+    return false
+  }
+}

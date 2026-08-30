@@ -95,6 +95,29 @@
       "web_project_id": "",
       "web_chat_id": null,
       "prompt": "Run `python3 -m ciao.skill_evolution --min-sessions 2` with the workspace default model. Requires at least 2 failing sessions per skill (reduces noise from single-session weak signals where a skill was merely loaded). Summarize proposals written and any failed gates. Do not apply proposals automatically, and do not edit native memory unless the curation workflow explicitly calls for it."
+    },
+    {
+      "schedule_id": "system-reviews-hygiene",
+      "title": "Reviews hygiene",
+      "description": "Daily auto-archive for Reviews helper chats (merge project fact, review proposal) that finished cleanly, so the inbox stays focused on chats needing attention.",
+      "scope": "system",
+      "editable": false,
+      "removable": false,
+      "enabled": true,
+      "frequency": "daily",
+      "daily_time_utc": "02:00",
+      "days_of_week": null,
+      "day_of_month": null,
+      "run_at_date": null,
+      "timezone_name": "UTC",
+      "archive_policy": "auto",
+      "provider": "",
+      "model": "",
+      "workspace": "",
+      "web_project_id": "",
+      "web_chat_id": null,
+      "prompt": "Reviews hygiene — auto-archive completed helper chats for THIS workspace only. List active (non-archived) chats and select only chats whose title matches one of: \"Merge <person> fact\", \"Merge project fact\", \"Merge memory fact\", \"Merge learning\", or \"Proposal review\" (case-insensitive), or whose context is Reviews. For each candidate, use the chat metadata's active-turn flag, full last assistant response, and response status. Archive only when it is idle, has an assistant response, status is successful, and the final output indicates success — e.g. contains \"Merged fact into\", \"dismissed proposal as promoted\", \"already covered\", \"nothing to review\", or an explicit \"no proposals needed\" — and does not end in error, unresolved conflict, a question awaiting user input, or a needs-attention flag. Use the chat_archive tool for each qualifying chat_id. Do not archive chats that failed, asked a follow-up question, or still need user judgment. Report archived titles/chat_ids or a one-line no-op if none qualified.",
+      "per_workspace": true
     }
   ]
 }

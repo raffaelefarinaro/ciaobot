@@ -708,6 +708,15 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
+  // Paused while the read-only subagent view is open for this chat: that
+  // view already polls its single transcript on a 4s timer, so the store's
+  // full-chat poll (every subagent, every transcript, re-parsed) would run
+  // alongside it and defeat the narrowing the dedicated endpoint provides.
+  const subagentViewActiveChatId = ref<string | null>(null)
+  function setSubagentViewActive(chatId: string | null) {
+    subagentViewActiveChatId.value = chatId
+  }
+
   // Live view while subagents run: refresh the active chat's subagent
   // transcripts on a short interval so the panel updates as the agents
   // work. The CLI appends to the transcript files continuously, so polling
@@ -716,13 +725,19 @@ export const useProjectStore = defineStore('projects', () => {
   // dispatched mid-turn nest live inside the Working trace).
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
   watch(
-    () => [activeChatId.value, activeBackgroundAgents.value, isStreaming.value] as const,
-    ([chatId, count, streamingNow]) => {
+    () => [
+      activeChatId.value,
+      activeBackgroundAgents.value,
+      isStreaming.value,
+      subagentViewActiveChatId.value,
+    ] as const,
+    ([chatId, count, streamingNow, viewChatId]) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
       if (!chatId || (count <= 0 && !streamingNow)) return
+      if (viewChatId !== null && viewChatId === chatId) return
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
@@ -1867,7 +1882,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function syncLatest() {
     if (latestSyncInFlight) return
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    // Do not gate on visibility — answers must appear in the active chat
+    // even while the tab is hidden, otherwise the reply stays invisible
+    // until the user opens the Activity view (visibilitychange).
     latestSyncInFlight = true
     try {
       // Active-only: the server skips the (possibly thousands of) archived
@@ -2642,6 +2659,97 @@ export const useProjectStore = defineStore('projects', () => {
     full_length: m.full_length,
   })
 
+  /** True for a trace row the client renders from streaming events. */
+  function isLiveTraceRow(m: ChatMessage): boolean {
+    if (m.role === 'assistant') return true
+    return m.role === 'system' && (
+      m.tool_name === '_activity'
+      || m.tool_name === '_thinking'
+      || m.tool_name === '_filecard'
+    )
+  }
+
+  /**
+   * Drop the client's own rendering of a turn the window has now delivered.
+   *
+   * The live tail and the server's rows are the same turn in two different
+   * shapes: the client streams the trace and then adds ONE merged answer
+   * bubble, while the server replays the provider's own text parts as separate
+   * rows with the tool groups between them. `sameRow` matches on exact content,
+   * so it can pair neither the merged bubble (no server row holds that text)
+   * nor a part the provider re-joined differently — and both copies survived,
+   * rendering the reply once whole and then again in pieces.
+   *
+   * The server's copy is authoritative once the turn has settled, which is what
+   * an appended assistant row carrying a completion `timestamp` says (only the
+   * turn-final row gets one, from `_overlay_assistant_timings`). Until then the
+   * live tail is all the user has, so it stays.
+   *
+   * Only trace rows go. An un-indexed plain system row is a client-side notice
+   * — the failed-send warning `recoverUnackedSend` pushes — with no server
+   * counterpart to replace it, and an un-indexed user bubble is handled by the
+   * optimistic-bubble pruning instead.
+   */
+  function dropSupersededLiveTail(
+    merged: ChatMessage[], tailStart: number, firstAppendPos: number,
+  ): ChatMessage[] {
+    if (firstAppendPos <= tailStart) return merged
+    const settled = merged.slice(firstAppendPos).some(
+      m => m.role === 'assistant' && !m.is_error && Boolean(m.timestamp),
+    )
+    if (!settled) return merged
+    // A fast follow-up can already be streaming after the settled turn. Keep
+    // that second turn's trace; only the live rows before its user bubble are
+    // superseded by the newly appended server rows.
+    const userPositions = merged
+      .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
+      .filter(pos => pos >= 0)
+    const supersededEnd = userPositions.length > 1
+      ? userPositions[1]
+      : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
+        ? userPositions[0]
+        : firstAppendPos
+    // `ServerRow` carries no token usage — that only ever reaches the client on
+    // the result event, which is exactly the row about to be dropped. Carry it
+    // (and the model that answered) onto the server row that closes the turn,
+    // or the footer would lose the turn's cost on every reload.
+    const carried: Partial<ChatMessage> = {}
+    const kept: ChatMessage[] = []
+    for (let p = 0; p < merged.length; p++) {
+      const row = merged[p]
+      const superseded = p >= tailStart
+        && p < supersededEnd
+        && typeof row.i !== 'number'
+        && isLiveTraceRow(row)
+      if (!superseded) {
+        kept.push(row)
+        continue
+      }
+      if (row.usage) carried.usage = row.usage
+      if (row.effective_model) carried.effective_model = row.effective_model
+      if (row.quota) carried.quota = row.quota
+    }
+    if (kept.length === merged.length) return merged
+    if (Object.keys(carried).length) {
+      const limit = supersededEnd === firstAppendPos ? merged.length : supersededEnd
+      let target: number | undefined
+      for (let p = limit - 1; p >= firstAppendPos; p--) {
+        const row = merged[p]
+        if (row.role === 'assistant' && typeof row.i === 'number') {
+          target = row.i
+          break
+        }
+      }
+      for (let p = kept.length - 1; p >= 0; p--) {
+        const row = kept[p]
+        if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
+        kept[p] = { ...carried, ...row }
+        break
+      }
+    }
+    return kept
+  }
+
   async function loadMessagesFromServer(chatId: string) {
     // Restore the AskUserQuestion picker before touching history. Runs on every
     // chat open / reconnect, so a reloaded chat paused on a question shows the
@@ -2758,6 +2866,9 @@ export const useProjectStore = defineStore('projects', () => {
           local.forEach((row, pos) => {
             if (typeof row.i === 'number') posByIndex.set(row.i, pos)
           })
+          // Where the window's genuinely-new rows start once appended; -1 when
+          // the window brought nothing past the cached extent.
+          let firstAppendPos = -1
           const merged = local.slice()
           // Where the un-indexed live tail begins: everything the client
           // rendered from streaming events (optimistic user bubble, activity
@@ -2790,6 +2901,17 @@ export const useProjectStore = defineStore('projects', () => {
             }
             return false
           }
+          const followUpBoundary = (() => {
+            const users = merged
+              .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
+              .filter(pos => pos >= 0)
+            if (users.length > 1) return users[1]
+            if (users.length !== 1) return null
+            const pos = users[0]
+            if (typeof merged[pos].i === 'number') return pos
+            return merged.slice(tailStart, pos).some(isLiveTraceRow) ? pos : null
+          })()
+          let insertedBeforeFollowUp = 0
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
@@ -2831,13 +2953,21 @@ export const useProjectStore = defineStore('projects', () => {
               break
             }
             if (reconciled) continue
-            // Beyond the cached extent: genuinely new tail rows, appended in
-            // the window's own ascending order (after any un-indexed local
-            // rows, which are older than anything arriving now).
-            posByIndex.set(abs, merged.length)
-            merged.push(item)
+            // Insert settled rows before a fast follow-up's live tail. Without
+            // this, the follow-up renders before the authoritative answer it
+            // followed, even though both turns are otherwise reconciled.
+            const insertionPos = followUpBoundary === null
+              ? merged.length
+              : followUpBoundary + insertedBeforeFollowUp
+            if (firstAppendPos < 0) firstAppendPos = insertionPos
+            for (const [index, position] of posByIndex) {
+              if (position >= insertionPos) posByIndex.set(index, position + 1)
+            }
+            merged.splice(insertionPos, 0, item)
+            posByIndex.set(abs, insertionPos)
+            if (followUpBoundary !== null) insertedBeforeFollowUp++
           }
-          messages.value[chatId] = merged
+          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, firstAppendPos)
         }
         persistMessages()
         if (streaming.value[chatId]
@@ -3836,6 +3966,12 @@ export const useProjectStore = defineStore('projects', () => {
         api.get<ChatInfo[]>('/api/chats?active_only=1')
           .then(c => reconcileActiveChats(c))
           .catch(() => { /* ignore */ })
+        // Ensure the active chat's transcript refreshes even when the tab is
+        // hidden — otherwise the answer stays invisible until the user opens
+        // the Activity view (which fires a visibilitychange).
+        if (msg.chat_id === activeChatId.value) {
+          void reconcileAfterResult(msg.chat_id)
+        }
         break
       }
       case 'chat_subagents_ready': {
@@ -5636,7 +5772,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled,
+    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,
