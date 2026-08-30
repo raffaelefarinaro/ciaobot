@@ -454,7 +454,12 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       graphIsWarm.value = snap.warm
       activeCats.clear()
       categoryList.value.forEach(c => activeCats.add(c.key))
-      selectedId.value = null
+      // A background revalidation may finish after Open-in-map has already
+      // selected a node. Preserve that selection when the node still exists.
+      const previousSelection = selectedId.value
+      selectedId.value = previousSelection && incoming.some(n => n.id === previousSelection)
+        ? previousSelection
+        : null
       pathStart.value = null
       pathEnd.value = null
     } catch (err) {

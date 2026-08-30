@@ -289,8 +289,19 @@ def restore_note(root: Path, candidate_id_value: str, *, actor: str = "user") ->
         raise ValueError("restore would overwrite data or the trashed note changed")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(destination))
-    metadata_path.unlink()
-    _append(root, {**metadata, "disposition": "restore", "status": "reviewed", "actor": actor})
+    try:
+        # Keep the trash copy and metadata available until the restore audit is
+        # durable; otherwise a read-only ledger could strand an untracked move.
+        _append(root, {**metadata, "disposition": "restore", "status": "reviewed", "actor": actor})
+    except OSError as exc:
+        shutil.move(str(destination), str(source))
+        raise ValueError(f"restore audit failed; note remains trashed: {exc}") from exc
+    try:
+        metadata_path.unlink()
+    except OSError as exc:
+        if destination.is_file() and not source.exists():
+            shutil.move(str(destination), str(source))
+        raise ValueError(f"restore metadata cleanup failed; note remains trashed: {exc}") from exc
     return metadata
 
 

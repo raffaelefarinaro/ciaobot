@@ -158,6 +158,7 @@ function onKeydown(e: KeyboardEvent): void {
   // keeps working once the textarea has focus.
   if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
     e.preventDefault()
+    e.stopPropagation()
     toggleDictation()
   }
 }
