@@ -47,6 +47,7 @@ export function useTypeToComment(options: TypeToCommentOptions): void {
       if (!options.dictate) return
       // Beats the browser's own bookmark shortcut.
       e.preventDefault()
+      e.stopPropagation()
       options.open('')
       options.dictate()
       return
