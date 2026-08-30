@@ -619,6 +619,25 @@ def test_project_facts_are_dropped_when_the_fold_consumed_them(tmp_path: Path) -
     assert stats.get("proposed", 0) == 0
 
 
+def test_already_applied_guard_does_not_match_contradictions_or_shared_words(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "note.md"
+    destination.write_text(
+        "Do not use Python for production tooling.\n"
+        "Deploy production services through the managed release pipeline.\n",
+        encoding="utf-8",
+    )
+
+    assert not mp._is_already_in_file(
+        destination, "Use Python for production tooling."
+    )
+    assert not mp._is_already_in_file(
+        destination,
+        "Deploy production databases through the managed backup pipeline.",
+    )
+
+
 def test_unconsumed_project_facts_queue_addressed_to_their_doc(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     archive = tmp_path / "chat.md"

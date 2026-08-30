@@ -12,12 +12,6 @@
   <div v-else-if="hasHomeActivity" class="home-recent">
     <div class="home-recent-toolbar">
       <h2 class="home-recent-label">jump back in</h2>
-      <button
-        v-if="store.totalUnread > 0"
-        type="button"
-        class="home-mark-all-read"
-        @click="markAllRead"
-      >mark all read</button>
     </div>
     <div ref="lanesEl" class="home-lanes">
       <section
@@ -291,10 +285,6 @@ const laneElements = ref<Record<string, HTMLElement>>({})
 const openProjectLane = ref<string | null>(null)
 // Chats whose insights retry is in flight, so the button shows a busy state.
 const retryingChats = ref<Record<string, boolean>>({})
-
-function markAllRead(): void {
-  void store.markAllRead()
-}
 
 async function retryInsightsFor(chatId: string): Promise<void> {
   if (retryingChats.value[chatId]) return
@@ -787,24 +777,6 @@ defineExpose({ onArrow })
   display: flex;
   justify-content: flex-end;
   min-height: 28px;
-}
-
-.home-mark-all-read {
-  align-self: start;
-  min-height: 28px;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-xs, 4px);
-  background: transparent;
-  color: var(--fg3);
-  cursor: pointer;
-  font: 600 var(--text-xs) / 1.3 var(--font-mono);
-}
-
-.home-mark-all-read:hover,
-.home-mark-all-read:focus-visible {
-  border-color: var(--border);
-  color: var(--fg);
 }
 
 .home-lanes {

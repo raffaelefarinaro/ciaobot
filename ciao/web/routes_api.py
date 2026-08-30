@@ -2119,7 +2119,11 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
         filename = getattr(upload, "filename", "") or ""
         try:
             data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
-            saved.append(pcm.save_chat_attachment_upload(chat.project_id, data, filename))
+            saved.append(
+                await asyncio.to_thread(
+                    pcm.save_chat_attachment_upload, chat.project_id, data, filename
+                )
+            )
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except (ValueError, RuntimeError) as exc:
@@ -2354,7 +2358,11 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         for path in regular_paths:
             if is_anydoc_document(path.name):
                 try:
-                    attachments.append(pcm.convert_chat_document(project_id, path))
+                    attachments.append(
+                        await asyncio.to_thread(
+                            pcm.convert_chat_document, project_id, path
+                        )
+                    )
                     converted_paths.add(path)
                 except (OSError, LookupError, RuntimeError, ValueError) as exc:
                     errors.append({"filename": path.name, "error": str(exc)})
