@@ -11,43 +11,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 import yaml
 
+from ciao import vault_index
+
 logger = logging.getLogger(__name__)
 
-# Directory-based type inference (similar to vault_index.py)
-EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian"}
+# Directory-based type inference (similar to vault_index.py). `.vault-trash`
+# holds notes `ciao.vault_review` has trashed: still on disk so a restore is
+# possible, but no longer part of the vault, so never searchable.
+EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian", ".vault-trash"}
 
-# Vault bookkeeping the memory pipeline itself writes (casefolded names).
-# Indexing them made the proposals queue and the curation logs rank above real
-# notes for ordinary recall queries — the memory system's paperwork must never
-# compete with the memories it manages. Matched only directly under a
-# `Workspace/` directory — where the pipeline writes them — so a user's own
-# note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
-# stays searchable.
-RESERVED_UNINDEXED_FILES = frozenset(
-    {
-        "memory-proposals.md",
-        "memory-consolidations.md",
-        "curation-log.md",
-        "weekly-review-log.md",
-        "vault-review.md",
-    }
-)
-
-
-def _is_reserved_bookkeeping(rel_to_root: Path) -> bool:
-    """True for the memory pipeline's own files, exactly where it writes them.
-
-    ``rel_to_root`` is the path relative to the indexed root (the vault). The
-    pipeline only ever writes these files at ``<vault>/Workspace/<name>``, so
-    the match is exact: a user's note under any other directory that happens
-    to be named ``workspace`` (``projects/acme/workspace/Curation-Log.md``)
-    stays searchable.
-    """
-    return (
-        len(rel_to_root.parts) == 2
-        and rel_to_root.parts[0].casefold() == "workspace"
-        and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
-    )
+# The reserved-bookkeeping definitions live in `vault_index` so the scan, the
+# lint, and this index cannot disagree about what counts as a note.
+RESERVED_UNINDEXED_FILES = vault_index.RESERVED_UNINDEXED_FILES
+_is_reserved_bookkeeping = vault_index.is_reserved_bookkeeping
 
 
 def _settle_excluded_row(
@@ -378,15 +354,13 @@ def index_vault(
     path_base: Path | None = None,
 ) -> tuple[int, int]:
     """Incremental indexer for core vault files (excludes Logs, Templates)."""
-    from ciao.vault_index import GENERATED_VAULT_FILES
-
     return _index_directory(
         conn=conn,
         root_dir=vault_root,
         meta_table="vault_meta",
         fts_table="vault_fts",
         exclude_dirs=EXCLUDED_VAULT_DIRS,
-        exclude_files=set(GENERATED_VAULT_FILES),
+        exclude_files=set(vault_index.GENERATED_VAULT_FILES),
         path_base=path_base,
     )
 

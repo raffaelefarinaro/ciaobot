@@ -4752,7 +4752,11 @@ async def vault_review(request: Request) -> JSONResponse:
         except (ValueError, TypeError):
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         action = str(payload.get("action", "") or "")
-    candidates = [] if action in {"restore", "delete"} else review.generate_candidates(root, workspace=workspace, max_candidates=50)
+    # A GET must not write to the vault: only the POST actions that already
+    # mutate refresh the readable `Workspace/Vault-Review.md` projection.
+    candidates = [] if action in {"restore", "delete"} else review.generate_candidates(
+        root, workspace=workspace, max_candidates=50, write_queue=request.method != "GET"
+    )
     if request.method == "GET":
         return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
 

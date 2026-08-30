@@ -12,19 +12,25 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from ciao.vault_index import scan_vault, resolve_vault_link
-from ciao.vault_lint import _links_in, run_validation
+from ciao.vault_index import scan_vault
+from ciao.vault_lint import run_validation
 
 RETENTION_DAYS = 30
 MAX_CANDIDATES = 5
 REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "deleted"})
-DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "archive", "trash", "restore", "delete"})
-DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "archive"})
+# No ``archive``: nothing here moves or marks an archived note, so accepting it
+# wrote a ledger row, left the note exactly where it was, and then suppressed
+# the candidate for good — a decision the caller was told had been carried out.
+# Archiving a note is an ordinary vault edit; the review workflow owns only the
+# reversible trash and the attended permanent deletion.
+DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "trash", "restore", "delete"})
+DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer"})
 _DEFER_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 
 
@@ -109,7 +115,7 @@ def _suppressed(decision: dict[str, Any], now: datetime) -> bool:
     if decision.get("content_hash") == "":
         return False
     disposition = decision.get("disposition")
-    if disposition in {"keep", "archive", "trash", "delete"}:
+    if disposition in {"keep", "trash", "delete"}:
         return True
     if disposition != "defer":
         return False
@@ -137,8 +143,15 @@ def generate_candidates(
     workspace: str,
     max_candidates: int = MAX_CANDIDATES,
     now: datetime | None = None,
+    write_queue: bool = True,
 ) -> list[ReviewCandidate]:
-    """Generate explainable candidates without changing vault notes."""
+    """Generate explainable candidates without changing vault notes.
+
+    ``write_queue`` refreshes the readable ``Workspace/Vault-Review.md``
+    projection. Callers that promise to be read-only — the ``list``/``inspect``
+    actions and ``GET /api/vault/review`` — pass ``False``: a listing that
+    writes to the vault is a listing that cannot be trusted to be one.
+    """
     root = Path(root).resolve()
     entries = scan_vault(root, workspace=workspace)
     validation = run_validation(root)
@@ -152,6 +165,12 @@ def generate_candidates(
     duplicate_by_path = {path: group for group in duplicate_groups for path in group}
     incoming: dict[str, list[str]] = {str(entry.path): [] for entry in entries}
     outbound: dict[str, list[str]] = {str(entry.path): [] for entry in entries}
+    # ``entry.related`` already carries both the frontmatter refs and the body's
+    # markdown links — `scan_vault` extends it with `_extract_body_links` — so
+    # one pass over it is the whole graph. An earlier revision re-read every
+    # note to walk `_links_in` as well; that loop compared extension-less refs
+    # against `.md`-suffixed keys, so it never matched, and only cost a second
+    # full read of the vault.
     for entry in entries:
         source = str(entry.path)
         for target in entry.related:
@@ -159,15 +178,6 @@ def generate_candidates(
             if target_path in incoming:
                 outbound[source].append(target_path)
                 incoming[target_path].append(source)
-        try:
-            text = (root / Path(source).relative_to("memory-vault")).read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            continue
-        for ref in _links_in(text):
-            target = resolve_vault_link(entry.path, ref)
-            if target in incoming:
-                outbound[source].append(str(target))
-                incoming[str(target)].append(source)
     today = (now or datetime.now(UTC)).date()
     candidates: list[ReviewCandidate] = []
     for entry in entries:
@@ -207,7 +217,13 @@ def generate_candidates(
             except ValueError:
                 pass
         backlinks = cast(list[str], evidence["backlinks"])
-        priority = len(signals) + (2 if evidence["bridge"] else 0) - min(len(backlinks), 2)
+        # Connectedness makes a note LESS disposable, so both connectedness
+        # terms subtract. An earlier revision added +2 for `bridge` while
+        # subtracting for backlinks: the two rules contradicted, and a hub with
+        # four outbound links and no backlinks outranked genuine orphans for
+        # the five candidate slots of a workflow whose terminal action is
+        # deletion.
+        priority = len(signals) - min(len(backlinks), 2) - (1 if evidence["bridge"] else 0)
         item = ReviewCandidate(
             candidate_id=candidate_id(workspace, path, digest), workspace=workspace,
             path=path, content_hash=digest, signals=tuple(sorted(signals)),
@@ -218,7 +234,8 @@ def generate_candidates(
     decisions = _latest_decisions(root)
     active = [item for item in candidates if not _suppressed(decisions.get(item.candidate_id, {}), now or datetime.now(UTC)) or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
     result = active[: max(1, min(int(max_candidates), 50))]
-    _write_queue(root, result, decisions)
+    if write_queue:
+        _write_queue(root, result, decisions)
     return result
 
 
@@ -282,17 +299,52 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     if not original.is_relative_to(Path(root).resolve()) or original.exists():
         raise ValueError("original note path is unavailable; refusing permanent deletion")
     original.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(original))
     try:
-        from ciao.vault_index import strip_references
+        shutil.move(str(source), str(original))
+    except OSError as exc:
+        raise ValueError(f"cannot delete: {exc}") from exc
+    # Probe the target directory before any backlink is rewritten.
+    # `strip_references` has to run while the note is still on disk — it
+    # resolves refs against the vault's real files — so the rewrites are
+    # committed before the unlink that ends the delete. Without the probe an
+    # unwritable folder failed only at that unlink, by which point every live
+    # link to the note had been dissolved: edits the rollback below cannot undo.
+    # Same probe as the Memory Map's delete route.
+    try:
+        with tempfile.NamedTemporaryFile(dir=original.parent, prefix=".ciao-delete-", suffix=".probe"):
+            pass
+    except OSError as exc:
+        shutil.move(str(original), str(source))
+        raise ValueError(f"cannot delete: {exc}") from exc
+    from ciao.vault_index import strip_references
 
+    edited: list[str] = []
+    cleanup_error = ""
+    try:
         edited = strip_references(Path(root), str(metadata["original_path"]))
-        original.unlink()
-    except Exception:
-        # Keep the trashed note recoverable if backlink cleanup cannot complete.
-        if original.is_file() and not source.exists():
-            shutil.move(str(original), str(source))
-        raise
+    except OSError as exc:
+        cleanup_error = str(exc)
+    if not cleanup_error:
+        try:
+            original.unlink()
+        except OSError as exc:
+            # The residual window the probe narrows. `edited` is already
+            # committed and cannot be rolled back, so the note goes back to the
+            # trash and the ledger records exactly which notes were rewritten —
+            # silently dissolving links used to be the only outcome here.
+            if original.is_file() and not source.exists():
+                shutil.move(str(original), str(source))
+            _append(root, {
+                **metadata, "edited_backlinks": edited, "disposition": "delete",
+                "status": "trashed", "actor": actor, "delete_failed_at": _now(),
+                "delete_error": str(exc),
+            })
+            raise ValueError(f"cannot delete: {exc}") from exc
+    if cleanup_error:
+        # The note is back where it was and nothing else was rewritten
+        # (`strip_references` is all-or-nothing); leave it in the trash.
+        shutil.move(str(original), str(source))
+        raise ValueError(f"backlink cleanup failed: {cleanup_error}")
     metadata_path.unlink()
     _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     return metadata

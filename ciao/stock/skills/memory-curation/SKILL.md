@@ -48,9 +48,10 @@ Never drop a durable fact merely to fit a cap. If a region remains over cap beca
 Before changing any vault file, run the scoped `vault_review` tool (or the
 equivalent review endpoint) and inspect its evidence. It may queue candidates,
 but unattended curation must never trash or permanently delete a note. Keep,
-improve/link, defer, and archive are explicit user decisions; trash is
-reversible and permanent deletion is a separate attended action requiring the
-candidate confirmation. Orphan status is only a linking signal, never proof
+improve/link, and defer are the dispositions it records; trash is reversible
+and permanent deletion is a separate attended action requiring the candidate
+confirmation. Archiving a note is an ordinary vault edit, not a review
+disposition. Orphan status is only a linking signal, never proof
 that a note is disposable.
 
 Run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>` and act on three sections:

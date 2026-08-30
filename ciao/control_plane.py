@@ -706,8 +706,12 @@ class CiaoControlPlane:
         root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         if action in {"trash", "delete"} and chat is not None:
-            latest = max(chat.user_turn_unattended, key=lambda key: int(str(key))) if chat.user_turn_unattended else None
-            if latest is not None and chat.user_turn_unattended.get(latest):
+            # The CURRENT turn, not the most recent unattended one. Only
+            # unattended turns get a key written, so `max(...)` answered "has
+            # this chat ever run unattended" — one scheduled turn then refused
+            # every later attended trash in that chat, permanently.
+            current_turn = str(max(0, int(chat.user_turn_count) - 1))
+            if chat.user_turn_unattended.get(current_turn):
                 raise ControlPlaneError("unattended_forbidden", "Vault trash and deletion require an attended turn.")
         if action in {"restore", "delete"}:
             try:
@@ -715,7 +719,11 @@ class CiaoControlPlane:
             except ValueError as exc:
                 raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
             return _ok(result)
-        candidates = review.generate_candidates(root, workspace=workspace)
+        # `list` and `inspect` are declared read-only to the MCP host, so they
+        # must not refresh the queue projection either.
+        candidates = review.generate_candidates(
+            root, workspace=workspace, write_queue=action not in {"list", "inspect"}
+        )
         by_id = {item.candidate_id: item for item in candidates}
         if action == "list":
             return _ok({"candidates": [item.as_dict() for item in candidates]})
