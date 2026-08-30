@@ -19,6 +19,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/chats/{chat_id}/speak": "browser read-aloud playback; returns audio bytes",
     "/api/chats/{chat_id}/reentry-summary": "browser-only ephemeral Apple Intelligence orientation note",
     "/api/chats/{chat_id}/images": "browser image upload",
+    "/api/chats/{chat_id}/attachments": "browser chat attachment upload",
     "/api/chats/{chat_id}/continue": "browser continuation of archived chat",
     "/api/chats/{chat_id}/retry-insights": "browser home-page retry of a failed insights extraction",
     "/api/chats/{chat_id}/prompt": "agents trigger prompts via ciao create-chat, not curl",

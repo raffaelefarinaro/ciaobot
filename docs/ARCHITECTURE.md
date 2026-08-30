@@ -110,6 +110,7 @@ ciao/                          Python backend (Starlette).
     auth.py                    Session-cookie auth middleware and serializer.
     security.py                Security response headers middleware.
     routes_api.py              REST route handlers. Catch-all for handlers without a domain home.
+    document_conversion.py     Lazy firecrawl-anydoc conversion for chat attachments.
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
     routes_node.py             Node/device route handlers (multi-device host/client, package status/update).
@@ -248,6 +249,12 @@ were active. Explicit deletion clears provider state, normalized transcripts,
 and session state so recovery cannot revive it.
 
 Chat transcripts are streamed via WebSocket and archived to `<logs root>/Chats/<chat-id>/<provider>/` (`transcripts.py`), where the logs root is `CiaoConfig.logs_root` — `<vault>/Logs` before the re-rooting and `<install>/Logs` after it, decided by the same migration receipt as `agent_root`. Every reader goes through that seam (or the standalone `config.logs_root_for` when it holds only paths): deriving it as `vault_root / "Logs"` resolves to a path that does not exist on a migrated install, so archiving would recreate it and split the archive in two. `Logs/` is global: a sibling of the workspaces inside the vault root, not a subfolder of any one of them. It stays global through the re-rooting release, which promotes it to `<install>/Logs/` without moving the files, because it holds 1423 of 1985 vault notes (72%), it is derived output rather than curated content, and 1350 chat ids cannot each be resolved back to one workspace. Archive, delete, and new-session cleanup disconnect the live supported provider before reclaiming its session: Claude SDK JSONL blobs via `delete_session` and OpenCode sessions via `DELETE /session/{id}`. Cleanup is fail-open so a provider outage cannot prevent the durable Ciaobot archive, and it includes prior session IDs created by rotation. Archived `/messages` falls back to the vault markdown when the supported provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Fable to Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
+
+Chat document attachments convert supported files into Markdown in the active
+project vault folder. Existing host sources remain at their original paths;
+remote uploads use a temporary host source and persist only Markdown. Images
+and ordinary text retain their existing behavior, and conversion errors are
+per-file and non-fatal.
 
 The same server embeds a Streamable HTTP MCP endpoint at `/mcp/`.
 `CiaoControlPlane` wraps the existing project/chat, schedule,

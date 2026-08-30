@@ -396,9 +396,10 @@ Ciaobot runs on macOS under launchd.
 - Selecting `Update` from the menu-bar tray opens the bundled update window immediately. It reports engine/app milestones with a percentage and expandable terminal details, then restarts the app only after both halves are ready. The PWA's non-bundled package-update actions use the same visual progress surface while their restart is pending.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
-- In client mode, non-image files dropped into chat are uploaded through the
-  authenticated host tunnel into the active project folder; the composer uses
-  the returned absolute host path, never the client's local filesystem path.
+- In client mode, non-image chat files use the authenticated host tunnel.
+  Supported documents are converted from a temporary host source and only
+  Markdown is kept in the active project; the composer never receives a client
+  filesystem path. Generic ProjectView uploads are unchanged.
 
 ### Server startup behaviors
 

@@ -1121,11 +1121,16 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
         return False
     norm_content = _normalize_for_match(content)
     norm_proposal = _normalize_for_match(proposal_text)
-    if not norm_proposal or len(norm_proposal) < _APPLIED_MIN_OVERLAP:
+    if not norm_proposal:
         return False
     # Exact containment first (fast, precise for copy-paste facts like paths).
-    if norm_proposal in norm_content:
-        return True
+    exact_at = norm_content.find(norm_proposal)
+    if exact_at >= 0:
+        prefix = norm_content[:exact_at]
+        if not re.search(r"(?:do not|don't|never|avoid)\s+$", prefix):
+            return True
+    if len(norm_proposal) < _APPLIED_MIN_OVERLAP:
+        return False
     # Also check the promotable variant for memory/profile: the region holds
     # "Avoid em dashes; use commas instead." while the proposal may carry
     # "User said: ... Durable rule: Avoid em dashes; use commas instead."
@@ -1134,17 +1139,11 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
         norm_promotable = _normalize_for_match(promotable)
         if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_content:
             return True
-    # Token-overlap fallback for rephrased but equivalent sentences (e.g.
-    # finance policy: "Keep Finance.xlsx local with quarterly review" vs
-    # proposal "Chose to keep Finance.xlsx local with quarterly schedule").
-    # Require ≥60% of the proposal's significant tokens to appear to avoid
-    # false positives on short phrases like "Chose Postgres over SQLite".
-    tokens = [t for t in re.split(r"\W+", norm_proposal) if len(t) > 3]
-    if len(tokens) < 4:
-        return False
-    content_tokens = set(re.split(r"\W+", norm_content))
-    hits = sum(1 for tok in tokens if tok in content_tokens)
-    return hits / len(tokens) >= 0.6
+    # Do not use unordered token overlap here. It treats contradictory or
+    # unrelated sentences as equivalent (for example, "use Python" versus
+    # "do not use Python"). A false negative leaves a reviewable proposal;
+    # a false positive silently loses a user fact.
+    return False
 
 
 def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> bool:
@@ -1170,14 +1169,6 @@ def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> 
             return True
         if len(norm_entry) >= _APPLIED_MIN_OVERLAP and norm_entry in norm_promotable:
             return True
-    # File-level fallback: the whole guide may contain the fact outside the
-    # region (e.g. standing directive in body). Check full guide text.
-    try:
-        guide_text = guide_path.read_text(encoding="utf-8")
-        if _normalize_for_match(promotable) in _normalize_for_match(guide_text):
-            return True
-    except OSError:
-        pass
     return False
 
 

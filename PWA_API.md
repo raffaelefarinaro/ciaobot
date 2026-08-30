@@ -62,6 +62,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
 | POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
+| POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
