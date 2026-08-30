@@ -154,6 +154,11 @@ def generate_candidates(
     outbound: dict[str, list[str]] = {str(entry.path): [] for entry in entries}
     for entry in entries:
         source = str(entry.path)
+        for target in entry.related:
+            target_path = str(target)
+            if target_path in incoming:
+                outbound[source].append(target_path)
+                incoming[target_path].append(source)
         try:
             text = (root / Path(source).relative_to("memory-vault")).read_text(encoding="utf-8")
         except (OSError, ValueError):
@@ -175,7 +180,7 @@ def generate_candidates(
         except (OSError, ValueError):
             continue
         signals: list[str] = []
-        if path in orphans:
+        if path in orphans and not entry.related:
             signals.append("unlinked")
         group = duplicate_by_path.get(path)
         if group:

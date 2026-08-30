@@ -4741,8 +4741,8 @@ async def vault_review(request: Request) -> JSONResponse:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
     try:
         root = Path(config.workspace_vault_root(workspace)).resolve()
-    except (AttributeError, ValueError, OSError):
-        root = Path(config.vault_root).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        return JSONResponse({"error": f"workspace vault unavailable: {exc}"}, status_code=409)
     from ciao import vault_review as review
 
     action = "" if request.method == "GET" else ""

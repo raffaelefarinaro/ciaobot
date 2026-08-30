@@ -704,6 +704,11 @@ class CiaoControlPlane:
         workspace = self._workspace(principal)
         resolver = getattr(self.config, "workspace_vault_root", None)
         root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if action in {"trash", "delete"} and chat is not None:
+            latest = max(chat.user_turn_unattended, key=lambda key: int(str(key))) if chat.user_turn_unattended else None
+            if latest is not None and chat.user_turn_unattended.get(latest):
+                raise ControlPlaneError("unattended_forbidden", "Vault trash and deletion require an attended turn.")
         if action in {"restore", "delete"}:
             try:
                 result = review.restore_note(root, candidate_id) if action == "restore" else review.delete_permanently(root, candidate_id, confirm=confirm)
