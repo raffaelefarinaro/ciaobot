@@ -3455,9 +3455,13 @@ function fileCardIcon(filePath: string): AppIconName {
  * those becomes the turn's *last rendered* bubble depends on phase tagging.
  * Take the last non-empty value for each field so the footer is complete
  * wherever its parts came from.
+ *
+ * ``base`` carries what an earlier flush of the SAME turn already found: a
+ * mid-turn system row (a client notice, an interrupt marker) splits one turn
+ * across two flushes, and the halves rarely both carry every field.
  */
-function turnMetaFrom(buffer: ChatMessage[]): TurnMeta | null {
-  const meta: TurnMeta = {}
+function turnMetaFrom(buffer: ChatMessage[], base: TurnMeta | null = null): TurnMeta | null {
+  const meta: TurnMeta = { ...(base ?? {}) }
   for (const m of buffer) {
     if (m.role !== 'assistant') continue
     if (m.timestamp) meta.timestamp = m.timestamp
@@ -3468,21 +3472,25 @@ function turnMetaFrom(buffer: ChatMessage[]): TurnMeta | null {
   return Object.keys(meta).length ? meta : null
 }
 
-/** Put the turn's footer on the last assistant bubble it produced.
+/** Put the turn's footer on the last assistant bubble it produced — once.
  *
  * Anything earlier is mid-turn: labelling it with the turn's cost read as the
  * price of that fragment, and left the reply the user actually ends on bare.
+ * The walk clears the footer off every earlier bubble of the same turn rather
+ * than only setting it on the last one, because a turn split by a mid-turn
+ * system row flushes twice and the first flush has already attached one.
  */
-function attachTurnMeta(items: RenderItem[], buffer: ChatMessage[]): void {
-  const meta = turnMetaFrom(buffer)
+function attachTurnMeta(items: RenderItem[], meta: TurnMeta | null): void {
   if (!meta) return
+  let last: RenderItem | null = null
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i]
     if (item.kind === 'user') break
     if (item.kind !== 'assistant') continue
-    item.meta = meta
-    return
+    if (last) delete item.meta
+    else last = item
   }
+  if (last && last.kind === 'assistant') last.meta = meta
 }
 
 const renderData = computed<{
@@ -3508,6 +3516,8 @@ const renderData = computed<{
     }
   }
   let currentTurnIndex: number | null = null
+  // The current turn's footer facts, carried across flushes of one turn.
+  let turnMeta: TurnMeta | null = null
 
   const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
     if (turnIndex === null) return []
@@ -3519,6 +3529,9 @@ const renderData = computed<{
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
+    // Accumulated before any early return below, so a turn split across two
+    // flushes still ends with one complete footer on its last bubble.
+    turnMeta = turnMetaFrom(buffer, turnMeta)
     const turnOutputs = collectTraceOutputs(buffer)
     // Prefer the last non-progress assistant text as the final reply so Claude
     // "Now let me…" narration folds into Activity; fall back to the last text
@@ -3599,7 +3612,7 @@ const renderData = computed<{
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
     }
-    attachTurnMeta(items, buffer)
+    attachTurnMeta(items, turnMeta)
     buffer = []
   }
 
@@ -3609,6 +3622,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
+      turnMeta = null
       items.push(withKey({ kind: 'user', msg, turnIndex: currentTurnIndex }))
     } else if (
       msg.role === 'system'

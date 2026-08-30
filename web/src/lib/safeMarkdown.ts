@@ -3,7 +3,7 @@ import { Marked, Renderer, type Tokens } from 'marked'
 
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { COMMENT_TAGS } from './commentContext'
-import { isPlausibleFilePath, linkifyHtml } from './filePaths'
+import { hasKnownFileExtension, isPlausibleFilePath, linkifyHtml } from './filePaths'
 import { buildMarkdownIndex, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
 
 type FileMarkdownOptions = {
@@ -66,6 +66,14 @@ function chatFileHref(href: string): string {
   }
   const base = decoded.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || ''
   if (!isPlausibleFilePath(decoded) || !isPlausibleFilePath(base)) return ''
+  // `[docs](anthropic.com)` is a schemeless site link, not a file: one segment
+  // whose dotted suffix satisfies every shape test above. Claiming it rendered
+  // a file-link to a workspace path that does not exist, and the click then
+  // went nowhere because `withExternalLinkAttrs` skips file links. A dotted
+  // single segment therefore has to carry an extension the viewer can open;
+  // `Makefile` (no dot) and `.gitignore` (dotfile) still qualify.
+  const dotted = base.includes('.') && !base.startsWith('.')
+  if (dotted && !/[/\\]/.test(decoded) && !hasKnownFileExtension(base)) return ''
   return decoded
 }
 

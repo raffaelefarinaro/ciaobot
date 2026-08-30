@@ -100,6 +100,22 @@ const EXTENSIONLESS_BASENAMES = new Set([
   'browserslist',
 ])
 
+const KNOWN_EXTS = new Set(EXTS)
+
+/** True when the basename ends in an extension the file viewer can open.
+ *
+ * Used to break the tie a bare `name.ext` cannot resolve on shape alone:
+ * `notes.md` is a file and `anthropic.com` is a site, and both are a single
+ * segment with a dotted suffix. (`.md` is also Moldova's TLD; the allowlist
+ * decides which reading wins, and files win.)
+ */
+export function hasKnownFileExtension(filePath: string): boolean {
+  const base = basenameOf(filePath.trim())
+  const dot = base.lastIndexOf('.')
+  if (dot <= 0) return false
+  return KNOWN_EXTS.has(base.slice(dot + 1).toLowerCase())
+}
+
 /** Reject bare English words that were never a real path (e.g. "There"). */
 export function isPlausibleFilePath(filePath: string): boolean {
   const trimmed = filePath.trim()

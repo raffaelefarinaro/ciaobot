@@ -179,6 +179,40 @@ describe('ChatPanel turn footer placement', () => {
     expect(footer.html()).toContain('13.2%')
   })
 
+  it('shows one footer when a system notice splits the turn', async () => {
+    const { wrapper, store } = await mountPanel()
+    // A non-trace system row flushes the turn mid-way, so the turn is built in
+    // two passes. Each pass used to attach a footer from its own half of the
+    // buffer, which put two footers on one turn — the duplication the single
+    // footer rule exists to prevent.
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'rewrite the speech', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
+      {
+        role: 'assistant',
+        content: 'Working on it.',
+        timestamp: '2026-08-30T13:23:10Z',
+        effective_model: 'openai/gpt-5.6-luna',
+        usage: { input_tokens: '10007', output_tokens: '92' },
+      },
+      { role: 'system', content: 'Connection restored.', timestamp: '2026-08-30T13:23:12Z' },
+      {
+        role: 'assistant',
+        content: 'The language allocation is already correct.',
+        timestamp: '2026-08-30T13:23:23Z',
+        duration_ms: 23000,
+      },
+    ]
+    await flushPromises()
+
+    const footers = wrapper.findAll('.message.assistant .message-meta')
+    expect(footers.length).toBe(1)
+    const bubbles = wrapper.findAll('.message.assistant')
+    // On the bubble that closes the turn, carrying both halves' facts.
+    expect(bubbles[0].find('.message-meta').exists()).toBe(false)
+    expect(bubbles[bubbles.length - 1].find('.message-meta').text()).toContain('openai/gpt-5.6-luna')
+    expect(bubbles[bubbles.length - 1].find('.message-meta').text()).toContain('23s')
+  })
+
   it('puts the footer on a single-bubble turn too', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [

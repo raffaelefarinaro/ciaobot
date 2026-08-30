@@ -212,4 +212,21 @@ describe('chat markdown file links', () => {
 
     expect(html).not.toContain('file-link')
   })
+
+  it('leaves a schemeless bare domain alone', () => {
+    // One segment whose dotted suffix passes every path-shape test, so it used
+    // to render as a file-link to a workspace path that does not exist — and
+    // the click went nowhere, since file links deliberately skip target/rel.
+    for (const href of ['anthropic.com', 'example.co.uk', 'docs.example.io']) {
+      const html = renderMarkdown(`[docs](${href})`)
+      expect(html).not.toContain('file-link')
+      expect(html).toContain(`href="${href}"`)
+    }
+  })
+
+  it('still treats a bare filename with a known extension as a file', () => {
+    expect(renderMarkdown('[notes](notes.md)')).toContain('data-file-path="notes.md"')
+    expect(renderMarkdown('[build](Makefile)')).toContain('data-file-path="Makefile"')
+    expect(renderMarkdown('[ignore](.gitignore)')).toContain('data-file-path=".gitignore"')
+  })
 })
