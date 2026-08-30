@@ -77,6 +77,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
+| GET, POST | `/api/vault/review` | List explainable note-review candidates or record an explicit keep/link/defer/archive/trash/restore decision; permanent deletion requires a trashed candidate and exact confirmation |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
@@ -202,6 +203,18 @@ curl -sS -c /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/auth" 
 ```
 
 Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer host-match check is skipped when those headers are absent, so plain curl works.
+
+**Vault note review**
+
+```bash
+# Detection is read-only and scoped to one logical workspace.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default"
+
+# Record a reversible decision. Permanent deletion is only available after trash.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"decide","candidate_id":"<candidate-id>","disposition":"keep"}'
+```
 
 **Agent assets**
 
