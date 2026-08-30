@@ -2890,6 +2890,17 @@ export const useProjectStore = defineStore('projects', () => {
             }
             return false
           }
+          const followUpBoundary = (() => {
+            const users = merged
+              .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
+              .filter(pos => pos >= 0)
+            if (users.length > 1) return users[1]
+            if (users.length !== 1) return null
+            const pos = users[0]
+            if (typeof merged[pos].i === 'number') return pos
+            return merged.slice(tailStart, pos).some(isLiveTraceRow) ? pos : null
+          })()
+          let insertedBeforeFollowUp = 0
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
@@ -2931,12 +2942,19 @@ export const useProjectStore = defineStore('projects', () => {
               break
             }
             if (reconciled) continue
-            // Beyond the cached extent: genuinely new tail rows, appended in
-            // the window's own ascending order (after any un-indexed local
-            // rows, which are older than anything arriving now).
-            if (firstAppendPos < 0) firstAppendPos = merged.length
-            posByIndex.set(abs, merged.length)
-            merged.push(item)
+            // Insert settled rows before a fast follow-up's live tail. Without
+            // this, the follow-up renders before the authoritative answer it
+            // followed, even though both turns are otherwise reconciled.
+            const insertionPos = followUpBoundary === null
+              ? merged.length
+              : followUpBoundary + insertedBeforeFollowUp
+            if (firstAppendPos < 0) firstAppendPos = insertionPos
+            for (const [index, position] of posByIndex) {
+              if (position >= insertionPos) posByIndex.set(index, position + 1)
+            }
+            merged.splice(insertionPos, 0, item)
+            posByIndex.set(abs, insertionPos)
+            if (followUpBoundary !== null) insertedBeforeFollowUp++
           }
           messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, firstAppendPos)
         }
