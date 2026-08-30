@@ -530,6 +530,24 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
     }
 }
 
+// Shared by the tray's "Update" item and the webview's update tile, so both
+// entry points show the same warning before interrupting active work.
+fn confirm_and_run_full_update(app: &AppHandle) {
+    let app_for_dialog = app.clone();
+    app.dialog()
+        .message("Ciaobot will update its engine and app, then restart. Active work will be interrupted.")
+        .title("Update Ciaobot?")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Update".into(),
+            "Cancel".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                run_full_update(app_for_dialog, false);
+            }
+        });
+}
+
 // One update for both halves: they ship from the same tag, so updating one
 // without the other is what produces an opaque desktop-service mismatch.
 fn run_full_update(app: AppHandle, force: bool) {
@@ -1373,23 +1391,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 "disconnect" => prompt_disconnect_from_host(app),
                 "start" => invoke_service_action(app.clone(), "start", false, false),
                 "restart" => invoke_service_action(app.clone(), "restart", false, false),
-                "update" => {
-                    let app_for_dialog = app.clone();
-                    app.dialog()
-                        .message(
-                            "Ciaobot will update its engine and app, then restart. Active work will be interrupted.",
-                        )
-                        .title("Update Ciaobot?")
-                        .buttons(MessageDialogButtons::OkCancelCustom(
-                            "Update".into(),
-                            "Cancel".into(),
-                        ))
-                        .show(move |confirmed| {
-                            if confirmed {
-                                run_full_update(app_for_dialog, false);
-                            }
-                        });
-                }
+                "update" => confirm_and_run_full_update(app),
                 "notifications" => {
                     let model = app.state::<DesktopModel>();
                     let mut enabled = false;
@@ -1410,7 +1412,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = refresh_tray(app);
                 }
                 "notification-settings" => {
-                    queue_navigation(app, NavigationIntent::Notifications);
+                    let _ = Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.preference.notifications")
+                        .spawn();
                 }
                 "hide-dock-icon" => {
                     let model = app.state::<DesktopModel>();
@@ -1737,6 +1741,13 @@ fn check_permission(kind: permissions::PermissionKind) -> permissions::Permissio
     permissions::query(kind)
 }
 
+// Lets the homepage's update tile start the same update the tray's "Update"
+// item does, instead of only pointing the operator at a chat about it.
+#[tauri::command]
+fn trigger_app_update(app: AppHandle) {
+    confirm_and_run_full_update(&app);
+}
+
 // Async on purpose: a synchronous command would run the permission prompt's
 // blocking wait on the main thread and freeze every window and the tray until
 // the user answered it.
@@ -1750,7 +1761,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             check_permission,
-            request_permission
+            request_permission,
+            trigger_app_update
         ])
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app, "main");

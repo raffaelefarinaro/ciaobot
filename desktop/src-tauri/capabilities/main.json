@@ -8,6 +8,7 @@
   },
   "permissions": [
     "check-permission",
-    "request-permission"
+    "request-permission",
+    "trigger-app-update"
   ]
 }

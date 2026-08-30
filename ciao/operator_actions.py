@@ -35,6 +35,7 @@ import inspect
 import json
 import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -294,7 +295,8 @@ def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
             ),
             glyph="★",
             workspace="",
-            link_label="Star on GitHub",
+            run_label="Star on GitHub",
+            link_label="Open repository",
             link_url=repo_url,
             dismiss_label="Later",
         )
@@ -1321,7 +1323,44 @@ def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str,
 
 
 def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
-    """Record the star so the ask never surfaces again."""
+    """Star the repository directly through the GitHub CLI.
+
+    A real API call, not a receipt on trust: the button used to only open the
+    repository page, which confirms nothing (the visitor may not even be
+    signed in). ``gh`` already carries the operator's own GitHub auth, so this
+    can star on their behalf without the app ever handling a token.
+
+    The CLI has no ``gh repo star`` subcommand (verified against gh 2.98.0 —
+    `gh repo --help` lists archive/clone/create/... and no "star"), so this
+    goes through the CLI's own thin API wrapper instead: a plain authenticated
+    ``PUT`` on the starring endpoint, which is what `gh repo star` would have
+    to do internally anyway.
+    """
+    from ciao.package_version import latest_release_redirect_url
+
+    repo_url = latest_release_redirect_url().removesuffix("/releases/latest")
+    slug = repo_url.removeprefix("https://github.com/").removeprefix("http://github.com/")
+    try:
+        subprocess.run(
+            ["gh", "api", "-X", "PUT", f"user/starred/{slug}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "The GitHub CLI (`gh`) isn't installed — star it yourself at "
+            f"{repo_url}, or install `gh` and run `gh auth login` first."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out talking to GitHub — try again.") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip() or "unknown error"
+        raise RuntimeError(
+            f"Starring via the GitHub CLI failed ({detail}) — sign in with "
+            f"`gh auth login`, or star it yourself at {repo_url}."
+        ) from exc
     _write_star_receipt(context, "starred")
     return {"status": "starred"}, "Thank you!"
 
