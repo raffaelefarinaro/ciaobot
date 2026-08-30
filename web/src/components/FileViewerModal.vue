@@ -330,7 +330,10 @@ async function openInMemoryMap(): Promise<void> {
   // that check would leave the map jumping to this note the next time /memory
   // opens — after a navigation the user cancelled.
   if (!(await store.close())) return
-  memoryMapStore.requestFocus(target)
+  // Not `requestFocus`: the map is not mounted yet, so nothing is listening
+  // for the signal, and the graph load it does on arrival clears `selectedId`
+  // anyway. The map drains this once its nodes are placed.
+  memoryMapStore.requestFocusOnOpen(target)
   await router.push('/memory')
 }
 

@@ -92,6 +92,29 @@ describe('visibility', () => {
     expect(mm.selectedId).toBe('d')
   })
 
+  test('a focus asked for before navigating here survives the trip', () => {
+    const mm = useMemoryMapStore()
+    // Set while the map is unmounted and its graph unloaded: `requestFocus`
+    // would bump a signal nobody hears, and the graph load clears selectedId.
+    mm.requestFocusOnOpen('memory-vault/People/D.md')
+    mm.nodes = [node('memory-vault/People/D.md', 0)]
+
+    expect(mm.consumePendingFocus()).toBe('memory-vault/People/D.md')
+    // Drained: a second visit to /memory must not re-fly to an old note.
+    expect(mm.consumePendingFocus()).toBeNull()
+  })
+
+  test('a workspace-relative path resolves to the node id the graph uses', () => {
+    const mm = useMemoryMapStore()
+    mm.nodes = [node('/root/memory-vault/People/D.md', 0)]
+
+    mm.requestFocusOnOpen('personal/memory-vault/People/D.md')
+    expect(mm.consumePendingFocus()).toBe('/root/memory-vault/People/D.md')
+
+    mm.requestFocusOnOpen('People/Nobody.md')
+    expect(mm.consumePendingFocus()).toBeNull()
+  })
+
   test('shift-click builds a path instead of changing the selection', () => {
     const mm = seedChain()
     mm.handleNodeClick('a', false)

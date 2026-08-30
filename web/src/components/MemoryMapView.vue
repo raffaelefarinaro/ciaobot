@@ -716,9 +716,35 @@ function attachCanvas() {
   fitCamera()
   // A graph restored from the store already carries settled positions from the
   // last visit, so it only needs the short settle, not the full warmup.
-  if (mm.graphIsWarm) wakeSimulation()
-  else beginWarmup(warmupStepsFor(simNodes.length))
+  if (mm.graphIsWarm) {
+    wakeSimulation()
+    // Settled positions, so a focus handed over from another view can land
+    // now; a cold graph waits for the warmup to place its nodes first.
+    deliverPendingFocus()
+  } else {
+    beginWarmup(warmupStepsFor(simNodes.length))
+  }
 }
+
+/**
+ * Act on a focus another view asked for before navigating here.
+ *
+ * Selecting the note the user arrived from is the whole point of the file
+ * viewer's "Open in memory map": landing on an unchanged, unselected graph
+ * makes them hunt for the note they were already reading. Deferred to here
+ * because `requestFocus` needs both a mounted canvas and placed nodes.
+ */
+function deliverPendingFocus() {
+  const id = mm.consumePendingFocus()
+  if (id) mm.requestFocus(id)
+}
+// The same hand-off while this view is already open: the file viewer floats
+// above the route, so "Open in memory map" from a note opened here pushes a
+// route that is already active and remounts nothing. `ctx` stands in for "the
+// canvas is attached", which is what `deliverPendingFocus` needs.
+watch(() => mm.pendingFocus, (path) => {
+  if (path && ctx) deliverPendingFocus()
+})
 // A category/search filter change can bring previously-hidden nodes back
 // into the simulation; wake it so they settle instead of sitting inert at
 // whatever position they last had.
@@ -897,6 +923,9 @@ function stepWarmupFrame(): boolean {
   // These positions are worth keeping: the store remembers that this
   // workspace's layout is settled, so coming back skips the warmup entirely.
   mm.markGraphWarm()
+  // The nodes have their final coordinates now, so a focus that arrived with
+  // the navigation can fly to a position that will not move under it.
+  deliverPendingFocus()
   return false
 }
 
