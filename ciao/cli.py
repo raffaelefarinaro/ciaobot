@@ -2385,11 +2385,67 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
         try:
             # The stamp only feeds graph scoping; the staleness detector keys
-            # on type and dates, not workspace.
-            entries = scan_vault(vault, workspace="personal")
-            report["stale_notes"] = find_stale_notes(
-                entries, vault_root=vault, today=datetime.date.today()
+            # on type and dates, not workspace. The render prefix is passed
+            # explicitly so the stored-key rebuild below strips exactly what
+            # scan_vault rendered, instead of hardcoding its default.
+            render_prefix = "memory-vault"
+            entries = scan_vault(
+                vault, workspace="personal", path_prefix=Path(render_prefix)
             )
+            report["stale_notes"] = find_stale_notes(
+                entries,
+                vault_root=vault,
+                # The same prefix scan_vault rendered: left to its default,
+                # find_stale_notes only works while its own internal default
+                # happens to equal render_prefix, and a drifted prefix makes
+                # every mtime stat miss silently.
+                path_prefix=Path(render_prefix),
+                today=datetime.date.today(),
+            )
+            # Decay-by-disuse: mark whether recall has returned each stale
+            # note recently. Stale AND unretrieved is the strongest demotion
+            # candidate; no evidence at all (no hits log yet) marks nothing.
+            from ciao.fts_search import (
+                NO_MATCH_KEY_PREFIX,
+                read_search_hit_paths,
+                vault_key_prefix,
+            )
+
+            # The writer (control_plane.vault_search) appends beside
+            # state.json, which honours CIAO_RUNTIME_ROOT — a hardcoded
+            # `.runtime` would silently read an empty location on installs
+            # with a custom runtime root.
+            hit_paths = read_search_hit_paths(Path(config.state_path).parent)
+            # Compare in the index's own key space: hits are stored relative
+            # to the install root with the vault directory's real name, while
+            # scan_vault renders every path under the render prefix above.
+            # Rebuilding the stored key per finding keeps a same-named note in
+            # another workspace (or a vault not named `memory-vault`) from
+            # producing a false match. The fail-closed prefix means this vault
+            # has no identifiable rows: no evidence, so mark nothing.
+            # workspace_root is a required config field, populated above from
+            # the same value injected into config_source — no fallback.
+            key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
+                normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
+                normalized_prefix = key_prefix.replace(os.sep, "/")
+                # A prefix that no hit carries means the log's keys were
+                # written against a different base (the audit invoked with
+                # another workspace root than the server's). That is missing
+                # evidence, not proof of disuse — marking everything false
+                # would nominate actively-used notes for demotion. An empty
+                # prefix (vault == workspace root) takes the same rule: every
+                # hit trivially carries it, so marking is skipped only when
+                # the log has no usable hits at all.
+                if any(
+                    hit.startswith(normalized_prefix) for hit in normalized_hits
+                ):
+                    for finding in report["stale_notes"]["stale_notes"]:
+                        rendered = str(finding["path"]).replace(os.sep, "/")
+                        rel = rendered.removeprefix(render_prefix + "/")
+                        finding["retrieved_recently"] = (
+                            normalized_prefix + rel
+                        ) in normalized_hits
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],
@@ -2443,6 +2499,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         )
         for finding in report["superseded_state_candidates"]:
             print(f"  [{finding['region']}] {finding['subject']}")
+        aging = report.get("aging_state_entries", [])
+        print(f"Aging dated entries to re-verify (informational): {len(aging)}")
+        for finding in aging:
+            print(
+                f"  [{finding['region']}] {finding['kind']} {finding['date']} "
+                f"({finding['age_days']}d ≥ {finding['threshold_days']}d) :: "
+                f"{finding['entry']}"
+            )
         stale = report.get("stale_notes") or {}
         if stale:
             print(

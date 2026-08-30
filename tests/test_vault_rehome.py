@@ -1039,8 +1039,8 @@ def test_a_linked_counterpart_takes_the_note_out_of_the_queue(tmp_path: Path) ->
 def test_the_counterpart_must_be_named_by_an_alias_not_by_name_shape(tmp_path: Path) -> None:
     """Two people who share a name are not one person.
 
-    Measured on a real vault: `personal/People/Ipek.md` (Raffa's partner) and
-    `work/People/Ipek-Kahraman-Scandit.md` (a Scandit colleague), whose note says
+    Measured on a real vault: `personal/People/Mira.md` (a family member) and
+    `work/People/Mira-Rossi-Acme.md` (a work colleague), whose note says
     "the name collision in the vault is intentional — do not merge". A rule that
     matched a longer stem extending a shorter one would have silently dropped a
     genuine queue row on the strength of a shared first name.
@@ -1048,20 +1048,20 @@ def test_the_counterpart_must_be_named_by_an_alias_not_by_name_shape(tmp_path: P
     vault = tmp_path / "memory-vault"
     _note(
         vault,
-        "personal/People/Ipek.md",
+        "personal/People/Mira.md",
         "---\n"
         "type: person\n"
         "tags: [person, friend, colleague]\n"
         "related:\n"
-        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        '  - "work/People/Mira-Rossi-Acme"\n'
         "---\n"
-        "# Ipek\n",
+        "# Mira\n",
     )
-    _note(vault, "work/People/Ipek-Kahraman-Scandit.md", _person("[person, colleague]"))
+    _note(vault, "work/People/Mira-Rossi-Acme.md", _person("[person, colleague]"))
 
     paths = [c.path for c in detect_misfiled_people(vault)]
 
-    assert "personal/People/Ipek.md" in paths
+    assert "personal/People/Mira.md" in paths
 
 
 def test_a_link_to_someone_else_over_there_is_not_a_counterpart(tmp_path: Path) -> None:
@@ -1128,38 +1128,38 @@ def test_an_inline_related_list_is_read_too(tmp_path: Path) -> None:
 
 
 def test_a_mutual_link_identifies_one_person_when_the_names_cannot(tmp_path: Path) -> None:
-    """`Ipek` and `Ipek-Kahraman-Scandit` are one person — she joined the company
+    """`Mira` and `Mira-Rossi-Acme` are one person — she joined the company
     — but the work note carries a disambiguating suffix no real alias contains.
     Both notes naming each other is an identity claim coincidence cannot produce.
     """
     vault = tmp_path / "memory-vault"
     _note(
         vault,
-        "personal/People/Ipek.md",
+        "personal/People/Mira.md",
         "---\n"
         "type: person\n"
         "tags: [person]\n"
         "related:\n"
-        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        '  - "work/People/Mira-Rossi-Acme"\n'
         "---\n"
-        "# Ipek\n",
+        "# Mira\n",
     )
     _note(
         vault,
-        "work/People/Ipek-Kahraman-Scandit.md",
+        "work/People/Mira-Rossi-Acme.md",
         "---\n"
         "type: person\n"
         "tags: [person, scandit]\n"
         "related:\n"
-        '  - "personal/People/Ipek"\n'
+        '  - "personal/People/Mira"\n'
         "---\n"
-        "# Ipek Kahraman\n",
+        "# Mira Rossi\n",
     )
 
     paths = [c.path for c in detect_misfiled_people(vault)]
 
-    assert "personal/People/Ipek.md" not in paths
-    assert "work/People/Ipek-Kahraman-Scandit.md" not in paths
+    assert "personal/People/Mira.md" not in paths
+    assert "work/People/Mira-Rossi-Acme.md" not in paths
 
 
 def test_one_sided_link_between_different_people_is_still_queued(tmp_path: Path) -> None:
@@ -1168,20 +1168,20 @@ def test_one_sided_link_between_different_people_is_still_queued(tmp_path: Path)
     vault = tmp_path / "memory-vault"
     _note(
         vault,
-        "personal/People/Ipek.md",
+        "personal/People/Mira.md",
         "---\n"
         "type: person\n"
         "tags: [person]\n"
         "related:\n"
-        '  - "work/People/Ipek-Kahraman-Scandit"\n'
+        '  - "work/People/Mira-Rossi-Acme"\n'
         "---\n"
-        "# Ipek\n",
+        "# Mira\n",
     )
-    _note(vault, "work/People/Ipek-Kahraman-Scandit.md", _person("[person, scandit]"))
+    _note(vault, "work/People/Mira-Rossi-Acme.md", _person("[person, scandit]"))
 
     paths = [c.path for c in detect_misfiled_people(vault)]
 
-    assert "personal/People/Ipek.md" in paths
+    assert "personal/People/Mira.md" in paths
 
 
 def test_the_legacy_unprefixed_form_counts_as_a_link_back(tmp_path: Path) -> None:

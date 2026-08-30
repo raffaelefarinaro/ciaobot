@@ -714,3 +714,32 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
     pcm.stop_chat_retry(chat.chat_id)
+
+
+def test_a_plainly_stated_usage_limit_arms_the_hourly_retry() -> None:
+    """opencode/OpenAI states the limit without a 429 or a vendor phrasing.
+
+    "The usage limit has been reached" contains "usage limit", but that needle
+    used to sit behind a `429`/`too many requests` gate, so the turn fell
+    through to unknown: no hourly retry armed, and the user had to sit on the
+    chat and press Retry by hand.
+    """
+    from ciao.web.project_chats import _is_retryable_quota_error
+
+    assert _is_retryable_quota_error("The usage limit has been reached") is True
+    assert _is_retryable_quota_error("Usage limit reached") is True
+    assert _is_retryable_quota_error("You have exceeded your quota") is True
+    assert _is_retryable_quota_error("Token limit exhausted for this key") is True
+
+
+def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
+    """The gate exists so ordinary prose mentioning a quota is not a quota error.
+
+    Only pairing the noun with an exhaustion verb bypasses it; the bare noun
+    must still carry the 429 / too-many-requests marker.
+    """
+    from ciao.web.project_chats import _is_retryable_quota_error
+
+    assert _is_retryable_quota_error("I checked the quota settings for you") is False
+    assert _is_retryable_quota_error("the session was restored") is False
+    assert _is_retryable_quota_error("explain how rate limit headers work") is False

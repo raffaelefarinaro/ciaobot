@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass
@@ -54,6 +55,43 @@ FREQUENCIES = {"daily", "weekly", "monthly", "manual", "once", INTERVAL_FREQUENC
 MIN_INTERVAL_MINUTES = 1
 DEFAULT_INTERVAL_MINUTES = 10
 
+# Exactly what ``compute_next_run`` can parse out of ``daily_time_utc``.
+_VALID_DAILY_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def wall_clock_time_error(entry: "ScheduleEntry") -> str:
+    """Why this entry's time is unusable, or "" when it is fine.
+
+    A wall-clock cadence needs a time ``compute_next_run`` can parse. Without
+    one it returns ``None`` and ``tick()`` never matches, so the entry sits
+    there reading as enabled and silently never fires — which is exactly where
+    an interval entry lands when it is edited to a wall-clock cadence, since
+    interval and manual entries carry no ``daily_time_utc`` at all.
+
+    Lives here rather than in a route because both write paths need it: the
+    REST ``PATCH /api/schedules/{id}`` and the ``schedule`` MCP tool. Guarding
+    only one of them leaves the other door open.
+    """
+    return wall_clock_time_value_error(
+        getattr(entry, "frequency", ""), getattr(entry, "daily_time_utc", "") or ""
+    )
+
+
+def wall_clock_time_value_error(frequency: str, daily_time_utc: str) -> str:
+    """:func:`wall_clock_time_error` on the raw values.
+
+    The REST create route validates the request body before any entry exists,
+    so it has the two fields and not the object. Same rule, one implementation.
+    """
+    if frequency in {"manual", INTERVAL_FREQUENCY}:
+        return ""
+    if _VALID_DAILY_TIME.match(daily_time_utc or ""):
+        return ""
+    return (
+        f"frequency '{frequency}' needs a HH:MM time; got {daily_time_utc!r}"
+    )
+
+
 SYSTEM_STATE_FIELDS = {
     "enabled",
     "last_triggered_on",
@@ -83,6 +121,17 @@ def system_schedule_id(base_id: str, workspace: str) -> str:
     return f"{base_id}{SYSTEM_ID_SEPARATOR}{workspace}"
 
 
+def is_system_schedule_id(schedule_id: str) -> bool:
+    """True when the id names a packaged system schedule, fanned out or not.
+
+    The archive pipeline gates memory writes on this: a system-schedule chat
+    (memory curation, hygiene, skill evolution) is the memory machinery itself,
+    and extracting its own operating rules as facts pollutes the bounded
+    regions with the machinery's self-description.
+    """
+    return system_base_id(schedule_id).startswith("system-")
+
+
 def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) -> str:
     """Offset a fanned-out routine's fire time by whole minutes.
 
@@ -99,6 +148,88 @@ def _stagger_time(daily_time_utc: str, offset: int, *, step_minutes: int = 7) ->
         return daily_time_utc
     total = (hours * 60 + minutes + offset * step_minutes) % (24 * 60)
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def supports_auto_archive(entry: Any) -> bool:
+    """False for an interval entry bound to a fixed chat.
+
+    Typed loosely because the dispatcher (``project_chats``) holds the entry as
+    an opaque object and reads it the same ``getattr`` way this does.
+
+    The point of that binding is one conversation carried across runs, and
+    ``_rehome_interval_chat`` forks a replacement whenever it finds the target
+    archived — so archiving after a clean run makes the next run fork, run, and
+    archive again, forever. A project-bound interval entry opens a fresh chat
+    per run and is exactly what auto-archive is for, so only the fixed-chat
+    binding is excluded.
+    """
+    return not (
+        getattr(entry, "frequency", "") == INTERVAL_FREQUENCY
+        and getattr(entry, "web_chat_id", "")
+        and not getattr(entry, "web_project_id", "")
+    )
+
+
+def normalize_auto_archive(entry: "ScheduleEntry") -> bool:
+    """Force ``manual`` where auto-archive cannot work. Returns if it changed.
+
+    The dispatcher already refuses to archive these, so storing ``auto`` only
+    produced a setting the UI displayed and honoured nowhere. Normalising at the
+    store means every write path — REST, MCP, both legacy loop routes, and a
+    retarget that turns a project entry into a fixed-chat one — lands on the
+    same answer, rather than each remembering to check.
+    """
+    if supports_auto_archive(entry) or getattr(entry, "archive_policy", "") != "auto":
+        return False
+    entry.archive_policy = "manual"
+    return True
+
+
+def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
+    """Keep ``fallback_project_id`` in step with ``web_chat_id``.
+
+    Every path that binds or rebinds an automation's chat calls this — REST
+    create/update, the ``schedule`` MCP create/update, and both legacy loop
+    routes. The field records where a *fixed-chat* entry re-homes once its
+    target chat is deleted, so it can only be captured while that chat still
+    exists; ``resolve_automation_project`` cannot derive it later, by which
+    point the chat is gone.
+
+    This exists because stamping it per call site did not hold: each creator
+    was fixed separately and the next one shipped without it, and no update
+    path refreshed it at all — retargeting an entry from a chat in project A to
+    one in project B left the fallback on A, so deleting the new chat resumed
+    the run in the old project.
+
+    Takes ``pcm`` rather than living on it: the only thing needed is
+    ``get_chat``, and a free function keeps the duck-typed managers in the
+    tests honest instead of forcing every stub to grow a method. A manager
+    without ``get_chat`` is read as "cannot see the chat" rather than raised
+    through: this runs inside every schedule write, and turning a stub's
+    missing method into a 500 on create would be a worse failure than leaving
+    one entry's fallback unstamped.
+
+    A project-bound entry clears the field — ``web_project_id`` already names
+    where its runs go, and a stale fallback under it would only mislead.
+    Returns whether anything changed, so callers can skip a redundant write.
+    """
+    web_project_id = getattr(entry, "web_project_id", "") or ""
+    web_chat_id = getattr(entry, "web_chat_id", "") or ""
+    if web_project_id or not web_chat_id:
+        resolved = ""
+    else:
+        get_chat = getattr(pcm, "get_chat", None)
+        chat = get_chat(web_chat_id) if get_chat is not None else None
+        # A chat we cannot see right now (already gone, or not local) tells us
+        # nothing new — keep whatever was captured while it existed rather than
+        # blanking the entry's only re-home target.
+        if chat is None:
+            return False
+        resolved = getattr(chat, "project_id", "") or ""
+    if (getattr(entry, "fallback_project_id", "") or "") == resolved:
+        return False
+    entry.fallback_project_id = resolved
+    return True
 
 
 def publish_automations_changed(pcm) -> None:
@@ -185,12 +316,24 @@ def migrate_loops(runtime_root: Path) -> int:
             # the old project hint: on interval schedules that means a fresh
             # chat per run and takes precedence over web_chat_id.
             web_project_id=None,
+            # The loop's project was its re-home target when the fixed chat
+            # went away (legacy `_resolve_loop_project`). Dropping it entirely
+            # sent those runs to the workspace's General instead, so keep it as
+            # the fallback it always was.
+            fallback_project_id=str(item.get("web_project_id") or ""),
             workspace=str(item.get("workspace") or ""),
             title=str(item.get("title") or ""),
             last_dispatched_at=str(item.get("last_run_at") or ""),
             last_status=str(item.get("last_status") or ""),
             enabled=bool(item.get("autostart")),
-            scope=str(item.get("scope") or "user"),
+            # Deliberately not carried from the loop. `replace` routes a
+            # ``scope == "system"`` entry to ``_replace_system_state``, which
+            # writes only the overlay fields into system_schedules_state.json
+            # and never adds a row to schedules.json — so a loop that named
+            # itself system-scoped was counted as imported, logged as imported,
+            # and then invisible to ``list_entries`` forever, with loops.json
+            # already renamed aside. An imported loop is a user schedule.
+            scope="user",
         )
         store.replace(entry)
         imported += 1
@@ -310,11 +453,16 @@ def compute_next_run(
         if last is None:
             return current.astimezone(tz)
         return (last + interval_delta(entry)).astimezone(tz)
-    try:
-        hh, mm = entry.daily_time_utc.split(":")
-        target_h, target_m = int(hh), int(mm)
-    except (ValueError, AttributeError):
+    # Range-checked, not just parseable: `int()` accepts "25:00" and "09:99"
+    # and the out-of-range value only blows up later, in `datetime.replace`
+    # below — outside this try, so it escaped as a 500 from every caller that
+    # serialises a schedule (`_enrich_schedule`, and therefore the whole
+    # `GET /api/schedules` list, permanently). An unusable time is "never
+    # fires", which is what None already means here.
+    if not _VALID_DAILY_TIME.match(entry.daily_time_utc or ""):
         return None
+    hh, mm = entry.daily_time_utc.split(":")
+    target_h, target_m = int(hh), int(mm)
     tz = ZoneInfo(entry.timezone_name)
     now_local = (now or _now_utc()).astimezone(tz)
     # `once` schedules have a fixed target date; if it's already past we
@@ -366,11 +514,12 @@ def compute_last_expected_run(
     """
     if not entry.enabled or entry.frequency == "manual" or is_interval(entry):
         return None
-    try:
-        hh, mm = entry.daily_time_utc.split(":")
-        target_h, target_m = int(hh), int(mm)
-    except (ValueError, AttributeError):
+    # Same range check as compute_next_run: `int()` alone lets "25:00" through
+    # to a `datetime.replace` that raises outside this guard.
+    if not _VALID_DAILY_TIME.match(entry.daily_time_utc or ""):
         return None
+    hh, mm = entry.daily_time_utc.split(":")
+    target_h, target_m = int(hh), int(mm)
     tz = ZoneInfo(entry.timezone_name)
     now_local = (now or _now_utc()).astimezone(tz)
     # Never report a fire from before the schedule existed.
@@ -476,6 +625,14 @@ class ScheduleEntry:
     # to the same project and repair the id. Empty for entries created before
     # this field existed; those still fall back to General.
     web_project_name: str = ""
+    # Where to re-home a *fixed-chat* entry whose target chat is gone, without
+    # turning it into a project entry. On an interval schedule `web_project_id`
+    # is the primary binding and means "a fresh chat per run", which takes
+    # precedence over `web_chat_id` — so a loop's project hint could not simply
+    # be carried into that field during migration without changing what the
+    # automation does. It is kept here instead: consulted only as a fallback,
+    # never as a target. Empty means fall back to the workspace's General.
+    fallback_project_id: str = ""
     # Workspace the schedule belongs to (e.g. "acme" | "home" | "default"). Project IDs
     # regenerate per device on fresh init, so web_project_id goes stale across
     # devices; this field lets the resolver re-target the right General project
@@ -599,11 +756,15 @@ class ScheduleStore:
         )
         with self._lock:
             data = self._load()
+            normalize_auto_archive(entry)
             data.setdefault("schedules", []).append(self._serialize_entry(entry))
             self._save(data)
         return entry
 
     def replace(self, entry: ScheduleEntry) -> None:
+        # Both write doors normalise, so no caller can persist an auto-archive
+        # policy the dispatcher will refuse to honour.
+        normalize_auto_archive(entry)
         with self._lock:
             if entry.scope == "system":
                 self._replace_system_state(entry)
@@ -932,6 +1093,18 @@ class ScheduleManager:
         # next tick comes due. Tracked here so the cadence skips instead of
         # starting a second copy.
         self._inflight: set[str] = set()
+        # Chats an interval run has claimed but not yet started streaming on.
+        # `_fire_interval` reaches `create_task` without ever awaiting, so the
+        # broker is still empty when the same tick evaluates the next entry:
+        # two entries bound to one chat both read `chat_busy` as False and both
+        # fire, and the second `start_stream` silently returns the first one's
+        # stream, dropping the second prompt while recording it as a clean run.
+        self._claimed_chats: set[str] = set()
+        # Strong references to the in-flight run tasks. The event loop holds
+        # only weak ones, and `_inflight` is discarded exclusively from inside
+        # the task, so a collected task would strand its schedule id there and
+        # the automation would read "run in progress" forever.
+        self._run_tasks: set[asyncio.Task[Any]] = set()
         self._loop_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -1022,6 +1195,35 @@ class ScheduleManager:
             logger.info("Recorded the target project name on %d schedule(s)", stamped)
         return stamped
 
+    def backfill_fallback_projects(self, pcm) -> int:
+        """Stamp the re-home fallback on chat-bound entries that never got one.
+
+        Same window as ``backfill_project_names``: ``fallback_project_id`` can
+        only be read off the bound chat while that chat still exists, and the
+        entries this repairs are exactly the ones whose chat has not been
+        deleted yet. Without it, every chat-bound schedule written before
+        ``stamp_fallback_project`` existed — the MCP `schedule`/`loop` creators
+        stamped nothing at all — keeps an empty fallback until someone happens
+        to edit it, and deleting its chat first re-homes the unattended run
+        into the workspace's General instead of the project it lived in.
+
+        Only fills blanks: a non-empty fallback is the user's own binding (or a
+        migrated loop's original project) and is left alone, since refreshing
+        it here would silently follow a chat that had since moved.
+        """
+        stamped = 0
+        for entry in self.list_entries():
+            if entry.fallback_project_id or entry.web_project_id:
+                continue
+            if not entry.web_chat_id:
+                continue
+            if stamp_fallback_project(entry, pcm):
+                self.replace(entry)
+                stamped += 1
+        if stamped:
+            logger.info("Recorded the re-home fallback on %d schedule(s)", stamped)
+        return stamped
+
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)
 
@@ -1040,11 +1242,16 @@ class ScheduleManager:
     ) -> None:
         """Dispatch a schedule entry through the web pipeline."""
         if self._dispatch_to_web is not None:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._dispatch_to_web(
                     entry, model, mode, provider, target_chat_id=target_chat_id
-                )
+                ),
+                name=f"schedule-dispatch-{entry.schedule_id}",
             )
+            # The loop keeps only a weak reference; without one of ours the
+            # task can be collected mid-run and the dispatch simply vanishes.
+            self._run_tasks.add(task)
+            task.add_done_callback(self._run_tasks.discard)
 
     # ── Interval cadence ────────────────────────────────────────────────
 
@@ -1060,9 +1267,16 @@ class ScheduleManager:
         """
         if entry.schedule_id in self._inflight:
             return True
-        if self._chat_busy is None or not self._binds_existing_chat(entry):
+        if not self._binds_existing_chat(entry):
             return False
-        return self._chat_busy(str(entry.web_chat_id))
+        chat_id = str(entry.web_chat_id)
+        # Checked before `chat_busy`: a sibling entry that fired earlier in this
+        # same tick has not reached the broker yet, so only the claim shows it.
+        if chat_id in self._claimed_chats:
+            return True
+        if self._chat_busy is None:
+            return False
+        return self._chat_busy(chat_id)
 
     def _interval_dispatchable(self, entry: ScheduleEntry) -> bool:
         if self._chat_dispatchable is None:
@@ -1101,6 +1315,11 @@ class ScheduleManager:
             if self._resolve_target is not None
             else ("claude", entry.model, entry.mode, entry.provider)
         )
+        # The binding as it stood *before* prepare_chat, which is what
+        # `_run_interval` needs to tell a re-home apart from a user edit.
+        # Sampling it in there instead read the already-re-pointed value, so
+        # the carry-over below could never fire.
+        bound_before = entry.web_chat_id
         chat_id: str | None = None
         if self._prepare_chat is not None:
             chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
@@ -1114,10 +1333,17 @@ class ScheduleManager:
         entry.last_status = "running"
         self._store.replace(entry)
         self._inflight.add(entry.schedule_id)
-        asyncio.create_task(
-            self._run_interval(entry, model, mode, provider, chat_id),
+        self._claimed_chats.add(chat_id)
+        task = asyncio.create_task(
+            self._run_interval(
+                entry, model, mode, provider, chat_id, bound_before=bound_before
+            ),
             name=f"interval-run-{entry.schedule_id}",
         )
+        # Hold a strong reference until the task finishes: the loop keeps only
+        # a weak one, and every release of `_inflight` happens inside the task.
+        self._run_tasks.add(task)
+        task.add_done_callback(self._run_tasks.discard)
         return chat_id
 
     async def _run_interval(
@@ -1127,6 +1353,8 @@ class ScheduleManager:
         mode: BridgeMode,
         provider: str,
         chat_id: str,
+        *,
+        bound_before: str | None = None,
     ) -> None:
         status = "ok"
         try:
@@ -1146,6 +1374,7 @@ class ScheduleManager:
             status = "error"
         finally:
             self._inflight.discard(entry.schedule_id)
+            self._claimed_chats.discard(chat_id)
         # Re-read before stamping: the user may have edited the entry while the
         # run was streaming. Only the dispatcher's own re-homing is carried over
         # from our copy; everything else on the stored row is the user's edit.
@@ -1153,7 +1382,14 @@ class ScheduleManager:
         if latest is None:
             return
         latest.last_status = status
-        if entry.web_chat_id and latest.web_chat_id != entry.web_chat_id:
+        rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
+        if rehomed and latest.web_chat_id == bound_before:
+            # prepare_chat re-pointed us at a replacement chat (the target was
+            # archived or gone) and nobody has retargeted the stored row since.
+            # Without carrying that across, the entry forgets the replacement
+            # and builds a new chat every interval. When `latest` no longer
+            # holds `bound_before` the user retargeted it mid-run, and their
+            # edit wins.
             latest.web_chat_id = entry.web_chat_id
         latest.last_run_chat_id = chat_id
         self._store.replace(latest)

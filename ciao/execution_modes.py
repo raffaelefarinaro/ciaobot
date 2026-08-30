@@ -122,3 +122,16 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
 def auto_approved_mcp_tool_names(server: str = MCP_SERVER_NAME) -> list[str]:
     """Fully-qualified SDK tool names for the auto-approved control plane."""
     return [f"mcp__{server}__{name}" for name in AUTO_APPROVED_MCP_TOOLS]
+
+
+# The modes whose contract allows acting without asking, and therefore the only
+# modes where the AUTO_APPROVED_MCP_TOOLS list applies. `plan` is "propose,
+# don't act" — an allow rule would punch a hole in it. `normal` is what the PWA
+# labels "Manual — ask for every action", and pre-approving the list quietly
+# broke that promise: no card for `memory_update`, `chat_send` or `schedule` —
+# and `schedule` is an escalation, not just a write, because an automation run
+# is dispatched `unattended`, which forces `bypass`. A one-minute interval
+# created without a card buys unprompted arbitrary tool use every minute — the
+# exact thing the operator chose Manual mode to prevent. Shared here so the
+# Claude and opencode providers cannot drift apart on the carve-out.
+CONTROL_PLANE_PREAPPROVED_MODES: frozenset[str] = frozenset({"auto", "bypass"})

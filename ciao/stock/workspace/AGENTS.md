@@ -26,6 +26,12 @@ Useful local files:
 - `skills/`, `commands/`, and `subagents/`: canonical workspace-authored assets.
 - `memory-vault/`: durable markdown memory, projects, logs, and references.
 
+File and project routing:
+
+- Use the active workspace and vault path supplied in the Ciaobot context; do not guess another workspace's folder.
+- For project work, inspect the active project's canonical document and relevant live files before editing.
+- Use workspace-relative paths for files. Use `vault_search` for recall, native file tools for reading and writing, and `file_surface` when a deliverable should open in the user's file panel.
+
 When diagnosing Ciaobot or preparing a GitHub issue, use sanitized log excerpts,
 reproduction steps, platform, install method/version, and expected versus actual
 behavior. Ask before creating or posting a public issue.

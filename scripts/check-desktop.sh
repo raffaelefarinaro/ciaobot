@@ -48,25 +48,30 @@ fi
 # and takes minutes, which is more than this gate is for. A placeholder
 # satisfies the path lookup; none of the Rust checks read its contents.
 RUNTIME="$DESKTOP/runtime"
-STUBBED_RUNTIME=0
+PLACEHOLDER="$RUNTIME/README.txt"
 if [[ ! -d "$RUNTIME" ]]; then
   mkdir -p "$RUNTIME"
-  cat > "$RUNTIME/README.txt" <<'EOF'
+  cat > "$PLACEHOLDER" <<'EOF'
 Placeholder created by scripts/check-desktop.sh so Tauri can resolve the
 `../runtime` resource path. The real bundled Python runtime is built by
 scripts/build-bundled-runtime.sh. An app bundled against this placeholder has
 no engine inside it: resolve_ciao() finds no Contents/Resources/ciao-runtime/
 bin/ciao and reports "Ciaobot engine unavailable".
 EOF
-  STUBBED_RUNTIME=1
 fi
 
+# Tested against the tree, not against a flag set earlier in *this* run. The
+# placeholder is never cleaned up and desktop/runtime/ is gitignored, so a
+# one-shot flag warned only on the very first invocation and every later run
+# printed an unqualified "signed, and runnable" for a bundle with no engine in
+# it — on the runs where that mattered most.
 runtime_note() {
-  [[ "$STUBBED_RUNTIME" -eq 1 ]] || return 0
+  [[ -f "$PLACEHOLDER" && ! -x "$RUNTIME/bin/ciao" ]] || return 0
   echo
-  echo "Note: desktop/runtime was missing, so a placeholder was created. The"
-  echo "Rust checks above are unaffected, but any .app built from this tree has"
-  echo "no engine bundled. Run scripts/build-bundled-runtime.sh for a real one."
+  echo "Note: desktop/runtime holds only the placeholder this script creates."
+  echo "The Rust checks above are unaffected, but any .app built from this tree"
+  echo "has no engine bundled. Run scripts/build-bundled-runtime.sh for a real"
+  echo "one before installing or shipping this bundle."
 }
 
 step() { printf '\n=== %s ===\n' "$1"; }

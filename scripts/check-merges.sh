@@ -24,7 +24,33 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-range="${1:-$(git describe --tags --abbrev=0)..develop}"
+if [ $# -ge 1 ]; then
+  range="$1"
+else
+  # Build the default range explicitly. Interpolating a failing command
+  # substitution would yield "..develop", which git rejects — and with no
+  # `set -e` the loop below would simply not run, so the script printed a
+  # fatal, reported "No hand edits", and exited 0. A detector that passes
+  # silently in a fresh clone is worse than no detector.
+  if ! last_tag=$(git describe --tags --abbrev=0 2>/dev/null) || [ -z "$last_tag" ]; then
+    echo "error: no tags found — fetch them (git fetch --tags) or pass an explicit range." >&2
+    echo "usage: $0 [range]     e.g. $0 v0.11.0..develop" >&2
+    exit 2
+  fi
+  if ! git rev-parse --verify --quiet develop >/dev/null; then
+    echo "error: no 'develop' ref here — pass an explicit range." >&2
+    echo "usage: $0 [range]     e.g. $0 ${last_tag}..origin/develop" >&2
+    exit 2
+  fi
+  range="${last_tag}..develop"
+fi
+
+# Whatever the range came from, prove git can resolve it before reporting on it.
+if ! git rev-list --quiet "$range" -- 2>/dev/null; then
+  echo "error: cannot resolve range '${range}'." >&2
+  exit 2
+fi
+
 found=0
 
 echo "Replaying merges in ${range}…"
@@ -36,10 +62,25 @@ for m in $(git rev-list --merges "$range"); do
   # Octopus merges have no single automatic result to compare against.
   [ $# -ne 2 ] && continue
 
-  auto=$(git merge-tree --write-tree "$1" "$2" 2>/dev/null | head -1)
-  if [ -z "$auto" ]; then
+  # `--write-tree` still writes a tree when the parents conflict: line 1 is its
+  # OID and the file content carries `<<<<<<<` markers. Only the exit status
+  # says which happened, and it is lost through a pipe — so testing the output
+  # for emptiness (it never is) made the "review by hand" branch unreachable
+  # and diffed every genuinely-conflicted merge against a marker-laden tree,
+  # reporting inflated, meaningless deltas on exactly the merges that most need
+  # a human read.
+  if auto_out=$(git merge-tree --write-tree "$1" "$2" 2>/dev/null); then
+    auto=$(printf '%s\n' "$auto_out" | head -1)
+  else
     echo "== $m  $(git log -1 --format='%s' "$m")"
     echo "     (parents conflict; resolution cannot be replayed — review by hand)"
+    echo
+    found=1
+    continue
+  fi
+  if [ -z "$auto" ]; then
+    echo "== $m  $(git log -1 --format='%s' "$m")"
+    echo "     (no automatic merge result — review by hand)"
     echo
     found=1
     continue

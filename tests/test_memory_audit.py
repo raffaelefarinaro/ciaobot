@@ -89,7 +89,7 @@ def test_event_shaped_ignores_durable_state() -> None:
         [
             "User prefers concise answers and no em-dashes.",
             "The user runs macOS 27 with Homebrew at /opt/homebrew.",
-            "Raffa is a PM at Scandit and owns SparkScan.",
+            "The user is a PM at Acme and owns the Falcon project.",
             "Assistant behaviour is configured through skills, not prompts.",
             "The assistant uses concise language for code reviews.",
         ],
@@ -340,7 +340,7 @@ def test_audit_entries_reports_every_region(tmp_path: Path) -> None:
     report = audit_entries(
         {
             "memory": ["User said: \"switch that\" -> assistant changed the slug."],
-            "profile": ["Raffa writes without em-dashes."],
+            "profile": ["The user writes without em-dashes."],
         },
         workspace_dir=workspace,
     )
@@ -557,6 +557,72 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in out
 
 
+def test_memory_audit_with_vault_marks_retrieved_stale_notes(
+    tmp_path: Path,
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    """Decay-by-disuse: a stale note in the hits log reads retrieved_recently.
+
+    The hits are stored in the index's key space (workspace-relative, real
+    vault directory name); the audit must rebuild that key from the rendered
+    finding path rather than suffix-matching, and mark nothing when no hit
+    carries this vault's prefix.
+    """
+    import argparse
+    import json as jsonlib
+    from datetime import datetime, timezone
+
+    from ciao.cli import _memory_audit_command
+    from ciao.memory_tool import ensure_regions
+
+    for name in (
+        "CIAO_WORKSPACES",
+        "CIAO_VAULT_ROOT",
+        "CIAO_WORKSPACE",
+        "CIAO_VAULT_MODE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_MEMORY_CHAR_LIMIT",
+        "CIAO_USER_CHAR_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    ensure_regions(guide)
+    vault = tmp_path / "memory-vault"
+    people = vault / "People"
+    people.mkdir(parents=True)
+    stale_note = "---\ntype: person\nupdated: 2024-01-01\n---\n# {n}\nOld facts.\n"
+    (people / "Retrieved.md").write_text(stale_note.format(n="Retrieved"), encoding="utf-8")
+    (people / "Forgotten.md").write_text(stale_note.format(n="Forgotten"), encoding="utf-8")
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "q": "retrieved",
+        "paths": ["memory-vault/People/Retrieved.md"],
+    }
+    (runtime / "vault_search_hits.jsonl").write_text(
+        jsonlib.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    _memory_audit_command(
+        argparse.Namespace(
+            workspace=tmp_path, vault_root=vault, json=True, with_vault=True
+        )
+    )
+
+    report = jsonlib.loads(capsys.readouterr().out)
+    by_path = {
+        finding["path"]: finding
+        for finding in report["stale_notes"]["stale_notes"]
+    }
+    assert by_path["memory-vault/People/Retrieved.md"]["retrieved_recently"] is True
+    assert by_path["memory-vault/People/Forgotten.md"]["retrieved_recently"] is False
+
+
 def test_memory_audit_command_stays_quiet_when_under_cap(
     tmp_path: Path,
     capsys: Any,
@@ -585,3 +651,56 @@ def test_memory_audit_command_stays_quiet_when_under_cap(
     assert exit_code == 0
     assert "over cap" not in out
     assert "consolidate" not in out
+
+
+# ---- Temporal validity -------------------------------------------------
+
+
+def test_find_aging_state_flags_old_as_of_and_learned_stamps() -> None:
+    import datetime as _dt
+
+    from ciao.memory_audit import find_aging_state
+
+    today = _dt.date(2026, 8, 29)
+    entries = [
+        "Quota data unavailable [as-of: 2026-04-01].",  # 150d: aged
+        "New pricing applies [as-of: 2026-08-01].",  # 28d: fresh
+        "Prefers terse replies. [2026-01-01]",  # learned 240d ago: aged
+        "Prefers tables for stats. [2026-08-01]",  # learned 28d ago: fresh
+        "Undated standing rule with no stamps.",
+        "Temporary flag [expires: 2026-12-01].",  # expiry is os-audit's job
+    ]
+    findings = find_aging_state("memory", entries, today=today)
+    kinds = {(f["kind"], f["date"]) for f in findings}
+    assert kinds == {("as-of", "2026-04-01"), ("learned", "2026-01-01")}
+    for finding in findings:
+        assert finding["age_days"] >= finding["threshold_days"]
+
+
+def test_find_aging_state_skips_impossible_dates() -> None:
+    from ciao.memory_audit import find_aging_state
+
+    assert find_aging_state("memory", ["Fact [as-of: 2026-02-30]."]) == []
+
+
+def test_strip_learned_stamp_round_trip() -> None:
+    from ciao.memory_audit import strip_learned_stamp
+
+    assert strip_learned_stamp("Rule text. [2026-08-29]") == "Rule text."
+    assert strip_learned_stamp("Rule text.") == "Rule text."
+    # An as-of tag is world time, not a learned stamp; it stays.
+    assert strip_learned_stamp("Fact [as-of: 2026-04-01].") == "Fact [as-of: 2026-04-01]."
+
+
+def test_audit_entries_reports_aging_state(tmp_path) -> None:
+    import datetime as _dt
+
+    from ciao.memory_audit import audit_entries
+
+    report = audit_entries(
+        {"memory": ["Old snapshot [as-of: 2025-01-01]."], "profile": []},
+        workspace_dir=tmp_path,
+        today=_dt.date(2026, 8, 29),
+    )
+    assert len(report["aging_state_entries"]) == 1
+    assert report["aging_state_entries"][0]["kind"] == "as-of"

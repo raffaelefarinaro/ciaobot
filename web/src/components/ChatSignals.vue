@@ -165,6 +165,14 @@ const intervalTitle = computed(() => {
   box-shadow: 0 0 4px var(--error, #f44336);
 }
 
+/* Card headings top-align their row so a two-line title can wrap, which
+   leaves this box only as tall as its dot — the dot then rides high next to
+   the meta text. Match the title's first line (1.35 x text-sm, see
+   .home-chat-title in HomeRecentChats.vue) so the dot centers on the row. */
+.chat-signals--card {
+  min-height: calc(1.35 * var(--text-sm));
+}
+
 /* A small squared tag, not a pill. The design this came from used a 4px radius
    deliberately: the pill shape reads as a count badge, and counts mean something
    else in this vocabulary. */

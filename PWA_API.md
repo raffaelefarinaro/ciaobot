@@ -436,7 +436,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # List — returns {workspaces, active, provider_options}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
-# Upsert — body keys: name, default_provider, default_model,
+# Upsert — body keys: name, default_provider,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
 # null = defaults). claude.ai connector MCPs are always allowed. POST

@@ -306,4 +306,42 @@ describe('SchedulePanel property cards', () => {
       }),
     )
   })
+
+  // An interval entry has no daily_time_utc, so switching one to a wall-clock
+  // cadence arrives with the time field empty. Saving that stored an
+  // automation that reads as enabled and can never fire.
+  it('blocks Save when an interval entry is switched to a cadence needing a time', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval', interval_minutes: 5, daily_time_utc: '',
+      days_of_week: null, web_chat_id: 'chat-1', web_project_id: null,
+    }))
+    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+
+    await card(wrapper, 'Schedule').find('select').setValue('daily')
+
+    const save = card(wrapper, 'Schedule').find('.card-actions .btn-primary')
+    expect(save.attributes('disabled')).toBeDefined()
+    expect(card(wrapper, 'Schedule').text()).toContain('Pick a time')
+    expect(useTaskStore().updateSchedule).not.toHaveBeenCalled()
+  })
+
+  it('re-enables Save once a time is supplied', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval', interval_minutes: 5, daily_time_utc: '',
+      days_of_week: null, web_chat_id: 'chat-1', web_project_id: null,
+    }))
+    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'Schedule').find('select').setValue('daily')
+    await card(wrapper, 'Schedule').find('input[type="time"]').setValue('09:30')
+
+    const save = card(wrapper, 'Schedule').find('.card-actions .btn-primary')
+    expect(save.attributes('disabled')).toBeUndefined()
+    await save.trigger('click')
+    await flushPromises()
+
+    expect(useTaskStore().updateSchedule).toHaveBeenCalledWith(
+      'sched-1',
+      expect.objectContaining({ frequency: 'daily', time: '09:30' }),
+    )
+  })
 })

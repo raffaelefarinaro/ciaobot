@@ -61,7 +61,11 @@ from ciao.providers.base import (
     build_runtime_context,
     prepend_stable_context,
 )
-from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
+from ciao.execution_modes import (
+    AUTO_APPROVED_MCP_TOOLS,
+    CONTROL_PLANE_PREAPPROVED_MODES,
+    MCP_SERVER_NAME,
+)
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
 
@@ -583,9 +587,11 @@ def mode_settings(
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Plan mode is excluded: its contract is "propose, don't act", and an allow
-    # rule would punch a hole in it — same carve-out as the Claude provider.
-    if key != "plan":
+    # Scoped to the modes whose contract allows acting without asking — the
+    # same carve-out as the Claude provider. The rationale (why `plan` and
+    # `normal` are excluded, and why `schedule` in particular is an
+    # escalation) lives beside the shared constant in ciao/execution_modes.py.
+    if key in CONTROL_PLANE_PREAPPROVED_MODES:
         rules.extend(control_plane_permission_rules())
     return _MODE_AGENTS[key], rules
 

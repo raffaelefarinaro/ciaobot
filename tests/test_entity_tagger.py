@@ -46,14 +46,14 @@ def test_filters_matches_to_the_active_workspace_only(tmp_path: Path) -> None:
 - [personal/Projects/Apollo](./personal/Projects/Apollo.md) (tags: project; aliases: Apollo)
 - [work/Projects/Apollo](./work/Projects/Apollo.md) (tags: project; aliases: Apollo)
 - [shared/People/Alba](./shared/People/Alba.md) (tags: person; aliases: Alba)
-- [personal/People/Defne](./personal/People/Defne.md) (tags: person; aliases: Defne)
+- [personal/People/Nora](./personal/People/Nora.md) (tags: person; aliases: Nora)
 """)
 
-    hits = find_entities("Apollo update with Alba and Defne", tmp_path, workspace="work")
+    hits = find_entities("Apollo update with Alba and Nora", tmp_path, workspace="work")
     paths = {e.path for e in hits}
     assert "work/Projects/Apollo" in paths
     assert "personal/Projects/Apollo" not in paths
-    assert "personal/People/Defne" not in paths
+    assert "personal/People/Nora" not in paths
     assert "shared/People/Alba" not in paths
 
 
@@ -152,14 +152,14 @@ def test_refreshes_on_mtime_change(tmp_path: Path) -> None:
     first = find_entities("Alba here", tmp_path)
     assert len(first) == 1
     # Rewrite INDEX.md with a new entity, bump mtime.
-    (tmp_path / "INDEX.md").write_text("- [People/Defne](./People/Defne.md) (aliases: Defne)\n", encoding="utf-8")
+    (tmp_path / "INDEX.md").write_text("- [People/Nora](./People/Nora.md) (aliases: Nora)\n", encoding="utf-8")
     future = (tmp_path / "INDEX.md").stat().st_mtime + 2
     os.utime(tmp_path / "INDEX.md", (future, future))
     # get_index is process-cached; reuse clears when path changes. Same path here,
     # so rely on mtime-based refresh.
-    second = find_entities("Alba here Defne", tmp_path)
+    second = find_entities("Alba here Nora", tmp_path)
     names = {e.name for e in second}
-    assert names == {"Defne"}
+    assert names == {"Nora"}
 
 
 def test_index_bullets_written_by_vault_index_are_parseable(tmp_path: Path) -> None:

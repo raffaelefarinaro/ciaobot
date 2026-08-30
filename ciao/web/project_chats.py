@@ -70,6 +70,7 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.error_log import clear_error_log, tail_error_log
+from ciao.schedules import supports_auto_archive
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -385,6 +386,16 @@ def _is_retryable_quota_error(text: str) -> bool:
     if "at capacity" in low:
         return True
     if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
+    # A provider that just states the limit, with no 429 and none of the vendor
+    # phrasings above — opencode/OpenAI surfaces "The usage limit has been
+    # reached". Pairing a limit noun with an exhaustion verb is unambiguous in a
+    # way the bare nouns are not, which is why those still need the 429 marker
+    # below: "quota" or "session" alone appears in plenty of prose that is not
+    # an exhaustion error.
+    if any(noun in low for noun in ("usage limit", "rate limit", "quota", "token limit")) and any(
+        verb in low for verb in ("reached", "exceeded", "exhausted")
+    ):
         return True
     if "429" not in low and "too many requests" not in low:
         return False
@@ -1101,9 +1112,16 @@ def _should_auto_archive_schedule_run(
     entry: object, outcome: ScheduleRunOutcome, *, needs_user: bool = False
 ) -> bool:
     archive_policy = getattr(entry, "archive_policy", "manual")
-    if archive_policy == "auto":
-        return _schedule_run_clean(outcome) and not needs_user
-    return False
+    if archive_policy != "auto":
+        return False
+    # Never auto-archive the chat an interval entry is bound to: archiving it
+    # makes the next run fork a replacement and archive that too, forever. One
+    # predicate, shared with the store-side normalisation that keeps `auto`
+    # from being persisted for such an entry in the first place — two copies of
+    # this rule would drift, and the dispatcher's copy is the one that decides.
+    if not supports_auto_archive(entry):
+        return False
+    return _schedule_run_clean(outcome) and not needs_user
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -3064,7 +3082,6 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
-        control_surface: str | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -4000,7 +4017,18 @@ class ProjectChatManager:
         )
         if run_insights:
             from ciao.insights import extract_and_append, resolve_insights_model
+            from ciao.schedules import is_system_schedule_id
 
+            # A system-schedule chat (memory curation, hygiene, skill
+            # evolution) is the memory machinery itself. Its archive keeps the
+            # insights section — the audit trail of what an unattended run did
+            # — but it may never write memory or project docs: extraction has
+            # been observed lifting the curation prompt's own rules as
+            # "Decisions" and auto-promoting the machinery's self-description
+            # into the bounded regions every session loads.
+            is_system_chat = is_system_schedule_id(
+                chat_meta.schedule_id if chat_meta else ""
+            )
             workspace = project_meta.workspace if project_meta else None
             insights_models = getattr(config, "provider_insights_models", {}) or {}
             insights_model = insights_models.get(
@@ -4013,7 +4041,7 @@ class ProjectChatManager:
             # archive-time canonical-doc update.
             project_doc_path = (
                 project_meta.vault_doc_path
-                if project_meta and not project_meta.is_auto
+                if project_meta and not project_meta.is_auto and not is_system_chat
                 else ""
             )
             proposal_vault_root = (
@@ -4028,7 +4056,7 @@ class ProjectChatManager:
                 expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if proposal_vault_root is not None:
+            if proposal_vault_root is not None and not is_system_chat:
                 expected.append("memory_proposals")
             self._begin_postprocess(chat_id, expected)
             asyncio.create_task(
@@ -4056,6 +4084,7 @@ class ProjectChatManager:
                         ),
                         provider=chat_meta.provider if chat_meta else "claude",
                         project_doc_path=project_doc_path,
+                        memory_proposals_enabled=not is_system_chat,
                     ),
                 )
             )
@@ -8153,10 +8182,21 @@ class ProjectChatManager:
         or workspace we still know about, and callers treat that as "disable
         this entry" — re-homing it into an arbitrary project would run the
         user's prompt against the wrong workspace, unattended.
+
+        Order matters: the primary binding, then the fixed-chat fallback, then
+        the workspace's General. Each step is a weaker claim about where the
+        user meant this to run.
         """
         web_project_id = getattr(entry, "web_project_id", "") or ""
         if web_project_id and web_project_id in self._projects:
             return self._projects[web_project_id]
+        # A fixed-chat entry can name a re-home project without becoming a
+        # project entry (see ScheduleEntry.fallback_project_id). Migrated loops
+        # carry their original project here; without this they would land in
+        # General and run the user's prompt in the wrong project context.
+        fallback_project_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_project_id and fallback_project_id in self._projects:
+            return self._projects[fallback_project_id]
         workspace = getattr(entry, "workspace", "") or ""
         if workspace:
             for p in self._projects.values():
