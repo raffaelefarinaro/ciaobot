@@ -4,6 +4,7 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import type { OperatorAction } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
+import { isDesktopApp, triggerDesktopUpdate } from '../lib/desktop'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -129,6 +130,29 @@ async function onDetailClick(event: MouseEvent): Promise<void> {
   }
 }
 
+// The update tile's button reaches the desktop shell's own tray-update flow
+// directly (native confirm dialog, coordinated engine+app restart) rather
+// than opening a chat about how to install — chat is only the web fallback,
+// where there is no tray to reuse.
+function chatButtonLabel(action: OperatorAction): string {
+  if (action.id === 'package-update' && isDesktopApp()) return 'Update now'
+  return action.chat_label || 'Discuss in chat'
+}
+
+async function onChatButtonClick(action: OperatorAction): Promise<void> {
+  if (action.id === 'package-update' && isDesktopApp()) {
+    if (chatBusy.value) return
+    chatBusy.value = true
+    try {
+      const started = await triggerDesktopUpdate()
+      if (started) return
+    } finally {
+      chatBusy.value = false
+    }
+  }
+  await openChat(action)
+}
+
 async function openChat(action: OperatorAction): Promise<void> {
   if (chatBusy.value || !action.chat_prompt) return
   chatBusy.value = true
@@ -203,9 +227,9 @@ async function openChat(action: OperatorAction): Promise<void> {
           type="button"
           class="btn-small btn-chip"
           :disabled="chatBusy"
-          @click="openChat(action)"
+          @click="onChatButtonClick(action)"
         >
-          {{ action.chat_label || 'Discuss in chat' }}
+          {{ chatButtonLabel(action) }}
         </button>
         <button
           v-if="action.dismiss_label"

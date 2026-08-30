@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "trigger-app-update"
+description = "Allows the frontend to start the app+engine update, with the same confirmation dialog as the tray's Update item."
+commands.allow = ["trigger_app_update"]

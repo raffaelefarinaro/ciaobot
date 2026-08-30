@@ -254,13 +254,19 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
      and the title gets row 2 to itself, full width, where its two-line clamp has
      somewhere to go. Row 2 only exists when there is a title, because
      `.header-title` is not rendered otherwise.
-     The columns are content-sized here rather than equal `1fr` tracks: with the
-     actions unable to shrink, equal tracks would let them overrun the middle
-     column and sit on top of the mark. The mark centres in the space left
-     between the hamburger and the actions. */
+     Same three tracks as the desktop header, and for the same reason: two `1fr`
+     side tracks are equal while there is slack, so the mark lands on the
+     header's centre rather than on the centre of whatever the hamburger and the
+     actions left over. Sizing the sides to their content instead put the mark
+     wherever the leftover gap happened to be - visibly right of centre, because
+     the 30px hamburger is narrower than the action trail. The trailing track is
+     plain `1fr` (= minmax(auto, 1fr)) so the actions are still never crushed;
+     when they need more than their share they take it from the leading track and
+     the mark drifts, which is the same order of sacrifice the desktop header
+     documents above. */
   .pane-header {
     height: auto;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto 1fr;
     /* Top padding matches the desktop/home 61px header's centring (12px here
        vs the 30px icon half-height) rather than --space-2: with 8px the
        touch-hit icons' -7px margin pulled their visual box to ~1px below the

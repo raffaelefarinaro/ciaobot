@@ -15,6 +15,7 @@ import yaml
 from ciao.vault_index import (
     canonical_type,
     is_generated_vault_file,
+    is_reserved_bookkeeping,
     resolve_vault_link,
     vault_link_ref,
 )
@@ -55,7 +56,7 @@ _COMMON_STEMS = {
 # Directories that aren't vault content: app state, generated projections, tool
 # caches, and any venv/node_modules checked out inside the vault root (#129).
 EXCLUDE_DIRS = {
-    "Logs", "Templates", ".obsidian",
+    "Logs", "Templates", ".obsidian", ".vault-trash",
     ".venv", "venv", "node_modules", ".git",
     ".claude", ".agents", ".codex", ".opencode", "__pycache__",
 }
@@ -71,7 +72,12 @@ class VaultTraversalError(RuntimeError):
 
 
 def _is_excluded(relative: Path) -> bool:
-    return any(part in EXCLUDE_DIRS for part in relative.parts)
+    if any(part in EXCLUDE_DIRS for part in relative.parts):
+        return True
+    # The memory pipeline's own paperwork — the review queue included — is a
+    # projection of state, not a note. Linting it reported the queue as an
+    # orphan, which then fed back in as a review signal for other notes.
+    return is_reserved_bookkeeping(relative)
 
 
 def _discover_paths(vault_root: Path) -> list[tuple[Path, Path]]:

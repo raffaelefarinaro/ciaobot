@@ -454,7 +454,12 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       graphIsWarm.value = snap.warm
       activeCats.clear()
       categoryList.value.forEach(c => activeCats.add(c.key))
-      selectedId.value = null
+      // A background revalidation may finish after Open-in-map has already
+      // selected a node. Preserve that selection when the node still exists.
+      const previousSelection = selectedId.value
+      selectedId.value = previousSelection && incoming.some(n => n.id === previousSelection)
+        ? previousSelection
+        : null
       pathStart.value = null
       pathEnd.value = null
     } catch (err) {
@@ -532,6 +537,48 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     focusSignal.magnify = magnify
     focusSignal.seq += 1
   }
+  /**
+   * Map a file path onto the node id the graph knows it by.
+   *
+   * Node ids are the scan's rendered paths — `memory-vault/...`, or
+   * `<root>/memory-vault/...` on a re-rooted install — while a path handed
+   * over by another view (the file viewer's "Open in memory map") can be
+   * workspace-relative. Fall back to the longest shared tail so both
+   * spellings land on the same note; shortest id wins so a bare relative path
+   * resolves to the least-qualified match rather than an arbitrary one.
+   */
+  function resolveNodeId(path: string): string | null {
+    const clean = (path || '').trim().replace(/^\/+/, '').replace(/:\d+$/, '')
+    if (!clean) return null
+    if (nodesById.value.has(clean)) return clean
+    const tail = clean.replace(/^.*?memory-vault\//, '')
+    let match: string | null = null
+    for (const id of nodesById.value.keys()) {
+      if (id === tail || id.endsWith(`/${clean}`) || id.endsWith(`/${tail}`)) {
+        if (!match || id.length < match.length) match = id
+      }
+    }
+    return match
+  }
+
+  /**
+   * A focus asked for from outside this view, held until the map can act on it.
+   *
+   * `requestFocus` alone cannot cross a navigation: the map is not mounted to
+   * hear the signal, and the graph load that follows clears `selectedId`. The
+   * view drains this once its nodes are placed.
+   */
+  const pendingFocus = ref<string | null>(null)
+  function requestFocusOnOpen(path: string) {
+    pendingFocus.value = path
+  }
+  /** The node id to focus, once, or null. Clears the request either way. */
+  function consumePendingFocus(): string | null {
+    const path = pendingFocus.value
+    if (!path) return null
+    pendingFocus.value = null
+    return resolveNodeId(path)
+  }
   function resetPath() {
     pathStart.value = null
     pathEnd.value = null
@@ -582,6 +629,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
 
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
+    pendingFocus,
     hideOrphans, orphanFilter, colorMode, view,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
@@ -589,7 +637,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     clusterOf, clusterSlotOf, betweennessOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
-    selectNode, requestFocus, resetPath, handleNodeClick, deleteNote,
+    selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
+    resetPath, handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

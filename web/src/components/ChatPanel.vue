@@ -56,7 +56,6 @@
                 :class="{ active: showContext }"
               >{{ projectCrumb }}</span>
             </span>
-            <span v-if="hasScopeCrumb" class="breadcrumb-separator breadcrumb-separator--title">/</span>
             <input
               v-if="editingTitle"
               class="title-input"
@@ -457,11 +456,19 @@
                   </button>
                 </div>
               </div>
-              <div v-if="item.msg.timestamp || item.msg.effective_model || formatTokenUsage(item.msg.usage)" class="message-meta">
-                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
-                <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
-                <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
-                <span v-if="formatTokenUsage(item.msg.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.msg.usage)"></span></span>
+              <!-- One footer per turn, on its last bubble. A turn can produce
+                   several assistant bubbles, and the fields are spread across
+                   them: the merged answer carries the model and the token
+                   usage, while the completion time and duration are overlaid
+                   onto the turn's last assistant row. Rendered per message that
+                   read as the cost of the *first* bubble and left the reply the
+                   user actually ends on unlabelled. `item.meta` is the whole
+                   turn's footer, set only on the bubble that closes it. -->
+              <div v-if="item.meta" class="message-meta">
+                <span v-if="item.meta.timestamp">{{ formatTime(item.meta.timestamp) }}</span>
+                <span v-if="item.meta.duration_ms"> &middot; {{ formatDuration(item.meta.duration_ms) }}</span>
+                <span v-if="item.meta.effective_model"> &middot; {{ item.meta.effective_model }}</span>
+                <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.meta.usage)"></span></span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
@@ -704,7 +711,7 @@
           class="chat-comment-trigger"
           :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
           @mousedown.prevent
-          @click="openCommentForSelection"
+          @click="openCommentForSelection()"
           type="button"
           title="Comment on this selection"
         >
@@ -1215,12 +1222,23 @@ import {
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
+import { useTypeToComment } from '../composables/useTypeToComment'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
+/** The footer facts for one turn: when it landed, how long it took, which
+ *  model answered and what it cost. Collected across the turn's assistant
+ *  messages and rendered once, on the turn's last bubble. */
+type TurnMeta = {
+  timestamp?: string
+  duration_ms?: number
+  effective_model?: string
+  usage?: Record<string, string>
+}
+
 type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
 
@@ -2716,14 +2734,15 @@ function onChatSelectionChange(): void {
   updateChatSelectionAnchorFromRange(range)
 }
 
-function openCommentForSelection(): void {
+function openCommentForSelection(initialText = ''): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
   closeChatCommentPopover()
   draftAnchor.value = { ...selectionAnchor.value }
   draftBubbleEl = lastChatSelectionBubble
+  commentDraftImages.value = []
   commentDraft.value = {
     selection: lastChatSelectionText,
-    text: '',
+    text: initialText,
     messageId: lastChatSelectionMsgId,
     messageIndex: lastChatSelectionMsgIndex,
     messageRole: lastChatSelectionMsgRole,
@@ -2783,19 +2802,33 @@ function saveChatComment(): void {
   nextTick(() => applyHighlights())
 }
 
-async function handleDraftImageUpload(e: Event): Promise<void> {
-  const input = e.target as HTMLInputElement
-  if (!input.files?.length) return
+async function addDraftImages(files: File[]): Promise<void> {
   const chatId = store.activeChatId
-  if (!chatId) return
+  if (!chatId || !files.length) return
   try {
-    const refs = await store.uploadImageRefs(chatId, Array.from(input.files))
+    const refs = await store.uploadImageRefs(chatId, files)
     commentDraftImages.value.push(...refs)
   } catch (err) {
     console.error('Comment image upload failed:', err)
   }
+}
+
+async function handleDraftImageUpload(e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement
+  if (!input.files?.length) return
+  await addDraftImages(Array.from(input.files))
   input.value = ''
 }
+
+// Selecting transcript text and typing (or pasting, or hitting Cmd+D) opens the
+// composer directly, so the "Comment" pill is a hint rather than a required
+// click. Dictation has to wait for the popover to mount its recorder.
+useTypeToComment({
+  isActive: () => !!selectionAnchor.value && !commentDraft.value,
+  open: (initialText: string) => openCommentForSelection(initialText),
+  dictate: () => nextTick(() => commentComposeDraftRef.value?.toggleDictation()),
+  addImages: (files: File[]) => addDraftImages(files),
+})
 
 function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)
@@ -3429,6 +3462,52 @@ function fileCardIcon(filePath: string): AppIconName {
   return 'file'
 }
 
+/** Fold a turn's footer facts into one record.
+ *
+ * The fields do not arrive together. The merged final-answer row carries
+ * `effective_model` and `usage`; `_overlay_assistant_timings` puts `sent_at`
+ * and `duration_ms` on whichever assistant row ends the turn; and which of
+ * those becomes the turn's *last rendered* bubble depends on phase tagging.
+ * Take the last non-empty value for each field so the footer is complete
+ * wherever its parts came from.
+ *
+ * ``base`` carries what an earlier flush of the SAME turn already found: a
+ * mid-turn system row (a client notice, an interrupt marker) splits one turn
+ * across two flushes, and the halves rarely both carry every field.
+ */
+function turnMetaFrom(buffer: ChatMessage[], base: TurnMeta | null = null): TurnMeta | null {
+  const meta: TurnMeta = { ...(base ?? {}) }
+  for (const m of buffer) {
+    if (m.role !== 'assistant') continue
+    if (m.timestamp) meta.timestamp = m.timestamp
+    if (m.duration_ms) meta.duration_ms = m.duration_ms
+    if (m.effective_model) meta.effective_model = m.effective_model
+    if (m.usage) meta.usage = m.usage
+  }
+  return Object.keys(meta).length ? meta : null
+}
+
+/** Put the turn's footer on the last assistant bubble it produced — once.
+ *
+ * Anything earlier is mid-turn: labelling it with the turn's cost read as the
+ * price of that fragment, and left the reply the user actually ends on bare.
+ * The walk clears the footer off every earlier bubble of the same turn rather
+ * than only setting it on the last one, because a turn split by a mid-turn
+ * system row flushes twice and the first flush has already attached one.
+ */
+function attachTurnMeta(items: RenderItem[], meta: TurnMeta | null): void {
+  if (!meta) return
+  let last: RenderItem | null = null
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]
+    if (item.kind === 'user') break
+    if (item.kind !== 'assistant') continue
+    if (last) delete item.meta
+    else last = item
+  }
+  if (last && last.kind === 'assistant') last.meta = meta
+}
+
 const renderData = computed<{
   items: RenderItem[]
   liveSubs: SubagentTranscript[]
@@ -3452,6 +3531,8 @@ const renderData = computed<{
     }
   }
   let currentTurnIndex: number | null = null
+  // The current turn's footer facts, carried across flushes of one turn.
+  let turnMeta: TurnMeta | null = null
 
   const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
     if (turnIndex === null) return []
@@ -3463,6 +3544,9 @@ const renderData = computed<{
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
+    // Accumulated before any early return below, so a turn split across two
+    // flushes still ends with one complete footer on its last bubble.
+    turnMeta = turnMetaFrom(buffer, turnMeta)
     const turnOutputs = collectTraceOutputs(buffer)
     // Prefer the last non-progress assistant text as the final reply so Claude
     // "Now let me…" narration folds into Activity; fall back to the last text
@@ -3543,6 +3627,7 @@ const renderData = computed<{
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
     }
+    attachTurnMeta(items, turnMeta)
     buffer = []
   }
 
@@ -3552,6 +3637,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
+      turnMeta = null
       items.push(withKey({ kind: 'user', msg, turnIndex: currentTurnIndex }))
     } else if (
       msg.role === 'system'
@@ -4474,25 +4560,32 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   min-width: 0;
   flex: 1;
   position: relative;
+  /* Two rows: the scope claims a full-width line, the title takes the next. */
+  flex-wrap: wrap;
+  row-gap: 0;
 }
 
-/* Workspace and project together: where this chat lives. On one line it is the
-   same type size as the title - the hierarchy is carried by weight and colour,
-   because two font sizes centred in a flex row never quite share a baseline
-   (the title is an overflow:hidden box, so its baseline is synthesized) and the
-   near-miss is exactly what read as misaligned.
+/* Workspace and project together: where this chat lives, as a quiet eyebrow
+   above the title rather than a third of one shared line. Sharing the line cost
+   the title most of its width — this is the densest header in the app, and a
+   chat title is the one string in it nothing else can stand in for, so it was
+   the string that ellipsed. Stacked, the title gets the full row and the scope
+   still reads as scope, now by size and colour instead of by position.
    Not a flex row itself but inline text, so the whole scope ellipses as one
    string when the header runs out of room instead of each crumb truncating on
    its own. */
 .breadcrumb-scope {
-  font-size: var(--text-lg);
-  line-height: 1.3;
+  flex: 1 1 100%;
+  font-size: var(--text-xs);
+  line-height: 1.35;
   min-width: 0;
-  flex: 0 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* No divider between scope and title: they no longer share a line, and the
+   line break is the separator. */
 
 /* Hue is workspace identity, so the crumb is tinted by data-workspace-color
    rather than inheriting whatever the active accent happens to be. */
@@ -4505,10 +4598,9 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   .breadcrumb-workspace { display: none; }
   .breadcrumb-workspace + .breadcrumb-separator { display: none; }
   /* A chat in the implicit General project has no project crumb, so hiding the
-     workspace empties the scope. Drop the wrapper and its divider too, rather
-     than leave a bare "/" in front of the title. */
-  .breadcrumb-scope:not(:has(.breadcrumb-project)),
-  .breadcrumb-scope:not(:has(.breadcrumb-project)) + .breadcrumb-separator--title {
+     workspace empties the scope. Drop the wrapper rather than leave a blank
+     eyebrow line above the title. */
+  .breadcrumb-scope:not(:has(.breadcrumb-project)) {
     display: none;
   }
 }
@@ -4532,12 +4624,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   margin: 0 0.3em;
   flex-shrink: 0;
 }
-.breadcrumb-separator--title {
-  /* A flex item, not inline text: the row's column-gap already spaces it. */
-  font-size: var(--text-lg);
-  margin: 0;
-}
-
 /* Compact project context popup, positioned below the breadcrumb.
    Replaces the old inline panel that pushed messages down. */
 .context-popup {
@@ -4662,8 +4748,8 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   /* Same step as the title it replaces, so renaming does not resize the text
      under the cursor. The literal 14px also ignored the font-scale setting. */
   font-size: var(--text-lg);
-  /* The breadcrumb aligns text on its baseline; an input has one, but it is its
-     content's, which would hang the box below the crumb beside it. */
+  /* Its own row, like the title it replaces, so renaming does not pull the
+     title back up beside the scope. */
   align-self: center;
   background: var(--bg);
   border: 1px solid var(--accent);
@@ -4671,7 +4757,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   color: var(--fg);
   padding: 2px 6px;
   font-family: var(--font);
-  flex: 1;
+  flex: 1 1 100%;
   min-width: 120px;
   width: 100%;
   box-sizing: border-box;
@@ -7090,25 +7176,8 @@ details[open] > .activity-summary::before {
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
-  /* Two lines, not three. The header used to wrap workspace, project and title
-     into a line each, at --text-lg, a hardcoded 11px and --text-sm - the
-     workspace the biggest text in the header, the chat title the smallest, and
-     no divider left to explain the stack. Now the scope wraps as one quiet
-     eyebrow above the title, and the title is the largest thing in the block,
-     which is the order they matter in. */
-  .header-breadcrumb {
-    flex-wrap: wrap;
-    column-gap: 6px;
-    row-gap: 0;
-  }
-  .breadcrumb-scope {
-    flex: 1 1 100%;
-    font-size: var(--text-xs);
-    line-height: 1.35;
-  }
-  /* The divider between scope and title only means anything while they share a
-     line. Stacked, the line break is the separator. */
-  .breadcrumb-separator--title { display: none; }
+  /* The scope/title stack is the base layout now, so this block only carries
+     what a narrow header changes about it. */
   /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
      right for a title competing with a page tag and a wordmark. This header has
      neither, and the title has its own full-width row, so it keeps body size and

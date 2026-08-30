@@ -150,7 +150,8 @@ def test_github_star_fires_on_a_configured_install(tmp_path: Path) -> None:
     actions = [a for a in detect_actions(context) if a.id == "github-star"]
     assert len(actions) == 1
     tile = actions[0]
-    assert tile.link_label == "Star on GitHub"
+    assert tile.run_label == "Star on GitHub"
+    assert tile.link_label == "Open repository"
     assert tile.link_url == "https://github.com/raffaelefarinaro/ciaobot"
     assert tile.dismiss_label == "Later"
     assert tile.glyph == "★"
@@ -187,9 +188,23 @@ async def test_github_star_run_records_starred(tmp_path: Path) -> None:
     from ciao.operator_actions import run_action
 
     context = _context(tmp_path)
-    result, _summary = await run_action("github-star", context)
+    with patch("subprocess.run") as mock_run:
+        result, _summary = await run_action("github-star", context)
+    mock_run.assert_called_once()
+    called = mock_run.call_args.args[0]
+    assert called[:3] == ["gh", "api", "-X"]
+    assert called[-1] == "user/starred/raffaelefarinaro/ciaobot"
     assert result["status"] == "starred"
     assert "github-star" not in [a.id for a in detect_actions(context)]
+
+
+async def test_github_star_run_reports_gh_missing(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    with patch("subprocess.run", side_effect=FileNotFoundError()):
+        with pytest.raises(RuntimeError, match="gh"):
+            await run_action("github-star", context)
+    # A failed run must not falsely record the star.
+    assert "github-star" in [a.id for a in detect_actions(context)]
 
 
 def test_dismiss_unknown_action_is_404(tmp_path: Path) -> None:

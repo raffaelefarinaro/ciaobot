@@ -152,11 +152,27 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
     e.preventDefault()
     emit('save')
+    return
+  }
+  // Same dictation shortcut that opens this popover from a selection, so it
+  // keeps working once the textarea has focus.
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+    e.preventDefault()
+    e.stopPropagation()
+    toggleDictation()
   }
 }
 
 function focus(): void {
-  nextTick(() => inputEl.value?.focus())
+  nextTick(() => {
+    const el = inputEl.value
+    if (!el) return
+    el.focus()
+    // Type-to-comment seeds the box with the first keystroke or a paste, and a
+    // freshly focused textarea would otherwise put the caret before it.
+    const end = el.value.length
+    el.setSelectionRange(end, end)
+  })
 }
 
 watch(

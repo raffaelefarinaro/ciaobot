@@ -4733,6 +4733,67 @@ async def vault_graph(request: Request) -> JSONResponse:
     })
 
 
+async def vault_review(request: Request) -> JSONResponse:
+    """List or explicitly dispose of scoped vault-review candidates."""
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        root = Path(config.workspace_vault_root(workspace)).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        return JSONResponse({"error": f"workspace vault unavailable: {exc}"}, status_code=409)
+    from ciao import vault_review as review
+
+    action = "" if request.method == "GET" else ""
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        action = str(payload.get("action", "") or "")
+    # A GET must not write to the vault: only the POST actions that already
+    # mutate refresh the readable `Workspace/Vault-Review.md` projection.
+    candidates = [] if action in {"restore", "delete"} else review.generate_candidates(
+        root, workspace=workspace, max_candidates=50, write_queue=request.method != "GET"
+    )
+    if request.method == "GET":
+        return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
+
+    candidate_id_value = str(payload.get("candidate_id", "") or "")
+    if action in {"restore", "delete"}:
+        try:
+            result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        review.generate_candidates(
+            root, workspace=workspace, max_candidates=50, write_queue=True
+        )
+        return JSONResponse({"ok": True, "result": result})
+    item = next((candidate for candidate in candidates if candidate.candidate_id == candidate_id_value), None)
+    if item is None:
+        return JSONResponse({"error": "candidate not found or changed"}, status_code=409)
+    try:
+        if action == "decide":
+            result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user", defer_days=int(payload.get("defer_days", 7)))
+        elif action == "trash":
+            result = review.trash_note(root, item)
+        elif action == "restore":
+            result = review.restore_note(root, item.candidate_id)
+        elif action == "delete":
+            result = review.delete_permanently(root, item.candidate_id, confirm=str(payload.get("confirm", "")))
+        else:
+            return JSONResponse({"error": "unsupported action"}, status_code=400)
+    except (ValueError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    # The projection is pending-only and must reflect the successful mutation,
+    # not the pre-action candidate list.
+    review.generate_candidates(
+        root, workspace=workspace, max_candidates=50, write_queue=True
+    )
+    return JSONResponse({"ok": True, "result": result})
+
+
 async def vault_delete_note(request: Request) -> JSONResponse:
     """Permanently delete one vault note from the Memory Map.
 

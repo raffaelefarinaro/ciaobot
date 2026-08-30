@@ -687,9 +687,20 @@ async def extract_and_append(
             if output:
                 _append_section(archive_path, output)
                 logger.info("Appended session insights to %s", archive_path)
-            else:
+            elif model_error:
                 run.status = "error"
-                run.error = model_error or "insights model returned no output"
+                run.error = model_error
+            else:
+                # The call came back clean with nothing in it. That is the
+                # right answer for a transcript that holds no durable signal —
+                # a no-op nightly curation, a one-line scheduled run — and it
+                # is what the system prompt asks for: omit empty sections, and
+                # never lift a maintenance session's own machinery as fact. A
+                # model that obeys both has nothing left to write. Reporting it
+                # as a failure put "insights failed" and a retry button on rows
+                # whose retry can only ever come back empty; a skip lets the
+                # settled line say "nothing durable to save" instead.
+                run.skip("no durable signal in this session")
 
         # Canonical project doc: fold Decisions/Open loops into the chat's
         # project doc while the insights are fresh. The nightly curation
