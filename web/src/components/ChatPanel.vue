@@ -711,7 +711,7 @@
           class="chat-comment-trigger"
           :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
           @mousedown.prevent
-          @click="openCommentForSelection"
+          @click="openCommentForSelection()"
           type="button"
           title="Comment on this selection"
         >
@@ -1222,6 +1222,7 @@ import {
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
+import { useTypeToComment } from '../composables/useTypeToComment'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -2733,14 +2734,15 @@ function onChatSelectionChange(): void {
   updateChatSelectionAnchorFromRange(range)
 }
 
-function openCommentForSelection(): void {
+function openCommentForSelection(initialText = ''): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
   closeChatCommentPopover()
   draftAnchor.value = { ...selectionAnchor.value }
   draftBubbleEl = lastChatSelectionBubble
+  commentDraftImages.value = []
   commentDraft.value = {
     selection: lastChatSelectionText,
-    text: '',
+    text: initialText,
     messageId: lastChatSelectionMsgId,
     messageIndex: lastChatSelectionMsgIndex,
     messageRole: lastChatSelectionMsgRole,
@@ -2800,19 +2802,33 @@ function saveChatComment(): void {
   nextTick(() => applyHighlights())
 }
 
-async function handleDraftImageUpload(e: Event): Promise<void> {
-  const input = e.target as HTMLInputElement
-  if (!input.files?.length) return
+async function addDraftImages(files: File[]): Promise<void> {
   const chatId = store.activeChatId
-  if (!chatId) return
+  if (!chatId || !files.length) return
   try {
-    const refs = await store.uploadImageRefs(chatId, Array.from(input.files))
+    const refs = await store.uploadImageRefs(chatId, files)
     commentDraftImages.value.push(...refs)
   } catch (err) {
     console.error('Comment image upload failed:', err)
   }
+}
+
+async function handleDraftImageUpload(e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement
+  if (!input.files?.length) return
+  await addDraftImages(Array.from(input.files))
   input.value = ''
 }
+
+// Selecting transcript text and typing (or pasting, or hitting Cmd+D) opens the
+// composer directly, so the "Comment" pill is a hint rather than a required
+// click. Dictation has to wait for the popover to mount its recorder.
+useTypeToComment({
+  isActive: () => !!selectionAnchor.value && !commentDraft.value,
+  open: (initialText: string) => openCommentForSelection(initialText),
+  dictate: () => nextTick(() => commentComposeDraftRef.value?.toggleDictation()),
+  addImages: (files: File[]) => addDraftImages(files),
+})
 
 function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)

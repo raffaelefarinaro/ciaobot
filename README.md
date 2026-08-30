@@ -144,7 +144,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 
 - Sidebar workspaces per life area (personal, work, a client) — each with its own vault, projects, and default model.
 - Projects group related chats and inject durable notes and context into every turn.
-- Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
+- Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working. Once text is selected, just start typing (or paste, or press Cmd/Ctrl+D to dictate) and the note opens for you.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
 - Subagents: the agents a chat dispatches for parallel work appear as rows under it in the sidebar while they run, and each one's conversation is readable in a read-only view.

@@ -238,6 +238,7 @@
       />
 
       <CommentComposePopover
+        ref="composeDraftRef"
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
         v-model="composeText"
         :images="commentDraftImages"
@@ -301,6 +302,7 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
+import { useTypeToComment } from '../composables/useTypeToComment'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -944,10 +946,24 @@ const {
   commentDraftImages, editingCommentId, editDraftText, editingCommentImages, editAnchor,
   isHighlightedLine, commentIdForLine, commentLineLabel,
   onCsvCellSelect, onCsvCellActivate, openCommentForSelection, openCommentForCsvCell,
-  cancelComment, saveComment, handleDraftImageUpload, removeDraftImage,
+  cancelComment, saveComment, handleDraftImageUpload, addDraftImages, removeDraftImage,
   cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
+
+const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
+
+// Selecting text and typing (or pasting, or hitting Cmd+D) opens the composer
+// directly, so the "Comment" pill is a hint rather than a required click.
+useTypeToComment({
+  isActive: () => !!selectionAnchor.value && !commentDraft.value,
+  open: (initialText: string) => {
+    if (isCsv.value) openCommentForCsvCell(initialText)
+    else openCommentForSelection(initialText)
+  },
+  dictate: () => nextTick(() => composeDraftRef.value?.toggleDictation()),
+  addImages: (files: File[]) => addDraftImages(files),
+})
 
 // Anything the user has half-written in the panel: a text edit, a new comment,
 // or an edit of an existing one. Auto-reloads hold off while it is true, so a
