@@ -324,18 +324,17 @@ describe('ChatPanel workspace breadcrumb', () => {
   })
 
   // Workspace and project are one unit - the scope the chat sits in - so they
-  // share a wrapper with a single divider between them and the title. That
-  // grouping is what lets the narrow header stack the scope on one line above
-  // the title instead of breaking into a line per crumb.
-  it('groups workspace and project into one scope crumb, divided from the title', async () => {
+  // share a wrapper, with one divider between them and none after: the scope is
+  // an eyebrow on its own line, so the line break separates it from the title.
+  it('groups workspace and project into one scope crumb above the title', async () => {
     const { wrapper } = await mountPanel()
     const scope = wrapper.find('.breadcrumb-scope')
     expect(scope.exists()).toBe(true)
     expect(scope.find('.breadcrumb-workspace').text()).toBe('personal')
     expect(scope.find('.breadcrumb-project').text()).toBe('Upwordo')
-    // One divider inside the scope, one between the scope and the title.
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(2)
-    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(1)
+    // The one divider is inside the scope; none dangles before the title.
+    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(1)
+    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(0)
     wrapper.unmount()
   })
 
@@ -348,8 +347,7 @@ describe('ChatPanel workspace breadcrumb', () => {
     })
     expect(wrapper.find('.breadcrumb-project').exists()).toBe(false)
     expect(wrapper.find('.breadcrumb-scope .breadcrumb-workspace').text()).toBe('personal')
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(1)
-    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(1)
+    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(0)
     wrapper.unmount()
   })
 

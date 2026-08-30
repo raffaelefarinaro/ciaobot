@@ -1141,7 +1141,10 @@ watch(() => props.filePath, () => {
 }
 
 .chat-title {
-  font-size: 16px;
+  /* Token, not 16px: this title sits beside the chat pane's in the split view,
+     and a literal here stopped answering the Appearance font-scale setting —
+     so raising the scale grew the chat title and left this one behind. */
+  font-size: var(--text-lg);
   font-weight: 600;
   color: var(--fg);
   white-space: nowrap;
