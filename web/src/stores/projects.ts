@@ -2696,6 +2696,15 @@ export const useProjectStore = defineStore('projects', () => {
       m => m.role === 'assistant' && !m.is_error && Boolean(m.timestamp),
     )
     if (!settled) return merged
+    // A fast follow-up can already be streaming after the settled turn. Keep
+    // that second turn's trace; only the live rows before its user bubble are
+    // superseded by the newly appended server rows.
+    const userPositions = merged
+      .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
+      .filter(pos => pos >= 0)
+    const supersededEnd = userPositions.length > 1
+      ? userPositions[1]
+      : firstAppendPos
     // `ServerRow` carries no token usage — that only ever reaches the client on
     // the result event, which is exactly the row about to be dropped. Carry it
     // (and the model that answered) onto the server row that closes the turn,
@@ -2705,7 +2714,7 @@ export const useProjectStore = defineStore('projects', () => {
     for (let p = 0; p < merged.length; p++) {
       const row = merged[p]
       const superseded = p >= tailStart
-        && p < firstAppendPos
+        && p < supersededEnd
         && typeof row.i !== 'number'
         && isLiveTraceRow(row)
       if (!superseded) {

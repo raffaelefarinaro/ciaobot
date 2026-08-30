@@ -32,6 +32,7 @@ REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "de
 DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "trash", "restore", "delete"})
 DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer"})
 _DEFER_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
+_CANDIDATE_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 
 
 def _workspace_dir(root: Path) -> Path:
@@ -41,15 +42,15 @@ def _workspace_dir(root: Path) -> Path:
 
 
 def ledger_path(root: Path) -> Path:
-    return _workspace_dir(root) / "Vault-Review.jsonl"
+    return Path(root) / "Workspace" / "Vault-Review.jsonl"
 
 
 def queue_path(root: Path) -> Path:
-    return _workspace_dir(root) / "Vault-Review.md"
+    return Path(root) / "Workspace" / "Vault-Review.md"
 
 
 def trash_dir(root: Path) -> Path:
-    return _workspace_dir(root) / ".vault-trash"
+    return Path(root) / "Workspace" / ".vault-trash"
 
 
 def content_hash(content: bytes) -> str:
@@ -83,6 +84,7 @@ def _now() -> str:
 
 
 def _append(root: Path, payload: dict[str, Any]) -> None:
+    _workspace_dir(root)
     path = ledger_path(root)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"timestamp": _now(), **payload}, sort_keys=True) + "\n")
@@ -127,6 +129,7 @@ def _suppressed(decision: dict[str, Any], now: datetime) -> bool:
 
 
 def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[str, dict[str, Any]]) -> None:
+    _workspace_dir(root)
     lines = ["# Vault Review", "", "Pending note-review candidates. This file is generated from the append-only ledger.", ""]
     for item in candidates:
         decision = decisions.get(item.candidate_id, {})
@@ -259,14 +262,21 @@ def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -
         raise ValueError("candidate changed or no longer exists; regenerate the review")
     destination = trash_dir(root) / f"{candidate.candidate_id}.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(destination))
     metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "edited_backlinks": [], "trashed_at": _now()}
-    destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _append(root, {**metadata, "path": candidate.path, "disposition": "trash", "status": "trashed", "actor": actor})
+    try:
+        shutil.move(str(source), str(destination))
+        destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _append(root, {**metadata, "path": candidate.path, "disposition": "trash", "status": "trashed", "actor": actor})
+    except OSError as exc:
+        if destination.is_file() and not source.exists():
+            shutil.move(str(destination), str(source))
+        destination.with_suffix(".json").unlink(missing_ok=True)
+        raise ValueError(f"trash failed; note was restored: {exc}") from exc
     return metadata
 
 
 def restore_note(root: Path, candidate_id_value: str, *, actor: str = "user") -> dict[str, Any]:
+    _validate_candidate_id(candidate_id_value)
     metadata_path = trash_dir(root) / f"{candidate_id_value}.json"
     if not metadata_path.is_file():
         raise ValueError("trashed candidate not found")
@@ -285,6 +295,7 @@ def restore_note(root: Path, candidate_id_value: str, *, actor: str = "user") ->
 
 
 def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, actor: str = "user") -> dict[str, Any]:
+    _validate_candidate_id(candidate_id_value)
     if confirm != candidate_id_value:
         raise ValueError("explicit candidate confirmation is required")
     source = trash_dir(root) / f"{candidate_id_value}.md"
@@ -348,3 +359,8 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     metadata_path.unlink()
     _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     return metadata
+
+
+def _validate_candidate_id(value: str) -> None:
+    if not _CANDIDATE_ID_RE.fullmatch(value):
+        raise ValueError("invalid candidate id")

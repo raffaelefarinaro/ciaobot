@@ -104,8 +104,8 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
     ``workspace`` (``projects/acme/workspace/Curation-Log.md``) stays indexed.
     """
     return (
-        len(rel_to_root.parts) == 2
-        and rel_to_root.parts[0].casefold() == "workspace"
+        len(rel_to_root.parts) in {2, 3}
+        and rel_to_root.parts[-2].casefold() == "workspace"
         and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
     )
 
