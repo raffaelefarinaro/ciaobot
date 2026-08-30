@@ -782,6 +782,8 @@ class CiaoControlPlane:
         result = cast(
             dict[str, Any], chat.to_dict(local=self.pcm.is_session_local(chat))
         )
+        result["last_response"] = getattr(chat, "last_response", "")
+        result["last_response_status"] = getattr(chat, "last_response_status", "")
         get_active_stream = getattr(self.pcm, "get_active_stream", None)
         result["active_turn"] = (
             get_active_stream(chat.chat_id) is not None

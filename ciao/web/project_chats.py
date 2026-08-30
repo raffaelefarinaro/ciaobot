@@ -1007,8 +1007,6 @@ class ChatInfo:
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
             "last_snippet": self.last_snippet,
-            "last_response": self.last_response,
-            "last_response_status": self.last_response_status,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -5112,6 +5110,9 @@ class ProjectChatManager:
             raise ValueError("Cannot send messages to an archived chat")
 
         self._get_provider(chat_id)
+        chat.last_response = ""
+        chat.last_response_status = "running"
+        self._save()
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
@@ -6425,8 +6426,18 @@ class ProjectChatManager:
                 # about the persisted attention flag. Clear it here so a
                 # denied-by-teardown prompt doesn't leave the chat stuck
                 # looking like it still needs approval.
-                if chat_meta is not None and chat_meta.pending_permission:
-                    chat_meta.pending_permission = ""
+                if chat_meta is not None:
+                    permission_pending = bool(chat_meta.pending_permission)
+                    chat_meta.last_response = last_assistant_text
+                    chat_meta.last_response_status = (
+                        "error" if had_error
+                        else "question" if chat_meta.pending_question
+                        else "permission" if permission_pending
+                        else "success" if last_assistant_text.strip()
+                        else "empty"
+                    )
+                    if permission_pending:
+                        chat_meta.pending_permission = ""
                     self._save()
                 # Always clean up the per-chat stream entry first so subsequent
                 # sends can start a new one immediately.
@@ -6474,8 +6485,6 @@ class ProjectChatManager:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
                         chat_now.last_snippet = snippet
-                        chat_now.last_response = last_assistant_text
-                        chat_now.last_response_status = "success"
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # Schedule the push with a small delay. If the user reads
