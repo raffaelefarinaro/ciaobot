@@ -875,8 +875,8 @@ class ChatInfo:
     # `last_activity_at` so the sidebar's unread tile can show "what finished"
     # without holding the full transcript in memory.
     last_snippet: str = ""
-    # Full final assistant response for automation predicates that must not
-    # decide from the 280-character display snippet.
+    # Bounded tail of the final assistant response for automation predicates
+    # that must not decide from the 280-character display snippet.
     last_response: str = ""
     last_response_status: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
@@ -4199,6 +4199,8 @@ class ProjectChatManager:
         chat.pending_question = ""
         chat.pending_permission = ""
         chat.pending_queue = []
+        chat.last_response = ""
+        chat.last_response_status = ""
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -6428,7 +6430,7 @@ class ProjectChatManager:
                 # looking like it still needs approval.
                 if chat_meta is not None:
                     permission_pending = bool(chat_meta.pending_permission)
-                    chat_meta.last_response = last_assistant_text
+                    chat_meta.last_response = last_assistant_text[-_PROVIDER_HANDOVER_MAX_CHARS:]
                     chat_meta.last_response_status = (
                         "error" if had_error
                         else "question" if chat_meta.pending_question
@@ -7202,7 +7204,7 @@ class ProjectChatManager:
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
                             chat_now.last_snippet = snippet
-                            chat_now.last_response = text
+                            chat_now.last_response = text[-_PROVIDER_HANDOVER_MAX_CHARS:]
                             chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
