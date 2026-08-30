@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.13.0 - 2026-08-30
+
+### Added
+- feat(schedules): add Reviews hygiene auto-archive for helper chats (`51e42758`)
+- feat: convert document attachments to Markdown (#376) (`5cf5bc11`)
+- feat: add vault note review workflow (#377) (`6c9d8044`)
+
+### Changed
+- Merge pull request #375 from raffaelefarinaro/chore/sync-develop-v0.12.0 (`b71f8dc3`)
+- Merge pull request #374 from santogioia/fix/archive-already-applied-guard (`a1dd21bd`)
+
+### Fixed
+- fix(review): address PR #373 post-merge review findings (`d573c4fe`)
+- fix(memory): suppress already-applied proposals before review queue (`cfcc637b`)
+- fix(review): tighten already-applied guard and unify doc path resolution (`95c1c986`)
+- fix(runtime): include Claude SDK telemetry dependency (`4ed42319`)
+- fix(chat): ensure answer displays without opening Activity view (#378) (`93454cd7`)
+
+### Maintenance
+- test(schedules): include reviews hygiene system routine (`13f9dc5a`)
+- docs: catalog release features (`59db48dd`)
+
 ## v0.12.0 - 2026-08-29
 
 ### Added
