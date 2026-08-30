@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.13.1 - 2026-08-31
+
+### Fixed
+- fix(review): close post-release review gaps (`58c8ad0d`)
+- fix(desktop): relaunch app after updates (`401f78d1`)
+
 ## v0.13.0 - 2026-08-30
 
 ### Added
