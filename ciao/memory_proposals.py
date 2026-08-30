@@ -1121,11 +1121,16 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
         return False
     norm_content = _normalize_for_match(content)
     norm_proposal = _normalize_for_match(proposal_text)
-    if not norm_proposal or len(norm_proposal) < _APPLIED_MIN_OVERLAP:
+    if not norm_proposal:
         return False
     # Exact containment first (fast, precise for copy-paste facts like paths).
-    if norm_proposal in norm_content:
-        return True
+    exact_at = norm_content.find(norm_proposal)
+    if exact_at >= 0:
+        prefix = norm_content[:exact_at]
+        if not re.search(r"(?:do not|don't|never|avoid)\s+$", prefix):
+            return True
+    if len(norm_proposal) < _APPLIED_MIN_OVERLAP:
+        return False
     # Also check the promotable variant for memory/profile: the region holds
     # "Avoid em dashes; use commas instead." while the proposal may carry
     # "User said: ... Durable rule: Avoid em dashes; use commas instead."

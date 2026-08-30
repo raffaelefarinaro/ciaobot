@@ -647,6 +647,13 @@ def test_already_applied_guard_does_not_match_contradictions_or_shared_words(
     )
 
 
+def test_already_applied_guard_matches_short_exact_facts(tmp_path: Path) -> None:
+    destination = tmp_path / "note.md"
+    destination.write_text("Use PostgreSQL, not SQLite.\n", encoding="utf-8")
+
+    assert mp._is_already_in_file(destination, "Use PostgreSQL, not SQLite.")
+
+
 def test_unconsumed_project_facts_queue_addressed_to_their_doc(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     archive = tmp_path / "chat.md"

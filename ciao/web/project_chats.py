@@ -875,6 +875,10 @@ class ChatInfo:
     # `last_activity_at` so the sidebar's unread tile can show "what finished"
     # without holding the full transcript in memory.
     last_snippet: str = ""
+    # Full final assistant response for automation predicates that must not
+    # decide from the 280-character display snippet.
+    last_response: str = ""
+    last_response_status: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -1003,6 +1007,8 @@ class ChatInfo:
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
             "last_snippet": self.last_snippet,
+            "last_response": self.last_response,
+            "last_response_status": self.last_response_status,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -1332,6 +1338,8 @@ class ProjectChatManager:
                     cd.get("last_activity_at", cd.get("created_at", "")),
                 ),
                 last_snippet=cd.get("last_snippet", ""),
+                last_response=cd.get("last_response", ""),
+                last_response_status=cd.get("last_response_status", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
@@ -1429,6 +1437,8 @@ class ProjectChatManager:
                     "last_activity_at": c.last_activity_at,
                     "last_read_at": c.last_read_at,
                     "last_snippet": c.last_snippet,
+                    "last_response": c.last_response,
+                    "last_response_status": c.last_response_status,
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
@@ -6464,6 +6474,8 @@ class ProjectChatManager:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
                         chat_now.last_snippet = snippet
+                        chat_now.last_response = last_assistant_text
+                        chat_now.last_response_status = "success"
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # Schedule the push with a small delay. If the user reads
@@ -7181,6 +7193,8 @@ class ProjectChatManager:
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
                             chat_now.last_snippet = snippet
+                            chat_now.last_response = text
+                            chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         self._announce_result_ready(

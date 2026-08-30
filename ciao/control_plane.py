@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ciao import vault_index
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
@@ -771,11 +771,28 @@ class CiaoControlPlane:
                 if self.pcm.get_project(chat.project_id)
                 and self.pcm.get_project(chat.project_id).workspace == principal.workspace
             ]
-        return _ok([chat.to_dict(local=self.pcm.is_session_local(chat)) for chat in chats])
+        return _ok([self._chat_review_dict(chat) for chat in chats])
 
     def chat_get(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
-        return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
+        return _ok(self._chat_review_dict(chat))
+
+    def _chat_review_dict(self, chat: Any) -> dict[str, Any]:
+        """Add reliable state needed by unattended chat cleanup routines."""
+        result = cast(
+            dict[str, Any], chat.to_dict(local=self.pcm.is_session_local(chat))
+        )
+        get_active_stream = getattr(self.pcm, "get_active_stream", None)
+        result["active_turn"] = (
+            get_active_stream(chat.chat_id) is not None
+            if get_active_stream is not None
+            else False
+        )
+        result["needs_attention"] = bool(
+            getattr(chat, "pending_question", "")
+            or getattr(chat, "pending_permission", "")
+        )
+        return result
 
     def chat_create(
         self,

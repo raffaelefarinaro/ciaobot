@@ -2419,7 +2419,10 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
     host_session = node_mgr.get_host_session()
     if host_session:
         headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
-    timeout = httpx.Timeout(60.0, connect=5.0)
+    # Host uploads synchronously convert supported documents. Give a Finder
+    # drop enough time for large PDFs/workbooks without leaving the request
+    # unbounded, so a client timeout does not invite duplicate retries.
+    timeout = httpx.Timeout(10 * 60.0, connect=5.0)
     imported_paths: list[str] = []
     image_refs: list[str] = []
 
