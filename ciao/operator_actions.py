@@ -31,6 +31,7 @@ Contract, enforced in tests
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -1298,7 +1299,7 @@ async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[st
     if action_id == "package-update":
         return _run_package_update(context)
     if action_id == "github-star":
-        return _run_github_star(context)
+        return await _run_github_star(context)
     if action_id == "vault-vocabulary":
         return _run_vault_vocabulary(context)
     if action_id == "missed-schedules":
@@ -1322,7 +1323,7 @@ def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str,
     raise ValueError(f"unknown operator action id: {action_id}")
 
 
-def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
+async def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
     """Star the repository directly through the GitHub CLI.
 
     A real API call, not a receipt on trust: the button used to only open the
@@ -1341,7 +1342,8 @@ def _run_github_star(context: DetectionContext) -> tuple[dict[str, Any], str]:
     repo_url = latest_release_redirect_url().removesuffix("/releases/latest")
     slug = repo_url.removeprefix("https://github.com/").removeprefix("http://github.com/")
     try:
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             ["gh", "api", "-X", "PUT", f"user/starred/{slug}"],
             check=True,
             capture_output=True,

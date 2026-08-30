@@ -335,29 +335,31 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
         edited = strip_references(Path(root), str(metadata["original_path"]))
     except OSError as exc:
         cleanup_error = str(exc)
-    if not cleanup_error:
-        try:
-            original.unlink()
-        except OSError as exc:
-            # The residual window the probe narrows. `edited` is already
-            # committed and cannot be rolled back, so the note goes back to the
-            # trash and the ledger records exactly which notes were rewritten —
-            # silently dissolving links used to be the only outcome here.
-            if original.is_file() and not source.exists():
-                shutil.move(str(original), str(source))
-            _append(root, {
-                **metadata, "edited_backlinks": edited, "disposition": "delete",
-                "status": "trashed", "actor": actor, "delete_failed_at": _now(),
-                "delete_error": str(exc),
-            })
-            raise ValueError(f"cannot delete: {exc}") from exc
     if cleanup_error:
         # The note is back where it was and nothing else was rewritten
         # (`strip_references` is all-or-nothing); leave it in the trash.
         shutil.move(str(original), str(source))
         raise ValueError(f"backlink cleanup failed: {cleanup_error}")
+    try:
+        # Keep the trash metadata until the completion audit is durable. If the
+        # append fails, the note can still be restored from this recovery state.
+        _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
+    except OSError as exc:
+        if original.is_file() and not source.exists():
+            shutil.move(str(original), str(source))
+        raise ValueError(f"delete audit failed; recovery metadata was retained: {exc}") from exc
+    try:
+        original.unlink()
+    except OSError as exc:
+        if original.is_file() and not source.exists():
+            shutil.move(str(original), str(source))
+        _append(root, {
+            **metadata, "edited_backlinks": edited, "disposition": "delete",
+            "status": "trashed", "actor": actor, "delete_failed_at": _now(),
+            "delete_error": str(exc),
+        })
+        raise ValueError(f"cannot delete: {exc}") from exc
     metadata_path.unlink()
-    _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     return metadata
 
 
