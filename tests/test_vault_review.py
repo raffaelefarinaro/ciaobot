@@ -56,3 +56,19 @@ def test_permanent_delete_requires_trash_and_exact_confirmation(tmp_path: Path) 
     delete_permanently(tmp_path, candidate.candidate_id, confirm=candidate.candidate_id)
     assert not list((tmp_path / "Workspace" / ".vault-trash").glob("*"))
     assert json.loads((tmp_path / "Workspace" / "Vault-Review.jsonl").read_text().splitlines()[-1])["status"] == "deleted"
+
+
+def test_restore_keeps_backlinks_until_permanent_delete(tmp_path: Path) -> None:
+    _note(tmp_path, "People/A.md", "The canonical note.")
+    _note(tmp_path, "People/B.md", "See [A](A.md).")
+    candidates = generate_candidates(tmp_path, workspace="personal", max_candidates=50)
+    candidate = next(item for item in candidates if item.path.endswith("/A.md"))
+
+    trash_note(tmp_path, candidate)
+    assert "See [A](A.md)." in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")
+    restore_note(tmp_path, candidate.candidate_id)
+    assert "See [A](A.md)." in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")
+
+    trash_note(tmp_path, candidate)
+    delete_permanently(tmp_path, candidate.candidate_id, confirm=candidate.candidate_id)
+    assert "See [A](A.md)." not in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")

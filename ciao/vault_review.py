@@ -237,11 +237,8 @@ def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -
         raise ValueError("candidate changed or no longer exists; regenerate the review")
     destination = trash_dir(root) / f"{candidate.candidate_id}.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    from ciao.vault_index import strip_references
-
-    edited_backlinks = strip_references(root, candidate.path)
     shutil.move(str(source), str(destination))
-    metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "edited_backlinks": edited_backlinks, "trashed_at": _now()}
+    metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "edited_backlinks": [], "trashed_at": _now()}
     destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _append(root, {**metadata, "path": candidate.path, "disposition": "trash", "status": "trashed", "actor": actor})
     return metadata
@@ -276,7 +273,21 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     digest = content_hash(source.read_bytes())
     if digest != metadata.get("content_hash"):
         raise ValueError("trashed note changed; refusing permanent deletion")
-    source.unlink()
+    original = (Path(root).resolve() / Path(str(metadata["original_path"]).replace("memory-vault/", "", 1))).resolve()
+    if not original.is_relative_to(Path(root).resolve()) or original.exists():
+        raise ValueError("original note path is unavailable; refusing permanent deletion")
+    original.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(original))
+    try:
+        from ciao.vault_index import strip_references
+
+        edited = strip_references(Path(root), str(metadata["original_path"]))
+        original.unlink()
+    except Exception:
+        # Keep the trashed note recoverable if backlink cleanup cannot complete.
+        if original.is_file() and not source.exists():
+            shutil.move(str(original), str(source))
+        raise
     metadata_path.unlink()
-    _append(root, {**metadata, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
+    _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     return metadata
