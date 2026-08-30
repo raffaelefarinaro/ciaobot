@@ -457,11 +457,19 @@
                   </button>
                 </div>
               </div>
-              <div v-if="item.msg.timestamp || item.msg.effective_model || formatTokenUsage(item.msg.usage)" class="message-meta">
-                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
-                <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
-                <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
-                <span v-if="formatTokenUsage(item.msg.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.msg.usage)"></span></span>
+              <!-- One footer per turn, on its last bubble. A turn can produce
+                   several assistant bubbles, and the fields are spread across
+                   them: the merged answer carries the model and the token
+                   usage, while the completion time and duration are overlaid
+                   onto the turn's last assistant row. Rendered per message that
+                   read as the cost of the *first* bubble and left the reply the
+                   user actually ends on unlabelled. `item.meta` is the whole
+                   turn's footer, set only on the bubble that closes it. -->
+              <div v-if="item.meta" class="message-meta">
+                <span v-if="item.meta.timestamp">{{ formatTime(item.meta.timestamp) }}</span>
+                <span v-if="item.meta.duration_ms"> &middot; {{ formatDuration(item.meta.duration_ms) }}</span>
+                <span v-if="item.meta.effective_model"> &middot; {{ item.meta.effective_model }}</span>
+                <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.meta.usage)"></span></span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
@@ -1218,9 +1226,19 @@ import { useReentrySummaryPreference } from '../composables/useReentrySummaryPre
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
+/** The footer facts for one turn: when it landed, how long it took, which
+ *  model answered and what it cost. Collected across the turn's assistant
+ *  messages and rendered once, on the turn's last bubble. */
+type TurnMeta = {
+  timestamp?: string
+  duration_ms?: number
+  effective_model?: string
+  usage?: Record<string, string>
+}
+
 type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
 
@@ -3429,6 +3447,44 @@ function fileCardIcon(filePath: string): AppIconName {
   return 'file'
 }
 
+/** Fold a turn's footer facts into one record.
+ *
+ * The fields do not arrive together. The merged final-answer row carries
+ * `effective_model` and `usage`; `_overlay_assistant_timings` puts `sent_at`
+ * and `duration_ms` on whichever assistant row ends the turn; and which of
+ * those becomes the turn's *last rendered* bubble depends on phase tagging.
+ * Take the last non-empty value for each field so the footer is complete
+ * wherever its parts came from.
+ */
+function turnMetaFrom(buffer: ChatMessage[]): TurnMeta | null {
+  const meta: TurnMeta = {}
+  for (const m of buffer) {
+    if (m.role !== 'assistant') continue
+    if (m.timestamp) meta.timestamp = m.timestamp
+    if (m.duration_ms) meta.duration_ms = m.duration_ms
+    if (m.effective_model) meta.effective_model = m.effective_model
+    if (m.usage) meta.usage = m.usage
+  }
+  return Object.keys(meta).length ? meta : null
+}
+
+/** Put the turn's footer on the last assistant bubble it produced.
+ *
+ * Anything earlier is mid-turn: labelling it with the turn's cost read as the
+ * price of that fragment, and left the reply the user actually ends on bare.
+ */
+function attachTurnMeta(items: RenderItem[], buffer: ChatMessage[]): void {
+  const meta = turnMetaFrom(buffer)
+  if (!meta) return
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]
+    if (item.kind === 'user') break
+    if (item.kind !== 'assistant') continue
+    item.meta = meta
+    return
+  }
+}
+
 const renderData = computed<{
   items: RenderItem[]
   liveSubs: SubagentTranscript[]
@@ -3543,6 +3599,7 @@ const renderData = computed<{
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
     }
+    attachTurnMeta(items, buffer)
     buffer = []
   }
 
