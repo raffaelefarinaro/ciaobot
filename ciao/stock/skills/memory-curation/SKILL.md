@@ -45,6 +45,14 @@ Never drop a durable fact merely to fit a cap. If a region remains over cap beca
 
 ## 3. Re-verify aging and stale facts
 
+Before changing any vault file, run the scoped `vault_review` tool (or the
+equivalent review endpoint) and inspect its evidence. It may queue candidates,
+but unattended curation must never trash or permanently delete a note. Keep,
+improve/link, defer, and archive are explicit user decisions; trash is
+reversible and permanent deletion is a separate attended action requiring the
+candidate confirmation. Orphan status is only a linking signal, never proof
+that a note is disposable.
+
 Run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>` and act on three sections:
 
 - **`aging_state_entries`** — region entries whose `[as-of:]` or learned-at stamp has aged past its horizon. Re-verify each against recent chats and project docs: update the entry (fresh stamp) if the fact changed, refresh the stamp if it still holds, or treat it as a consolidation candidate (pass 2) if it no longer matters. Report malformed date tags instead of guessing.

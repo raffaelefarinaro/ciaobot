@@ -691,6 +691,42 @@ class CiaoControlPlane:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
 
+    # ---- vault review --------------------------------------------------
+
+    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "", defer_days: int = 7) -> dict[str, Any]:
+        """Inspect candidates or record an explicit, scoped note disposition.
+
+        Destructive operations are intentionally separate from ``decide`` and
+        require a candidate generated from the current content hash.
+        """
+        from ciao import vault_review as review
+
+        workspace = self._workspace(principal)
+        root = self._vault_root(principal)
+        candidates = review.generate_candidates(root, workspace=workspace)
+        by_id = {item.candidate_id: item for item in candidates}
+        if action == "list":
+            return _ok({"candidates": [item.as_dict() for item in candidates]})
+        item = by_id.get(candidate_id)
+        if item is None and path:
+            item = next((candidate for candidate in candidates if candidate.path == path), None)
+        if item is None:
+            raise ControlPlaneError("candidate_not_found", "Review candidate was not found or has changed.")
+        try:
+            if action == "inspect":
+                return _ok(item.as_dict())
+            if action == "decide":
+                return _ok(review.record_decision(root, item, disposition, defer_days=defer_days))
+            if action == "trash":
+                return _ok(review.trash_note(root, item))
+            if action == "restore":
+                return _ok(review.restore_note(root, item.candidate_id))
+            if action == "delete":
+                return _ok(review.delete_permanently(root, item.candidate_id, confirm=confirm))
+        except ValueError as exc:
+            raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
+        raise ControlPlaneError("invalid_action", "action must be list, inspect, decide, trash, restore, or delete.")
+
     # ---- projects/chats ------------------------------------------------
 
     def projects_list(self, principal: McpPrincipal, include_completed: bool = False) -> dict[str, Any]:
