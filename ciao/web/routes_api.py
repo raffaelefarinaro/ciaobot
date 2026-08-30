@@ -4754,9 +4754,18 @@ async def vault_review(request: Request) -> JSONResponse:
         action = str(payload.get("action", "") or "")
     # A GET must not write to the vault: only the POST actions that already
     # mutate refresh the readable `Workspace/Vault-Review.md` projection.
-    candidates = [] if action in {"restore", "delete"} else review.generate_candidates(
-        root, workspace=workspace, max_candidates=50, write_queue=request.method != "GET"
-    )
+    if action in {"restore", "delete"}:
+        candidates = []
+    else:
+        candidates = await asyncio.to_thread(
+            functools.partial(
+                review.generate_candidates,
+                root,
+                workspace=workspace,
+                max_candidates=50,
+                write_queue=request.method != "GET",
+            )
+        )
     if request.method == "GET":
         return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
 
@@ -4766,8 +4775,14 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
         except (ValueError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        review.generate_candidates(
-            root, workspace=workspace, max_candidates=50, write_queue=True
+        await asyncio.to_thread(
+            functools.partial(
+                review.generate_candidates,
+                root,
+                workspace=workspace,
+                max_candidates=50,
+                write_queue=True,
+            )
         )
         return JSONResponse({"ok": True, "result": result})
     item = next((candidate for candidate in candidates if candidate.candidate_id == candidate_id_value), None)
@@ -4788,8 +4803,14 @@ async def vault_review(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
     # The projection is pending-only and must reflect the successful mutation,
     # not the pre-action candidate list.
-    review.generate_candidates(
-        root, workspace=workspace, max_candidates=50, write_queue=True
+    await asyncio.to_thread(
+        functools.partial(
+            review.generate_candidates,
+            root,
+            workspace=workspace,
+            max_candidates=50,
+            write_queue=True,
+        )
     )
     return JSONResponse({"ok": True, "result": result})
 

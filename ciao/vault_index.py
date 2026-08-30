@@ -820,7 +820,11 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
 
 
 def strip_references(
-    vault_root: Path, deleted_path: str, *, path_prefix: Path | None = None
+    vault_root: Path,
+    deleted_path: str,
+    *,
+    path_prefix: Path | None = None,
+    undo: dict[str, str] | None = None,
 ) -> list[str]:
     """Remove literal references to `deleted_path` from every note linking to it.
 
@@ -844,6 +848,10 @@ def strip_references(
     every reference was left untouched and the note was deleted anyway -
     dangling `related:` entries and markdown links on every migrated install,
     reported as `edited_backlinks: []`.
+
+    When ``undo`` is provided, it receives the original text for each rewritten
+    path so a caller can roll the successful cleanup back if a later delete step
+    fails.
     """
     vault_root = vault_root.resolve()
     prefix = path_prefix or Path("memory-vault")
@@ -870,6 +878,8 @@ def strip_references(
             edited.append(str(e.path))
     # Phase 2: stage + swap everything in, or roll back to the original bytes.
     _commit_staged_edits(edits)
+    if undo is not None:
+        undo.update({str(path): original for path, original, _new_text in edits})
     return edited
 
 

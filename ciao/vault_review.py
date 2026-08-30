@@ -341,9 +341,12 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     from ciao.vault_index import strip_references
 
     edited: list[str] = []
+    undo: dict[str, str] = {}
     cleanup_error = ""
     try:
-        edited = strip_references(Path(root), str(metadata["original_path"]))
+        edited = strip_references(
+            Path(root), str(metadata["original_path"]), undo=undo
+        )
     except OSError as exc:
         cleanup_error = str(exc)
     if cleanup_error:
@@ -357,12 +360,16 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
         _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     except OSError as exc:
         if original.is_file() and not source.exists():
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8")
             shutil.move(str(original), str(source))
         raise ValueError(f"delete audit failed; recovery metadata was retained: {exc}") from exc
     try:
         original.unlink()
     except OSError as exc:
         if original.is_file() and not source.exists():
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8")
             shutil.move(str(original), str(source))
         _append(root, {
             **metadata, "edited_backlinks": edited, "disposition": "delete",

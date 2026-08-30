@@ -645,6 +645,14 @@ def test_already_applied_guard_does_not_match_contradictions_or_shared_words(
         destination,
         "Deploy production databases through the managed backup pipeline.",
     )
+    destination.write_text(
+        "Do not deploy production services through the managed release pipeline.\n",
+        encoding="utf-8",
+    )
+    assert not mp._is_already_in_file(
+        destination,
+        "Deploy production services through the managed release pipeline.",
+    )
 
 
 def test_already_applied_guard_matches_short_exact_facts(tmp_path: Path) -> None:

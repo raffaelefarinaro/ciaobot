@@ -1113,6 +1113,19 @@ def _normalize_for_match(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _positive_contains(text: str, needle: str) -> bool:
+    """Match *needle* unless the containing sentence negates the match."""
+    start = 0
+    while True:
+        at = text.find(needle, start)
+        if at < 0:
+            return False
+        prefix = text[:at]
+        if not re.search(r"(?:\bdo not|\bdon't|\bnever|\bavoid)\s+$", prefix):
+            return True
+        start = at + 1
+
+
 def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     """True when *path* already contains the proposal's substance."""
     try:
@@ -1124,11 +1137,8 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     if not norm_proposal:
         return False
     # Exact containment first (fast, precise for copy-paste facts like paths).
-    exact_at = norm_content.find(norm_proposal)
-    if exact_at >= 0:
-        prefix = norm_content[:exact_at]
-        if not re.search(r"(?:do not|don't|never|avoid)\s+$", prefix):
-            return True
+    if _positive_contains(norm_content, norm_proposal):
+        return True
     if len(norm_proposal) < _APPLIED_MIN_OVERLAP:
         return False
     # Also check the promotable variant for memory/profile: the region holds
@@ -1137,7 +1147,7 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     promotable = _promotable_text(proposal_text)
     if promotable and promotable != proposal_text:
         norm_promotable = _normalize_for_match(promotable)
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_content:
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_content, norm_promotable):
             return True
     # Do not use unordered token overlap here. It treats contradictory or
     # unrelated sentences as equivalent (for example, "use Python" versus
@@ -1165,9 +1175,9 @@ def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> 
         norm_entry = _normalize_for_match(entry)
         if norm_promotable == norm_entry:
             return True
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_entry:
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_entry, norm_promotable):
             return True
-        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and norm_entry in norm_promotable:
+        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_promotable, norm_entry):
             return True
     return False
 

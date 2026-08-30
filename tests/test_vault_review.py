@@ -159,6 +159,28 @@ def test_permanent_delete_keeps_backlinks_when_the_folder_is_read_only(tmp_path:
     assert read_ledger(tmp_path)[-1]["disposition"] == "trash"
 
 
+def test_permanent_delete_restores_backlinks_when_audit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _note(tmp_path, "People/A.md", "The canonical note.")
+    _note(tmp_path, "People/B.md", "See [A](A.md).")
+    candidate = next(
+        item for item in generate_candidates(tmp_path, workspace="personal", max_candidates=50)
+        if item.path.endswith("/A.md")
+    )
+    trash_note(tmp_path, candidate)
+
+    def fail_audit(*args: object, **kwargs: object) -> None:
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr("ciao.vault_review._append", fail_audit)
+    with pytest.raises(ValueError, match="audit failed"):
+        delete_permanently(tmp_path, candidate.candidate_id, confirm=candidate.candidate_id)
+
+    assert "See [A](A.md)." in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")
+    assert (tmp_path / "Workspace" / ".vault-trash" / f"{candidate.candidate_id}.md").is_file()
+
+
 def test_an_earlier_unattended_turn_does_not_block_a_later_attended_trash(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
