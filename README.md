@@ -168,7 +168,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 
 - Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat (with a durable `schedule_id` backlink so banners survive later runs).
 - Interval automations: re-run a prompt every N minutes — inside one chat, keeping its context and model between runs, or in a fresh chat each time. Marked `↻` in the sidebar; PWA owns them — the harness's own `/schedule` and `/loop` skills are removed and denied so automations land in Ciaobot instead of a cloud routine it cannot see.
-- System routines ship enabled (memory curation, workspace hygiene, skill evolution); every run is visible under **Settings → Automation**.
+- System routines ship enabled (memory curation, install health, workspace hygiene, skill evolution, and Reviews hygiene); every run is visible under **Settings → Automation**.
 
 **Extensibility — skills, subagents, commands**
 
@@ -214,8 +214,10 @@ Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/sc
 | Routine | Cadence | What it does |
 |---|---|---|
 | Memory curation | Daily | Processes uncertain or failed memory items left after archive-time auto-filing, re-checks aging vault notes, and updates vault pages and `Workspace/Learnings.md`. Removes `[expires:]` entries after their date and reports malformed tags. Then runs `ciao memory-audit --json` and repairs rot in the always-loaded regions: event-shaped entries move to `Workspace/Learnings.md`, broken paths are corrected/dropped, competing values collapsed. |
+| Install health | Weekly (Sun) | Runs `ciao os-audit --json --scope global` for unresolved background job failures and pending upgrade actions, reporting findings without modifying them. |
 | Workspace hygiene | Weekly (Sun) | Regenerates the vault index with `ciao vault-index --write`, then runs `ciao os-audit --json`. Repairs low-risk link/index drift, then verifies the rest. |
 | Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
+| Reviews hygiene | Daily | Archives completed Reviews helper chats only when they finished successfully and need no further user judgment. |
 
 Your own automations live alongside these in the workspace (`.runtime/schedules.json`), whatever their cadence, and are managed from the UI's Automations page. Packaged **skills** (Google Workspace, web research, and more) are browsable under **Settings → Assets** and live in [ciao/stock/skills/](ciao/stock/skills/).
 

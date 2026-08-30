@@ -129,7 +129,7 @@ npm install -g @jackwener/opencli
 opencli list   # see available adapters
 ```
 
-Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
+Note: many adapters require the Browser Bridge Chrome extension and a logged-in Chrome session.
 
 ### Apple Intelligence (on-device session insights)
 
