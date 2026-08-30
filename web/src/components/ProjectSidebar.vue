@@ -3077,6 +3077,16 @@ async function confirmDeleteChat(chatId: string) {
      width this media query covers. The container query stays for the wide
      window where the sidebar is drag-resizable. */
   .sidebar-header { container-type: normal; }
+  /* Same failure, second cause. `.touch-hit` opens an isolated stacking context
+     with a `z-index: -1` pill behind it, and inside the drawer's composited
+     layer WebKit renders each of those isolated subtrees into its own offscreen
+     buffer - at 1x, not the device's 3x. The header's border and background are
+     painted straight into the layer and stay crisp, which is why the blur ends
+     exactly at the header's box while the workspace pills right below it (no
+     isolation) are sharp. Dropping the isolation costs nothing here: the header
+     declares no background of its own, so the pill still lands above the
+     sidebar's background and below the glyphs. */
+  .sidebar-header .touch-hit { isolation: auto; }
 }
 
 /* Schedules list in sidebar (schedules mode) */
