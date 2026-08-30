@@ -2729,9 +2729,18 @@ export const useProjectStore = defineStore('projects', () => {
     }
     if (kept.length === merged.length) return merged
     if (Object.keys(carried).length) {
+      const limit = supersededEnd === firstAppendPos ? merged.length : supersededEnd
+      let target: number | undefined
+      for (let p = limit - 1; p >= firstAppendPos; p--) {
+        const row = merged[p]
+        if (row.role === 'assistant' && typeof row.i === 'number') {
+          target = row.i
+          break
+        }
+      }
       for (let p = kept.length - 1; p >= 0; p--) {
         const row = kept[p]
-        if (row.role !== 'assistant') continue
+        if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
         kept[p] = { ...carried, ...row }
         break
       }

@@ -4766,6 +4766,9 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
         except (ValueError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        review.generate_candidates(
+            root, workspace=workspace, max_candidates=50, write_queue=True
+        )
         return JSONResponse({"ok": True, "result": result})
     item = next((candidate for candidate in candidates if candidate.candidate_id == candidate_id_value), None)
     if item is None:
