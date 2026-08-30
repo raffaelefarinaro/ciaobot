@@ -2062,6 +2062,76 @@ describe('optimistic user bubble reconciliation', () => {
     expect(msgs.some(m => m.content === 'unsent question')).toBe(false)
   })
 
+  test('loadMessages replaces the live copy of a turn once the server window delivers it', async () => {
+    // The client renders a streamed turn as its trace plus ONE merged answer
+    // bubble; the server replays the provider's own text parts as separate
+    // rows with the tool groups between them. Neither pairs by exact content,
+    // so both copies used to survive the window merge and the reply rendered
+    // once whole and then again in pieces.
+    const store = useProjectStore()
+    const chatId = 'chat-live-dup'
+    store.messages[chatId] = [
+      { role: 'user', content: 'rewrite the speech', timestamp: '2026-08-30T13:23:00Z', turn_index: 0, i: 0 },
+      { role: 'system', content: '· read wedding-speech.md', timestamp: '', tool_name: '_activity' },
+      {
+        role: 'assistant',
+        content: 'part one\n\npart two',
+        timestamp: '2026-08-30T13:23:23Z',
+        effective_model: 'openai/gpt-5.6-luna',
+        usage: { input_tokens: '10007', output_tokens: '92' },
+      },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'rewrite the speech', sent_at: '2026-08-30T13:23:00Z', turn_index: 0 },
+        { i: 1, role: 'assistant', content: 'part one' },
+        { i: 2, role: 'system', content: '· read wedding-speech.md · edit wedding-speech.md', tool_name: '_activity' },
+        { i: 3, role: 'assistant', content: 'part two', sent_at: '2026-08-30T13:23:23Z', duration_ms: 23000 },
+      ],
+      total: 4, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.map(m => m.content)).toEqual([
+      'rewrite the speech',
+      'part one',
+      '· read wedding-speech.md · edit wedding-speech.md',
+      'part two',
+    ])
+    // The dropped bubble was the only carrier of the turn's cost; it has to
+    // land on the server row that closes the turn.
+    const last = msgs[msgs.length - 1]
+    expect(last.usage).toEqual({ input_tokens: '10007', output_tokens: '92' })
+    expect(last.effective_model).toBe('openai/gpt-5.6-luna')
+    expect(last.duration_ms).toBe(23000)
+  })
+
+  test('loadMessages keeps the live copy while the server window has no settled reply for it', async () => {
+    // Half-persisted turn: the window has the first part but not the row that
+    // closes it, so the client's copy is still the only complete rendering.
+    const store = useProjectStore()
+    const chatId = 'chat-live-partial'
+    store.messages[chatId] = [
+      { role: 'user', content: 'rewrite the speech', timestamp: '2026-08-30T13:23:00Z', turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'part one\n\npart two', timestamp: '2026-08-30T13:23:23Z' },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'rewrite the speech', sent_at: '2026-08-30T13:23:00Z', turn_index: 0 },
+        { i: 1, role: 'assistant', content: 'part one' },
+      ],
+      total: 2, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    expect(
+      store.messages[chatId].some(m => m.content === 'part one\n\npart two'),
+    ).toBe(true)
+  })
+
   test('loadMessages keeps local history to avoid data loss if server has fewer completed user turns', async () => {
     const store = useProjectStore()
     const chatId = 'chat-dataloss'
