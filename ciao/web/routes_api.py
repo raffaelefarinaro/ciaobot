@@ -4783,6 +4783,11 @@ async def vault_review(request: Request) -> JSONResponse:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+    # The projection is pending-only and must reflect the successful mutation,
+    # not the pre-action candidate list.
+    review.generate_candidates(
+        root, workspace=workspace, max_candidates=50, write_queue=True
+    )
     return JSONResponse({"ok": True, "result": result})
 
 

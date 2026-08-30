@@ -185,7 +185,7 @@ def generate_candidates(
     candidates: list[ReviewCandidate] = []
     for entry in entries:
         path = str(entry.path)
-        if "Workspace/" in path or path.endswith("/Workspace"):
+        if any(part.casefold() == "workspace" for part in Path(path).parts):
             continue
         try:
             disk_path = root / Path(path).relative_to("memory-vault")

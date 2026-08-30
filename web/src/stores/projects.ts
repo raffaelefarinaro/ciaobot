@@ -2704,7 +2704,9 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(pos => pos >= 0)
     const supersededEnd = userPositions.length > 1
       ? userPositions[1]
-      : firstAppendPos
+      : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
+        ? userPositions[0]
+        : firstAppendPos
     // `ServerRow` carries no token usage — that only ever reaches the client on
     // the result event, which is exactly the row about to be dropped. Carry it
     // (and the model that answered) onto the server row that closes the turn,

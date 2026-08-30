@@ -716,6 +716,7 @@ class CiaoControlPlane:
         if action in {"restore", "delete"}:
             try:
                 result = review.restore_note(root, candidate_id) if action == "restore" else review.delete_permanently(root, candidate_id, confirm=confirm)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
             except ValueError as exc:
                 raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
             return _ok(result)
@@ -736,9 +737,13 @@ class CiaoControlPlane:
             if action == "inspect":
                 return _ok(item.as_dict())
             if action == "decide":
-                return _ok(review.record_decision(root, item, disposition, defer_days=defer_days))
+                result = review.record_decision(root, item, disposition, defer_days=defer_days)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+                return _ok(result)
             if action == "trash":
-                return _ok(review.trash_note(root, item))
+                result = review.trash_note(root, item)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+                return _ok(result)
             if action == "restore":
                 return _ok(review.restore_note(root, item.candidate_id))
             if action == "delete":
