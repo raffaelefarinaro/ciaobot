@@ -892,6 +892,44 @@ fn current_app_bundle() -> Option<std::path::PathBuf> {
     })
 }
 
+/// Opt a webview out of the system Writing Tools affordance.
+///
+/// macOS 26 shows a "lightweight UI" affordance when the pointer dwells over
+/// text (`NSCampoLightweightUIController`), and opens a Writing Tools session
+/// for whatever it finds. Over our WKWebView it gets an empty attributed
+/// string back — WebKit logs `willBeginWritingToolsSession () => attributed
+/// string is empty` — and then trips an AppKit assertion on the affordance's
+/// mouse-enter. The NSException that assertion raises unwinds into tao's
+/// `sendEvent:`, an `extern "C"` Rust frame that cannot unwind, so the process
+/// aborts (`panic_cannot_unwind`) instead of the popover simply failing. The
+/// app has no way to catch that, only to stop provoking it: no Writing Tools,
+/// no affordance, no assertion.
+///
+/// `respondsToSelector:` guards the call, so this is a no-op before macOS 15
+/// where the property does not exist.
+#[cfg(target_os = "macos")]
+fn opt_out_of_writing_tools(window: &tauri::WebviewWindow) {
+    // NSWritingToolsBehaviorNone.
+    const WRITING_TOOLS_NONE: isize = -1;
+    let _ = window.with_webview(|webview| {
+        let view = webview.inner().cast::<objc2::runtime::AnyObject>();
+        if view.is_null() {
+            return;
+        }
+        unsafe {
+            let view = &*view;
+            let responds: objc2::runtime::Bool =
+                objc2::msg_send![view, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)];
+            if responds.as_bool() {
+                let _: () = objc2::msg_send![view, setWritingToolsBehavior: WRITING_TOOLS_NONE];
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn opt_out_of_writing_tools(_window: &tauri::WebviewWindow) {}
+
 fn build_windows(
     app: &AppHandle,
     runtime: &RuntimeConfig,
@@ -979,6 +1017,7 @@ fn build_windows(
             server_configured,
         ))
         .build()?;
+    opt_out_of_writing_tools(&main);
     main.on_window_event({
         let window = main.clone();
         let runtime_root = runtime.runtime_root.clone();
@@ -1044,6 +1083,7 @@ fn build_windows(
         .min_inner_size(760.0, 560.0)
         .visible(false)
         .build()?;
+    opt_out_of_writing_tools(&update);
     update.on_window_event({
         let window = update.clone();
         move |event| {
