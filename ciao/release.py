@@ -335,20 +335,17 @@ def apply_release_files(
 def _bump_service_worker_caches(files: ReleaseFiles, version: str) -> None:
     """Retarget the service-worker cache names at the new version.
 
-    The PWA keys its caches by version (``ciaobot-vX.Y.Z``). Ship a release
-    without bumping them and every existing client keeps serving the previous
-    build's assets out of its old cache until something else evicts them — the
-    upgrade looks like it silently did nothing. This was a manual step for the
-    first releases and got missed, so it happens here with the rest of the
-    version bumps.
+    The PWA's asset cache is versioned (``ciaobot-vX.Y.Z``). The unread cache is
+    durable user state and deliberately keeps one stable name; the service
+    worker migrates older versioned unread caches before deleting them.
     """
     for path in files.service_workers:
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
         bumped = re.sub(
-            r"(['\"])ciaobot-((?:[a-z]+-)*)v\d+\.\d+\.\d+\1",
-            lambda m: f"{m.group(1)}ciaobot-{m.group(2)}v{version}{m.group(1)}",
+            r"(['\"])ciaobot-v\d+\.\d+\.\d+\1",
+            lambda m: f"{m.group(1)}ciaobot-v{version}{m.group(1)}",
             text,
         )
         if bumped != text:

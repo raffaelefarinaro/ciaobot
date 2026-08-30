@@ -2,7 +2,8 @@ const CACHE_NAME = 'ciaobot-v0.13.1'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
-const UNREAD_CACHE = 'ciaobot-unread-v0.13.1'
+const UNREAD_CACHE = 'ciaobot-unread'
+const LEGACY_UNREAD_CACHE_PREFIX = 'ciaobot-unread-v'
 const UNREAD_KEY = '/__unread__'
 
 self.addEventListener('install', (event) => {
@@ -14,16 +15,36 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys
-          .filter((k) => k !== CACHE_NAME && k !== UNREAD_CACHE)
-          .map((k) => caches.delete(k))
+    migrateUnreadCaches().then(() =>
+      caches.keys().then((keys) =>
+        Promise.all(
+          keys
+            .filter((k) => k !== CACHE_NAME && k !== UNREAD_CACHE)
+            .map((k) => caches.delete(k))
+        )
       )
     )
   )
   self.clients.claim()
 })
+
+// The unread cache contains user state, unlike the versioned asset cache. Move
+// entries from older releases before activation removes their caches.
+async function migrateUnreadCaches() {
+  const keys = await caches.keys()
+  const legacyKeys = keys.filter((key) => key.startsWith(LEGACY_UNREAD_CACHE_PREFIX))
+  if (!legacyKeys.length) return
+  const current = await caches.open(UNREAD_CACHE)
+  for (const key of legacyKeys) {
+    const legacy = await caches.open(key)
+    for (const request of [UNREAD_KEY, PENDING_TARGET_KEY]) {
+      if (!(await current.match(request))) {
+        const response = await legacy.match(request)
+        if (response) await current.put(request, response)
+      }
+    }
+  }
+}
 
 // --- Unread badge state -----------------------------------------------------
 // Stored in a Cache entry as JSON: { [chat_id]: count }. Cache survives SW

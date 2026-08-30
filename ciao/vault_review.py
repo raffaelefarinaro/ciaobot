@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import threading
 import tempfile
 from dataclasses import dataclass, asdict
 from datetime import UTC, datetime, timedelta
@@ -33,6 +35,8 @@ DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "trash", "restore", "
 DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer"})
 _DEFER_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 _CANDIDATE_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+_QUEUE_LOCKS: dict[tuple[Path, str], threading.Lock] = {}
+_QUEUE_LOCKS_GUARD = threading.Lock()
 
 
 def _workspace_dir(root: Path) -> Path:
@@ -137,10 +141,24 @@ def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[
             continue
         reason = ", ".join(item.signals) or "weak provenance"
         lines.append(f"- `{item.path}` [{item.priority}] {reason} (candidate `{item.candidate_id}`)")
-    queue_path(root).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    destination = queue_path(root)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=destination.parent, delete=False
+    ) as handle:
+        handle.write("\n".join(lines) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    os.replace(temporary, destination)
 
 
-def generate_candidates(
+def _queue_lock(root: Path, workspace: str) -> threading.Lock:
+    key = (root, workspace)
+    with _QUEUE_LOCKS_GUARD:
+        return _QUEUE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _generate_candidates(
     root: Path,
     *,
     workspace: str,
@@ -240,6 +258,26 @@ def generate_candidates(
     if write_queue:
         _write_queue(root, result, decisions)
     return result
+
+
+def generate_candidates(
+    root: Path,
+    *,
+    workspace: str,
+    max_candidates: int = MAX_CANDIDATES,
+    now: datetime | None = None,
+    write_queue: bool = True,
+) -> list[ReviewCandidate]:
+    """Generate candidates with one consistent snapshot per workspace."""
+    root = Path(root).resolve()
+    with _queue_lock(root, workspace):
+        return _generate_candidates(
+            root,
+            workspace=workspace,
+            max_candidates=max_candidates,
+            now=now,
+            write_queue=write_queue,
+        )
 
 
 def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *, actor: str = "user", defer_days: int = 7) -> dict[str, Any]:
