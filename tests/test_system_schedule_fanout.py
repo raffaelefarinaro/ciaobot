@@ -5,10 +5,9 @@ a real workspace: the resolver fell through it to the primary one, so exactly
 one vault was ever curated and every work contact was filed under
 `personal/People/`.
 
-A routine is fanned out only when its inputs *and* write targets are partitioned
-per workspace (curation, hygiene). Routines whose subject is shared — the global
-runtime directory, one skill catalog — stay single, because N runs would redo the
-same work and report one problem N times.
+Both shipped routines are partitioned per workspace: Workspace care owns that
+workspace's vault, while Skill reflection reads that workspace's trajectories
+and canonical user-owned skills.
 
 The set is derived on every read, not persisted: `list_entries` drops runtime
 rows with `scope == "system"`, so it cannot be extended by writing to
@@ -48,7 +47,7 @@ def _ids(store: ScheduleStore) -> list[str]:
 
 def test_base_id_survives_fan_out() -> None:
     assert system_base_id("system-memory-curation@work") == "system-memory-curation"
-    assert system_base_id("system-workspace-hygiene") == "system-workspace-hygiene"
+    assert system_base_id("system-skill-evolution@work") == "system-skill-evolution"
     assert system_base_id("") == ""
 
 
@@ -81,33 +80,12 @@ def test_curation_becomes_one_entry_per_workspace(tmp_path: Path) -> None:
     assert "system-memory-curation" not in ids
 
 
-def test_global_routines_stay_single(tmp_path: Path) -> None:
-    """Only routines whose subject is shared stay single.
-
-    `system-install-health` reports the audit sections whose subject is the
-    global runtime directory — job failures and pending upgrade actions — which
-    are identical in every workspace; `system-skill-evolution` reasons about one
-    skill catalog, which stays one until the re-rooting has run and the user has
-    triaged it. N runs of either would redo identical work, and for
-    install-health it would also report one problem as N.
-    """
+def test_skill_reflection_is_fanned_out_per_workspace(tmp_path: Path) -> None:
     ids = _ids(_store(tmp_path, "personal", "work"))
 
-    assert ids.count("system-install-health") == 1
-    assert ids.count("system-skill-evolution") == 1
-    assert not any(item.startswith("system-install-health@") for item in ids)
-    assert not any(item.startswith("system-skill-evolution@") for item in ids)
-
-
-def test_hygiene_is_fanned_out_per_workspace(tmp_path: Path) -> None:
-    """Its audit reads one workspace's MEMORY.md and proposal queue and reports
-    into that workspace's chat, so an unscoped run leaked another workspace's
-    findings into the wrong chat."""
-    ids = _ids(_store(tmp_path, "personal", "work"))
-
-    assert "system-workspace-hygiene@personal" in ids
-    assert "system-workspace-hygiene@work" in ids
-    assert "system-workspace-hygiene" not in ids
+    assert "system-skill-evolution@personal" in ids
+    assert "system-skill-evolution@work" in ids
+    assert "system-skill-evolution" not in ids
 
 
 def test_each_fanned_out_row_carries_its_own_workspace(tmp_path: Path) -> None:
@@ -226,18 +204,6 @@ def test_the_legacy_overlay_carries_the_last_run_forward(tmp_path: Path) -> None
     assert rows["system-memory-curation@work"].last_triggered_on == "2026-08-19"
 
 
-def test_a_single_routine_still_reads_its_own_key(tmp_path: Path) -> None:
-    """The fallback must not make an un-fanned routine read some other key."""
-    _write_state(tmp_path, {"system-install-health": {"enabled": False}})
-
-    rows = {
-        entry.schedule_id: entry
-        for entry in _store(tmp_path, "personal", "work").list_entries()
-    }
-
-    assert rows["system-install-health"].enabled is False
-
-
 def test_a_stale_workspace_in_the_overlay_no_longer_shadows_the_definition(
     tmp_path: Path,
 ) -> None:
@@ -252,7 +218,7 @@ def test_a_stale_workspace_in_the_overlay_no_longer_shadows_the_definition(
         tmp_path,
         {
             "system-memory-curation": {"enabled": True, "workspace": "default"},
-            "system-workspace-hygiene": {"enabled": True, "workspace": "default"},
+            "system-skill-evolution": {"enabled": True, "workspace": "default"},
         },
     )
 
@@ -356,24 +322,6 @@ def test_a_case_only_workspace_difference_is_not_a_move(tmp_path: Path) -> None:
     assert reloaded is not None
     assert reloaded.enabled is False
     assert reloaded.workspace == "Work"
-
-
-def test_a_single_routine_can_still_be_moved_between_workspaces(
-    tmp_path: Path,
-) -> None:
-    """The workspace is identity only for a fanned-out row. `system-install-health`
-    has one row for a shared subject, so pointing it at a workspace is a real
-    setting and must keep working."""
-    store = _store(tmp_path, "personal", "work")
-    entry = store.get("system-install-health")
-    assert entry is not None
-    entry.workspace = "work"
-
-    store.replace(entry)
-
-    reloaded = _store(tmp_path, "personal", "work").get("system-install-health")
-    assert reloaded is not None
-    assert reloaded.workspace == "work"
 
 
 # ---- consumers of the literal ids -----------------------------------------

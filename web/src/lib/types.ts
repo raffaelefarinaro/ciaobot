@@ -190,6 +190,12 @@ export interface ChatInfo {
   // because a schedule spawns a new chat each time).
   schedule_id?: string
   schedule_title?: string
+  helper?: {
+    kind: 'proposal'
+    intent: 'resolve' | 'review'
+    proposal_ids: string[]
+    archive_policy: 'when_resolved' | 'manual'
+  }
   // What the post-archive pipeline is doing, or did. Present only on archived
   // chats that ran it. Drives the greyed activity signal and the settled
   // "here is what was learned from this chat" line.

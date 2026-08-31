@@ -37,6 +37,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
+from ciao import proposal_tracking
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
@@ -2564,6 +2565,7 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
+            helper=body.get("helper"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -3113,6 +3115,32 @@ def _overlay_transcript_metadata(
             last = index
     if last is not None:
         targets.append(last)
+    # The two lists cover different spans, and which end they disagree at
+    # decides how to pair them:
+    #
+    #   fewer session rows than transcript turns — a resumed or handed-over
+    #     chat, whose JSONL starts at the resume point while the transcript
+    #     store holds every turn. The rows they share are the NEWEST ones, so
+    #     match the tails; the unmatched head gets no metadata.
+    #
+    #   more session rows than transcript turns — a turn is in flight. The
+    #     session already carries the live assistant text while the transcript
+    #     still ends at the last completed turn, because `record_turn` only
+    #     runs once a turn finishes. The surplus is at the NEWEST end, so match
+    #     the heads and leave the live reply without metadata. Matching tails
+    #     here would shift every usage record forward by one and hang the
+    #     previous turn's token count on the reply still being written.
+    #
+    # Zipping from the front unconditionally (the original) got the first case
+    # wrong from its very first row; right-aligning unconditionally gets the
+    # second wrong the same way.
+    pairs = min(len(targets), len(metadata))
+    if not pairs:
+        return
+    if len(targets) <= len(metadata):
+        targets, metadata = targets[-pairs:], metadata[-pairs:]
+    else:
+        targets, metadata = targets[:pairs], metadata[:pairs]
     for index, source in zip(targets, metadata):
         for key in ("usage", "quota", "effective_model"):
             if source.get(key):
@@ -3622,6 +3650,16 @@ async def _assemble_chat_messages(
                 entry["unattended"] = True
             user_idx += 1
         result.append(entry)
+    # Stitch the durable transcript's per-turn metadata (token usage with the
+    # context %, quota, effective model) onto the rendered rows — the session
+    # JSONL carries none of it, so without this the turn footer showed only
+    # the completion time and duration. The opencode branch has made the same
+    # overlay since the transcript store gained these fields.
+    current = pcm._transcripts.current_messages(
+        ChatContext.for_web(chat_id), provider
+    )
+    if current and result:
+        _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
     return [*handover_messages, *result]
 
@@ -7447,7 +7485,7 @@ async def cli_stats(request: Request) -> JSONResponse:
 _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 # The queue file lives at this relative path inside each workspace's vault.
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
-# Skill-proposal files live under this folder, one dated file per candidate.
+# Skill-reflection proposals live under this folder, one canonical file per skill.
 _SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 
@@ -7483,18 +7521,21 @@ def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
     return False
 
 
-def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
-    """A content-derived, stable id for one queued proposal.
-
-    The id hashes the bullet's content plus the workspace and file it lives in,
-    so dismissing a neighbouring row never renumbers or renames a survivor.
-    ``dup`` is the occurrence index among identical bullets inside one file,
-    used only to keep two textually identical rows addressable; it is stable
-    because it counts only same-file duplicates, which are unaffected by rows
-    in other files (or non-duplicate rows in this one) being removed.
-    """
-    digest = hashlib.sha256(f"{workspace}\x00{path}\x00{kind}\x00{text}\x00{source}".encode("utf-8")).hexdigest()[:16]
-    return f"{digest}{f':{dup}' if dup else ''}"
+# A content-derived, stable id for one queued proposal.
+#
+# The id hashes the bullet's content plus the workspace and file it lives in,
+# so dismissing a neighbouring row never renumbers or renames a survivor.
+# ``dup`` is the occurrence index among identical bullets inside one file, used
+# only to keep two textually identical rows addressable; it is stable because
+# it counts only same-file duplicates, which are unaffected by rows in other
+# files (or non-duplicate rows in this one) being removed.
+#
+# Imported rather than redefined: `proposal_tracking.pending_proposal_ids`
+# decides whether a resolution helper chat can be archived by comparing ids
+# against the ones this module hands out. Two copies that drift apart stop
+# matching silently — no error, just helper chats that never archive — so
+# there is exactly one implementation.
+_stable_proposal_id = proposal_tracking.stable_proposal_id
 
 
 def _rehome_signal(config) -> dict[str, dict[str, Any]]:
@@ -7686,16 +7727,16 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
         rel_path = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
-        seen_dup: dict[tuple[str, str, str], int] = {}
         if queue.is_file():
-            for line_index, raw in enumerate(queue.read_text(encoding="utf-8").splitlines()):
-                bullet = proposal_kinds.parse_bullet(raw)
-                if bullet is None:
-                    continue
-                key = (bullet.kind, bullet.text, bullet.source)
-                dup = seen_dup.get(key, 0)
-                seen_dup[key] = dup + 1
-                pid = _stable_proposal_id(workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup)
+            # The same walk `proposal_tracking.pending_proposal_ids` uses, so
+            # the ids the review tab hands out and the ids the archive check
+            # looks for can never drift apart.
+            for entry in proposal_tracking.walk_proposal_queue(
+                workspace, rel_path, queue.read_text(encoding="utf-8")
+            ):
+                line_index, raw, bullet, pid = (
+                    entry.line, entry.raw, entry.bullet, entry.proposal_id,
+                )
                 row: dict[str, Any] = {
                     "id": pid,
                     "kind": bullet.kind,

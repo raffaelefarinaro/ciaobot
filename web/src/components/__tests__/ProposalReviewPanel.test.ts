@@ -263,15 +263,24 @@ describe('ProposalReviewPanel', () => {
     const sent = String(send.mock.calls.at(-1)?.[1] ?? '')
     expect(sent).toContain(path)
     expect(sent).toContain('skills/')
+    expect(sent).toContain('do not delegate')
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-work/chats', {
+      title: 'Implement proposal-2026-08-20',
+      helper: {
+        kind: 'proposal',
+        intent: 'resolve',
+        proposal_ids: ['skill'],
+        archive_policy: 'when_resolved',
+      },
+    })
     // A proposal is a suggestion: implementing it must not silently resolve it.
     expect(act).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
   it('groups the same skill proposed on several dates', async () => {
-    // Curation re-proposes every run, so one skill arrives as N dated rows. They
-    // are one decision, and reading them as N is what made 45 rows look like 45
-    // things to think about.
+    // New reflections upsert one canonical file. Keep grouping old dated rows
+    // until every existing workspace has converged through another pass.
     apiGet.mockResolvedValue({
       rows: [
         row({ id: 's1', kind: 'skill', text: '2026-08-09-defuddle', path: 'p/Workspace/Skill-Proposals/2026-08-09-defuddle.md', line: -1 }),

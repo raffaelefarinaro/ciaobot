@@ -7,7 +7,7 @@ description: Vault curation, durable note updates, and memory proposal processin
 
 Use the configured vault root as the durable memory source. The `<ciao-context>` block names it as `vault=<path>` — write under **that** path and nowhere else. Do not infer the location from where existing notes happen to sit: a vault whose `People/` folder was filled by an older single-workspace curator will pull you toward the wrong workspace.
 
-Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on writes and curation. The nightly procedure itself lives in the `memory-curation` skill; this role carries the standing contracts the skill relies on.
+Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on sequential writes and curation. The nightly Workspace care procedure itself lives in the `memory-curation` skill; this role carries the standing contracts the skill relies on.
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.

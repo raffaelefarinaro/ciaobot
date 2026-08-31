@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, vault review, archiving, schedules, interval automations, routines, workspaces, projects, forks, subagents, skills, voice, models, providers, opencode, plan mode, permission modes, notifications, desktop app, updates, menu bar, files, document conversion, chat comments, pinned files, document previews, CSV tables and cell comments, HTML artifacts, backlinks, memory map, vault graph, note graph) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you review vault notes", "can you convert documents", "can you fork this chat", "can you ask another provider", "can you stop asking permission", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, vault review, archiving, adversarial review, schedules, interval automations, routines, workspaces, projects, forks, subagents, skills, MCP servers, slash commands, voice, models, providers, opencode, plan mode, permission modes, notifications, desktop app, updates, menu bar, files, document conversion, chat comments, pinned files, document previews, CSV tables and cell comments, HTML artifacts, backlinks, memory map, vault graph, note graph) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you review vault notes", "can you run an adversarial review", "can you convert documents", "can you fork this chat", "can you ask another provider", "can you stop asking permission", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -17,6 +17,20 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 ## The one-paragraph pitch
 
 Ciaobot is a local-first UI and UX layer for using Claude Code (and other backends) as a personal assistant and second brain. Chats, projects, files, schedules, memory, and archived knowledge live in one web app instead of being scattered across terminal sessions — and everything durable is plain markdown that works with any other tool even when Ciaobot is not running.
+
+## Connecting providers
+
+Ciaobot uses the provider CLI the user already has, rather than creating a
+second model account or storing a second provider credential. For Anthropic,
+the user installs and signs into [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview),
+then chooses Claude Code in Ciaobot; Ciaobot adds workspace/project context and
+handles archive-time insights and memory extraction around that session. For
+OpenAI access, OpenRouter, Ollama, or another cloud/local backend, the user
+installs [opencode](https://opencode.ai/docs/), configures and authenticates the
+provider there, then chooses opencode in Ciaobot. Its connected models appear
+in the Ciaobot picker. Point users to the live
+[`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
+for current commands; do not invent version-sensitive install or login syntax.
 
 ## Capability catalog
 
@@ -66,13 +80,15 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note (`[Note](./Note.md)`) — the incoming half of the link graph.
 - **Keyboard shortcuts** work in the browser as well as the desktop app, on whichever modifier is actually free: new chat, dictation, and archive are `Cmd+T` / `Cmd+D` / `Cmd+A` in the app, and `Option+N` / `Option+D` / `Option+A` in the PWA, where the browser has already claimed the Cmd versions for new-tab, bookmark, and select-all. Arrow keys roam the home screen's recent chats and Esc closes the open chat in both. Unmodified `1`–`9` switch to the workspace in that position in the sidebar (inert while you are typing in a field), and `Cmd+S` / `Option+S` shows and hides the sidebar. **Settings → Shortcuts** lists the set with the labels for how you are running it.
 
+The file workflow is designed around model collaboration: keep a Markdown document pinned beside the chat, edit it, annotate exact passages or CSV cells, and send the requested changes back with their locations. Markdown opens directly, CSV is an editable table, and `.pptx` is previewed as PDF. Supported document attachments are converted to Markdown with AnyDoc before injection so the model can read their contents efficiently.
+
 ### 5. Skills, subagents, and commands (extensibility)
 
 - **Stock skills** ship with the app and are synced into both `.claude/skills/` and `.agents/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
 - **Visual plans**: ask for a plan, design direction, architecture review, UI flow, or approval artifact and Ciaobot writes a local Markdown plan with an optional self-contained HTML companion, including diagrams drawn as inline SVG. Markdown is the canonical, commentable, editable, restorable plan; HTML is an optional companion that answers a specific review question. Only one file is pinned at a time. Plan mode cannot produce a plan file — the skill explains that and offers an in-chat proposal instead. Routine working docs (notes, analyses) stay with the `workspace-authoring` skill.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
 - **Adding a skill**: place a folder `skills/<name>/SKILL.md` (or validated zip containing one top-level folder with `SKILL.md`) then run `ciao sync-skills`. Workspace git sync carries it to other operators. No GitHub fetch.
-- **Skill evolution**: a background routine analyzes usage and proposes skill improvements — as reviewable proposals, never silent edits.
+- **Skill reflection**: a weekly per-workspace routine analyzes repeated failures or corrections involving user-owned skills and keeps one plain-language improvement proposal per skill — never a silent edit.
 
 ### 6. Models and providers
 
@@ -81,6 +97,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - Per-provider default model and thinking level for new chats (**Settings → Models**) — no cross-provider tier mapping; each provider resolves `opus`/`sonnet`/`haiku`/`fable`-style aliases against its own catalog. Per-chat override in the picker, with Automatic resolving to the chat's own model.
 - Per-provider default **permission mode** for new chats (**Settings → Providers**): *manual* asks before every action, *auto* (the default) runs safe reads and edits silently and asks before destructive ones, *bypass* allows everything. Any chat can still be switched individually, and plan mode stays a per-chat choice rather than a default.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: the `/critique` command gives an inline multi-model second opinion, and a handover moves the whole chat to another provider.
+- **Adversarial review**: the built-in critique panel can send the same file, question, or idea to multiple configured agents and models, then synthesize their independent feedback into a comparative verdict. Select the participating models from the available provider/model configuration.
 - **Voice** is on-device and free — one engine each, with no API key, no per-minute billing, and no engine picker: dictation uses Apple's dictation models and speech uses `AVSpeechSynthesizer`, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. It needs a **macOS 26+ host with the desktop app installed**; on Linux, Windows, older macOS, or a package-only install there is no voice, and Settings says so instead of failing when you press record. The constraint is on the *host* only — a phone or iPad talking to a Mac host gets voice, because the PWA uploads the audio to the host to transcribe.
 - **Session insights** can use Apple Intelligence as an explicit on-device model, offered whenever the machine supports it (macOS 26+, the app bundle, Apple Intelligence on, model downloaded) — no separate beta opt-in.
 
@@ -94,7 +111,9 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### App and system surface
 
 - **Settings page**: Home (deploy, notifications, appearance, **host & client** multi-device role, workspace health), Providers, Workspaces (including Google Workspace), Models, Context (injected prompt layers), Assets (skill/agent/command inventory plus editable **project MCP servers** and secrets), and Automations.
+- **Workspace extensions in the UI**: the Assets settings surface makes it easy to add and manage skills, MCP servers, slash commands, and subagents for the selected workspace; those additions stay scoped to that workspace and are synced into its agent configuration.
 - **macOS extras**: `Ciaobot.app` provides the main window plus a menu bar with engine status, notification and Start at Login toggles, and a single **Update…** action that updates the engine and the app together and restarts. The Python engine remains a separate LaunchAgent.
+- **Host/client multi-device mode**: one machine can host the engine, workspace, vault, and provider sessions while other devices connect as clients through the PWA. The host remains the source of truth; clients can use the same workspace UI remotely over a private network such as Tailscale.
 - **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the `chat_create` and `schedule_*` MCP tools already carry the working recipes in their own docstrings.
 
 ### Privacy and trust posture

@@ -164,6 +164,13 @@ describe('PinnedFilePanel', () => {
     wrapper.unmount()
   })
 
+  it('offers memory-map navigation for markdown files', async () => {
+    const wrapper = await mountPanel()
+
+    expect(wrapper.get('button[aria-label="Open in memory map"]')).toBeTruthy()
+    wrapper.unmount()
+  })
+
   it('edits the newly pinned file after the pinned path changes', async () => {
     // Regression: switching pinned files used to leave the panel showing the
     // previous file's content when entering edit mode.

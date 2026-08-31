@@ -170,7 +170,7 @@ def test_propose_skill_edit_returns_text_when_model_proposes(
 # ── write_proposal ──────────────────────────────────────────────────────
 
 
-def test_write_proposal_creates_dated_file(tmp_path: Path) -> None:
+def test_write_proposal_upserts_one_readable_file_per_skill(tmp_path: Path) -> None:
     skill_path = tmp_path / "skills" / "web-research" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("# Skill\n")
@@ -180,16 +180,39 @@ def test_write_proposal_creates_dated_file(tmp_path: Path) -> None:
         skill_name="web-research",
         skill_path=skill_path,
         trajectories=[_t("web-research", corrections=1)],
-        proposal_text="add a defuddle fallback",
+        proposal_text=(
+            "## What I noticed\nRepeated fetch failures.\n\n"
+            "## Suggested improvement\nAdd a defuddle fallback.\n\n"
+            "## Why this should help\nIt handles blocked pages.\n\n"
+            "## Proposed edit\n```diff\n+fallback\n```\nconfidence: 0.8"
+        ),
         output_dir=output_dir,
         now=ts,
     )
-    assert path.name == "2026-05-23-web-research.md"
+    assert path.name == "web-research.md"
     text = path.read_text()
     assert "type: skill-proposal" in text
     assert "skill: web-research" in text
-    assert "add a defuddle fallback" in text
+    assert "## What I noticed" in text
+    assert "## Suggested improvement" in text
+    assert "## Technical details" in text
+    assert text.index("## Suggested improvement") < text.index("## Technical details")
     assert "trajectories: 1" in text
+
+    legacy = output_dir / "2026-05-20-web-research.md"
+    legacy.write_text("legacy", encoding="utf-8")
+    updated = se.write_proposal(
+        skill_name="web-research",
+        skill_path=skill_path,
+        trajectories=[_t("web-research", corrections=2)],
+        proposal_text="## What I noticed\nUpdated evidence.",
+        output_dir=output_dir,
+        now=datetime(2026, 5, 24, tzinfo=UTC),
+    )
+    assert updated == path
+    assert "Updated evidence" in path.read_text(encoding="utf-8")
+    assert not legacy.exists()
+    assert [item.name for item in output_dir.glob("*.md")] == ["web-research.md"]
 
 
 # ── run_evolution_pass end-to-end ───────────────────────────────────────
@@ -487,25 +510,21 @@ def test_run_evolution_pass_prunes_old_trajectories(
 def test_resolve_skills_roots_uses_ciao_workspace_when_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """CIAO_WORKSPACE should put the ciao workspace's skill directories
-    first, ahead of the ciaobot in-tree fallbacks."""
+    """Only the canonical user-owned skill directory is eligible."""
     ciao_root = tmp_path / "ciao"
     (ciao_root / "skills").mkdir(parents=True)
     (ciao_root / ".claude" / "skills").mkdir(parents=True)
     monkeypatch.setenv("CIAO_WORKSPACE", str(ciao_root))
     roots = se._resolve_skills_roots()
-    assert roots[0] == ciao_root / "skills"
-    assert roots[1] == ciao_root / ".claude" / "skills"
-    # ciaobot fallbacks still included at the tail
-    assert roots[-2:] == se._CIAOBOT_SKILLS_ROOTS
+    assert roots == (ciao_root / "skills",)
 
 
-def test_resolve_skills_roots_falls_back_to_ciaobot_when_unset(
+def test_resolve_skills_roots_has_no_packaged_fallback_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
     roots = se._resolve_skills_roots()
-    assert roots == se._CIAOBOT_SKILLS_ROOTS
+    assert roots == ()
 
 
 def test_resolve_skills_roots_ignores_blank_env(
@@ -513,7 +532,7 @@ def test_resolve_skills_roots_ignores_blank_env(
 ) -> None:
     monkeypatch.setenv("CIAO_WORKSPACE", "   ")
     roots = se._resolve_skills_roots()
-    assert roots == se._CIAOBOT_SKILLS_ROOTS
+    assert roots == ()
 
 
 # ── non-skill classifier (commands / subagents / external) ─────────────

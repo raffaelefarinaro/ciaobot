@@ -32,6 +32,10 @@ def _config(roots: dict[str, str] | None = None, *, primary: str = "personal"):
         workspace_names=lambda: tuple(roots) or (primary,),
         primary_workspace=lambda: primary,
         agent_root=lambda name: roots.get(name, "/tmp"),
+        # Model resolution for the LLM title fallback (resolve_insights_model).
+        insights_model_override="",
+        insights_model="sonnet",
+        default_model_for_workspace=lambda workspace, provider="claude": "sonnet",
     )
 
 
@@ -200,9 +204,14 @@ async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "Native Title"}, "messages": []}
 
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
     monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    # No session_id throughout the poll window -> native never reachable, so
-    # the deterministic fallback is used instead of leaving "New Chat".
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    # No session_id throughout the poll window -> native never reachable, and
+    # the one-shot titler fails, so the deterministic fallback is used instead
+    # of leaving "New Chat".
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
     assert manager._chats["chat-1"].title == "hello"
 
@@ -216,9 +225,14 @@ async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> N
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": ""}, "messages": []}
 
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
     monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    # Native title never arrives within the poll window -> fallback from the
-    # prompt so the sidebar doesn't stay stuck on "New Chat".
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    # Native title never arrives within the poll window and the one-shot
+    # titler fails -> fallback from the prompt so the sidebar doesn't stay
+    # stuck on "New Chat".
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
     assert manager._chats["chat-1"].title == "hello"
 
@@ -530,3 +544,189 @@ async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch
         == "Opencode Work Title"
     )
     assert seen == ["/roots/work"]
+
+
+# ── LLM title fallback (tier 2) ──────────────────────────────────────────
+#
+# Claude Code ≥ 2.1.246 skips its own ai-title generation when the first
+# prompt opens with the injected [CIAO_CONTEXT_BEGIN] capsule — i.e. every
+# Ciaobot chat — so the native-title poll exhausts and the sidebar used to
+# sit on the 6-word prompt snippet ("Check Zendesk ticket https://scand…").
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+
+    calls: list[dict] = []
+
+    async def fake_oneshot(prompt, *, system_prompt="", model="", **_kwargs):
+        calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model})
+        return "Zendesk Ticket Thread Follow-Up"
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025")
+    assert title == "Zendesk Ticket Thread Follow-Up"
+    assert manager._chats["chat-1"].title == "Zendesk Ticket Thread Follow-Up"
+    assert len(calls) == 1
+    assert "Check Zendesk ticket 152025" in calls[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
+    """The post-reply invocation includes the assistant's framing so the
+    title can name the topic rather than echo the question."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+
+    prompts: list[str] = []
+
+    async def fake_oneshot(prompt, **_kwargs):
+        prompts.append(prompt)
+        return "Automation Page Job Log"
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await manager.auto_title_if_default(
+        "chat-1", "why no recent sessions?", "The Automation page lists every job run."
+    )
+    assert title == "Automation Page Job Log"
+    assert "<assistant>The Automation page lists every job run.</assistant>" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_failure_still_applies_deterministic_fallback(
+    monkeypatch,
+) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("usage limit reached")
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
+    """A degrading model that echoes the injected capsule (or returns nothing
+    usable) must not contaminate the sidebar; the deterministic fallback wins."""
+    from ciao.web import project_chats as pc
+
+    leaked = (
+        '[CIAO_CONTEXT_BEGIN] [Chat ID: "chat-1"] <ciao-context> workspace=work '
+        "vault=work/memory-vault </ciao-context>"
+    )
+
+    async def leaking_oneshot(*_args, **_kwargs):
+        return leaked
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_not_called_when_native_title_lands(monkeypatch) -> None:
+    """Tier 1 stays free: when the provider publishes a title the one-shot
+    call must never run."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    oneshot_calls: list[int] = []
+
+    async def unexpected_oneshot(*_args, **_kwargs):
+        oneshot_calls.append(1)
+        return "Should Not Be Used"
+
+    async def fake_read_thread(_workspace, _sid):
+        return {"info": {"title": "Native Title"}, "messages": []}
+
+    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unexpected_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
+    assert oneshot_calls == []
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> None:
+    """A rename that lands while the model is running must win."""
+    from ciao.web import project_chats as pc
+
+    chat = _chat(provider="claude")
+    manager = _manager(chats={"chat-1": chat})
+
+    async def slow_oneshot(*_args, **_kwargs):
+        chat.title = "User Picked This"
+        return "Model's Title"
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
+
+
+def test_clean_llm_title_strips_noise() -> None:
+    from ciao.web.project_chats import _clean_llm_title
+
+    assert _clean_llm_title("  Zendesk Ticket Thread  ") == "Zendesk Ticket Thread"
+    assert _clean_llm_title('"Quoted Title"\n') == "Quoted Title"
+    assert _clean_llm_title("`Backticked`") == "Backticked"
+    assert _clean_llm_title("Trailing period.") == "Trailing period"
+    # First non-empty line wins over an explanation paragraph.
+    assert _clean_llm_title("Real Title\n\nHere is why I picked it...") == "Real Title"
+    long = "A" * 80
+    assert _clean_llm_title(long) == "A" * 57 + "..."
+    assert _clean_llm_title("") is None
+    assert _clean_llm_title(None) is None
+    assert _clean_llm_title("[CIAO_CONTEXT_BEGIN] leaked") is None
+    assert _clean_llm_title("New session - 2026-08-31") is None
+
+
+def test_fallback_title_strips_leading_url() -> None:
+    """The reported failure: 'Check Zendesk ticket https://scandit.zendesk…'."""
+    from ciao.web.project_chats import _fallback_title
+
+    assert (
+        _fallback_title(
+            "Check Zendesk ticket https://scandit.zendesk.com/agent/tickets/152025 "
+            "and check the other one too"
+        )
+        == "Check Zendesk ticket"
+    )
+    # A bare-URL prompt still yields something (the URL itself, capped).
+    bare = _fallback_title("https://example.com/very/long/path/segments")
+    assert bare is not None and bare.startswith("https://")
+    assert _fallback_title("plain words only here") == "plain words only here"

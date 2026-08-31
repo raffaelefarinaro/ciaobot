@@ -1,6 +1,6 @@
-"""Skill evolution: mine trajectories and propose skill edits.
+"""Skill reflection: mine trajectories and propose skill edits.
 
-Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
+Runs weekly through the packaged per-workspace system schedule. The pass:
 
 1. Loads trajectories from the last N days via
    :mod:`ciao.trajectory_builder`.
@@ -14,8 +14,8 @@ Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
    helper is in :mod:`ciao.dag`; per-node timing lands in
    ``.runtime/job_runs.jsonl`` with ``provider='dag'`` so the Automation
    page can drill in.
-4. Writes one Markdown proposal per skill to the active workspace's
-   ``Workspace/Skill-Proposals/YYYY-MM-DD-<skill>.md`` queue.
+4. Upserts one Markdown proposal per skill in the active workspace's
+   ``Workspace/Skill-Proposals/<skill>.md`` queue.
 
 Guardrails:
 
@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -61,58 +62,22 @@ logger = logging.getLogger(__name__)
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-# ciaobot's own skill roots (used as a fallback when the ciao workspace is
-# missing or unset, and for in-tree tests). ``skills/`` is the canonical
-# edit target for the upgrade flow, so we prefer it.
-_CIAOBOT_SKILLS_ROOTS: tuple[Path, ...] = (
-    _REPO_ROOT / "skills",
-    _REPO_ROOT / ".claude" / "skills",
-)
 
 
 def _resolve_skills_roots(workspace: str = "") -> tuple[Path, ...]:
-    """Resolve skill search roots for one workspace.
-
-    Since the 2026-06-30 repo split, the canonical skill catalog lives in
-    the *ciao* workspace (``CIAO_WORKSPACE``, e.g. ``~/repos/ciao``) under
-    ``<workspace>/skills`` and ``<workspace>/.claude/skills``. The engine
-    here is the ciaobot repo, so its own ``skills/`` and ``.claude/skills``
-    are normally empty; they are kept as a fallback for in-tree tests and
-    for installs that ship skills alongside the engine.
-
-    The ciao workspace roots come first when set, so user edits in
-    ``CIAO_WORKSPACE/skills/`` win over any stale in-tree copy.
-
-    ``workspace`` names a registered workspace, whose catalog is resolved
-    through ``CiaoConfig.agent_root``. That returns the install root until this
-    install has re-rooted, so a named call is identical to an unnamed one today
-    and reads the root's own ``skills/`` afterwards. Falling back to the install
-    root rather than raising matters: a name that is not registered, or a broken
-    registry, must still search somewhere rather than silently finding no skill
-    and reporting every skill as missing.
-
-    Called per invocation, never cached at import. The previous module-level
-    constant froze the catalog location at the first import in the process, so a
-    per-workspace pass would have searched whichever root happened to be
-    resolved first — and after the re-rooting that is a different directory per
-    workspace, which is the whole point.
-    """
-    roots: list[Path] = []
+    """Resolve only the workspace's canonical user-owned ``skills/`` root."""
     if workspace:
         try:
             from ciao.config import CiaoConfig  # noqa: PLC0415
 
             root = Path(CiaoConfig.from_env().agent_root(workspace))
-            roots.extend([root / "skills", root / ".claude" / "skills"])
+            return (root / "skills",)
         except Exception:  # noqa: BLE001 — fall back to the env-derived root
             logger.debug("could not resolve the agent root for %r", workspace)
     env_root = os.environ.get("CIAO_WORKSPACE", "").strip()
     if env_root:
-        ws = Path(env_root).expanduser()
-        for candidate in (ws / "skills", ws / ".claude" / "skills"):
-            if candidate not in roots:
-                roots.append(candidate)
-    return (*roots, *_CIAOBOT_SKILLS_ROOTS)
+        return (Path(env_root).expanduser() / "skills",)
+    return ()
 
 
 def _resolve_proposals_dir(workspace: str | None = None) -> Path:
@@ -134,28 +99,6 @@ def _resolve_proposals_dir(workspace: str | None = None) -> Path:
         / "Workspace"
         / "Skill-Proposals"
     )
-
-
-def evolution_workspaces() -> list[str]:
-    """Workspaces the evolution pass should run for, one queue each.
-
-    Still ONE schedule rather than N. The catalog becomes per-root only once the
-    re-rooting has run AND the user has triaged
-    ``Workspace/Skill-Triage.md``; until then every root's
-    :func:`_resolve_skills_roots` resolves to the same directory, so fanning the
-    routine out would mean N identical passes over one catalog writing duplicate
-    proposals into N queues. Evidence and queue are already per-workspace, which
-    is the part that partitions today.
-    """
-    from ciao.config import CiaoConfig
-
-    try:
-        config = CiaoConfig.from_env()
-        names = [name for name in config.workspace_names() if name]
-    except Exception:  # noqa: BLE001 — a broken registry must not skip the pass
-        logger.exception("Failed to resolve workspaces for skill evolution")
-        return []
-    return names
 
 
 # Resolved per call, not at import: an import-time constant that depended on
@@ -232,8 +175,12 @@ Rules when you DO have a causal link:
 - Output one of:
   * a unified Markdown diff (preferred), OR
   * a replacement block tagged with the heading it replaces.
-- End with a single line: ``confidence: 0.0-1.0`` reflecting how sure
-  you are the edit would help.
+- Make the output understandable without reading trajectory JSON. Use exactly
+  these Markdown headings in this order: ``## What I noticed``,
+  ``## Suggested improvement``, ``## Why this should help``, and
+  ``## Proposed edit``. Put the diff or replacement block under Proposed edit.
+- End with a single line: ``confidence: 0.0-1.0`` reflecting how sure you are
+  the edit would help.
 
 If you cannot establish a causal link, end with the single line:
 ``No clear improvement found.``
@@ -292,6 +239,10 @@ Rules when you DO have a causal link:
 - Output one of:
   * a unified Markdown diff (preferred), OR
   * a replacement block tagged with the heading it replaces.
+- Make the output understandable without reading trajectory JSON. Use exactly
+  these Markdown headings in this order: ``## What I noticed``,
+  ``## Suggested improvement``, ``## Why this should help``, and
+  ``## Proposed edit``. Put the diff or replacement block under Proposed edit.
 - End with two lines:
   ``projected_bytes: <integer>`` — your estimate of the skill size in
   bytes after the proposed edits are applied.
@@ -601,7 +552,7 @@ def write_proposal(
     """Render the proposal Markdown and write it to ``output_dir``."""
     ts = now or datetime.now(UTC)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{ts.strftime('%Y-%m-%d')}-{skill_name}.md"
+    path = output_dir / f"{skill_name}.md"
 
     rows = "\n".join(
         f"- {(t.get('session_id') or '')[:8]} "
@@ -628,20 +579,26 @@ def write_proposal(
         f"trajectories: {len(trajectories)}\n"
         f"{semantic_block}"
         f"---\n\n"
-        f"# Skill proposal: {skill_name}\n\n"
-        f"- **Skill path:** `{skill_path}`\n"
+        f"# Skill reflection: {skill_name}\n\n"
+        f"This is a reviewable suggestion based on repeated recent use. Nothing "
+        f"has been changed automatically.\n\n"
+        f"{proposal_text}\n\n"
+        f"## Technical details\n\n"
+        f"- **Skill:** `{skill_path}`\n"
         f"- **Generated:** {ts.isoformat().replace('+00:00', 'Z')}\n"
-        f"- **Trajectories analyzed:** {len(trajectories)}\n"
+        f"- **Sessions analyzed:** {len(trajectories)}\n"
     )
     if semantic_verdict:
         body += f"- **Semantic check:** {semantic_verdict} — {semantic_reason}\n"
     body += (
-        f"\n## Source trajectories\n\n"
+        f"\n### Source sessions\n\n"
         f"{rows}\n\n"
-        f"## Proposal\n\n"
-        f"{proposal_text}\n"
     )
     path.write_text(body, encoding="utf-8")
+    dated = re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(skill_name)}\.md$")
+    for legacy in output_dir.glob("*.md"):
+        if legacy != path and dated.fullmatch(legacy.name):
+            legacy.unlink(missing_ok=True)
     logger.info("Wrote skill proposal %s", path)
     return path
 
@@ -898,7 +855,7 @@ async def run_evolution_pass(
                 written.append(path)
     else:
         logger.info(
-            "Skill evolution: no underperforming skills in last %d day(s)",
+            "Skill reflection: no underperforming skills in last %d day(s)",
             since_days,
         )
 
@@ -942,6 +899,11 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--skills-root", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--workspace",
+        default="",
+        help="logical workspace whose trajectories, skills, and proposal queue are used",
+    )
     parser.add_argument(
         "--model",
         default=None,
@@ -988,12 +950,13 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         since = datetime.now(UTC) - timedelta(days=args.since_days)
-        trajectories = _load_trajectories(since=since)
+        workspace = args.workspace or os.environ.get("CIAO_ACTIVE_WORKSPACE", "") or None
+        trajectories = _load_trajectories(since=since, workspace=workspace)
         flagged = find_underperforming_skills(
             trajectories, min_sessions=args.min_sessions
         )
         search_roots = (
-            (args.skills_root,) if args.skills_root else _resolve_skills_roots()
+            (args.skills_root,) if args.skills_root else _resolve_skills_roots(workspace or "")
         )
         for name, recs in sorted(flagged.items()):
             sids = ",".join((r.get("session_id") or "")[:8] for r in recs)
@@ -1038,7 +1001,7 @@ def _main(argv: list[str] | None = None) -> int:
         or (Path(__file__).resolve().parents[1] / ".runtime")
     )
     with job_runs.track_sync(
-        "skill_evolution", "Skill evolution", model=args.model
+        "skill_evolution", "Skill reflection", model=args.model
     ) as run:
         from ciao import native_sidecar
         from ciao.config import CiaoConfig
@@ -1050,33 +1013,26 @@ def _main(argv: list[str] | None = None) -> int:
         )
         if note:
             run.extra["fallback"] = note
-            logger.info("Skill evolution %s", note)
-        # One pass per workspace: the skill catalog is global, so this is not
-        # N schedules, but each workspace's evidence must land in its own queue.
-        # An explicit --output-dir overrides the routing and pools everything,
-        # which is what a targeted manual run wants.
-        scopes: list[str | None] = [None]
-        if args.output_dir is None:
-            scopes = list(evolution_workspaces()) or [None]
-        paths: list[Path] = []
-        for scope in scopes:
-            paths.extend(
-                asyncio.run(
-                    run_evolution_pass(
-                        since_days=args.since_days,
-                        skills_root=args.skills_root,
-                        output_dir=args.output_dir,
-                        model=args.model,
-                        min_sessions=args.min_sessions,
-                        enable_test_gate=args.test_gate,
-                        enable_semantic_check=args.semantic_check,
-                        retention_months=args.retention_months or None,
-                        workspace=scope,
-                    )
-                )
+            logger.info("Skill reflection %s", note)
+        workspace = args.workspace or os.environ.get("CIAO_ACTIVE_WORKSPACE", "")
+        if workspace and cfg.workspace(workspace) is None:
+            parser.error(f"unknown workspace: {workspace}")
+        workspace = workspace or cfg.primary_workspace()
+        paths = asyncio.run(
+            run_evolution_pass(
+                since_days=args.since_days,
+                skills_root=args.skills_root,
+                output_dir=args.output_dir,
+                model=args.model,
+                min_sessions=args.min_sessions,
+                enable_test_gate=args.test_gate,
+                enable_semantic_check=args.semantic_check,
+                retention_months=args.retention_months or None,
+                workspace=workspace,
             )
+        )
         run.extra["proposals"] = len(paths)
-        run.extra["workspaces"] = [scope for scope in scopes if scope]
+        run.extra["workspaces"] = [workspace]
         if not paths:
             run.skip("no proposals written")
     print(f"Wrote {len(paths)} proposal(s)")

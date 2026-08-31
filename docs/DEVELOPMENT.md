@@ -312,7 +312,7 @@ The status and process exit code are a stable contract:
 | `needs_attention` | 1 | The scan completed reliably and found actionable items. |
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
-The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` before `ciao os-audit --json`. A failed index rebuild blocks link and index repairs and prevents a healthy/no-op claim. The prompt treats audit exit 1 as findings and continues, but treats exit 2 as an unreliable scan and reports the errors without claiming success.
+The daily `system-memory-curation` schedule is presented as **Workspace care**. Its stock `memory-curation` skill runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs.
 
 ### Bounded-memory rot audit
 

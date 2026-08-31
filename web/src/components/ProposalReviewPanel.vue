@@ -23,6 +23,26 @@ watch(
 )
 const chatBusy = ref(false)
 
+type ProposalHelper = NonNullable<import('../lib/types').ChatInfo['helper']>
+
+function resolutionHelper(...proposalIds: string[]): ProposalHelper {
+  return {
+    kind: 'proposal',
+    intent: 'resolve',
+    proposal_ids: proposalIds,
+    archive_policy: 'when_resolved',
+  }
+}
+
+function reviewHelper(...proposalIds: string[]): ProposalHelper {
+  return {
+    kind: 'proposal',
+    intent: 'review',
+    proposal_ids: proposalIds,
+    archive_policy: 'manual',
+  }
+}
+
 const confirmLeakId = ref('')
 const olderThanDays = ref(30)
 
@@ -143,12 +163,9 @@ const selected = computed({
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
-/** A skill proposal's name without its date prefix.
- *
- * Curation re-proposes the same skill on every run, so the queue holds
- * `2026-08-09-defuddle`, `2026-08-12-defuddle`, `2026-08-16-defuddle` as three
- * separate rows. They are one decision, and reading them as three is what made
- * 45 skill rows look like 45 things to think about.
+/** A skill proposal's name without its legacy date prefix. New Skill reflection
+ * runs upsert one canonical file; grouping keeps older queues understandable
+ * until each skill is reflected again.
  */
 function skillBase(row: ProposalRow): string {
   return row.text.replace(/^\d{4}-\d{2}-\d{2}-/, '') || row.text
@@ -395,7 +412,7 @@ async function mergePeopleViaChat(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`, resolutionHelper(row.id))
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
@@ -409,7 +426,7 @@ async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`, resolutionHelper(row.id))
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
@@ -423,7 +440,7 @@ async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`, resolutionHelper(row.id))
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
@@ -437,7 +454,7 @@ async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`, resolutionHelper(row.id))
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
@@ -451,7 +468,7 @@ function peopleMergePrompt(row: ProposalRow): string {
   const target = row.target || '?'
   const where = `queued in the ${row.workspace} workspace`
   return (
-    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it.\n\n` +
+    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it. Work in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
     `After the note is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` so it disappears from Review (the flag records the promotion; do not delete the bullet from the file directly — that skips the outcome log). ` +
@@ -463,7 +480,7 @@ function projectMergePrompt(row: ProposalRow, errorMsg: string): string {
   const target = row.target || 'the project doc'
   const where = `queued in the ${row.workspace} workspace`
   return (
-    `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
+    `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`${target}\` (vault-relative, in the ${row.workspace} workspace), merge this fact into the appropriate section without duplicating existing content, and write it back. Keep frontmatter and structure intact.\n\n` +
     `After the doc is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\`. If the fact is already covered, run the same command without \`--promoted\`. Do not delete the bullet from the file directly — that skips the outcome log. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
@@ -474,7 +491,7 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
   const region = row.region || row.kind
   const where = `queued in the ${row.workspace} workspace`
   return (
-    `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\n` +
+    `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
     `After the region is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
@@ -484,7 +501,7 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
 function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
   const where = `queued in the ${row.workspace} workspace`
   return (
-    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\n` +
+    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
     `After the file is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present, just dismiss. Leave other proposals untouched.`
@@ -529,7 +546,7 @@ async function openWorkspaceChat(workspace: string, title: string) {
   return projectStore.createChat(project.project_id, title)
 }
 
-async function openWorkspaceChatInBackground(workspace: string, title: string) {
+async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
   const target = workspace || projectStore.activeWorkspace
   let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
   if (!project) {
@@ -547,7 +564,7 @@ async function openWorkspaceChatInBackground(workspace: string, title: string) {
   if (!project) return null
   try {
     const { api } = await import('../lib/api')
-    const chat = await api.post<any>(`/api/projects/${project.project_id}/chats`, { title })
+    const chat = await api.post<any>(`/api/projects/${project.project_id}/chats`, { title, helper })
     if (!projectStore.chats.some((c) => c.chat_id === chat.chat_id)) {
       projectStore.chats.push(chat)
     }
@@ -590,7 +607,7 @@ async function implementSkill(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Implement ${row.text}`)
+    const chat = await openWorkspaceChatInBackground(row.workspace, `Implement ${row.text}`, resolutionHelper(row.id))
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
     projectStore.sendMessage(chat.chat_id, implementPrompt(row))
@@ -603,7 +620,7 @@ async function implementSkill(row: ProposalRow) {
 function implementPrompt(row: ProposalRow): string {
   return (
     `Implement the skill proposed in \`${row.path}\` (queued in the ${row.workspace} ` +
-    'workspace).\n\n' +
+    'workspace). Work in this chat only; do not delegate this helper task.\n\n' +
     'Read the proposal first and tell me what it wants before writing anything. ' +
     'If it is worth building, create it under this workspace\'s `skills/` directory ' +
     'as a `SKILL.md` with a name and description, then run `ciao sync-skills` for ' +
@@ -624,7 +641,7 @@ async function discuss(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review')
+    const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review', reviewHelper(row.id))
     if (!chat) return
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
     pushBackgroundToast(chat.chat_id, 'Discussion in background', 'Proposal review — click to open the chat')
@@ -691,7 +708,7 @@ async function batchDiscuss() {
   if (!rows.length || chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review')
+    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review', reviewHelper(...rows.map(row => row.id)))
     if (!chat) return
     const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
     projectStore.sendMessage(
@@ -798,8 +815,8 @@ onMounted(() => {
       </header>
 
       <template v-for="group in groups" :key="group.key">
-        <!-- Curation re-proposes the same skill every run, so one skill arrives
-             as N dated rows. They are one decision. -->
+        <!-- Legacy dated proposals remain one decision until the next reflection
+             upserts their canonical file. -->
         <header v-if="group.label" class="pr-group-label">
           <span class="pr-group-label-name">{{ group.label }}</span>
           <span class="pr-group-label-count">{{ group.rows.length }}</span>

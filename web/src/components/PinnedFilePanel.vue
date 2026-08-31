@@ -52,7 +52,16 @@
           aria-label="Open in default app"
           :disabled="loading || !!error || openExternalState === 'loading'"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+         </button>
+        <button
+          v-if="memoryPath"
+          class="btn-icon"
+          @click="void openInMemoryMap()"
+          title="Open in memory map"
+          aria-label="Open in memory map"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
         </button>
       </template>
     </PaneHeader>
@@ -304,10 +313,13 @@ import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
+import { useMemoryMapStore } from '../stores/memoryMap'
+import { router } from '../router'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
@@ -316,6 +328,25 @@ defineEmits<{ (e: 'close'): void }>()
 
 const projectsStore = useProjectStore()
 const fileViewer = useFileViewerStore()
+const memoryMapStore = useMemoryMapStore()
+const memoryPath = computed(() => /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
+
+async function openInMemoryMap(): Promise<void> {
+  const target = memoryPath.value
+  if (!target) return
+  // Navigating to /memory makes ChatLayout unmount this panel, which throws
+  // away `editBuffer` and any comment draft with it. Ask first, the same way
+  // FileViewerModal's version awaits its guarded `close()`.
+  if (isBusyAuthoring.value && !await askConfirm(
+    'You have unsaved changes in this file. Are you sure you want to leave?',
+    { title: 'Discard unsaved changes?', confirmLabel: 'Discard and open map', destructive: true },
+  )) return
+  // Recorded only once the user has accepted: the focus request outlives this
+  // panel, so requesting it before the prompt would leave the map jumping to
+  // this note the next time /memory opens, after a navigation that was cancelled.
+  memoryMapStore.requestFocusOnOpen(target)
+  await router.push('/memory')
+}
 
 // ── Loading & rendering ──────────────────────────────────────────────
 const loading = ref(false)

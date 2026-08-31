@@ -237,6 +237,7 @@ class TranscriptStore:
         provider: str = "claude",
         tool_events: list[dict[str, Any]] | None = None,
         is_error: bool = False,
+        is_partial: bool = False,
     ) -> None:
         transcript = self._load_current(ctx, provider)
         if not transcript:
@@ -269,6 +270,9 @@ class TranscriptStore:
                 "usage": usage,
                 "quota": quota,
                 "tool_events": list(tool_events or []),
+                # A force-stopped turn is durable but incomplete; renderers
+                # already treat this flag as "the reply was cut short".
+                **({"is_partial": True} if is_partial else {}),
             }
         )
         self._save_current(ctx, transcript, provider)

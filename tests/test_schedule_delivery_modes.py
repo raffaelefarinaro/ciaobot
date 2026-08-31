@@ -139,6 +139,41 @@ def test_auto_policy_does_not_archive_while_subagents_pending() -> None:
     )
 
 
+# ── Interim subagent text (the 2026-08-30 daily-log failure) ─────────────
+
+
+def test_interim_subagent_text_detected() -> None:
+    """A run that ended on "Waiting on X" never synthesized its agents."""
+    f = ProjectChatManager._is_interim_subagent_text
+    assert f("Waiting on the Drive subagent, the last one.") is True
+    assert f("Phase A complete (all empty). Waiting on the Drive, Tasks, "
+             "and chat-transcript subagents.") is True
+    assert f("Nothing to do — all background agents still running.") is False
+    assert f("") is False
+
+
+def test_auto_policy_does_not_archive_interim_subagent_text() -> None:
+    """The exact 2026-08-30 shape: clean 1-turn run whose final words were an
+    interim waiting message. The agents' data was never synthesized and the
+    run's follow-up work (writing the log, committing) never happened, so the
+    run must not auto-archive."""
+    outcome = ScheduleRunOutcome(
+        completed=True,
+        is_error=False,
+        final_text="Waiting on the Drive subagent, the last one.",
+        subagents_pending=True,
+    )
+    assert (
+        _should_auto_archive_schedule_run(_entry(), outcome, needs_user=False)
+        is False
+    )
+    # It is reported as skipped-with-reason, not ok: the dispatch row must
+    # tell the story instead of reading "ok".
+    from ciao.web.project_chats import _schedule_run_clean
+
+    assert _schedule_run_clean(outcome) is False
+
+
 def _job_rows(tmp_path: Path) -> list[dict]:
     path = tmp_path / "job_runs.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()]

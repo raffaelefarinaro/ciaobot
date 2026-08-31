@@ -323,6 +323,18 @@ final class SpeechCollector {
     private var rate = 0
     private let done = DispatchSemaphore(value: 0)
     private var finished = false
+    private var pending = 0
+
+    /// Set the number of utterances whose completion this collector waits for.
+    /// AVSpeechSynthesizer.write truncates a single long utterance around ~15s
+    /// of audio, so long messages are split into sentence-boundary utterances
+    /// and concatenated; the collector must not signal done until the last one
+    /// finishes.
+    func begin(_ count: Int) {
+        lock.lock()
+        pending = count
+        lock.unlock()
+    }
 
     func append(_ buffer: AVAudioBuffer) {
         guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
@@ -351,10 +363,13 @@ final class SpeechCollector {
 
     func complete() {
         lock.lock()
-        let alreadyDone = finished
-        finished = true
+        if pending > 0 { pending -= 1 }
+        if pending == 0 {
+            finished = true
+        }
+        let isDone = finished
         lock.unlock()
-        if !alreadyDone { done.signal() }
+        if isDone { done.signal() }
     }
 
     var isFinished: Bool {
@@ -370,6 +385,89 @@ final class SpeechCollector {
     }
 }
 
+/// Longest utterance handed to `AVSpeechSynthesizer.write` in one piece.
+/// `write` truncates around ~15s of audio; this sits comfortably under that
+/// for every voice while staying long enough that ordinary prose is never cut
+/// mid-thought.
+let speechChunkLimit = 300
+
+/// Cut *token* into `speechChunkLimit`-sized pieces on character boundaries.
+/// The last resort for a word with no internal spaces to break on.
+func hardSplit(_ token: String) -> [String] {
+    var pieces: [String] = []
+    var index = token.startIndex
+    while index < token.endIndex {
+        let end = token.index(index, offsetBy: speechChunkLimit, limitedBy: token.endIndex)
+            ?? token.endIndex
+        pieces.append(String(token[index..<end]))
+        index = end
+    }
+    return pieces
+}
+
+/// Split *text* into utterance-sized pieces at real sentence boundaries.
+///
+/// `components(separatedBy: ". ")` — the previous split — only saw a literal
+/// period followed by a space, so newline-separated text, bullet lists, and
+/// anything ending in `?` or `!` stayed one utterance and still truncated. It
+/// also appended `"."` to every piece, turning `"Ready?"` into `"Ready?."` and
+/// splitting abbreviations like `"e.g. foo"`. Foundation's sentence
+/// enumeration handles all of those, keeps the original punctuation, and is
+/// locale-aware.
+///
+/// A single sentence can still be longer than one utterance may be (a wall of
+/// prose with no terminator), so anything over the limit is further split on
+/// word boundaries.
+func speechChunks(_ text: String) -> [String] {
+    var sentences: [String] = []
+    text.enumerateSubstrings(
+        in: text.startIndex..<text.endIndex, options: [.bySentences, .localized]
+    ) { substring, _, _, _ in
+        let trimmed = substring?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty { sentences.append(trimmed) }
+    }
+    // Enumeration yields nothing for some inputs (a lone emoji, say); reading
+    // the text as one utterance is strictly better than reading none of it.
+    if sentences.isEmpty {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        sentences = trimmed.isEmpty ? [] : [trimmed]
+    }
+
+    var chunks: [String] = []
+    for sentence in sentences {
+        if sentence.count <= speechChunkLimit {
+            chunks.append(sentence)
+            continue
+        }
+        var current = ""
+        for word in sentence.split(separator: " ", omittingEmptySubsequences: true) {
+            // A single token can exceed the limit on its own — a long URL, or
+            // prose in a script that does not separate words with spaces. Word
+            // boundaries have nothing to offer there, so fall back to
+            // character boundaries rather than emitting an utterance that
+            // `write` will truncate anyway.
+            if word.count > speechChunkLimit {
+                if !current.isEmpty {
+                    chunks.append(current)
+                    current = ""
+                }
+                chunks.append(contentsOf: hardSplit(String(word)))
+                continue
+            }
+            if current.isEmpty {
+                current = String(word)
+            } else if current.count + 1 + word.count <= speechChunkLimit {
+                current += " " + word
+            } else {
+                chunks.append(current)
+                current = String(word)
+            }
+        }
+        if !current.isEmpty { chunks.append(current) }
+    }
+    return chunks
+}
+
 func runSpeak(requested: String, explicit: String) {
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard let text = String(data: input, encoding: .utf8)?
@@ -378,16 +476,29 @@ func runSpeak(requested: String, explicit: String) {
         fail(.usage, "speak expects the text to read on stdin")
     }
 
-    let utterance = AVSpeechUtterance(string: text)
     guard let voice = bestVoice(locale: requested, explicit: explicit) else {
         fail(.localeUnavailable, "no installed voice matches \(requested)")
     }
-    utterance.voice = voice
 
     let synthesizer = AVSpeechSynthesizer()
     let collector = SpeechCollector()
-    synthesizer.write(utterance) { buffer in
-        collector.append(buffer)
+    // AVSpeechSynthesizer.write truncates a single long utterance around ~15s
+    // of audio, so a long message would only read its first few sentences.
+    // Split on sentence boundaries and concatenate the audio so it reads in
+    // full. The collector waits for every utterance before signalling done.
+    let chunks = speechChunks(text)
+    if chunks.isEmpty {
+        // begin(0) would leave the collector permanently unfinished, so the
+        // run loop below would spin out its whole 120s deadline for nothing.
+        fail(.emptyResult, "nothing in the input could be spoken")
+    }
+    collector.begin(chunks.count)
+    for chunk in chunks {
+        let utterance = AVSpeechUtterance(string: chunk)
+        utterance.voice = voice
+        synthesizer.write(utterance) { buffer in
+            collector.append(buffer)
+        }
     }
 
     // AVSpeechSynthesizer delivers buffers through the run loop, so the main
@@ -397,12 +508,25 @@ func runSpeak(requested: String, explicit: String) {
     while !collector.isFinished && Date() < deadline {
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
     }
-    if !collector.isFinished {
-        fail(.failure, "speech synthesis timed out")
-    }
     let (pcm, rate) = collector.collected()
     if pcm.isEmpty || rate == 0 {
+        // Nothing usable either way, so the timeout is the more informative
+        // error when that is what happened.
+        if !collector.isFinished {
+            fail(.failure, "speech synthesis timed out")
+        }
         fail(.emptyResult, "speech synthesis produced no audio")
+    }
+    if !collector.isFinished {
+        // Partial audio beats none: splitting into per-sentence utterances
+        // made completion all-or-nothing, so one utterance whose write
+        // callback never delivered its terminating zero-length buffer used to
+        // discard every sentence that HAD been collected — a regression
+        // against the single-utterance path, which at least returned what it
+        // had. Emit the audio we have and say so on stderr.
+        FileHandle.standardError.write(Data(
+            "speech synthesis timed out; emitting the audio collected so far\n".utf8
+        ))
     }
     FileHandle.standardOutput.write(wavContainer(pcm: pcm, sampleRate: rate))
 }

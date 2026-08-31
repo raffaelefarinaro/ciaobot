@@ -57,7 +57,7 @@ def _write_release_tree(root: Path) -> None:
     ):
         sw.write_text(
             "const CACHE_NAME = 'ciaobot-v0.2.0'\n"
-            "const UNREAD_CACHE = 'ciaobot-unread-v0.2.0'\n",
+            "const UNREAD_CACHE = 'ciaobot-unread'\n",
             encoding="utf-8",
         )
     (root / "pyproject.toml").write_text(
@@ -192,9 +192,9 @@ def test_apply_release_files_bumps_service_worker_caches(tmp_path: Path) -> None
     ):
         text = sw.read_text(encoding="utf-8")
         assert "'ciaobot-v0.3.0'" in text
-        # The prefixed cache has to move too, not just the bare one.
-        assert "'ciaobot-unread-v0.3.0'" in text
-        assert "0.2.0" not in text
+        # The unread cache is user state and must remain stable across releases.
+        assert "'ciaobot-unread'" in text
+        assert "ciaobot-unread-v0.3.0" not in text
         assert sw in touched
 
 

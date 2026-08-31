@@ -158,6 +158,23 @@ _RETRY_STATUSES = {"pending", "stopped", ""}
 # to the nudge drain, never to a reply the user asked for: see
 # ProjectChatManager._is_worth_announcing_nudge_reply.
 _NUDGE_ANNOUNCE_MIN_CHARS = 4
+# Patterns an unattended parent emits while still waiting on its background
+# subagents. A run that ended on one of these never synthesized its agents'
+# results — the follow-up turn died before producing a report — so the run is
+# not done even though the turn completed "cleanly". Matched loosely against
+# the whole flattened reply (case-insensitive, anchored on the waiting
+# phrase) so wording changes do not defeat the guard.
+_INTERIM_SUBAGENT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bwaiting on\b",
+        r"\bwaiting for\b.*\bsubagent",
+        r"\bstill running\b.*\bsubagent",
+        r"\bshall report back\b",
+        r"\bwill report back\b",
+        r"\breport back once\b",
+    )
+)
 # Prompt used to resume a session after a mid-response connection drop. The
 # original prompt is NOT replayed — the partial turn already ran (and may have
 # executed tools), so we resume the existing session and ask it to continue,
@@ -706,6 +723,9 @@ def _real_title(title: str) -> str | None:
     return title
 
 
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+
+
 def _fallback_title(user_text: str) -> str | None:
     """Deterministic fallback title derived from the user's first message.
 
@@ -719,6 +739,14 @@ def _fallback_title(user_text: str) -> str | None:
     snippet = snippet.splitlines()[0].strip().strip('"').strip("'").strip()
     if not snippet:
         return None
+    # A leading URL truncates mid-host ("Check Zendesk ticket https://scand…"),
+    # which reads as broken text in the sidebar. Keep only the words before
+    # the first URL when there are any; a bare-URL prompt keeps the URL.
+    url_match = _URL_RE.search(snippet)
+    if url_match and url_match.start() > 0:
+        before = snippet[: url_match.start()].strip()
+        if before:
+            snippet = before
     # Cap at ~6 words or 60 chars.
     words = snippet.split()
     if len(words) > 6:
@@ -727,6 +755,42 @@ def _fallback_title(user_text: str) -> str | None:
     if len(snippet) > 60:
         snippet = snippet[:57].rstrip() + "..."
     return snippet or None
+
+
+# One-shot titler budget. Hosted models answer in a couple of seconds; a slow
+# local backend simply times out and the deterministic fallback applies, the
+# same trade the schedule attention classifier makes with a longer window.
+_TITLE_LLM_TIMEOUT_S = 45.0
+
+_TITLE_MAX_CHARS = 60
+
+
+def _clean_llm_title(text: str | None) -> str | None:
+    """Normalize a model-produced title, or None when it is not usable.
+
+    Models answer with trailing newlines, wrapping quotes, or — when their
+    own summarizer degrades — the literal first session message, which
+    carries our injected ``[CIAO_CONTEXT_BEGIN]`` capsule. Accepting any of
+    those would put them straight into the sidebar.
+    """
+    title = (text or "").strip()
+    if not title:
+        return None
+    # First non-empty line only; the prompt asks for one line anyway.
+    for line in title.splitlines():
+        line = line.strip()
+        if line:
+            title = line
+            break
+    title = title.strip().strip('"').strip("'").strip("`").strip()
+    title = title.rstrip(".!?:,")
+    if not title or _PLACEHOLDER_TITLE_RE.match(title):
+        return None
+    if _INJECTED_CONTEXT_MARKER in title:
+        return None
+    if len(title) > _TITLE_MAX_CHARS:
+        title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
+    return title or None
 
 
 _FRONTMATTER_DELIM = "---"
@@ -802,6 +866,37 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
 
 
 # ── Data models ──────────────────────────────────────────────────────────
+
+
+def _normalize_chat_helper(value: Any) -> dict[str, Any]:
+    """Fail closed on lifecycle metadata supplied by older or invalid clients."""
+    if not isinstance(value, dict) or value.get("kind") != "proposal":
+        return {}
+    intent = str(value.get("intent") or "")
+    policy = str(value.get("archive_policy") or "")
+    if (intent, policy) not in {
+        ("resolve", "when_resolved"),
+        ("review", "manual"),
+    }:
+        return {}
+    raw_ids = value.get("proposal_ids")
+    if not isinstance(raw_ids, list):
+        return {}
+    proposal_ids = list(
+        dict.fromkeys(
+            item
+            for item in raw_ids[:100]
+            if isinstance(item, str) and 0 < len(item) <= 128
+        )
+    )
+    if not proposal_ids:
+        return {}
+    return {
+        "kind": "proposal",
+        "intent": intent,
+        "proposal_ids": proposal_ids,
+        "archive_policy": policy,
+    }
 
 
 @dataclass(slots=True)
@@ -979,6 +1074,10 @@ class ChatInfo:
     # only on the automation side). Empty for interactive chats.
     schedule_id: str = ""
     schedule_title: str = ""
+    # Server-owned lifecycle metadata for chats created by the proposal review
+    # UI. Resolution helpers may auto-archive only after their target proposal
+    # IDs have durably left the queue; discussion helpers always remain manual.
+    helper: dict = field(default_factory=dict)
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
     # off insights extraction, a project-doc fold, a trajectory and memory
     # proposals (ciao/insights.py:extract_and_append), and until now none of
@@ -1017,6 +1116,7 @@ class ChatInfo:
             "fork_base_title": self.fork_base_title,
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
+            "helper": dict(self.helper),
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1210,6 +1310,10 @@ class ProjectChatManager:
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
         self._pending_push: dict[str, asyncio.Task] = {}
+        self._archive_locks: dict[str, asyncio.Lock] = {}
+        # Callers currently holding or waiting on each archive lock, so
+        # the lock is only dropped once the last one is done with it.
+        self._archive_lock_users: dict[str, int] = {}
         # Per-chat background subagent completion watchers. Each active turn
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
@@ -1257,6 +1361,12 @@ class ProjectChatManager:
         # `opencode serve`), so the second trigger joins the first instead of
         # racing it.
         self._titling: set[str] = set()
+        # Strong references to detached background tasks. asyncio keeps only a
+        # weak reference to a running task, so a fire-and-forget
+        # `create_task(...)` whose result nobody holds can be collected
+        # mid-flight, and any exception it raised is reported as "Task
+        # exception was never retrieved" at GC time instead of being logged.
+        self._detached_tasks: set[asyncio.Task] = set()
         # Chats whose post-archive pipeline is running right now. Mirrors
         # `postprocess["state"] == "running"` on the chat, kept as a set so the
         # /ws/events connect snapshot and the home-screen count are O(1) reads.
@@ -1368,6 +1478,7 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
+                helper=_normalize_chat_helper(cd.get("helper")),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1465,6 +1576,7 @@ class ProjectChatManager:
                     "fork_base_title": c.fork_base_title,
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
+                    "helper": c.helper,
                     "postprocess": c.postprocess,
                 }
                 for cid, c in self._chats.items()
@@ -3090,6 +3202,7 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
+        helper: dict | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -3133,6 +3246,7 @@ class ProjectChatManager:
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
             created_at=_now_iso(),
+            helper=_normalize_chat_helper(helper),
         )
         self._chats[cid] = chat
         self._save()
@@ -3309,14 +3423,16 @@ class ProjectChatManager:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
         parts = re.split(r'^## Turn \d+', text, flags=re.MULTILINE)
-        
+
         for part in parts[1:]:
             user_match = re.search(r'### User\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
             assistant_match = re.search(r'### Assistant\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
-            
+
             time_match = re.search(r'-\s*Time:\s*([^\n]+)', part)
             timestamp = time_match.group(1).strip() if time_match else ""
-            
+
+            usage = self._parse_transcript_usage(part)
+
             if user_match:
                 user_content = user_match.group(1)
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
@@ -3326,17 +3442,41 @@ class ProjectChatManager:
                         "content": user_content,
                         "timestamp": timestamp,
                     })
-                    
+
             if assistant_match:
                 assistant_content = assistant_match.group(1)
                 if assistant_content.strip():
-                    turns_data.append({
+                    row = {
                         "role": "assistant",
                         "content": assistant_content,
                         "timestamp": timestamp,
-                    })
-                    
+                    }
+                    if usage:
+                        row["usage"] = usage
+                    turns_data.append(row)
+
         return turns_data
+
+    @staticmethod
+    def _parse_transcript_usage(part: str) -> dict[str, str]:
+        """Parse the archived turn's ``### Usage`` section into a dict.
+
+        The archive renders each persisted turn's usage dict as ``- key:
+        value`` lines, so an archived chat can serve the same token counts
+        (and the context %) the live transcript carried. Everything else in
+        the section is preserved as-is; a missing or empty section yields {}.
+        """
+        section = re.search(
+            r'### Usage\s*\n(.*?)(?=^### |\Z)', part, re.DOTALL | re.MULTILINE
+        )
+        if not section:
+            return {}
+        usage: dict[str, str] = {}
+        for line in section.group(1).splitlines():
+            item = re.match(r'^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$', line.strip())
+            if item:
+                usage[item.group(1)] = item.group(2).strip()
+        return usage
 
     def continue_archived_chat(self, chat_id: str) -> ChatInfo:
         """Create a new active chat continuing from an archived one.
@@ -3704,6 +3844,43 @@ class ProjectChatManager:
         })
         return True
 
+    async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
+        """Archive a clean resolution helper once all owned proposals are gone."""
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            return False
+        helper = _normalize_chat_helper(chat.helper)
+        if helper.get("archive_policy") != "when_resolved":
+            return False
+        if (
+            self._broker.get(chat_id) is not None
+            or chat.last_response_status != "success"
+            or not chat.last_response.strip()
+            or chat.pending_question
+            or chat.pending_permission
+            or chat.retry_status
+            or self._background_agents_last.get(chat_id, 0) > 0
+        ):
+            return False
+        try:
+            from ciao.proposal_tracking import pending_proposal_ids
+
+            pending = pending_proposal_ids(self._config)
+        except Exception:  # noqa: BLE001 — uncertainty must keep the chat visible
+            logger.exception("Could not verify proposal helper %s", chat_id)
+            return False
+        pending_bases = {pid.split(":", 1)[0] for pid in pending}
+        if any(
+            pid in pending or pid.split(":", 1)[0] in pending_bases
+            for pid in helper["proposal_ids"]
+        ):
+            return False
+        project = self._projects.get(chat.project_id)
+        outcome = await self.archive_chat(chat_id)
+        if outcome is not None:
+            self.run_archive_postprocess(chat_id, outcome, chat, project)
+        return bool(chat.archived)
+
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
@@ -3748,6 +3925,33 @@ class ProjectChatManager:
         return turn_count, filtered_jsonl, result
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
+        """Serialize concurrent archive requests for one chat."""
+        lock = self._archive_locks.setdefault(chat_id, asyncio.Lock())
+        # Refcounted rather than `if not lock.locked()`: `Lock.release()`
+        # clears `_locked` before the woken waiter actually resumes, so the
+        # releasing caller saw the lock as free while a waiter was still queued
+        # on it and dropped the entry. A third `archive_chat` then setdefault'd
+        # a *fresh* lock and ran concurrently with that waiter — losing exactly
+        # the serialization this lock provides. Counting holders is unaffected
+        # by when the waiter wakes.
+        self._archive_lock_users[chat_id] = (
+            self._archive_lock_users.get(chat_id, 0) + 1
+        )
+        try:
+            async with lock:
+                chat = self._chats.get(chat_id)
+                if chat is None or chat.archived:
+                    return None
+                return await self._archive_chat_unlocked(chat_id)
+        finally:
+            remaining = self._archive_lock_users.get(chat_id, 1) - 1
+            if remaining <= 0:
+                self._archive_lock_users.pop(chat_id, None)
+                self._archive_locks.pop(chat_id, None)
+            else:
+                self._archive_lock_users[chat_id] = remaining
+
+    async def _archive_chat_unlocked(self, chat_id: str) -> ArchiveOutcome | None:
         """Archive a chat's transcript and mark it as archived.
 
         Also disconnects any live provider and reclaims provider-side session
@@ -4201,6 +4405,7 @@ class ProjectChatManager:
         chat.pending_queue = []
         chat.last_response = ""
         chat.last_response_status = ""
+        chat.helper = {}
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -5097,6 +5302,77 @@ class ProjectChatManager:
 
     # ── Streaming chat ───────────────────────────────────────────────────
 
+    def _spawn_detached(self, coro: Any, name: str) -> asyncio.Task:
+        """Run *coro* in the background, keeping it alive and logging failures.
+
+        Nothing awaits these, so without a held reference the loop may collect
+        the task before it finishes, and without a done callback a raised
+        exception is only ever reported by the garbage collector.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._detached_tasks.add(task)
+
+        def _done(finished: asyncio.Task) -> None:
+            self._detached_tasks.discard(finished)
+            if finished.cancelled():
+                return
+            exc = finished.exception()
+            if exc is not None:
+                logger.warning(
+                    "Background task %s failed: %s", name, exc, exc_info=exc
+                )
+
+        task.add_done_callback(_done)
+        return task
+
+    def _record_stopped_turn(
+        self,
+        chat_id: str,
+        chat: ChatInfo,
+        request: AgentRequest,
+        outcome: "_StreamOutcome",
+        journal: Any,
+    ) -> None:
+        """Persist a force-stopped turn as a partial one.
+
+        No ResultEvent ever arrived, so ``outcome.response_text`` is empty and
+        the streamed answer exists only as the deltas already collected on the
+        outcome. Rebuild it from those so the durable transcript keeps both
+        halves of the exchange — for opencode chats the transcript IS what a
+        reload renders, so without this a stopped turn vanished from history.
+
+        Best-effort: this runs while a CancelledError is propagating, and a
+        failure to persist must not replace it with a different exception.
+        """
+        try:
+            streamed = "".join(
+                getattr(event, "text", "") or ""
+                for event in outcome.events
+                if type(event).__name__ == "AssistantTextDelta"
+            )
+            self._transcripts.record_turn(
+                request,
+                ctx=ChatContext.for_web(chat_id),
+                response_text=outcome.response_text or streamed,
+                effective_model=outcome.effective_model or chat.model,
+                session_id=chat.session_id or None,
+                usage=outcome.usage,
+                quota=outcome.quota,
+                input_kind="text",
+                context_label=chat.title,
+                provider=chat.provider,
+                tool_events=outcome.tool_events,
+                is_error=False,
+                is_partial=True,
+            )
+            # The transcript owns the turn now; recovery must not fold the
+            # journal in again if the process dies before `finish()` unlinks it.
+            journal.mark_committed()
+        except Exception:  # noqa: BLE001 — never mask the stop's cancellation
+            logger.exception(
+                "Failed to persist force-stopped turn for chat %s", chat_id
+            )
+
     async def stream_chat(
         self,
         chat_id: str,
@@ -5279,8 +5555,22 @@ class ProjectChatManager:
                 yield event
 
         try:
-            async for event in _journalled_stream():
-                yield event
+            try:
+                async for event in _journalled_stream():
+                    yield event
+            except asyncio.CancelledError:
+                # stop_chat force-closes a turn whose provider never delivered
+                # a terminal event by cancelling the task driving this
+                # generator. Unwinding straight to `finally` meant
+                # `record_turn` never ran AND `journal.finish()` deleted the
+                # crash journal, so the exchange survived only as live WS
+                # events: reloading the chat showed neither the prompt nor the
+                # partial answer, and no startup recovery could bring it back.
+                # Persist what streamed, flagged partial, before re-raising.
+                self._record_stopped_turn(
+                    chat_id, chat, request, outcome, journal
+                )
+                raise
             response_text = outcome.response_text
             had_error = outcome.had_error
             effective_model = outcome.effective_model
@@ -5781,6 +6071,22 @@ class ProjectChatManager:
         flat = " ".join((text or "").strip().splitlines()).strip()
         return len(flat) >= _NUDGE_ANNOUNCE_MIN_CHARS
 
+    @staticmethod
+    def _is_interim_subagent_text(text: str) -> bool:
+        """True when ``text`` reads as "still waiting on my subagents".
+
+        An unattended run whose final output is one of these interim messages
+        never synthesized its background agents' results: the completion turn
+        died before producing a report, so anything the run was supposed to do
+        with the results (write the log, commit) did not happen. Used by
+        :meth:`dispatch_schedule` to keep such a run visible instead of
+        auto-archiving a stub (the 2026-08-30 daily-log failure).
+        """
+        flat = " ".join((text or "").strip().splitlines()).strip()
+        if not flat:
+            return False
+        return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
     def start_stream(
         self,
         chat_id: str,
@@ -5962,8 +6268,21 @@ class ProjectChatManager:
             try:
                 while True:
                     turn_assistant_text = ""
+                    # Assistant text streamed so far this turn, used as the
+                    # synthetic result when the user force-stops the turn
+                    # before the provider emits its terminal event.
+                    turn_streamed_text = ""
                     question_paused = False
-                    try:
+
+                    async def _run_turn() -> None:
+                        # One stream_chat() pass, executed as a dedicated
+                        # task so `stop_chat` can force-close a turn whose
+                        # provider never delivers a terminal event (hung
+                        # CLI, dead SSE subscription) instead of blocking
+                        # forever in the event iterator.
+                        nonlocal turn_assistant_text, turn_streamed_text
+                        nonlocal question_paused, had_error
+                        nonlocal had_provider_progress
                         async for event in self.stream_chat(
                             chat_id,
                             current_prompt,
@@ -6009,6 +6328,11 @@ class ProjectChatManager:
                                     payload["duration_ms"] = duration_ms
                             if payload:
                                 stream.publish(payload)
+                            if isinstance(event, AssistantTextDelta):
+                                # Parent-turn prose only: subagent deltas are
+                                # attributed to their own agent in the UI.
+                                if event.parent_tool_use_id is None:
+                                    turn_streamed_text += event.text
                             if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent, PermissionRequestEvent)):
                                 had_provider_progress = True
                             if isinstance(event, PermissionRequestEvent):
@@ -6075,7 +6399,7 @@ class ProjectChatManager:
                                                     chat_id,
                                                 )
                                         question_paused = True
-                                        break
+                                        return
                                     continue
                                 q_provider = self._providers.get(chat_id)
                                 if q_provider is not None:
@@ -6087,7 +6411,7 @@ class ProjectChatManager:
                                             chat_id,
                                         )
                                 question_paused = True
-                                break
+                                return
                             if isinstance(event, ToolUseEvent):
                                 # Schedule a debounced file snapshot for
                                 # Write/Edit/MultiEdit/NotebookEdit/Bash creates.
@@ -6165,6 +6489,76 @@ class ProjectChatManager:
                                         )
                                 else:
                                     turn_assistant_text = event.result or ""
+
+                    turn_task = asyncio.create_task(
+                        _run_turn(), name=f"chat-turn-{chat_id}"
+                    )
+                    stream.turn_task = turn_task
+                    try:
+                        await turn_task
+                    except asyncio.CancelledError:
+                        if not stream.force_closing:
+                            # The drive task itself was cancelled (shutdown):
+                            # propagate after the per-turn cleanup. Keyed on
+                            # `force_closing`, which `stop_chat` sets only
+                            # around its own cancel, rather than on
+                            # `user_stopped`, which stays true for the rest of
+                            # the turn and so swallowed real shutdowns.
+                            raise
+                        stream.force_closing = False
+                        # The provider never delivered a terminal event
+                        # within stop_chat's grace window (hung CLI, dead SSE
+                        # subscription), so the turn was force-closed. Publish
+                        # a synthetic result carrying the partial answer so
+                        # every client leaves streaming state immediately; the
+                        # streamed deltas are already in each client's
+                        # timeline, and the containment skip below keeps the
+                        # final bubble from duplicating them.
+                        logger.info(
+                            "Turn force-closed by user stop for chat %s", chat_id
+                        )
+                        turn_assistant_text = turn_streamed_text
+                        chat_now = self._chats.get(chat_id)
+                        completed_at = _now_iso()
+                        duration_ms = None
+                        sent_at_rec = ""
+                        if current_turn_index is not None:
+                            started_perf = self._turn_perf_started.pop(
+                                (chat_id, current_turn_index), None
+                            )
+                            if started_perf is not None:
+                                duration_ms = int(
+                                    (time.perf_counter() - started_perf) * 1000
+                                )
+                            if chat_now is not None:
+                                rec = chat_now.user_turn_timings.setdefault(
+                                    str(current_turn_index), {}
+                                )
+                                rec["completed_at"] = completed_at
+                                if duration_ms is not None:
+                                    rec["duration_ms"] = duration_ms
+                                sent_at_rec = rec.get("sent_at", "")
+                                self._save()
+                        stop_payload: dict = {
+                            "type": "result",
+                            "text": turn_streamed_text,
+                            "is_error": False,
+                            "stopped": True,
+                            "effective_model": (
+                                chat_now.model if chat_now else ""
+                            ),
+                            "usage": {},
+                            "quota": {},
+                            "session_id": (
+                                chat_now.session_id if chat_now else ""
+                            ) or "",
+                        }
+                        stop_payload["completed_at"] = completed_at
+                        if sent_at_rec:
+                            stop_payload["sent_at"] = sent_at_rec
+                        if duration_ms is not None:
+                            stop_payload["duration_ms"] = duration_ms
+                        stream.publish(stop_payload)
                     except Exception as exc:
                         # A user-initiated stop may surface here (if the SDK
                         # raises rather than yielding a terminal ResultEvent)
@@ -6298,6 +6692,10 @@ class ProjectChatManager:
                                     cm_park.pending_queue = list(parked)
                                     self._save()
                             break
+                    finally:
+                        # Clear before the next turn (or the stream teardown)
+                        # can register a different task on the same stream.
+                        stream.turn_task = None
 
                     if turn_assistant_text:
                         last_assistant_text = turn_assistant_text
@@ -6496,6 +6894,10 @@ class ProjectChatManager:
                     # the timer (see _schedule_push).
                     self._announce_result_ready(
                         chat_id, project_id, title, snippet
+                    )
+                    self._spawn_detached(
+                        self._maybe_archive_proposal_helper(chat_id),
+                        f"archive-proposal-helper-{chat_id}",
                     )
 
         asyncio.create_task(_drive())
@@ -6742,6 +7144,21 @@ class ProjectChatManager:
 
         last_count = -1
         last_size = -1
+        # Pending-notification handling. The completion watcher delays the
+        # synthesis nudge while the CLI is still processing a
+        # <task-notification>: steering into that exact window is the race
+        # that killed the 2026-08-30 daily-log run (the two prompts crossed
+        # on the transport, the SDK read task was cancelled, and the run
+        # ended on an interim message with the agents' data never
+        # synthesized). The hold is bounded at two ticks (~6s): a CLI that
+        # died before answering — the other half of that same failure —
+        # must not leave the chat parked on the interim message until the
+        # deadline, and steer() queues on the persistent client, so firing
+        # after the grace still lands after whatever turn the CLI is
+        # running instead of interleaving with it. "Nudged" is reported to
+        # clients only once, with the zero-count publish it belongs to.
+        held_ticks = 0
+        nudged = False
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
@@ -6756,9 +7173,23 @@ class ProjectChatManager:
                     last_size = size
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
-                if count != last_count:
-                    nudged = False
-                    if count == 0 and last_count > 0:
+                pending = state.notification_pending
+                if pending:
+                    held_ticks += 1
+                else:
+                    # A closed window must not spend its grace on the next
+                    # one: an earlier notification leaves held_ticks at
+                    # whatever it climbed to, and without the reset a later
+                    # notification would inherit "grace expired" on its first
+                    # tick and steer into the CLI's processing window — the
+                    # exact prompt-crossing race the hold exists to prevent.
+                    held_ticks = 0
+                grace_expired = pending and held_ticks > 2
+                ready_to_nudge = (
+                    count == 0 and not nudged and (not pending or grace_expired)
+                )
+                if count != last_count or ready_to_nudge:
+                    if ready_to_nudge:
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
@@ -6766,25 +7197,31 @@ class ProjectChatManager:
                         # Poke the parent to synthesize a final report. The
                         # CLI won't auto-continue the turn on its own, so
                         # without this the chat sits on the interim
-                        # "I'll report back" message forever. When the
-                        # nudge lands on the live client the between-turns
+                        # "I'll report back" message forever. The
+                        # unprocessed-notification hold above decides *when*:
+                        # not inside the CLI's own window (the race that
+                        # killed the 2026-08-30 daily-log run), or, if the
+                        # window never closes, after the bounded grace. When
+                        # the nudge lands on the live client the between-turns
                         # drain publishes the reply (and its own push); we
                         # only fall back to a bare push if the nudge could
-                        # not be delivered.
-                        # Nudge the parent to synthesize a final report; its
-                        # completion pushes the real chat notification. We
-                        # intentionally do NOT send a separate generic
-                        # "Background agents finished" push — it stacked a
-                        # second, content-free notification on top of the
-                        # chat's own result push (user feedback). The in-app
-                        # subagent count below still updates the UI.
+                        # not be delivered. We intentionally do NOT send a
+                        # separate generic "Background agents finished" push
+                        # — it stacked a second, content-free notification
+                        # on top of the chat's own result push (user
+                        # feedback). The in-app subagent count below still
+                        # updates the UI.
+                        # The question hold stays absolute (inside the
+                        # nudge call); only the notification hold above
+                        # carries the bounded grace.
                         nudged = await self._nudge_synthesis_after_subagents(
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
-                    self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
+                    if count != last_count or (ready_to_nudge and nudged):
+                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
-                if count == 0:
+                if count == 0 and (not pending or nudged or grace_expired):
                     break
                 await asyncio.sleep(3)
         finally:
@@ -6854,11 +7291,14 @@ class ProjectChatManager:
         a live client, False otherwise (caller falls back to a plain push).
 
         ``awaiting_user_answer`` holds the nudge back when the parent ended its
-        turn by asking the user a question: answering it is the user's move, and
-        nudging would both bury the question and answer on their behalf. The
-        question stays the last thing in the transcript; the finished agents are
-        still surfaced by the ``chat_subagents_ready`` count dropping to zero
-        and by the subagent panel refresh it triggers.
+        turn by asking the user a question: answering it is the user's move,
+        and nudging would both bury the question and answer on their behalf.
+        (A still-unprocessed completion notification is a second hold reason,
+        but it carries its own bounded grace in the watcher, so the watcher
+        passes the question signal only.) The question stays the last thing
+        in the transcript; the finished agents are still surfaced by the
+        ``chat_subagents_ready`` count dropping to zero and by the subagent
+        panel refresh it triggers.
         """
         if awaiting_user_answer:
             return False
@@ -7211,6 +7651,10 @@ class ProjectChatManager:
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
+                        self._spawn_detached(
+                            self._maybe_archive_proposal_helper(chat_id),
+                            f"archive-proposal-helper-{chat_id}",
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app
@@ -7400,10 +7844,26 @@ class ProjectChatManager:
             return False
         return stream.resolve_capability(request_id, action, model_id)
 
+    # How long stop_chat waits for a provider-level stop (interrupt/abort)
+    # to end the turn cleanly before force-closing the local iteration.
+    # Long enough for a healthy CLI ack + terminal event, short enough that
+    # Stop still feels instant when the provider is wedged.
+    _STOP_GRACE_S = 2.0
+
     async def stop_chat(self, chat_id: str) -> bool:
-        # Mark the active stream as user-stopped so the drive loop flushes
-        # any queued follow-up messages instead of dropping them. A stop is
-        # intentional, not an error.
+        """Stop the chat's in-flight turn.
+
+        Two layers, so Stop works with every provider and never hangs:
+
+        1. Provider stop (interrupt/abort), bounded by ``_STOP_GRACE_S``.
+           A clean provider-level end is preferred: the terminal event
+           keeps transcript, usage, and provider-side bookkeeping exact.
+        2. Force close: if the turn is still running when the grace window
+           expires, cancel the turn task. The drive loop turns that into a
+           synthetic result carrying the partial answer, so every client
+           leaves streaming state immediately and queued follow-ups still
+           flush.
+        """
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
@@ -7415,7 +7875,85 @@ class ProjectChatManager:
         provider = self._providers.get(chat_id)
         if provider is None:
             return False
-        return await provider.stop_active()
+        turn_task = stream.turn_task if stream is not None else None
+        if turn_task is None or turn_task.done():
+            # No local turn to close (between turns, or the HTTP fallback
+            # racing a fresh send): the bounded provider stop is all there
+            # is to do.
+            try:
+                return await asyncio.wait_for(
+                    provider.stop_active(), timeout=self._STOP_GRACE_S
+                )
+            except asyncio.TimeoutError:
+                return False
+            except Exception:  # noqa: BLE001 — stop must never wedge a socket
+                logger.debug(
+                    "Provider stop failed for chat %s", chat_id, exc_info=True
+                )
+                return False
+        handle = provider.active_handle()
+        # Detached: a hung interrupt must not delay the force close below,
+        # and the pending ack unwinds when the escalation disconnect (or
+        # the generator's own cleanup) tears the transport down.
+        # Tracked, not fire-and-forget: an untracked task can be collected
+        # while still pending, and a provider stop that raises anything but an
+        # httpx error (opencode's abort path) would surface only as "Task
+        # exception was never retrieved" at GC time.
+        if handle is not None:
+            self._spawn_detached(handle.stop(), f"stop-{chat_id}")
+        stopped = False
+        try:
+            # Shielded: the timeout must not cancel the turn itself, because
+            # the drive loop has to see `force_closing` set before the
+            # cancellation reaches it. This function does the cancelling.
+            await asyncio.wait_for(
+                asyncio.shield(turn_task), timeout=self._STOP_GRACE_S
+            )
+            # The turn ended cleanly inside the grace window (its terminal
+            # event drove the normal result path); nothing to force.
+            stopped = True
+        except asyncio.TimeoutError:
+            # Force-close: flag the stream first so the drive loop's handler
+            # can tell this apart from a shutdown, then cancel and await the
+            # turn so its synthetic result and generator teardown fully unwind
+            # before we escalate.
+            stopped = True
+            if stream is not None:
+                stream.force_closing = True
+            turn_task.cancel()
+            try:
+                await turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                logger.debug(
+                    "Turn errored while force-stopping chat %s",
+                    chat_id,
+                    exc_info=True,
+                )
+            # Claude escalation: a wedged CLI means generation may never
+            # have stopped, and the interrupted turn can leave a stale
+            # terminal message in the SDK transport buffer that would
+            # truncate the next turn's receive_response(). Dropping the
+            # client solves both; the next turn reconnects and resumes the
+            # session (ProviderService._provider is rebuilt on demand).
+            chat_meta = self._chats.get(chat_id)
+            if chat_meta is not None and chat_meta.provider == "claude":
+                try:
+                    await asyncio.wait_for(provider.disconnect(), timeout=5.0)
+                except Exception:  # noqa: BLE001 — teardown is best-effort
+                    logger.debug(
+                        "Disconnect after stop failed for chat %s",
+                        chat_id,
+                        exc_info=True,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # The turn raised a real error inside the grace window; its own
+            # handler already published an error result.
+            stopped = True
+        return stopped
 
     # ── Auto-title generation ────────────────────────────────────────────
 
@@ -7432,25 +7970,24 @@ class ProjectChatManager:
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
     ) -> str | None:
-        """If chat title is still the default, read the provider's native title.
+        """If chat title is still the default, title the chat.
 
-        Each provider generates its own session title for free (opencode's
-        ``title`` agent or Claude Code's ``aiTitle``), so
-        there is no separate model call or title-model setting. Returns the new
-        title or None if nothing was changed.
+        Three tiers, in order:
 
-        The provider publishes that title some time after the turn, so this
-        polls ``_TITLE_POLL_DELAYS`` rather than reading once. Every wait
-        re-checks the chat, so a manual rename or a delete during the poll
-        stops it instead of overwriting the user. When the provider never
-        publishes a title within the poll window the deterministic
-        ``_fallback_title`` (first 6 words of the prompt) is returned so the
-        sidebar never stays stuck on "New Chat"; the late-turn poll can still
-        overwrite that fallback with the provider's native title when it
-        finally lands.
-
-        ``assistant_text`` is accepted for call-site compatibility but unused:
-        the native title is authoritative.
+        1. The provider's native session title (opencode's ``title`` agent or
+           Claude Code's ``aiTitle``) — free when it works, so it is polled
+           first via ``_TITLE_POLL_DELAYS``. Every wait re-checks the chat, so
+           a manual rename or a delete during the poll stops it instead of
+           overwriting the user.
+        2. A one-shot model call (``_llm_chat_title``) when the native title
+           never lands. The native path is not dependable: Claude Code
+           ≥ 2.1.246 skips its own title generation for prompts that open
+           with our injected ``[CIAO_CONTEXT_BEGIN]`` capsule — i.e. every
+           Ciaobot chat — so without this tier new chats sat on tier 3.
+        3. The deterministic ``_fallback_title`` (first 6 words of the
+           prompt) so the sidebar never stays stuck on "New Chat". The
+           late-turn poll can still upgrade it with a native title when one
+           finally lands.
         """
         fallback = _fallback_title(user_text)
 
@@ -7484,10 +8021,23 @@ class ProjectChatManager:
             chat.title = title
             self._save()
             return title
-        # Native title never arrived within the window — use the deterministic
-        # fallback so the sidebar leaves "New Chat". The late-turn poll
-        # (fired from _drive's finally) will still attempt to overwrite this
-        # with the native title when it lands.
+        # Native title never arrived within the window. Try the one-shot
+        # titler next: for Claude chats the native title is commonly absent
+        # (the CLI skips its own titler for capsule-prefixed prompts), and a
+        # model-generated label beats the raw 6-word prompt snippet. The
+        # late-turn poll (fired from _drive's finally) will still attempt to
+        # upgrade the deterministic fallback with a native title when one
+        # lands later.
+        chat = self._chats.get(chat_id)
+        if chat is not None and _is_titling_target(chat.title):
+            llm_title = await self._llm_chat_title(chat, user_text, assistant_text)
+            if llm_title:
+                # Re-check: user may have renamed while the model ran.
+                chat = self._chats.get(chat_id)
+                if chat is not None and _is_titling_target(chat.title):
+                    chat.title = llm_title
+                    self._save()
+                    return llm_title
         if fallback is None:
             return None
         chat = self._chats.get(chat_id)
@@ -7496,6 +8046,54 @@ class ProjectChatManager:
         chat.title = fallback
         self._save()
         return fallback
+
+    async def _llm_chat_title(
+        self, chat: ChatInfo, user_text: str, assistant_text: str
+    ) -> str | None:
+        """One-shot model fallback for the chat title, or None on any failure.
+
+        Runs through the same one-shot plumbing as insights and the schedule
+        attention classifier (model resolution included), so a slow local
+        model or an unavailable backend degrades to the deterministic
+        fallback instead of raising into the titler task.
+        """
+        provider = getattr(chat, "provider", "") or "claude"
+        user_text = (user_text or "").strip()
+        if not user_text:
+            return None
+        try:
+            from ciao.insights import _resolve_insights_call, resolve_insights_model
+            from ciao.providers.oneshot import run_oneshot
+
+            project = self._projects.get(chat.project_id)
+            workspace = getattr(project, "workspace", None) if project else None
+            model = resolve_insights_model(self._config, workspace, provider=provider)
+            model, provider, _note = _resolve_insights_call(
+                self._config, model, provider=provider
+            )
+            reply = (assistant_text or "").strip()
+            sections = [f"<user>{user_text[:1500]}</user>"]
+            if reply:
+                sections.append(f"<assistant>{reply[:800]}</assistant>")
+            text = await run_oneshot(
+                "<session>\n" + "\n".join(sections) + "\n</session>",
+                system_prompt=(
+                    "You name chat sessions for a sidebar. Reply with ONLY the title: "
+                    "a short specific noun phrase (3-8 words) naming the session's "
+                    "subject. No quotes, no trailing period, no explanation, no "
+                    "prefix verb when a noun carries the meaning. If the content is "
+                    "mostly a URL or reference, name what it points at. Write the "
+                    "title in the language the user wrote in."
+                ),
+                model=model,
+                timeout_s=_TITLE_LLM_TIMEOUT_S,
+                provider=provider,
+                cwd=self._agent_root_for_chat(chat.chat_id),
+            )
+        except Exception:  # noqa: BLE001 — any titler failure degrades to tier 3
+            logger.info("LLM title fallback failed for %s", chat.chat_id, exc_info=True)
+            return None
+        return _clean_llm_title(text)
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
@@ -7810,7 +8408,7 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("Schedule target project %s not found, skipping", web_project_id)
                 return None
-            # Prefer the routine's own name ("Workspace hygiene") over a
+            # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
             routine_name = (getattr(entry, "title", "") or "").strip()
@@ -7856,7 +8454,7 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("System schedule %s has no default project, skipping", getattr(entry, "schedule_id", ""))
                 return None
-            # Prefer the routine's own name ("Workspace hygiene") over a
+            # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
             routine_name = (getattr(entry, "title", "") or "").strip()
@@ -8065,6 +8663,28 @@ class ProjectChatManager:
                         outcome.final_text = synth_text
                     if synth_error:
                         outcome.is_error = True
+                    elif not synth_text:
+                        # A drain result that carries neither text nor error
+                        # says nothing; fall through to the interim-text
+                        # guard below with whatever the parent last said.
+                        pass
+                if not outcome.is_error and self._is_interim_subagent_text(
+                    outcome.final_text
+                ):
+                    # The synthesis turn never happened (or the CLI died
+                    # before writing one — the 2026-08-30 daily-log run: the
+                    # nudge and the final task-notification crossed, the SDK
+                    # read task was cancelled, and the run "ended" on an
+                    # interim message). The parent's data is un-synthesized
+                    # and whatever work was supposed to follow — writing the
+                    # log, committing — never ran. The run is not done: keep
+                    # the chat visible instead of archiving a stub.
+                    outcome.subagents_pending = True
+                    logger.warning(
+                        "Schedule chat %s ended on interim subagent text with "
+                        "no synthesis turn; keeping it visible",
+                        target_id,
+                    )
             self._last_drain_result.pop(target_id, None)
 
         needs_user = False
