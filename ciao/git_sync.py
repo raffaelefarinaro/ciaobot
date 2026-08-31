@@ -33,7 +33,7 @@ def _protected_path(path: str) -> bool:
     name = Path(path).name.lower()
     env_template = name in {".env.example", ".env.sample", ".env.template", ".env.schema"}
     return (
-        (path == ".env" or (path.startswith(".env.") and not env_template))
+        (name == ".env" or (name.startswith(".env.") and not env_template))
         or path.startswith("secrets/")
         or name.endswith((".pem", ".key", ".p12", ".pfx"))
     )

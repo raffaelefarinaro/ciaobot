@@ -3860,7 +3860,11 @@ class ProjectChatManager:
         except Exception:  # noqa: BLE001 — uncertainty must keep the chat visible
             logger.exception("Could not verify proposal helper %s", chat_id)
             return False
-        if any(pid in pending for pid in helper["proposal_ids"]):
+        pending_bases = {pid.split(":", 1)[0] for pid in pending}
+        if any(
+            pid in pending or pid.split(":", 1)[0] in pending_bases
+            for pid in helper["proposal_ids"]
+        ):
             return False
         project = self._projects.get(chat.project_id)
         outcome = await self.archive_chat(chat_id)

@@ -141,6 +141,22 @@ async def test_startup_sync_rejects_modified_tracked_secret(tmp_path: Path) -> N
     assert "+new\n" not in shown
 
 
+async def test_startup_sync_rejects_nested_tracked_env_file(tmp_path: Path) -> None:
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    env_file = repo / "config" / ".env.local"
+    env_file.parent.mkdir()
+    env_file.write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-f", "config/.env.local")
+    _git(repo, "commit", "-q", "-m", "fixture env")
+    env_file.write_text("new\n", encoding="utf-8")
+
+    result = await sync_workspace(repo)
+
+    assert result is not None
+    assert "config/.env.local" in result
+
+
 async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None:
     repo = tmp_path / "ws"
     _init_repo(repo, with_remote=True)
