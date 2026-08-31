@@ -488,8 +488,16 @@ function laneStatusText(lane: HomeLane): string {
   sentences.push(working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working')
-  const tidying = laneTidyCount(lane) + laneArchivingCount(lane) + laneInsightsFailedCount(lane)
+  // Tidying is work still in flight and needs nobody. A failed extraction is
+  // neither: processing has stopped and the row below offers a manual retry,
+  // so folding it in here reported a stalled chat as busy — and a workspace
+  // whose only signal was that failure read as "nothing needs your attention"
+  // with the recovery state hidden inside a muted "tidying up". It gets its
+  // own sentence, in the same warn register the header fragment used.
+  const tidying = laneTidyCount(lane) + laneArchivingCount(lane)
   if (tidying) sentences.push(`${tidying} chat${tidying === 1 ? '' : 's'} tidying up`)
+  const failed = laneInsightsFailedCount(lane)
+  if (failed) sentences.push(`${failed} insights extraction${failed === 1 ? '' : 's'} failed`)
   return sentences.join('. ') + '.'
 }
 
