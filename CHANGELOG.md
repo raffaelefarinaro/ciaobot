@@ -1,10 +1,38 @@
 # Changelog
 
-## v0.13.1 - 2026-08-31
+## v0.14.0 - 2026-08-31
+
+### Added
+- New-chat picker on Cmd+T (Desktop) / Option+N (Web): opens on the active workspace's projects, `1`-`9` previews another workspace, arrows and Enter pick (`1982ed8f`, `20ec8fdb`)
+- Switch top-level sections with Cmd+Arrow on Desktop, Option+Arrow on the web PWA (`00907737`)
+- Let Claude pick a default model from the Providers tab in Settings (`8f19745b`)
+- Glanceable workspace status moved into the lane header, with the star ask mirrored in Settings (`61e149f9`, `1a018f27`)
+- Vault note review workflow (`6c9d8044`)
+- Convert document attachments to Markdown (`5cf5bc11`)
+- Reviews hygiene auto-archive for helper chats (`51e42758`, `13f9dc5a`)
+
+### Changed
+- Routines consolidated into Workspace care + Skill reflection (`6fc7dd01`)
+- Startup sync stages untracked files, so notes and whole project folders reach the backup instead of sitting outside it forever (`b3983d41`)
+- README, provider setup, and workspace-model docs clarified; CLAUDE.md is now a symlink to AGENTS.md (`88ef4d36`, `a49330db`, `d04d3523`, `59db48dd`)
 
 ### Fixed
-- fix(review): close post-release review gaps (`58c8ad0d`)
-- fix(desktop): relaunch app after updates (`401f78d1`)
+- Startup sync no longer commits provider credentials: the ignore guard is verified with `git check-ignore` rather than by reading .gitignore, untracked files are listed individually so their names reach the guard, and credential filenames are refused wherever they sit (`a3e4fab9`, `fdaea8f3`, `235a3808`)
+- Chat stop is instant and reliable on both providers, and a force-stopped turn is persisted to the transcript instead of being lost (`7258e676`, `235a3808`)
+- Long messages are read in full, split on real sentence boundaries (`68514196`, `235a3808`)
+- Already-applied memory proposals are no longer re-queued into Review by a neighbouring negated bullet (`ce568170`, `cfcc637b`, `95c1c986`, `235a3808`)
+- Completion notifications are counted once, so the synthesis nudge cannot steer into the CLI's processing window (`afb0ccfd`, `d7ab187b`, `235a3808`)
+- Token usage and context % show on Claude chat history, attributed to the right turn (`4b038949`, `235a3808`)
+- Chats get a title when the provider's native one never lands (`75662382`)
+- Answers display without opening the Activity view (#378) (`93454cd7`)
+- Schedule runs whose subagent synthesis never ran are not archived (`b3983d41`)
+- Failed insights extraction reports as a failure, not as active tidy-up (`9471a182`)
+- Picker workspace browsing no longer moves the app, and its keys are claimed ahead of global shortcuts (`031cc305`, `fdaea8f3`)
+- Unsaved pinned-file edits are confirmed before navigating to the memory map (`fdaea8f3`)
+- A failed chat creation restores the previous workspace and socket (`fdaea8f3`)
+- Desktop app relaunches after updates (`401f78d1`)
+- Claude SDK telemetry dependency included in the bundled runtime (`4ed42319`)
+- Memory navigation added; assorted review races and post-merge findings closed (`f9d8e750`, `c13cc79e`, `3f04511e`, `8dccfb38`, `70191885`, `58c8ad0d`, `d573c4fe`)
 
 ## v0.13.0 - 2026-08-30
 
