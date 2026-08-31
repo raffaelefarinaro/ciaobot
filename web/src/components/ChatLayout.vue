@@ -623,6 +623,15 @@ async function createWorkspaceChat(action: { workspace: string; projectId: strin
   await store.switchWorkspace(action.workspace)
   await store.createChat(action.projectId)
 }
+
+// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker. Enter
+// creates the chat in the current workspace's General project without a pick.
+async function handleNewChatShortcut() {
+  const { openNewChatPicker } = await import('../lib/newChat')
+  const workspace = await openNewChatPicker()
+  if (!workspace) return
+  await store.newChatInWorkspace(workspace)
+}
 const activePinKey = computed(() => {
   return store.activeChatId || currentProjectId.value
 })
@@ -937,10 +946,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
 
-  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA).
+  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
+  // choose the workspace the new chat should live in; Enter creates it in the
+  // active workspace's General project.
   if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
     e.preventDefault()
-    void store.newChatInGeneral()
+    void handleNewChatShortcut()
     return
   }
 

@@ -3648,6 +3648,55 @@ describe('workspace and chat transitions', () => {
     ).rejects.toThrow()
     expect(apiPost).not.toHaveBeenCalled()
   })
+
+  test('newChatInWorkspace creates the chat in the chosen workspace and switches to it', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-home', name: 'General', workspace: 'home', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-client', name: 'General', workspace: 'client', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'home'
+    const chat: ChatInfo = { chat_id: 'c-new', project_id: 'p-client', title: 'New Chat', model: 'sonnet', provider: 'claude', mode: 'default', session_id: '', created_at: '', archived: false }
+    apiPost.mockResolvedValue(chat)
+
+    const created = await store.newChatInWorkspace('client')
+
+    expect(created?.chat_id).toBe('c-new')
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-client/chats', { title: expect.any(String) })
+    expect(store.activeWorkspace).toBe('client')
+    await vi.waitFor(() => expect(store.activeChatId).toBe('c-new'))
+  })
+
+  test('newChatInWorkspace falls back to the active workspace General when the target has none', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-home', name: 'General', workspace: 'home', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-other', name: 'Notes', workspace: 'client', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'home'
+    const chat: ChatInfo = { chat_id: 'c-new', project_id: 'p-home', title: 'New Chat', model: 'sonnet', provider: 'claude', mode: 'default', session_id: '', created_at: '', archived: false }
+    apiPost.mockResolvedValue(chat)
+
+    const created = await store.newChatInWorkspace('client')
+
+    expect(created?.chat_id).toBe('c-new')
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-home/chats', { title: expect.any(String) })
+    expect(store.activeWorkspace).toBe('home')
+  })
+
+  test('newChatInWorkspace surfaces a toast when no General project exists anywhere', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-notes', name: 'Notes', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'home'
+
+    const created = await store.newChatInWorkspace('home')
+
+    expect(created).toBeUndefined()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.toasts.at(-1)).toMatchObject({ title: 'Cannot open a new chat' })
+  })
 })
 
 describe('orphaned draft recovery on load', () => {

@@ -9,6 +9,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
+import { pendingNewChat } from '../../lib/newChat'
 
 const toggleDictation = vi.fn()
 const toggleModelPicker = vi.fn()
@@ -652,6 +653,60 @@ describe('ChatLayout', () => {
 
     expect(toggleDictation).toHaveBeenCalledOnce()
     expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('Cmd+T opens the new-chat picker instead of creating a chat directly', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const newChatInGeneral = vi.spyOn(store, 'newChatInGeneral')
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 't', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(newChatInGeneral).not.toHaveBeenCalled()
+    expect(pendingNewChat.value).not.toBeNull()
+    pendingNewChat.value?.resolve(null)
     wrapper.unmount()
   })
 

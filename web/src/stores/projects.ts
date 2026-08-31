@@ -1081,6 +1081,24 @@ export const useProjectStore = defineStore('projects', () => {
     return createChat(general.project_id)
   }
 
+  // Cmd+T picker: open a fresh, empty chat in the chosen workspace's General
+  // project. Falls back to the active workspace's General project when the
+  // named workspace has none. Returns the created chat, or undefined when
+  // there was nowhere to put one.
+  async function newChatInWorkspace(workspace: WorkspaceName): Promise<ChatInfo | undefined> {
+    const project = generalProject(workspace) ?? generalProject()
+    if (!project) {
+      pushErrorToast('Cannot open a new chat', 'No General project found to create the chat in.')
+      return
+    }
+    if (project.workspace !== activeWorkspace.value && activeChatId.value) {
+      disconnectWs(activeChatId.value)
+    }
+    activeWorkspace.value = project.workspace
+    persistState()
+    return createChat(project.project_id)
+  }
+
   // Recover a draft orphaned by a server-side empty-chat sweep (#277): open a
   // fresh chat pre-filled with the recovered text, in its original project
   // when that still exists, otherwise General. Only ever called from an
@@ -5766,7 +5784,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInWorkspace, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
