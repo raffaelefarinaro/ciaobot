@@ -164,6 +164,33 @@ def test_protected_config_names_are_rejected(path: str) -> None:
     assert _protected_path(path) is True
 
 
+async def test_startup_sync_rejects_rename_into_protected_location(tmp_path: Path) -> None:
+    """A tracked file renamed into `secrets/` must not be auto-committed.
+
+    Porcelain rename output carries both sides; the destination basename
+    alone (``token.json``) is not protected, so the rename side must be
+    parsed and checked too.
+    """
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    source = repo / "normal.json"
+    source.write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fixture")
+    (repo / "secrets").mkdir()
+    _git(repo, "mv", "normal.json", "secrets/token.json")
+
+    result = await sync_workspace(repo)
+
+    assert result is not None
+    assert "secrets/token.json" in result
+    shown = subprocess.run(
+        ["git", "show", "--format=", "HEAD"], cwd=str(repo), check=True,
+        capture_output=True, text=True, env=_git_env(repo),
+    ).stdout
+    assert "secrets/token.json" not in shown
+
+
 async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None:
     repo = tmp_path / "ws"
     _init_repo(repo, with_remote=True)

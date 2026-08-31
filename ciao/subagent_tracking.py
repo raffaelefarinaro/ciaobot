@@ -424,9 +424,14 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # when the tool_result record lands.
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
-    # Track each completion independently. A single boolean loses a queued
-    # notification when several agents finish before the CLI processes them.
-    notification_windows: list[bool] = []
+    # The CLI's prompt queue, in order. Each entry is one of:
+    #   None   — an ordinary prompt (no synthesis-nudge window)
+    #   False  — a completion notification still queued (window open)
+    #   True   — a completion notification dequeued, awaiting an assistant
+    #            reply (window open)
+    # Dequeues are matched to the front of this queue so a dequeue of an
+    # ordinary prompt never claims a notification still queued behind it.
+    queue: list[bool | None] = []
 
     try:
         fh = path.open(encoding="utf-8")
@@ -452,31 +457,34 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # without ever becoming a user record (e.g. the process exits
                 # first), so the enqueue itself must count as completion.
                 if record.get("operation") == "dequeue":
-                    # The CLI took the next prompt: the turn for it is being
-                    # built. The nudge must not steer into this window — the
-                    # two prompts would cross on the transport the same way
-                    # (the dequeue record never has assistant output after it
-                    # when the run dies. This is evidence that an assistant
-                    # record may clear the pending flag.
-                    for index, claimed in enumerate(notification_windows):
-                        if not claimed:
-                            notification_windows[index] = True
-                            break
+                    # The CLI took the next prompt off the queue. Only a
+                    # notification at the front of the queue opens a
+                    # synthesis-nudge window; dequeuing an ordinary prompt
+                    # that was queued ahead of a notification must not claim
+                    # that notification (the two prompts would cross on the
+                    # transport the same way). A dequeued notification stays
+                    # pending until an assistant reply closes it.
+                    if queue:
+                        front = queue.pop(0)
+                        if front is False:
+                            queue.append(True)
                     continue
                 else:
                     content = record.get("content")
                     if isinstance(content, str) and _notification_fields(content):
                         _apply_notification(state, content)
-                        notification_windows.append(False)
+                        queue.append(False)
+                    else:
+                        queue.append(None)
                 continue
 
             if rtype == "assistant":
                 # Only an assistant reply to a dequeued/surfaced notification
                 # closes its window. A normal parent record after enqueue is
                 # not evidence that the completion notification was handled.
-                for index, claimed in enumerate(notification_windows):
+                for index, claimed in enumerate(queue):
                     if claimed:
-                        notification_windows.pop(index)
+                        queue.pop(index)
                         break
                 message = record.get("message")
                 assistant_text = _text_content(message)
@@ -540,12 +548,12 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # record follows it, the CLI has not turned it into a reply
                 # yet — that is exactly the window where steering the nudge
                 # kills the run (see notification_pending).
-                notification_windows.append(True)
+                queue.append(True)
                 continue
             if _is_countable_user_turn(content):
                 user_idx += 1
 
-    state.notification_pending = bool(notification_windows)
+    state.notification_pending = any(entry is not None for entry in queue)
     return state
 
 

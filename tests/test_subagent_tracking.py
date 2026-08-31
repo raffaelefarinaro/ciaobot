@@ -438,3 +438,40 @@ def test_non_notification_enqueue_never_holds_the_window(tmp_path: Path) -> None
     ]
     state = parse_session_subagents(_write_session(tmp_path, records))
     assert state.notification_pending is False
+
+
+def test_dequeue_of_ordinary_prompt_does_not_claim_queued_notification(
+    tmp_path: Path,
+) -> None:
+    """Dequeuing a plain prompt queued ahead of a notification must not close it.
+
+    The CLI processes the queue in order: an ordinary prompt enqueued before a
+    completion notification is dequeued first, and its assistant reply is not
+    evidence that the notification was handled. The notification window must
+    stay open until the notification itself is dequeued and answered.
+    """
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {"type": "queue-operation", "operation": "enqueue", "content": "a plain prompt"},
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        {"type": "queue-operation", "operation": "dequeue"},
+        _assistant_text("Handling the plain prompt."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is True
+
+
+def test_dequeue_of_notification_stays_pending_until_reply(tmp_path: Path) -> None:
+    """Dequeuing the notification itself keeps the window open until a reply."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        {"type": "queue-operation", "operation": "dequeue"},
+        _assistant_text("All agents finished. Here is the report."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is False

@@ -41,6 +41,34 @@ def _protected_path(path: str) -> bool:
     )
 
 
+def _porcelain_paths(status_out: str) -> list[str]:
+    """Every path in `git status --porcelain -z` output.
+
+    Renames appear as two NUL-separated fields (``old`` then ``new``); both
+    sides are returned so a rename *into* a protected location is caught even
+    though the destination basename alone would not look protected.
+    """
+    paths: list[str] = []
+    fields = status_out.split("\0")
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if not field:
+            continue
+        if len(field) < 3:
+            continue
+        status = field[:2]
+        path = field[3:]
+        if not path:
+            continue
+        paths.append(path)
+        if "R" in status and i < len(fields) and fields[i]:
+            paths.append(fields[i])
+            i += 1
+    return paths
+
+
 async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tuple[int, str, str]:
     """Run a git command and return (returncode, stdout, stderr)."""
     proc = await asyncio.create_subprocess_exec(
@@ -94,11 +122,11 @@ async def sync_workspace(workspace: Path) -> str | None:
     # up" (the 2026-08-30 work-notes gap). `add -A` never stages gitignored
     # paths, so runtime scratch and caches (`.runtime/`, `Logs/Chats/`) are
     # untouched.
-    rc, status_out, _ = await _git(workspace, "status", "--porcelain")
+    rc, status_out, _ = await _git(workspace, "status", "--porcelain", "-z")
     has_changes = rc == 0 and bool(status_out.strip())
 
     if has_changes:
-        changed_paths = [line[3:].strip() for line in status_out.splitlines() if len(line) > 3]
+        changed_paths = _porcelain_paths(status_out)
         protected = sorted(path for path in changed_paths if _protected_path(path))
         if protected:
             detail = ", ".join(protected)
