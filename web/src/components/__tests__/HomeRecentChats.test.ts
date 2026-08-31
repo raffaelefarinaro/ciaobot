@@ -481,6 +481,82 @@ describe('HomeRecentChats regressions', () => {
   })
 })
 
+// The glanceable status moved out of ChatLayout into the lane header: face +
+// sentence under the workspace line it summarizes, divider below. One place,
+// derived from the same tiers as the rows.
+describe('the lane status row', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+    if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+  })
+
+  it('renders under the workspace line with the face image and no greeting bubble', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    const status = lane.find('.home-lane-status')
+    expect(status.exists()).toBe(true)
+    expect(status.find('.home-lane-status-face').exists()).toBe(true)
+    expect(status.find('.home-lane-status-face').attributes('src')).toBe('/face.png')
+    // Decoration beside a status line: a plain image, not a button.
+    expect(status.find('img').element.tagName).toBe('IMG')
+    wrapper.unmount()
+  })
+
+  it('speaks from the same tiers as the rows: needs, working, tidying', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'tidy', project_id: 'personal-project', title: 'Archived chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/tidy.md',
+        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    // The seeded "needs" chat is still blocked; the archived chat only adds
+    // the muted tidying fragment.
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('1 chat needs your attention. no agents working. 1 chat tidying up.')
+    wrapper.unmount()
+  })
+
+  it('names the needs-you chats and offers one nudge per blocked chat', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'asker-2', project_id: 'personal-project', title: 'Asks again',
+        pending_question: JSON.stringify({ questions: [{ question: 'Also this?' }] }),
+        created_at: timestamp(20), last_activity_at: timestamp(20), last_read_at: timestamp(20), archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('2 chats need your attention. no agents working.')
+
+    const nudges = lane.findAll('.home-lane-nudge')
+    expect(nudges).toHaveLength(2)
+    // The blocked chats — the seeded one and the new asker — each get a nudge
+    // targeting their own chat.
+    await nudges[0].trigger('click')
+    expect(sendSpy).toHaveBeenCalledWith('asker-2', 'nudge')
+    await nudges[1].trigger('click')
+    expect(sendSpy).toHaveBeenCalledWith('needs', 'nudge')
+    wrapper.unmount()
+  })
+})
+
 describe('HomeRecentChats new-chat project picker', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

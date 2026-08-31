@@ -409,8 +409,11 @@
           <DevicePanel />
         </div>
 
-        <!-- Open source -->
-        <div class="card">
+        <!-- Open source. The face image on the right appears only while the
+             GitHub-star ask is still live (housekeeping detects it via the
+             `starred` / snoozed receipt): once the user has starred or
+             dismissed, the card quiets back to prose. -->
+        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
           <div class="settings-card-header">
             <p class="section-title">open source</p>
             <p class="hint">
@@ -419,7 +422,22 @@
               <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
               You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
             </p>
+            <div v-if="showStarNudge" class="open-source-actions">
+              <button
+                class="btn-primary btn-small"
+                :disabled="starPending"
+                @click="starOnGitHub"
+              >{{ starPending ? 'Starring…' : '★ Star on GitHub' }}</button>
+              <button class="btn-small" @click="dismissStarNudge">Later</button>
+            </div>
           </div>
+          <img
+            v-if="showStarNudge"
+            class="open-source-face"
+            src="/face.png"
+            alt=""
+            draggable="false"
+          />
         </div>
       </template>
 
@@ -2003,6 +2021,7 @@ import type {
 import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { useHousekeepingStore } from '../stores/housekeeping'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -2028,10 +2047,47 @@ const route = useRoute()
 const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
+const housekeeping = useHousekeepingStore()
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
 })
+
+// ── GitHub star nudge, mirrored onto the open-source card ─────────────────
+// The home strip's ask-style action is the source of truth: the backend gates
+// it on a `starred` receipt (permanent) or a "Later" snooze, so this simply
+// reflects whether the ask is currently live. The strip's own toast is the
+// success feedback when the backend button runs; here the button disappears,
+// which is feedback enough.
+const starPending = ref(false)
+const showStarNudge = computed(() =>
+  housekeeping.actions.some(action => action.id === 'github-star'),
+)
+
+async function starOnGitHub(): Promise<void> {
+  if (starPending.value) return
+  starPending.value = true
+  try {
+    const { ok, summary } = await housekeeping.run('github-star')
+    if (ok) {
+      projectStore.pushToast({
+        chat_id: '',
+        title: '★ Starred — thank you!',
+        body: summary || 'It genuinely helps other developers discover Ciaobot.',
+      })
+    } else if (summary) {
+      projectStore.pushErrorToast('Could not star the repository', summary)
+    }
+  } catch (e) {
+    projectStore.pushErrorToast('Could not star the repository', e instanceof Error ? e.message : String(e))
+  } finally {
+    starPending.value = false
+  }
+}
+
+async function dismissStarNudge(): Promise<void> {
+  await housekeeping.dismiss('github-star')
+}
 
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
@@ -4059,6 +4115,8 @@ onMounted(async () => {
   fetchSkills()
   fetchCommands()
   fetchAgentAssets()
+  // Idempotent store init; the open-source card's star nudge mirrors its list.
+  housekeeping.init()
   fetchLocalStatus().then(() => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
@@ -4555,6 +4613,36 @@ async function doPackageUpdate() {
   flex-wrap: wrap;
   justify-content: flex-end;
   flex: 0 0 auto;
+}
+/* Open-source card with the star ask still live: the pixel face sits on the
+   right, out of the prose's flow. Without the nudge the card has no class and
+   no image renders, so plain cards are untouched. */
+.open-source-card {
+  position: relative;
+}
+
+.open-source-face {
+  position: absolute;
+  right: var(--space-4);
+  top: var(--space-4);
+  width: 64px;
+  height: 64px;
+  image-rendering: pixelated;
+  -webkit-user-drag: none;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+/* Keep the title clear of the face on narrow cards too. */
+.open-source-card--with-face .settings-card-header {
+  padding-right: 84px;
+}
+
+.open-source-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
 }
 .hint--compact {
   margin: 0;

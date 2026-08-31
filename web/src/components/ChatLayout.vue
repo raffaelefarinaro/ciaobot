@@ -49,15 +49,11 @@
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
-              <!-- Skeleton of the home screen this will become (status line,
-                   housekeeping tile, lane header, chat rows) — a spinner pill
-                   read as "nothing is coming", while the shapes promise the
-                   layout that is about to land. -->
+              <!-- Skeleton of the home screen this will become (lane header
+                   with the face+status row inside it, housekeeping tile, chat
+                   rows) — a spinner pill read as "nothing is coming", while
+                   the shapes promise the layout that is about to land. -->
               <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
-                <div class="boot-status">
-                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
-                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
-                </div>
                 <div class="boot-tile" aria-hidden="true">
                   <span class="boot-line boot-shimmer" style="width: 38%"></span>
                   <span class="boot-line boot-shimmer" style="width: 88%"></span>
@@ -68,6 +64,10 @@
                     <span class="boot-chip boot-shimmer"></span>
                     <span class="boot-line boot-shimmer" style="width: 26%"></span>
                     <span class="boot-pill boot-shimmer"></span>
+                  </div>
+                  <div class="boot-status">
+                    <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                    <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
                   </div>
                   <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
                   <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
@@ -82,17 +82,14 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-              <div class="empty-home-header">
-                <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
-                     is a plain image: no button, no hover handlers, no greeting bubble. The
-                     bubble belongs to the big first-run face below, where it is the only
-                     thing on the screen and has room to be a greeting. Next to a sentence
-                     that already reads "nothing needs you" it just collided with it. -->
-                <template v-if="hasHomeActivity">
-                  <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
-                  <span class="empty-status-text">{{ homeStatus }}</span>
-                </template>
-                <div v-else class="empty-mark">
+              <!-- The glanceable status (face + summary) lives inside the active
+                   workspace's lane header now (HomeRecentChats.vue), right under
+                   the workspace name it summarizes. This header only remains for
+                   the first-run greeting face, which is the sole greeting-bubble
+                   owner: beside a status line that reads "nothing needs you" the
+                   bubble used to collide with it. -->
+              <div v-if="!hasHomeActivity" class="empty-home-header">
+                <div class="empty-mark">
                   <button
                     type="button"
                     class="empty-face-btn"
@@ -177,10 +174,6 @@
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
             <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
-              <div class="boot-status">
-                <span class="boot-face boot-shimmer" aria-hidden="true"></span>
-                <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
-              </div>
               <div class="boot-tile" aria-hidden="true">
                 <span class="boot-line boot-shimmer" style="width: 38%"></span>
                 <span class="boot-line boot-shimmer" style="width: 88%"></span>
@@ -191,6 +184,10 @@
                   <span class="boot-chip boot-shimmer"></span>
                   <span class="boot-line boot-shimmer" style="width: 26%"></span>
                   <span class="boot-pill boot-shimmer"></span>
+                </div>
+                <div class="boot-status">
+                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
                 </div>
                 <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
                 <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
@@ -205,17 +202,14 @@
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-            <div class="empty-home-header">
-              <!-- With active chats or post-archive work on screen the mark is decoration beside a status line, so it
-                   is a plain image: no button, no hover handlers, no greeting bubble. The
-                   bubble belongs to the big first-run face below, where it is the only
-                   thing on the screen and has room to be a greeting. Next to a sentence
-                   that already reads "nothing needs you" it just collided with it. -->
-              <template v-if="hasHomeActivity">
-                <img class="empty-face empty-face--compact" :src="faceSrc" alt="" draggable="false" />
-                <span class="empty-status-text">{{ homeStatus }}</span>
-              </template>
-              <div v-else class="empty-mark">
+            <!-- The glanceable status (face + summary) lives inside the active
+                 workspace's lane header now (HomeRecentChats.vue), right under
+                 the workspace name it summarizes. This header only remains for
+                 the first-run greeting face, which is the sole greeting-bubble
+                 owner: beside a status line that reads "nothing needs you" the
+                 bubble used to collide with it. -->
+            <div v-if="!hasHomeActivity" class="empty-home-header">
+              <div class="empty-mark">
                 <button
                   type="button"
                   class="empty-face-btn"
@@ -580,38 +574,6 @@ const generalWorkspaceActions = computed(() => {
       }
     })
     .filter(action => action.projectId)
-})
-
-const homeStatus = computed(() => {
-  const chats = store.activeChatsAll
-  // Unread replies need attention even when they do not block the agent on a
-  // direct answer. Keep the explicit-question state visible in its own lane,
-  // but include both kinds of actionable chat in the glanceable summary.
-  const needs = chats.filter(chat =>
-    store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0,
-  ).length
-  const working = chats.filter(chat =>
-    store.isChatStreaming(chat.chat_id) || store.chatHasBackgroundAgents(chat.chat_id),
-  ).length
-  // Post-archive tidying is background work too, just quieter: it never needs
-  // the user, so it reports itself in the same muted register as the lane
-  // headers' "N tidying up" fragment.
-  const tidying = store.postprocessingChats().length
-  const archiving = store.archivingChatsList().length
-  const needVerb = needs === 1 ? 'needs' : 'need'
-  const needText = needs
-    ? `${needs} chat${needs === 1 ? '' : 's'} ${needVerb} your attention`
-    : 'nothing needs your attention'
-  const workingText = working
-    ? `${working} agent${working === 1 ? '' : 's'} still working`
-    : 'no agents working'
-  const tidyingText = tidying
-    ? `${tidying} chat${tidying === 1 ? '' : 's'} tidying up`
-    : ''
-  const archivingText = archiving
-    ? `${archiving} chat${archiving === 1 ? '' : 's'} archiving`
-    : ''
-  return [needText, workingText, archivingText, tidyingText].filter(Boolean).join('. ') + '.'
 })
 
 function workspaceLabel(name: string): string {
@@ -1196,6 +1158,13 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  /* The promised status row sits inside the lane, under its header, in the
+     muted register the real row uses (HomeRecentChats.vue). */
+  padding: var(--space-2) 0;
+}
+
+.boot-status .boot-line {
+  margin: 8px 0;
 }
 
 .boot-face {
@@ -1331,15 +1300,6 @@ onBeforeUnmount(() => {
   justify-content: flex-start;
 }
 
-.empty-status-text {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .empty-state .empty-mark {
   display: inline-flex;
   align-items: center;
@@ -1371,11 +1331,6 @@ onBeforeUnmount(() => {
     drop-shadow(-1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
     drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
     drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
-}
-
-.empty-state .empty-face--compact {
-  width: 30px;
-  height: 30px;
 }
 
 .face-speech-bubble {

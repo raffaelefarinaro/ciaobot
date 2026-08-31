@@ -95,6 +95,8 @@ describe('ChatLayout', () => {
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
+    // HomeRecentChats is NOT stubbed: the glanceable status now lives inside
+    // its lane header, under the workspace line, not in ChatLayout.
     const wrapper = mount(ChatLayout, {
       global: {
         plugins: [router],
@@ -107,13 +109,15 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
         },
       },
     })
     await flushPromises()
 
-    expect(wrapper.find('.empty-status-text').text()).toBe('1 chat needs your attention. no agents working.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. 1 agent still working.')
+    // The greeting face is the first-run only header; with activity it stays
+    // off the screen.
+    expect(wrapper.find('.empty-home-header').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -217,6 +221,8 @@ describe('ChatLayout', () => {
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
+    // HomeRecentChats is NOT stubbed: the glanceable status now lives inside
+    // its lane header, under the workspace line, not in ChatLayout.
     const wrapper = mount(ChatLayout, {
       global: {
         plugins: [router],
@@ -229,13 +235,12 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
         },
       },
     })
     await flushPromises()
 
-    expect(wrapper.find('.empty-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
     wrapper.unmount()
   })
 

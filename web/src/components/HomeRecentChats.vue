@@ -99,6 +99,25 @@
               >{{ project.name }}</button>
             </div>
           </div>
+          <!-- The glanceable status lives under the workspace line it
+               summarizes, in the muted register: the face is an image (no
+               button, no greeting bubble — the bubble belongs to the big
+               first-run face in ChatLayout), the sentence reads as a status
+               report. The header's border sits below this row, so the
+               workspace line and its status read as one block. Nudge: when a
+               chat needs the user, a tap pulls the answer out of the agent
+               without opening the chat. -->
+          <div class="home-lane-status">
+            <img class="home-lane-status-face" src="/face.png" alt="" draggable="false" />
+            <span class="home-lane-status-text">{{ laneStatusText(lane) }}</span>
+            <button
+              v-for="chatId in laneNudgeChatIds(lane)"
+              :key="chatId"
+              type="button"
+              class="home-lane-nudge"
+              @click="nudgeChat(chatId)"
+            >nudge</button>
+          </div>
         </header>
 
         <div class="home-lane-body">
@@ -507,6 +526,40 @@ function laneInsightsFailedCount(lane: HomeLane): number {
   return lane.failedChats.length
 }
 
+// The glanceable sentence under the workspace line, in plain status grammar.
+// Counts come from the same tiers as the rows below, so it can never disagree
+// with what is rendered. Tidying/archiving ride along in their muted fragments
+// even though they are not part of the lane's active tiers.
+function laneStatusText(lane: HomeLane): string {
+  const needs = laneNeedsCount(lane)
+  const sentences: string[] = []
+  sentences.push(needs
+    ? `${needs} chat${needs === 1 ? '' : 's'} need${needs === 1 ? 's' : ''} your attention`
+    : 'nothing needs your attention')
+  const working = laneWorkingCount(lane) + laneUnreadCount(lane)
+  sentences.push(working
+    ? `${working} agent${working === 1 ? '' : 's'} still working`
+    : 'no agents working')
+  const tidying = laneTidyCount(lane) + laneArchivingCount(lane) + laneInsightsFailedCount(lane)
+  if (tidying) sentences.push(`${tidying} chat${tidying === 1 ? '' : 's'} tidying up`)
+  return sentences.join('. ') + '.'
+}
+
+// The nudge applies to needs-you chats only: that is the one state where the
+// agent is blocked on this user and a pull from home can actually help. The
+// per-lane derivation keeps the button scoped to the workspace the reader is
+// standing in.
+function laneNudgeChatIds(lane: HomeLane): string[] {
+  return lane.tiers.needsYou.map(chat => chat.chat_id)
+}
+
+// Pull a nudge out of the blocked agent without opening the chat: the message
+// lands in the chat and the engine treats it as a turn, same as sending from
+// the composer. Local-only, like every send path.
+function nudgeChat(chatId: string): void {
+  store.sendMessage(chatId, 'nudge')
+}
+
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
   if (!workspace || workspace === 'unknown') return null
   const projectId = store.projects.find(
@@ -803,15 +856,87 @@ defineExpose({ onArrow })
   background: transparent;
 }
 
+/* The header is a column now: the workspace line with "+ new" first, then the
+   glanceable status row. The accent border stays on the whole header, so the
+   divider lands below the status (the line above the "working" tier labels). */
 .home-lane-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   min-width: 0;
   min-height: 44px;
   padding: 6px 0 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.home-lane-heading,
+.home-lane-header > .home-lane-new-split {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.home-lane-heading {
+  align-items: baseline;
+}
+
+/* Glanceable status: the compact face beside a plain sentence, in the muted
+   register — decoration beside a status line, so a plain image rather than a
+   button. The greeting bubble stays on the big first-run face only. */
+.home-lane-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding-top: 6px;
+}
+
+.home-lane-status-face {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  image-rendering: pixelated;
+  -webkit-user-drag: none;
+  opacity: 0.9;
+}
+
+.home-lane-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nudge: the one header control that acts on an agent. Accent-tinted like
+   "+ new" so the two header actions read as siblings, but quieter — a hairline
+   border and muted text at rest, full accent on hover/focus. A pull aimed at
+   one blocked agent, not a lane-level primary action. */
+.home-lane-nudge {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: color-mix(in srgb, var(--accent) 70%, var(--fg3));
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.home-lane-nudge:hover,
+.home-lane-nudge:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .home-lane-heading {
