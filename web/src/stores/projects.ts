@@ -758,8 +758,13 @@ export const useProjectStore = defineStore('projects', () => {
   // stayed in the sidebar with a live spinner until the next turn. Drain
   // instead — keep polling until the rows are gone — but only for a bounded
   // window, because a row the server can never retire (an interrupted agent
-  // whose transcript has no final record) would otherwise poll forever.
+  // whose transcript has no final record) would otherwise poll forever. The
+  // bound counts interval ticks rather than reading the wall clock: under
+  // vitest's fake timers the two can disagree, and a deadline taken from the
+  // real clock silently never expires (CI run 33378792898).
   const RUNNING_SUBAGENT_DRAIN_MS = 90_000
+  const RUNNING_SUBAGENT_POLL_MS = 4000
+  const RUNNING_SUBAGENT_DRAIN_TICKS = Math.ceil(RUNNING_SUBAGENT_DRAIN_MS / RUNNING_SUBAGENT_POLL_MS)
 
   let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
   let runningSubagentRefreshGeneration = 0
@@ -777,17 +782,18 @@ export const useProjectStore = defineStore('projects', () => {
     if (working) {
       runningSubagentTimer = setInterval(() => {
         void refreshRunningSubagents()
-      }, 4000)
+      }, RUNNING_SUBAGENT_POLL_MS)
       return
     }
-    const deadline = Date.now() + RUNNING_SUBAGENT_DRAIN_MS
+    let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
     runningSubagentTimer = setInterval(() => {
-      if (Object.keys(runningSubagents.value).length === 0 || Date.now() > deadline) {
+      if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
         stopRunningSubagentPoll()
         return
       }
+      drainTicksLeft -= 1
       void refreshRunningSubagents()
-    }, 4000)
+    }, RUNNING_SUBAGENT_POLL_MS)
   })
 
   function projectChats(projectId: string): ChatInfo[] {

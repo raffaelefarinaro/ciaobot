@@ -6896,6 +6896,14 @@ class ProjectChatManager:
                 pending = state.notification_pending
                 if pending:
                     held_ticks += 1
+                else:
+                    # A closed window must not spend its grace on the next
+                    # one: an earlier notification leaves held_ticks at
+                    # whatever it climbed to, and without the reset a later
+                    # notification would inherit "grace expired" on its first
+                    # tick and steer into the CLI's processing window — the
+                    # exact prompt-crossing race the hold exists to prevent.
+                    held_ticks = 0
                 grace_expired = pending and held_ticks > 2
                 ready_to_nudge = (
                     count == 0 and not nudged and (not pending or grace_expired)
