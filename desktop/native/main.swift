@@ -323,6 +323,18 @@ final class SpeechCollector {
     private var rate = 0
     private let done = DispatchSemaphore(value: 0)
     private var finished = false
+    private var pending = 0
+
+    /// Set the number of utterances whose completion this collector waits for.
+    /// AVSpeechSynthesizer.write truncates a single long utterance around ~15s
+    /// of audio, so long messages are split into sentence-boundary utterances
+    /// and concatenated; the collector must not signal done until the last one
+    /// finishes.
+    func begin(_ count: Int) {
+        lock.lock()
+        pending = count
+        lock.unlock()
+    }
 
     func append(_ buffer: AVAudioBuffer) {
         guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
@@ -351,10 +363,13 @@ final class SpeechCollector {
 
     func complete() {
         lock.lock()
-        let alreadyDone = finished
-        finished = true
+        if pending > 0 { pending -= 1 }
+        if pending == 0 {
+            finished = true
+        }
+        let isDone = finished
         lock.unlock()
-        if !alreadyDone { done.signal() }
+        if isDone { done.signal() }
     }
 
     var isFinished: Bool {
@@ -386,8 +401,18 @@ func runSpeak(requested: String, explicit: String) {
 
     let synthesizer = AVSpeechSynthesizer()
     let collector = SpeechCollector()
-    synthesizer.write(utterance) { buffer in
-        collector.append(buffer)
+    // AVSpeechSynthesizer.write truncates a single long utterance around ~15s
+    // of audio, so a long message would only read its first few sentences.
+    // Split on sentence boundaries and concatenate the audio so it reads in
+    // full. The collector waits for every utterance before signalling done.
+    let sentences = text.components(separatedBy: ". ").filter { !$0.isEmpty }
+    collector.begin(sentences.count)
+    for sentence in sentences {
+        let utterance = AVSpeechUtterance(string: sentence + ".")
+        utterance.voice = voice
+        synthesizer.write(utterance) { buffer in
+            collector.append(buffer)
+        }
     }
 
     // AVSpeechSynthesizer delivers buffers through the run loop, so the main
