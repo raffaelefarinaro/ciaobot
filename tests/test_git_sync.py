@@ -120,6 +120,27 @@ async def test_startup_sync_repairs_missing_secret_ignore(tmp_path: Path) -> Non
     assert not any(path.startswith("secrets/") for path in tracked)
 
 
+async def test_startup_sync_rejects_modified_tracked_secret(tmp_path: Path) -> None:
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    secret = repo / "secrets" / "token.json"
+    secret.parent.mkdir()
+    secret.write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-f", "secrets/token.json")
+    _git(repo, "commit", "-q", "-m", "fixture secret")
+    secret.write_text("new\n", encoding="utf-8")
+
+    result = await sync_workspace(repo)
+
+    assert result is not None
+    assert "secrets/token.json" in result
+    shown = subprocess.run(
+        ["git", "show", "--format=", "HEAD"], cwd=str(repo), check=True,
+        capture_output=True, text=True, env=_git_env(repo),
+    ).stdout
+    assert "+new\n" not in shown
+
+
 async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None:
     repo = tmp_path / "ws"
     _init_repo(repo, with_remote=True)

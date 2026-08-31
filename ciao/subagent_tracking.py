@@ -457,9 +457,9 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     # built. The nudge must not steer into this window — the
                     # two prompts would cross on the transport the same way
                     # (the dequeue record never has assistant output after it
-                    # when the run dies, so the user-record path below cannot
-                    # clear this).
-                    notification_pending = False
+                    # when the run dies, so the assistant-record path below
+                    # must be the only thing that clears this.
+                    continue
                 else:
                     content = record.get("content")
                     if isinstance(content, str) and _notification_fields(content):

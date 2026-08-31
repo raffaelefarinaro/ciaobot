@@ -399,6 +399,20 @@ def test_notification_window_closes_when_cli_answers(tmp_path: Path) -> None:
     assert state.notification_pending is False
 
 
+def test_notification_stays_pending_after_dequeue_until_assistant_reply(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        {"type": "queue-operation", "operation": "dequeue"},
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_pending is True
+
+
 def test_non_notification_enqueue_never_holds_the_window(tmp_path: Path) -> None:
     records = [
         _user_text("go"),

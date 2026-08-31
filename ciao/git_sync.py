@@ -61,8 +61,8 @@ async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tup
         stdout, stderr = await proc.communicate()
     return (
         proc.returncode or 0,
-        stdout.decode(errors="replace").strip(),
-        stderr.decode(errors="replace").strip(),
+        stdout.decode(errors="replace").rstrip(),
+        stderr.decode(errors="replace").rstrip(),
     )
 
 
