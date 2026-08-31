@@ -3095,6 +3095,34 @@ if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', onChatSelectionChange)
 }
 
+// Opening a chat puts the cursor in the composer, so typing just works.
+// ChatLayout keys this panel on chat_id, so it remounts per chat and this
+// covers switching chats as well as opening one.
+//
+// Two deliberate exceptions:
+//
+//   A pending question or permission card. Its options are numbered on screen
+//     and 1-9 picks one, but ChatLayout only offers a key to the card when
+//     focus is NOT in a text field (see handleQuestionShortcut's contract).
+//     Focusing here would turn "press 2" into typing "2", in exactly the chats
+//     that are blocked waiting for that answer.
+//
+//   Narrow viewports. Focus is what raises the on-screen keyboard (see
+//     handleInputFocus), so on a phone this would cover half the transcript on
+//     every chat you tap into, and iOS zooms the page on focus besides.
+const COMPOSER_FOCUS_MIN_WIDTH = 768
+
+function focusComposerOnOpen(): void {
+  if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
+  if (questionCardVisible.value || pendingApprovals.value.length) return
+  const el = inputEl.value
+  if (!el) return
+  el.focus()
+  // A restored draft would otherwise take the caret at offset 0, so the next
+  // keystroke would prepend to what the user already wrote.
+  el.selectionStart = el.selectionEnd = el.value.length
+}
+
 onMounted(async () => {
   window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
@@ -3129,6 +3157,7 @@ onMounted(async () => {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       pinToBottom()
     }
+    focusComposerOnOpen()
   })
 })
 
