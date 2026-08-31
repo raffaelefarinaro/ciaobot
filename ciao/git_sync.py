@@ -11,8 +11,32 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_GITIGNORE_ENTRIES = (".env", "secrets/", ".runtime/")
+# The one list of paths a workspace snapshot must never pick up. `cli.py`
+# writes it into a fresh workspace's .gitignore and `_ensure_sync_ignores`
+# repairs workspaces that predate that guard, so the two MUST agree: a shorter
+# repair list means `git add -A` stages provider credentials (`.claude/
+# .credentials.json`, `.codex/auth.json`) on exactly the old workspaces the
+# repair exists for. It lives here rather than in `cli.py` because this module
+# imports nothing from `ciao`, so either side can depend on it.
+WORKSPACE_GITIGNORE_ENTRIES = (
+    ".env",
+    "secrets/",
+    ".runtime/",
+    ".claude/",
+    ".agents/",
+    ".codex/",
+    ".opencode/",
+    "opencode.json",
+    "*.log",
+)
 _PROTECTED_CONFIG_NAMES = frozenset({".npmrc", ".netrc", ".pypirc"})
+# Directory names that hold credentials wherever they sit in the tree. Matched
+# per path segment, not as a prefix: `add -A` sweeps untracked files, so a
+# nested `sub/secrets/token` reaches the index the same as a root-level one.
+_PROTECTED_DIR_SEGMENTS = frozenset({"secrets", ".ssh", ".aws", ".gnupg"})
+_PROTECTED_KEY_NAMES = frozenset(
+    {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", ".credentials.json"}
+)
 
 
 def _ensure_sync_ignores(workspace: Path) -> None:
@@ -21,7 +45,7 @@ def _ensure_sync_ignores(workspace: Path) -> None:
     try:
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         present = {line.strip() for line in existing.splitlines()}
-        missing = [entry for entry in _REQUIRED_GITIGNORE_ENTRIES if entry not in present]
+        missing = [entry for entry in WORKSPACE_GITIGNORE_ENTRIES if entry not in present]
         if not missing:
             return
         prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
@@ -31,12 +55,15 @@ def _ensure_sync_ignores(workspace: Path) -> None:
 
 
 def _protected_path(path: str) -> bool:
-    name = Path(path).name.lower()
+    parts = Path(path).parts
+    name = parts[-1].lower() if parts else ""
     env_template = name in {".env.example", ".env.sample", ".env.template", ".env.schema"}
+    if any(part.lower() in _PROTECTED_DIR_SEGMENTS for part in parts[:-1]):
+        return True
     return (
         (name == ".env" or (name.startswith(".env.") and not env_template))
         or name in _PROTECTED_CONFIG_NAMES
-        or path.startswith("secrets/")
+        or name in _PROTECTED_KEY_NAMES
         or name.endswith((".pem", ".key", ".p12", ".pfx"))
     )
 

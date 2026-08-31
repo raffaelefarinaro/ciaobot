@@ -1113,6 +1113,19 @@ def _normalize_for_match(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+_NEGATION_RE = re.compile(r"\b(?:do not|don't|never|avoid)\b")
+
+# Where one fact ends and the next begins, in text that has already been
+# through `_normalize_for_match`. That collapse removes every newline, so a
+# markdown file arrives here as one line and the bullet markers that started
+# each item are the only separator left between two independent facts. Without
+# them a single "- Never commit secrets" bullet reads as the containing
+# sentence of everything below it, and every later fact in the file is scored
+# as negated — so an already-applied proposal fails this guard and is queued
+# back into Review, which is the exact loop the guard exists to close.
+_SEGMENT_SPLIT_RE = re.compile(r"[.!?;\n]|(?:^|(?<= ))(?:[-*+\u2022\u2013\u2014]|\d+\.) ")
+
+
 def _positive_contains(text: str, needle: str) -> bool:
     """Match *needle* unless its containing sentence is negated."""
     start = 0
@@ -1120,14 +1133,10 @@ def _positive_contains(text: str, needle: str) -> bool:
         at = text.find(needle, start)
         if at < 0:
             return False
-        sentence_start = max(
-            text.rfind(".", 0, at),
-            text.rfind("!", 0, at),
-            text.rfind("?", 0, at),
-            text.rfind("\n", 0, at),
-        )
-        sentence = text[sentence_start + 1 : at]
-        if not re.search(r"\b(?:do not|don't|never|avoid)\b", sentence):
+        boundary = 0
+        for match in _SEGMENT_SPLIT_RE.finditer(text, 0, at):
+            boundary = match.end()
+        if not _NEGATION_RE.search(text[boundary:at]):
             return True
         start = at + 1
 

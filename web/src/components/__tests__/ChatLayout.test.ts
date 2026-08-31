@@ -115,7 +115,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('1 chat needs your attention. no agents working.')
     // The greeting face is the first-run only header; with activity it stays
     // off the screen.
     expect(wrapper.find('.empty-home-header').exists()).toBe(false)

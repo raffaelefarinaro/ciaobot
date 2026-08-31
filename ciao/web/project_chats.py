@@ -1311,6 +1311,9 @@ class ProjectChatManager:
         # new one (coalesce rapid replies into a single push).
         self._pending_push: dict[str, asyncio.Task] = {}
         self._archive_locks: dict[str, asyncio.Lock] = {}
+        # Callers currently holding or waiting on each archive lock, so
+        # the lock is only dropped once the last one is done with it.
+        self._archive_lock_users: dict[str, int] = {}
         # Per-chat background subagent completion watchers. Each active turn
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
@@ -1358,6 +1361,12 @@ class ProjectChatManager:
         # `opencode serve`), so the second trigger joins the first instead of
         # racing it.
         self._titling: set[str] = set()
+        # Strong references to detached background tasks. asyncio keeps only a
+        # weak reference to a running task, so a fire-and-forget
+        # `create_task(...)` whose result nobody holds can be collected
+        # mid-flight, and any exception it raised is reported as "Task
+        # exception was never retrieved" at GC time instead of being logged.
+        self._detached_tasks: set[asyncio.Task] = set()
         # Chats whose post-archive pipeline is running right now. Mirrors
         # `postprocess["state"] == "running"` on the chat, kept as a set so the
         # /ws/events connect snapshot and the home-screen count are O(1) reads.
@@ -3918,6 +3927,16 @@ class ProjectChatManager:
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         """Serialize concurrent archive requests for one chat."""
         lock = self._archive_locks.setdefault(chat_id, asyncio.Lock())
+        # Refcounted rather than `if not lock.locked()`: `Lock.release()`
+        # clears `_locked` before the woken waiter actually resumes, so the
+        # releasing caller saw the lock as free while a waiter was still queued
+        # on it and dropped the entry. A third `archive_chat` then setdefault'd
+        # a *fresh* lock and ran concurrently with that waiter — losing exactly
+        # the serialization this lock provides. Counting holders is unaffected
+        # by when the waiter wakes.
+        self._archive_lock_users[chat_id] = (
+            self._archive_lock_users.get(chat_id, 0) + 1
+        )
         try:
             async with lock:
                 chat = self._chats.get(chat_id)
@@ -3925,8 +3944,12 @@ class ProjectChatManager:
                     return None
                 return await self._archive_chat_unlocked(chat_id)
         finally:
-            if not lock.locked():
+            remaining = self._archive_lock_users.get(chat_id, 1) - 1
+            if remaining <= 0:
+                self._archive_lock_users.pop(chat_id, None)
                 self._archive_locks.pop(chat_id, None)
+            else:
+                self._archive_lock_users[chat_id] = remaining
 
     async def _archive_chat_unlocked(self, chat_id: str) -> ArchiveOutcome | None:
         """Archive a chat's transcript and mark it as archived.
@@ -5279,6 +5302,77 @@ class ProjectChatManager:
 
     # ── Streaming chat ───────────────────────────────────────────────────
 
+    def _spawn_detached(self, coro: Any, name: str) -> asyncio.Task:
+        """Run *coro* in the background, keeping it alive and logging failures.
+
+        Nothing awaits these, so without a held reference the loop may collect
+        the task before it finishes, and without a done callback a raised
+        exception is only ever reported by the garbage collector.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._detached_tasks.add(task)
+
+        def _done(finished: asyncio.Task) -> None:
+            self._detached_tasks.discard(finished)
+            if finished.cancelled():
+                return
+            exc = finished.exception()
+            if exc is not None:
+                logger.warning(
+                    "Background task %s failed: %s", name, exc, exc_info=exc
+                )
+
+        task.add_done_callback(_done)
+        return task
+
+    def _record_stopped_turn(
+        self,
+        chat_id: str,
+        chat: ChatInfo,
+        request: AgentRequest,
+        outcome: "_StreamOutcome",
+        journal: Any,
+    ) -> None:
+        """Persist a force-stopped turn as a partial one.
+
+        No ResultEvent ever arrived, so ``outcome.response_text`` is empty and
+        the streamed answer exists only as the deltas already collected on the
+        outcome. Rebuild it from those so the durable transcript keeps both
+        halves of the exchange — for opencode chats the transcript IS what a
+        reload renders, so without this a stopped turn vanished from history.
+
+        Best-effort: this runs while a CancelledError is propagating, and a
+        failure to persist must not replace it with a different exception.
+        """
+        try:
+            streamed = "".join(
+                getattr(event, "text", "") or ""
+                for event in outcome.events
+                if type(event).__name__ == "AssistantTextDelta"
+            )
+            self._transcripts.record_turn(
+                request,
+                ctx=ChatContext.for_web(chat_id),
+                response_text=outcome.response_text or streamed,
+                effective_model=outcome.effective_model or chat.model,
+                session_id=chat.session_id or None,
+                usage=outcome.usage,
+                quota=outcome.quota,
+                input_kind="text",
+                context_label=chat.title,
+                provider=chat.provider,
+                tool_events=outcome.tool_events,
+                is_error=False,
+                is_partial=True,
+            )
+            # The transcript owns the turn now; recovery must not fold the
+            # journal in again if the process dies before `finish()` unlinks it.
+            journal.mark_committed()
+        except Exception:  # noqa: BLE001 — never mask the stop's cancellation
+            logger.exception(
+                "Failed to persist force-stopped turn for chat %s", chat_id
+            )
+
     async def stream_chat(
         self,
         chat_id: str,
@@ -5461,8 +5555,22 @@ class ProjectChatManager:
                 yield event
 
         try:
-            async for event in _journalled_stream():
-                yield event
+            try:
+                async for event in _journalled_stream():
+                    yield event
+            except asyncio.CancelledError:
+                # stop_chat force-closes a turn whose provider never delivered
+                # a terminal event by cancelling the task driving this
+                # generator. Unwinding straight to `finally` meant
+                # `record_turn` never ran AND `journal.finish()` deleted the
+                # crash journal, so the exchange survived only as live WS
+                # events: reloading the chat showed neither the prompt nor the
+                # partial answer, and no startup recovery could bring it back.
+                # Persist what streamed, flagged partial, before re-raising.
+                self._record_stopped_turn(
+                    chat_id, chat, request, outcome, journal
+                )
+                raise
             response_text = outcome.response_text
             had_error = outcome.had_error
             effective_model = outcome.effective_model
@@ -6389,10 +6497,15 @@ class ProjectChatManager:
                     try:
                         await turn_task
                     except asyncio.CancelledError:
-                        if not stream.user_stopped:
+                        if not stream.force_closing:
                             # The drive task itself was cancelled (shutdown):
-                            # propagate after the per-turn cleanup.
+                            # propagate after the per-turn cleanup. Keyed on
+                            # `force_closing`, which `stop_chat` sets only
+                            # around its own cancel, rather than on
+                            # `user_stopped`, which stays true for the rest of
+                            # the turn and so swallowed real shutdowns.
                             raise
+                        stream.force_closing = False
                         # The provider never delivered a terminal event
                         # within stop_chat's grace window (hung CLI, dead SSE
                         # subscription), so the turn was force-closed. Publish
@@ -6782,7 +6895,10 @@ class ProjectChatManager:
                     self._announce_result_ready(
                         chat_id, project_id, title, snippet
                     )
-                    asyncio.create_task(self._maybe_archive_proposal_helper(chat_id))
+                    self._spawn_detached(
+                        self._maybe_archive_proposal_helper(chat_id),
+                        f"archive-proposal-helper-{chat_id}",
+                    )
 
         asyncio.create_task(_drive())
         return stream
@@ -7535,7 +7651,10 @@ class ProjectChatManager:
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
-                        asyncio.create_task(self._maybe_archive_proposal_helper(chat_id))
+                        self._spawn_detached(
+                            self._maybe_archive_proposal_helper(chat_id),
+                            f"archive-proposal-helper-{chat_id}",
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app
@@ -7776,20 +7895,32 @@ class ProjectChatManager:
         # Detached: a hung interrupt must not delay the force close below,
         # and the pending ack unwinds when the escalation disconnect (or
         # the generator's own cleanup) tears the transport down.
-        stop_task: asyncio.Task | None = (
-            asyncio.create_task(handle.stop()) if handle is not None else None
-        )
+        # Tracked, not fire-and-forget: an untracked task can be collected
+        # while still pending, and a provider stop that raises anything but an
+        # httpx error (opencode's abort path) would surface only as "Task
+        # exception was never retrieved" at GC time.
+        if handle is not None:
+            self._spawn_detached(handle.stop(), f"stop-{chat_id}")
         stopped = False
         try:
-            await asyncio.wait_for(turn_task, timeout=self._STOP_GRACE_S)
+            # Shielded: the timeout must not cancel the turn itself, because
+            # the drive loop has to see `force_closing` set before the
+            # cancellation reaches it. This function does the cancelling.
+            await asyncio.wait_for(
+                asyncio.shield(turn_task), timeout=self._STOP_GRACE_S
+            )
             # The turn ended cleanly inside the grace window (its terminal
             # event drove the normal result path); nothing to force.
             stopped = True
         except asyncio.TimeoutError:
-            # wait_for already cancelled the turn task; await it so the
-            # drive loop's cancellation handler (synthetic result) and the
-            # generator teardown fully unwind before we escalate.
+            # Force-close: flag the stream first so the drive loop's handler
+            # can tell this apart from a shutdown, then cancel and await the
+            # turn so its synthetic result and generator teardown fully unwind
+            # before we escalate.
             stopped = True
+            if stream is not None:
+                stream.force_closing = True
+            turn_task.cancel()
             try:
                 await turn_task
             except asyncio.CancelledError:

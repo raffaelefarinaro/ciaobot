@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from ciao.git_sync import _protected_path, sync_workspace
+from ciao.git_sync import (
+    WORKSPACE_GITIGNORE_ENTRIES,
+    _protected_path,
+    sync_workspace,
+)
 
 
 def _git_env(repo: Path) -> dict[str, str]:
@@ -201,3 +205,72 @@ async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None
     ).stdout.strip()
     # The first startup repairs the protective ignore file and commits it.
     assert log == "2"
+
+
+async def test_startup_sync_repairs_every_credential_ignore(tmp_path: Path) -> None:
+    """The repair list must cover the same paths workspace setup writes.
+
+    It used to be a three-entry subset (.env, secrets/, .runtime/), so a
+    workspace that predated the setup guard — exactly the case this repair
+    exists for — kept `.claude/`, `.codex/` and friends untracked-but-not-
+    ignored. Once startup sync moved from `git add -u` to `git add -A`, the
+    next sync staged and pushed `.claude/.credentials.json` and
+    `.codex/auth.json` to the workspace remote.
+    """
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    for directory, name in (
+        (".claude", ".credentials.json"),
+        (".codex", "auth.json"),
+        (".opencode", "state.json"),
+        (".agents", "notes.md"),
+    ):
+        (repo / directory).mkdir()
+        (repo / directory / name).write_text("secret\n", encoding="utf-8")
+    (repo / "opencode.json").write_text("{}\n", encoding="utf-8")
+    (repo / "run.log").write_text("noise\n", encoding="utf-8")
+
+    await sync_workspace(repo)
+
+    ignored = (repo / ".gitignore").read_text(encoding="utf-8")
+    for entry in WORKSPACE_GITIGNORE_ENTRIES:
+        assert entry in ignored, entry
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo)
+    ).stdout.splitlines()
+    assert [
+        path
+        for path in tracked
+        if path.startswith((".claude/", ".codex/", ".opencode/", ".agents/"))
+        or path in {"opencode.json", "run.log"}
+    ] == []
+
+
+def test_setup_and_sync_share_one_ignore_list() -> None:
+    """Two lists that must agree are one list."""
+    from ciao import cli
+
+    assert cli._WORKSPACE_GITIGNORE_ENTRIES is WORKSPACE_GITIGNORE_ENTRIES
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "sub/secrets/token.json",
+        "deep/nested/secrets/api-key",
+        ".ssh/config",
+        "home/.aws/credentials",
+        "keys/id_rsa",
+        "keys/id_ed25519",
+    ],
+)
+def test_protected_paths_are_caught_anywhere_in_the_tree(path: str) -> None:
+    """`add -A` sweeps untracked files, so a root-prefix check is not enough."""
+    assert _protected_path(path) is True
+
+
+@pytest.mark.parametrize(
+    "path", ["notes/secretive-plan.md", "src/main.py", "docs/.env.example"]
+)
+def test_ordinary_paths_stay_committable(path: str) -> None:
+    assert _protected_path(path) is False

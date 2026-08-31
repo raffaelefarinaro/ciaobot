@@ -420,17 +420,9 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     return True
 
 
-_WORKSPACE_GITIGNORE_ENTRIES = (
-    ".env",
-    "secrets/",
-    ".runtime/",
-    ".claude/",
-    ".agents/",
-    ".codex/",
-    ".opencode/",
-    "opencode.json",
-    "*.log",
-)
+# Shared with the startup-sync repair path so a workspace created here and a
+# workspace repaired there ignore exactly the same paths (see git_sync).
+from ciao.git_sync import WORKSPACE_GITIGNORE_ENTRIES as _WORKSPACE_GITIGNORE_ENTRIES
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:

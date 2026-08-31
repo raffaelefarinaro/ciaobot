@@ -704,8 +704,12 @@ class OpencodeActiveHandle(ActiveHandle):
         # issued rather than when the server's `session.idle` happens to
         # arrive (or when the poll backstop gives up, which could take a
         # minute over a dead SSE subscription).
-        self._provider._stop_requested = self._session_id
-        await self._provider.abort_session(self._session_id)
+        # Guarded: an empty id would put the sentinel back to a value the
+        # pump's `== session_id` guard can match by accident (see
+        # `_stop_requested`), and there is nothing to abort either way.
+        if self._session_id:
+            self._provider._stop_requested = self._session_id
+            await self._provider.abort_session(self._session_id)
 
 
 @dataclass(slots=True)
@@ -799,11 +803,18 @@ class OpencodeProvider(BaseSDKProvider):
         # before the session payload is built, while the prompt reuses the
         # exact same provider/model pair.
         self._turn_model: tuple[str, str] = ("", "")
-        # Session id whose turn the user asked to stop, or "". Set by the
+        # Session id whose turn the user asked to stop, or None. Set by the
         # active handle's stop() and consumed by the streaming pump so the
         # turn ends as soon as the abort is issued instead of waiting for a
         # session.idle that may never arrive over a flaky SSE subscription.
-        self._stop_requested: str = ""
+        #
+        # None, not "": `_ensure_session` can hand back an empty id when the
+        # server's response carries none, and with "" as the sentinel the
+        # pump's `self._stop_requested == session_id` guard then read as
+        # "stopped" on the first SSE event of a turn nobody stopped —
+        # returning with `idle_seen` set, which also skips the reconcile
+        # backstop, for a silently empty turn.
+        self._stop_requested: str | None = None
 
     def _reset_turn_state(self) -> None:
         self._emitted.clear()
@@ -815,7 +826,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
-        self._stop_requested = ""
+        self._stop_requested = None
 
     # ---------------------------------------------------------------- server
 
@@ -1275,7 +1286,14 @@ class OpencodeProvider(BaseSDKProvider):
             return
         try:
             await client.post(f"/session/{session_id}/abort")
-        except httpx.HTTPError:
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed abort must never wedge Stop
+            # Broader than httpx.HTTPError on purpose: this runs detached from
+            # the Stop request, so anything it raises that is not caught here
+            # never reaches a caller — it only ever surfaces as an unretrieved
+            # task exception. Stop's own escalation path handles a turn that
+            # does not end.
             logger.debug("opencode abort failed for %s", session_id, exc_info=True)
 
     def _prompt_parts(self, request: AgentRequest) -> list[dict[str, Any]]:

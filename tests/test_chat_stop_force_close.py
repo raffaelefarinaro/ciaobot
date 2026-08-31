@@ -17,9 +17,11 @@ import pytest
 
 from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
-from ciao.sessions import StateStore
+from ciao.sessions import ChatContext, StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
+
+from .conftest import attach_stub_mcp
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -299,3 +301,96 @@ async def test_stop_reaches_both_providers(tmp_path: Path, provider: str) -> Non
     await _wait_for(lambda: stream.done)
 
     consumer.cancel()
+
+
+async def test_force_close_persists_the_partial_turn_to_the_transcript(
+    tmp_path: Path,
+) -> None:
+    """A force-stopped turn survives a reload, flagged partial.
+
+    Cancelling the turn task unwound `stream_chat` before `record_turn`, and
+    its `finally` then deleted the crash journal — so the exchange existed
+    only as live WS events. Reopening the chat showed neither the prompt nor
+    the partial answer, and no startup recovery could bring it back, because
+    for opencode chats the durable transcript IS what a reload renders.
+    """
+    pcm = attach_stub_mcp(_make_manager(tmp_path))
+    pcm._STOP_GRACE_S = 0.05
+    project = pcm.create_project("stop-persist", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="stop-test", provider="opencode")
+
+    acked = asyncio.Event()
+    disconnects: list[int] = []
+    pcm._providers[chat.chat_id] = _fake_provider_service(acked, disconnects)
+
+    hung = asyncio.Event()
+
+    # Patched below `stream_chat`, so the real journal + record_turn path runs.
+    async def fake_drive_stream(*, chat_id, request, outcome):
+        event = AssistantTextDelta(type="text", text="partial answer")
+        outcome.events.append(event)
+        yield event
+        await hung.wait()
+
+    pcm._drive_stream = fake_drive_stream  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "please answer")
+    consumer = asyncio.create_task(consume(stream))
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=2.0) is True
+    await _wait_for(
+        lambda: any(e.get("type") == "result" and e.get("stopped") for e in captured)
+    )
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(
+        lambda: bool(pcm._transcripts.current_messages(ctx, "opencode"))
+    )
+    rows = pcm._transcripts.current_messages(ctx, "opencode")
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[0]["content"] == "please answer"
+    assert rows[1]["content"] == "partial answer"
+
+    hung.set()
+    consumer.cancel()
+
+
+async def test_a_clean_turn_is_not_flagged_partial(tmp_path: Path) -> None:
+    """The partial flag belongs to force-close only, not to every turn."""
+    pcm = attach_stub_mcp(_make_manager(tmp_path))
+    project = pcm.create_project("stop-clean", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="clean", provider="opencode")
+    pcm._providers[chat.chat_id] = _fake_provider_service(asyncio.Event(), [])
+
+    async def fake_drive_stream(*, chat_id, request, outcome):
+        event = ResultEvent(
+            type="result",
+            result="whole answer",
+            session_id="sess-1",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+        )
+        outcome.events.append(event)
+        outcome.response_text = event.result
+        yield event
+
+    pcm._drive_stream = fake_drive_stream  # type: ignore[assignment]
+
+    async for _ in pcm.stream_chat(chat.chat_id, "hello"):
+        pass
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    stored = pcm._transcripts._load_current(ctx, "opencode")
+    turns = stored["turns"]
+    assert len(turns) == 1
+    assert turns[0]["response"] == "whole answer"
+    assert "is_partial" not in turns[0]

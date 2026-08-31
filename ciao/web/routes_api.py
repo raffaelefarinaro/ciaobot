@@ -37,6 +37,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
+from ciao import proposal_tracking
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
@@ -3114,7 +3115,18 @@ def _overlay_transcript_metadata(
             last = index
     if last is not None:
         targets.append(last)
-    for index, source in zip(targets, metadata):
+    # Right-align rather than zip from the front. The two lists cover
+    # different spans whenever the session file is shorter than the durable
+    # transcript — a resumed or handed-over chat's JSONL starts at the resume
+    # point while the transcript store holds every turn — and pairing from the
+    # front then attributed every token count and context % to the wrong turn,
+    # starting at the very first row. Both lists always end on the newest
+    # turn, so matching their tails keeps the pairing correct in either
+    # direction and simply leaves the unmatched head without metadata.
+    pairs = min(len(targets), len(metadata))
+    if not pairs:
+        return
+    for index, source in zip(targets[-pairs:], metadata[-pairs:]):
         for key in ("usage", "quota", "effective_model"):
             if source.get(key):
                 entries[index][key] = source[key]
@@ -7494,18 +7506,21 @@ def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
     return False
 
 
-def _stable_proposal_id(workspace: str, path: str, kind: str, text: str, source: str, dup: int) -> str:
-    """A content-derived, stable id for one queued proposal.
-
-    The id hashes the bullet's content plus the workspace and file it lives in,
-    so dismissing a neighbouring row never renumbers or renames a survivor.
-    ``dup`` is the occurrence index among identical bullets inside one file,
-    used only to keep two textually identical rows addressable; it is stable
-    because it counts only same-file duplicates, which are unaffected by rows
-    in other files (or non-duplicate rows in this one) being removed.
-    """
-    digest = hashlib.sha256(f"{workspace}\x00{path}\x00{kind}\x00{text}\x00{source}".encode("utf-8")).hexdigest()[:16]
-    return f"{digest}{f':{dup}' if dup else ''}"
+# A content-derived, stable id for one queued proposal.
+#
+# The id hashes the bullet's content plus the workspace and file it lives in,
+# so dismissing a neighbouring row never renumbers or renames a survivor.
+# ``dup`` is the occurrence index among identical bullets inside one file, used
+# only to keep two textually identical rows addressable; it is stable because
+# it counts only same-file duplicates, which are unaffected by rows in other
+# files (or non-duplicate rows in this one) being removed.
+#
+# Imported rather than redefined: `proposal_tracking.pending_proposal_ids`
+# decides whether a resolution helper chat can be archived by comparing ids
+# against the ones this module hands out. Two copies that drift apart stop
+# matching silently — no error, just helper chats that never archive — so
+# there is exactly one implementation.
+_stable_proposal_id = proposal_tracking.stable_proposal_id
 
 
 def _rehome_signal(config) -> dict[str, dict[str, Any]]:
@@ -7697,16 +7712,16 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
         rel_path = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
-        seen_dup: dict[tuple[str, str, str], int] = {}
         if queue.is_file():
-            for line_index, raw in enumerate(queue.read_text(encoding="utf-8").splitlines()):
-                bullet = proposal_kinds.parse_bullet(raw)
-                if bullet is None:
-                    continue
-                key = (bullet.kind, bullet.text, bullet.source)
-                dup = seen_dup.get(key, 0)
-                seen_dup[key] = dup + 1
-                pid = _stable_proposal_id(workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup)
+            # The same walk `proposal_tracking.pending_proposal_ids` uses, so
+            # the ids the review tab hands out and the ids the archive check
+            # looks for can never drift apart.
+            for entry in proposal_tracking.walk_proposal_queue(
+                workspace, rel_path, queue.read_text(encoding="utf-8")
+            ):
+                line_index, raw, bullet, pid = (
+                    entry.line, entry.raw, entry.bullet, entry.proposal_id,
+                )
                 row: dict[str, Any] = {
                     "id": pid,
                     "kind": bullet.kind,

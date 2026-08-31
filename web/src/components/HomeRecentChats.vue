@@ -22,29 +22,30 @@
         :data-lane-key="lane.key"
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
-          <div class="home-lane-heading">
-            <!-- With a single workspace the key badge and the name are pure
-                 noise: there is nothing to switch to and the workspace is the
-                 only one. Keep the status summary and "+ new". -->
-            <template v-if="hasMultipleWorkspaces">
-              <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
-              <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
-            </template>
-            <span class="home-lane-summary" aria-live="polite">
-              <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
-              <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
-              <!-- Archiving: the chat panel already closed, but the server hasn't
-                   confirmed the archive yet. Shown as the first muted fragment so
-                   the user sees where the chat went. -->
-              <span v-if="laneArchivingCount(lane)" class="home-lane-archiving"> · <span class="home-lane-archiving-dot" aria-hidden="true" />{{ laneArchivingLabel(lane) }}</span>
-              <!-- Third fragment, in the muted register: background tidy-up
-                   never needs the user, so it must not read as a demand. -->
-              <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
-              <!-- A failed extraction is a recovery case, so it reads in the
-                   warn register — it is the one tidy signal that can act. -->
-              <span v-if="laneInsightsFailedCount(lane)" class="home-lane-failed"> · <b>{{ laneInsightsFailedCount(lane) }}</b> insights failed</span>
-            </span>
-          </div>
+          <div class="home-lane-topline">
+            <div class="home-lane-heading">
+              <!-- With a single workspace the key badge and the name are pure
+                   noise: there is nothing to switch to and the workspace is the
+                   only one. Keep the status summary and "+ new". -->
+              <template v-if="hasMultipleWorkspaces">
+                <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
+                <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
+              </template>
+              <span class="home-lane-summary" aria-live="polite">
+                <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
+                <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
+                <!-- Archiving: the chat panel already closed, but the server hasn't
+                     confirmed the archive yet. Shown as the first muted fragment so
+                     the user sees where the chat went. -->
+                <span v-if="laneArchivingCount(lane)" class="home-lane-archiving"> · <span class="home-lane-archiving-dot" aria-hidden="true" />{{ laneArchivingLabel(lane) }}</span>
+                <!-- Third fragment, in the muted register: background tidy-up
+                     never needs the user, so it must not read as a demand. -->
+                <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
+                <!-- A failed extraction is a recovery case, so it reads in the
+                     warn register — it is the one tidy signal that can act. -->
+                <span v-if="laneInsightsFailedCount(lane)" class="home-lane-failed"> · <b>{{ laneInsightsFailedCount(lane) }}</b> insights failed</span>
+              </span>
+            </div>
           <div v-if="lane.newAction" class="home-lane-new-split">
             <button
               type="button"
@@ -99,24 +100,35 @@
               >{{ project.name }}</button>
             </div>
           </div>
+          </div>
           <!-- The glanceable status lives under the workspace line it
                summarizes, in the muted register: the face is an image (no
                button, no greeting bubble — the bubble belongs to the big
                first-run face in ChatLayout), the sentence reads as a status
                report. The header's border sits below this row, so the
                workspace line and its status read as one block. Nudge: when a
-               chat needs the user, a tap pulls the answer out of the agent
-               without opening the chat. -->
+               chat needs the user, a tap jumps straight to it so the question
+               or approval card can collect the real answer. -->
           <div class="home-lane-status">
             <img class="home-lane-status-face" src="/face.png" alt="" draggable="false" />
             <span class="home-lane-status-text">{{ laneStatusText(lane) }}</span>
             <button
-              v-for="chatId in laneNudgeChatIds(lane)"
-              :key="chatId"
+              v-for="chat in laneNudgeChats(lane)"
+              :key="chat.chatId"
               type="button"
               class="home-lane-nudge"
-              @click="nudgeChat(chatId)"
+              :aria-label="`Open ${chat.title}, which needs your attention`"
+              :title="chat.title"
+              @click="nudgeChat(chat.chatId)"
             >nudge</button>
+            <!-- Past the cap the row would overflow its single ellipsised
+                 line with buttons a screen reader cannot tell apart anyway;
+                 the remainder is stated instead, and every chat still has its
+                 own row below. -->
+            <span
+              v-if="laneNudgeOverflow(lane)"
+              class="home-lane-nudge-more"
+            >+{{ laneNudgeOverflow(lane) }} more below</span>
           </div>
         </header>
 
@@ -531,7 +543,12 @@ function laneInsightsFailedCount(lane: HomeLane): number {
 // with what is rendered. Tidying/archiving ride along in their muted fragments
 // even though they are not part of the lane's active tiers.
 function laneStatusText(lane: HomeLane): string {
-  const needs = laneNeedsCount(lane)
+  // Both actionable tiers, as the glanceable sentence has always counted
+  // them: an unread reply wants the user even though it is not blocking the
+  // agent on a direct answer, and counting only `needsYou` told a reader with
+  // unread replies waiting that "nothing needs your attention". The tiers are
+  // mutually exclusive, so adding them cannot double-count a chat.
+  const needs = laneNeedsCount(lane) + laneUnreadCount(lane)
   const sentences: string[] = []
   sentences.push(needs
     ? `${needs} chat${needs === 1 ? '' : 's'} need${needs === 1 ? 's' : ''} your attention`
@@ -549,12 +566,28 @@ function laneStatusText(lane: HomeLane): string {
 // agent is blocked on this user and a pull from home can actually help. The
 // per-lane derivation keeps the button scoped to the workspace the reader is
 // standing in.
-function laneNudgeChatIds(lane: HomeLane): string[] {
-  return lane.tiers.needsYou.map(chat => chat.chat_id)
+//
+// Capped because these sit in a single-line, ellipsised status row: past a
+// few they push the sentence out of view. Each carries its chat's title so
+// the buttons are distinguishable — they are otherwise identical to a screen
+// reader, which read the whole row as "nudge, nudge, nudge".
+const _NUDGE_LIMIT = 3
+
+function laneNudgeChats(lane: HomeLane): { chatId: string; title: string }[] {
+  return lane.tiers.needsYou.slice(0, _NUDGE_LIMIT).map(chat => ({
+    chatId: chat.chat_id,
+    title: chat.title || 'Untitled chat',
+  }))
 }
 
-// Open the blocked chat so its question or approval card can collect the real
-// answer. Sending arbitrary text here would answer AskUserQuestion with it.
+function laneNudgeOverflow(lane: HomeLane): number {
+  return Math.max(0, lane.tiers.needsYou.length - _NUDGE_LIMIT)
+}
+
+// Opens the blocked chat: its question or approval card is what collects the
+// real answer, and sending arbitrary text from here would answer an
+// AskUserQuestion with it. Named "nudge" for what it does for the reader —
+// one tap from home to the thing that is waiting on them.
 function nudgeChat(chatId: string): void {
   void store.switchChat(chatId)
 }
@@ -869,8 +902,12 @@ defineExpose({ onArrow })
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
 }
 
-.home-lane-heading,
-.home-lane-header > .home-lane-new-split {
+/* Row one of the header: the workspace line and the "+ new" split share it,
+   pushed to the two ends. The split must stay a compact control here — it
+   was previously caught by this row's own justify-content, which flung
+   "+ new" and the caret to opposite edges of the lane and centered the
+   workspace name in the leftover space. */
+.home-lane-topline {
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -880,7 +917,14 @@ defineExpose({ onArrow })
 }
 
 .home-lane-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
   align-items: baseline;
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* Glanceable status: the compact face beside a plain sentence, in the muted
@@ -936,6 +980,15 @@ defineExpose({ onArrow })
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* The tail of a capped nudge list: muted, not a control — the chats it counts
+   are reachable as their own rows below. */
+.home-lane-nudge-more {
+  flex: 0 0 auto;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .home-lane-heading {
@@ -1106,6 +1159,8 @@ defineExpose({ onArrow })
   display: flex;
   flex: 0 0 auto;
   align-items: stretch;
+  /* Explicitly not the topline's space-between: both buttons hug one end. */
+  justify-content: flex-start;
 }
 
 .home-lane-new--split {

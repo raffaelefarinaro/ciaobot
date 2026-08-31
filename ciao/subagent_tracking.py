@@ -425,13 +425,22 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
     # The CLI's prompt queue, in order. Each entry is one of:
-    #   None   — an ordinary prompt (no synthesis-nudge window)
-    #   False  — a completion notification still queued (window open)
-    #   True   — a completion notification dequeued, awaiting an assistant
-    #            reply (window open)
+    #   None         — an ordinary prompt (no synthesis-nudge window)
+    #   "queued"     — a completion notification still queued (window open)
+    #   "dequeued"   — a notification taken off the queue, not yet seen as a
+    #                  user record (window open)
+    #   "surfaced"   — a notification present as a user record, awaiting an
+    #                  assistant reply (window open)
     # Dequeues are matched to the front of this queue so a dequeue of an
     # ordinary prompt never claims a notification still queued behind it.
-    queue: list[bool | None] = []
+    # "dequeued" and "surfaced" are separate states because one notification
+    # normally passes through both: it is dequeued, and then the very same
+    # notification lands again as a user record. Collapsing them made that one
+    # notification occupy two entries, so the single assistant reply that
+    # followed closed only one and `notification_pending` stayed true for the
+    # rest of the session — which pins `held_ticks` in the nudge poller and
+    # makes the next real notification start out already past its grace.
+    queue: list[str | None] = []
 
     try:
         fh = path.open(encoding="utf-8")
@@ -466,14 +475,14 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     # pending until an assistant reply closes it.
                     if queue:
                         front = queue.pop(0)
-                        if front is False:
-                            queue.append(True)
+                        if front == "queued":
+                            queue.append("dequeued")
                     continue
                 else:
                     content = record.get("content")
                     if isinstance(content, str) and _notification_fields(content):
                         _apply_notification(state, content)
-                        queue.append(False)
+                        queue.append("queued")
                     else:
                         queue.append(None)
                 continue
@@ -482,8 +491,8 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # Only an assistant reply to a dequeued/surfaced notification
                 # closes its window. A normal parent record after enqueue is
                 # not evidence that the completion notification was handled.
-                for index, claimed in enumerate(queue):
-                    if claimed:
+                for index, entry in enumerate(queue):
+                    if entry in ("dequeued", "surfaced"):
                         queue.pop(index)
                         break
                 message = record.get("message")
@@ -548,7 +557,18 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # record follows it, the CLI has not turned it into a reply
                 # yet — that is exactly the window where steering the nudge
                 # kills the run (see notification_pending).
-                queue.append(True)
+                #
+                # A notification that went through the queue is already
+                # tracked: this record IS the dequeued entry arriving, not a
+                # second notification. Promote the oldest one instead of
+                # appending, or a queued-then-dequeued notification would need
+                # two assistant replies to close and never would.
+                for index, entry in enumerate(queue):
+                    if entry == "dequeued":
+                        queue[index] = "surfaced"
+                        break
+                else:
+                    queue.append("surfaced")
                 continue
             if _is_countable_user_turn(content):
                 user_idx += 1

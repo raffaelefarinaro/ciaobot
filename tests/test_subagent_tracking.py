@@ -475,3 +475,68 @@ def test_dequeue_of_notification_stays_pending_until_reply(tmp_path: Path) -> No
     ]
     state = parse_session_subagents(_write_session(tmp_path, records))
     assert state.notification_pending is False
+
+
+def test_dequeued_notification_that_lands_as_a_user_record_closes_on_one_reply(
+    tmp_path: Path,
+) -> None:
+    """The realistic ordering: enqueue → dequeue → user record → reply.
+
+    One notification passes through all three records, so it must occupy one
+    queue slot, not two. Counting it twice left `notification_pending` true
+    after the CLI had already answered — and a stuck pending flag pins
+    `held_ticks` in the nudge poller, so the *next* real notification starts
+    out past its grace and the nudge steers into the CLI's processing window.
+    """
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("abc123"),
+        },
+        {"type": "queue-operation", "operation": "dequeue"},
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        _assistant_text("All agents finished. Here is the report."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_pending is False
+
+
+def test_second_notification_after_a_closed_one_reopens_the_window(
+    tmp_path: Path,
+) -> None:
+    """A fresh notification still holds, and only its own reply closes it."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("abc123"),
+        },
+        {"type": "queue-operation", "operation": "dequeue"},
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        _assistant_text("First agent is done."),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("def456"),
+        },
+        {"type": "queue-operation", "operation": "dequeue"},
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_pending is True

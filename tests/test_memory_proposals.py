@@ -1462,3 +1462,35 @@ def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "- legacy plain learning bullet" in text
     assert "(x1) A brand new structured learning." in text
+
+
+def test_already_applied_guard_scopes_negation_to_its_own_bullet(
+    tmp_path: Path,
+) -> None:
+    """One "Never ..." bullet must not negate every fact below it.
+
+    `_normalize_for_match` collapses the whole file to a single line, so the
+    newline the guard used as its sentence boundary was gone by the time it
+    looked — and a markdown bullet rarely ends in `.!?`. Every fact after the
+    first negated bullet therefore read as negated, `_is_already_in_file`
+    returned False for facts plainly present, and the proposals they came from
+    were queued straight back into Review.
+    """
+    destination = tmp_path / "note.md"
+    destination.write_text(
+        "- Never commit secrets to the repository\n"
+        "- The deploy script lives at scripts/deploy.sh and runs nightly\n"
+        "- Staging mirrors production on the first Monday of the month\n",
+        encoding="utf-8",
+    )
+
+    assert mp._is_already_in_file(
+        destination, "The deploy script lives at scripts/deploy.sh and runs nightly"
+    )
+    assert mp._is_already_in_file(
+        destination, "Staging mirrors production on the first Monday of the month"
+    )
+    # The negated bullet itself still reads as negated.
+    assert not mp._is_already_in_file(
+        destination, "Commit secrets to the repository"
+    )

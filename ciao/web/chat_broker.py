@@ -512,6 +512,13 @@ class ChatStream:
         # fails to end the turn within its grace window, so Stop always
         # reacts immediately instead of waiting on a hung provider.
         "turn_task",
+        # Set by `stop_chat` immediately before it cancels `turn_task`, so the
+        # drive loop can tell "the turn we were awaiting was force-closed" from
+        # "this drive task is itself being cancelled" (shutdown). `user_stopped`
+        # cannot: it stays true until the end of the turn, so a shutdown
+        # cancellation landing anywhere in that stretch was swallowed and the
+        # drive loop carried on past its own cancellation.
+        "force_closing",
         # Open capability questions keyed by request_id, each
         # {"event": asyncio.Event(), "answer": None}. Populated by the
         # image-capability pre-flight, resolved via `resolve_capability`.
@@ -541,6 +548,7 @@ class ChatStream:
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
         self.turn_task: asyncio.Task | None = None
+        self.force_closing: bool = False
         self.pending_capability: dict[str, dict] | None = None
 
     def enqueue(

@@ -526,6 +526,59 @@ describe('the lane status row', () => {
     wrapper.unmount()
   })
 
+  it('counts unread replies as needing attention', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'unread', project_id: 'personal-project', title: 'Unread reply',
+        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(90),
+        archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    // An unread reply wants the user even though it is not blocking the agent
+    // on a direct answer; counting only the needs-you tier told a reader with
+    // replies waiting that nothing needed them.
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('2 chats need your attention. no agents working.')
+    // Only the blocked chat gets a nudge — the unread one is just unread.
+    expect(lane.findAll('.home-lane-nudge')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('caps the nudge buttons and names each one for a screen reader', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      ...['two', 'three', 'four'].map((suffix, index) => ({
+        chat_id: `asker-${suffix}`, project_id: 'personal-project', title: `Asks ${suffix}`,
+        pending_question: JSON.stringify({ questions: [{ question: 'And this?' }] }),
+        created_at: timestamp(20 + index), last_activity_at: timestamp(20 + index),
+        last_read_at: timestamp(20 + index), archived: false, local: true,
+      })),
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    const nudges = lane.findAll('.home-lane-nudge')
+    // Four blocked chats, three buttons: the row is a single ellipsised line.
+    expect(nudges).toHaveLength(3)
+    // Identical accessible names read as "nudge, nudge, nudge"; each button
+    // has to say which chat it opens.
+    const names = nudges.map(button => button.attributes('aria-label'))
+    expect(new Set(names).size).toBe(3)
+    names.forEach(name => expect(name).toMatch(/^Open .+, which needs your attention$/))
+    expect(lane.find('.home-lane-nudge-more').text()).toBe('+1 more below')
+    wrapper.unmount()
+  })
+
   it('names the needs-you chats and offers one nudge per blocked chat', async () => {
     const store = seedChats()
     store.chats = [
