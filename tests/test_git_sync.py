@@ -104,6 +104,22 @@ async def test_startup_sync_never_stages_gitignored_paths(tmp_path: Path) -> Non
     assert not any(".runtime/" in f or f.startswith("secrets/") for f in tracked)
 
 
+async def test_startup_sync_repairs_missing_secret_ignore(tmp_path: Path) -> None:
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    (repo / "secrets").mkdir()
+    (repo / "secrets" / "refresh-token.json").write_text("token\n", encoding="utf-8")
+
+    result = await sync_workspace(repo)
+
+    assert result is None
+    assert "secrets/" in (repo / ".gitignore").read_text(encoding="utf-8")
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo)
+    ).stdout.splitlines()
+    assert not any(path.startswith("secrets/") for path in tracked)
+
+
 async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None:
     repo = tmp_path / "ws"
     _init_repo(repo, with_remote=True)
@@ -112,5 +128,5 @@ async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None
         ["git", "rev-list", "--count", "HEAD"],
         cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo),
     ).stdout.strip()
-    # Only the seed commit; no extra auto-commit appeared.
-    assert log == "1"
+    # The first startup repairs the protective ignore file and commits it.
+    assert log == "2"

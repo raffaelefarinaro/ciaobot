@@ -536,7 +536,7 @@ function laneStatusText(lane: HomeLane): string {
   sentences.push(needs
     ? `${needs} chat${needs === 1 ? '' : 's'} need${needs === 1 ? 's' : ''} your attention`
     : 'nothing needs your attention')
-  const working = laneWorkingCount(lane) + laneUnreadCount(lane)
+  const working = laneWorkingCount(lane)
   sentences.push(working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working')
@@ -553,11 +553,10 @@ function laneNudgeChatIds(lane: HomeLane): string[] {
   return lane.tiers.needsYou.map(chat => chat.chat_id)
 }
 
-// Pull a nudge out of the blocked agent without opening the chat: the message
-// lands in the chat and the engine treats it as a turn, same as sending from
-// the composer. Local-only, like every send path.
+// Open the blocked chat so its question or approval card can collect the real
+// answer. Sending arbitrary text here would answer AskUserQuestion with it.
 function nudgeChat(chatId: string): void {
-  store.sendMessage(chatId, 'nudge')
+  void store.switchChat(chatId)
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
@@ -920,7 +919,7 @@ defineExpose({ onArrow })
    one blocked agent, not a lane-level primary action. */
 .home-lane-nudge {
   flex: 0 0 auto;
-  min-height: 28px;
+  min-height: 44px;
   padding: 3px 9px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
   border-radius: var(--radius-sm, 6px);

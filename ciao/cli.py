@@ -422,6 +422,7 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
 
 _WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
+    "secrets/",
     ".runtime/",
     ".claude/",
     ".agents/",

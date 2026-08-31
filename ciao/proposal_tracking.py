@@ -43,16 +43,19 @@ def pending_proposal_ids(config: Any) -> set[str]:
                 key = (bullet.kind, bullet.text, bullet.source)
                 dup = seen.get(key, 0)
                 seen[key] = dup + 1
-                pending.add(
-                    stable_proposal_id(
-                        workspace,
-                        rel_path,
-                        bullet.kind,
-                        bullet.text,
-                        bullet.source,
-                        dup,
-                    )
+                proposal_id = stable_proposal_id(
+                    workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup
                 )
+                pending.add(proposal_id)
+                # The ordinal suffix is only a rendering detail. Keep the
+                # unsuffixed identity as an alias so removing an earlier
+                # duplicate cannot make the surviving proposal look settled.
+                if dup:
+                    pending.add(
+                        stable_proposal_id(
+                            workspace, rel_path, bullet.kind, bullet.text, bullet.source, 0
+                        )
+                    )
         skill_dir = root.joinpath(*_SKILL_PROPOSALS_REL)
         if skill_dir.is_dir():
             for proposal in skill_dir.glob("*.md"):

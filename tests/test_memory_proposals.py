@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ciao import memory_proposals as mp
 from ciao import memory_tool as mt
+from ciao import proposal_tracking
 
 
 def write_guide(
@@ -669,6 +670,27 @@ def test_already_applied_guard_matches_short_exact_facts(tmp_path: Path) -> None
     destination.write_text("Use PostgreSQL, not SQLite.\n", encoding="utf-8")
 
     assert mp._is_already_in_file(destination, "Use PostgreSQL, not SQLite.")
+
+
+def test_pending_duplicate_proposal_keeps_base_identity_after_first_is_removed(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir()
+    queue.write_text(
+        "- [memory] Same fact — sources: one\n"
+        "- [memory] Same fact — sources: one\n",
+        encoding="utf-8",
+    )
+
+    class Config:
+        def workspace_names(self):
+            return ["personal"]
+
+        def workspace_vault_root(self, _workspace):
+            return tmp_path
+
+    ids = proposal_tracking.pending_proposal_ids(Config())
+    base = next(item for item in ids if ":" not in item)
+    assert base in ids
 
 
 def test_unconsumed_project_facts_queue_addressed_to_their_doc(tmp_path: Path) -> None:

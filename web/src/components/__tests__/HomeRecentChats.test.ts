@@ -536,7 +536,7 @@ describe('the lane status row', () => {
         created_at: timestamp(20), last_activity_at: timestamp(20), last_read_at: timestamp(20), archived: false, local: true,
       },
     ] as unknown as typeof store.chats
-    const sendSpy = vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+    const switchSpy = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined)
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
@@ -547,12 +547,12 @@ describe('the lane status row', () => {
 
     const nudges = lane.findAll('.home-lane-nudge')
     expect(nudges).toHaveLength(2)
-    // The blocked chats — the seeded one and the new asker — each get a nudge
-    // targeting their own chat.
+    // The blocked chats — the seeded one and the new asker — each open their
+    // own chat so the real question/approval control remains intact.
     await nudges[0].trigger('click')
-    expect(sendSpy).toHaveBeenCalledWith('asker-2', 'nudge')
+    expect(switchSpy).toHaveBeenCalledWith('asker-2')
     await nudges[1].trigger('click')
-    expect(sendSpy).toHaveBeenCalledWith('needs', 'nudge')
+    expect(switchSpy).toHaveBeenCalledWith('needs')
     wrapper.unmount()
   })
 })

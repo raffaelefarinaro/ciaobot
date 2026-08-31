@@ -11,6 +11,33 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_REQUIRED_GITIGNORE_ENTRIES = (".env", "secrets/", ".runtime/")
+
+
+def _ensure_sync_ignores(workspace: Path) -> None:
+    """Keep startup snapshots from picking up credentials or runtime state."""
+    path = workspace / ".gitignore"
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        present = {line.strip() for line in existing.splitlines()}
+        missing = [entry for entry in _REQUIRED_GITIGNORE_ENTRIES if entry not in present]
+        if not missing:
+            return
+        prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
+        path.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
+    except OSError:
+        logger.warning("Startup sync: could not enforce credential ignores", exc_info=True)
+
+
+def _protected_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    env_template = name in {".env.example", ".env.sample", ".env.template", ".env.schema"}
+    return (
+        (path == ".env" or (path.startswith(".env.") and not env_template))
+        or path.startswith("secrets/")
+        or name.endswith((".pem", ".key", ".p12", ".pfx"))
+    )
+
 
 async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tuple[int, str, str]:
     """Run a git command and return (returncode, stdout, stderr)."""
@@ -52,6 +79,10 @@ async def sync_workspace(workspace: Path) -> str | None:
     if not await _is_git_repo(workspace):
         return None
 
+    # Existing workspaces predate the setup guard. Repair it before status so
+    # newly ignored credential files never reach `git add -A`.
+    _ensure_sync_ignores(workspace)
+
     # Auto-commit local changes so pull can handle them cleanly. Untracked
     # files are staged too (`add -A`, unlike the historical `add -u`): notes,
     # logs, and whole project folders that were never added by hand would
@@ -65,6 +96,12 @@ async def sync_workspace(workspace: Path) -> str | None:
     has_changes = rc == 0 and bool(status_out.strip())
 
     if has_changes:
+        changed_paths = [line[3:].strip() for line in status_out.splitlines() if len(line) > 3]
+        protected = sorted(path for path in changed_paths if _protected_path(path))
+        if protected:
+            detail = ", ".join(protected)
+            logger.warning("Startup sync: refusing to stage protected files: %s", detail)
+            return f"Startup sync: refusing to auto-commit protected files: {detail}"
         await _git(workspace, "add", "-A")
         rc, out, err = await _git(
             workspace, "commit", "-m", "auto-commit before startup sync",
