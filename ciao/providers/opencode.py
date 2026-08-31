@@ -699,6 +699,12 @@ class OpencodeActiveHandle(ActiveHandle):
         self._session_id = session_id
 
     async def stop(self) -> None:
+        # Flag first: the streaming pump checks it on every event and at
+        # every reconnect, so the local turn ends the moment the abort is
+        # issued rather than when the server's `session.idle` happens to
+        # arrive (or when the poll backstop gives up, which could take a
+        # minute over a dead SSE subscription).
+        self._provider._stop_requested = self._session_id
         await self._provider.abort_session(self._session_id)
 
 
@@ -793,6 +799,11 @@ class OpencodeProvider(BaseSDKProvider):
         # before the session payload is built, while the prompt reuses the
         # exact same provider/model pair.
         self._turn_model: tuple[str, str] = ("", "")
+        # Session id whose turn the user asked to stop, or "". Set by the
+        # active handle's stop() and consumed by the streaming pump so the
+        # turn ends as soon as the abort is issued instead of waiting for a
+        # session.idle that may never arrive over a flaky SSE subscription.
+        self._stop_requested: str = ""
 
     def _reset_turn_state(self) -> None:
         self._emitted.clear()
@@ -804,6 +815,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
+        self._stop_requested = ""
 
     # ---------------------------------------------------------------- server
 
@@ -1892,6 +1904,13 @@ class OpencodeProvider(BaseSDKProvider):
                     prompt_accepted = True
                 decoder = SSEDecoder()
                 async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
+                    if self._stop_requested == session_id:
+                        # The user stopped the turn and the abort has been
+                        # issued: end locally now. Waiting for the server's
+                        # `session.idle` can drag through SSE reconnects and
+                        # the poll backstop, leaving Stop feeling dead.
+                        idle_seen = True
+                        return
                     try:
                         event = sse.json()
                     except ValueError:
@@ -1947,13 +1966,21 @@ class OpencodeProvider(BaseSDKProvider):
                         return
                 if prompt_rejected or idle_seen:
                     break
+                if self._stop_requested == session_id:
+                    # Stopped: no reconnects, no recovery — just finish.
+                    break
                 if reconnects >= _OPENCODE_SSE_RECONNECTS - 1:
                     break
                 reconnects += 1
                 await asyncio.sleep(0.5 * reconnects)
 
             degraded_final = False
-            if not idle_seen and prompt_accepted and not prompt_rejected:
+            if (
+                not idle_seen
+                and prompt_accepted
+                and not prompt_rejected
+                and self._stop_requested != session_id
+            ):
                 self._turn_recovered_via_poll = False
                 async for converted in self._reconcile_interrupted_turn(
                     client, session_id

@@ -506,6 +506,12 @@ class ChatStream:
         "_pending_id_seq",
         "user_stopped",
         "background",
+        # The asyncio.Task currently iterating this stream's turn events.
+        # Set by the drive loop before awaiting the turn; cleared when the
+        # turn ends. `stop_chat` cancels it after the provider-level stop
+        # fails to end the turn within its grace window, so Stop always
+        # reacts immediately instead of waiting on a hung provider.
+        "turn_task",
         # Open capability questions keyed by request_id, each
         # {"event": asyncio.Event(), "answer": None}. Populated by the
         # image-capability pre-flight, resolved via `resolve_capability`.
@@ -534,6 +540,7 @@ class ChatStream:
         # queued user messages — a user send while one is active
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
+        self.turn_task: asyncio.Task | None = None
         self.pending_capability: dict[str, dict] | None = None
 
     def enqueue(

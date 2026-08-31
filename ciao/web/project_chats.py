@@ -6160,8 +6160,21 @@ class ProjectChatManager:
             try:
                 while True:
                     turn_assistant_text = ""
+                    # Assistant text streamed so far this turn, used as the
+                    # synthetic result when the user force-stops the turn
+                    # before the provider emits its terminal event.
+                    turn_streamed_text = ""
                     question_paused = False
-                    try:
+
+                    async def _run_turn() -> None:
+                        # One stream_chat() pass, executed as a dedicated
+                        # task so `stop_chat` can force-close a turn whose
+                        # provider never delivers a terminal event (hung
+                        # CLI, dead SSE subscription) instead of blocking
+                        # forever in the event iterator.
+                        nonlocal turn_assistant_text, turn_streamed_text
+                        nonlocal question_paused, had_error
+                        nonlocal had_provider_progress
                         async for event in self.stream_chat(
                             chat_id,
                             current_prompt,
@@ -6207,6 +6220,11 @@ class ProjectChatManager:
                                     payload["duration_ms"] = duration_ms
                             if payload:
                                 stream.publish(payload)
+                            if isinstance(event, AssistantTextDelta):
+                                # Parent-turn prose only: subagent deltas are
+                                # attributed to their own agent in the UI.
+                                if event.parent_tool_use_id is None:
+                                    turn_streamed_text += event.text
                             if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent, PermissionRequestEvent)):
                                 had_provider_progress = True
                             if isinstance(event, PermissionRequestEvent):
@@ -6273,7 +6291,7 @@ class ProjectChatManager:
                                                     chat_id,
                                                 )
                                         question_paused = True
-                                        break
+                                        return
                                     continue
                                 q_provider = self._providers.get(chat_id)
                                 if q_provider is not None:
@@ -6285,7 +6303,7 @@ class ProjectChatManager:
                                             chat_id,
                                         )
                                 question_paused = True
-                                break
+                                return
                             if isinstance(event, ToolUseEvent):
                                 # Schedule a debounced file snapshot for
                                 # Write/Edit/MultiEdit/NotebookEdit/Bash creates.
@@ -6363,6 +6381,71 @@ class ProjectChatManager:
                                         )
                                 else:
                                     turn_assistant_text = event.result or ""
+
+                    turn_task = asyncio.create_task(
+                        _run_turn(), name=f"chat-turn-{chat_id}"
+                    )
+                    stream.turn_task = turn_task
+                    try:
+                        await turn_task
+                    except asyncio.CancelledError:
+                        if not stream.user_stopped:
+                            # The drive task itself was cancelled (shutdown):
+                            # propagate after the per-turn cleanup.
+                            raise
+                        # The provider never delivered a terminal event
+                        # within stop_chat's grace window (hung CLI, dead SSE
+                        # subscription), so the turn was force-closed. Publish
+                        # a synthetic result carrying the partial answer so
+                        # every client leaves streaming state immediately; the
+                        # streamed deltas are already in each client's
+                        # timeline, and the containment skip below keeps the
+                        # final bubble from duplicating them.
+                        logger.info(
+                            "Turn force-closed by user stop for chat %s", chat_id
+                        )
+                        turn_assistant_text = turn_streamed_text
+                        chat_now = self._chats.get(chat_id)
+                        completed_at = _now_iso()
+                        duration_ms = None
+                        sent_at_rec = ""
+                        if current_turn_index is not None:
+                            started_perf = self._turn_perf_started.pop(
+                                (chat_id, current_turn_index), None
+                            )
+                            if started_perf is not None:
+                                duration_ms = int(
+                                    (time.perf_counter() - started_perf) * 1000
+                                )
+                            if chat_now is not None:
+                                rec = chat_now.user_turn_timings.setdefault(
+                                    str(current_turn_index), {}
+                                )
+                                rec["completed_at"] = completed_at
+                                if duration_ms is not None:
+                                    rec["duration_ms"] = duration_ms
+                                sent_at_rec = rec.get("sent_at", "")
+                                self._save()
+                        stop_payload: dict = {
+                            "type": "result",
+                            "text": turn_streamed_text,
+                            "is_error": False,
+                            "stopped": True,
+                            "effective_model": (
+                                chat_now.model if chat_now else ""
+                            ),
+                            "usage": {},
+                            "quota": {},
+                            "session_id": (
+                                chat_now.session_id if chat_now else ""
+                            ) or "",
+                        }
+                        stop_payload["completed_at"] = completed_at
+                        if sent_at_rec:
+                            stop_payload["sent_at"] = sent_at_rec
+                        if duration_ms is not None:
+                            stop_payload["duration_ms"] = duration_ms
+                        stream.publish(stop_payload)
                     except Exception as exc:
                         # A user-initiated stop may surface here (if the SDK
                         # raises rather than yielding a terminal ResultEvent)
@@ -6496,6 +6579,10 @@ class ProjectChatManager:
                                     cm_park.pending_queue = list(parked)
                                     self._save()
                             break
+                    finally:
+                        # Clear before the next turn (or the stream teardown)
+                        # can register a different task on the same stream.
+                        stream.turn_task = None
 
                     if turn_assistant_text:
                         last_assistant_text = turn_assistant_text
@@ -7638,10 +7725,26 @@ class ProjectChatManager:
             return False
         return stream.resolve_capability(request_id, action, model_id)
 
+    # How long stop_chat waits for a provider-level stop (interrupt/abort)
+    # to end the turn cleanly before force-closing the local iteration.
+    # Long enough for a healthy CLI ack + terminal event, short enough that
+    # Stop still feels instant when the provider is wedged.
+    _STOP_GRACE_S = 2.0
+
     async def stop_chat(self, chat_id: str) -> bool:
-        # Mark the active stream as user-stopped so the drive loop flushes
-        # any queued follow-up messages instead of dropping them. A stop is
-        # intentional, not an error.
+        """Stop the chat's in-flight turn.
+
+        Two layers, so Stop works with every provider and never hangs:
+
+        1. Provider stop (interrupt/abort), bounded by ``_STOP_GRACE_S``.
+           A clean provider-level end is preferred: the terminal event
+           keeps transcript, usage, and provider-side bookkeeping exact.
+        2. Force close: if the turn is still running when the grace window
+           expires, cancel the turn task. The drive loop turns that into a
+           synthetic result carrying the partial answer, so every client
+           leaves streaming state immediately and queued follow-ups still
+           flush.
+        """
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
@@ -7653,7 +7756,73 @@ class ProjectChatManager:
         provider = self._providers.get(chat_id)
         if provider is None:
             return False
-        return await provider.stop_active()
+        turn_task = stream.turn_task if stream is not None else None
+        if turn_task is None or turn_task.done():
+            # No local turn to close (between turns, or the HTTP fallback
+            # racing a fresh send): the bounded provider stop is all there
+            # is to do.
+            try:
+                return await asyncio.wait_for(
+                    provider.stop_active(), timeout=self._STOP_GRACE_S
+                )
+            except asyncio.TimeoutError:
+                return False
+            except Exception:  # noqa: BLE001 — stop must never wedge a socket
+                logger.debug(
+                    "Provider stop failed for chat %s", chat_id, exc_info=True
+                )
+                return False
+        handle = provider.active_handle()
+        # Detached: a hung interrupt must not delay the force close below,
+        # and the pending ack unwinds when the escalation disconnect (or
+        # the generator's own cleanup) tears the transport down.
+        stop_task: asyncio.Task | None = (
+            asyncio.create_task(handle.stop()) if handle is not None else None
+        )
+        stopped = False
+        try:
+            await asyncio.wait_for(turn_task, timeout=self._STOP_GRACE_S)
+            # The turn ended cleanly inside the grace window (its terminal
+            # event drove the normal result path); nothing to force.
+            stopped = True
+        except asyncio.TimeoutError:
+            # wait_for already cancelled the turn task; await it so the
+            # drive loop's cancellation handler (synthetic result) and the
+            # generator teardown fully unwind before we escalate.
+            stopped = True
+            try:
+                await turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                logger.debug(
+                    "Turn errored while force-stopping chat %s",
+                    chat_id,
+                    exc_info=True,
+                )
+            # Claude escalation: a wedged CLI means generation may never
+            # have stopped, and the interrupted turn can leave a stale
+            # terminal message in the SDK transport buffer that would
+            # truncate the next turn's receive_response(). Dropping the
+            # client solves both; the next turn reconnects and resumes the
+            # session (ProviderService._provider is rebuilt on demand).
+            chat_meta = self._chats.get(chat_id)
+            if chat_meta is not None and chat_meta.provider == "claude":
+                try:
+                    await asyncio.wait_for(provider.disconnect(), timeout=5.0)
+                except Exception:  # noqa: BLE001 — teardown is best-effort
+                    logger.debug(
+                        "Disconnect after stop failed for chat %s",
+                        chat_id,
+                        exc_info=True,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # The turn raised a real error inside the grace window; its own
+            # handler already published an error result.
+            stopped = True
+        return stopped
 
     # ── Auto-title generation ────────────────────────────────────────────
 
