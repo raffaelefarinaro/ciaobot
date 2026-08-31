@@ -158,6 +158,23 @@ _RETRY_STATUSES = {"pending", "stopped", ""}
 # to the nudge drain, never to a reply the user asked for: see
 # ProjectChatManager._is_worth_announcing_nudge_reply.
 _NUDGE_ANNOUNCE_MIN_CHARS = 4
+# Patterns an unattended parent emits while still waiting on its background
+# subagents. A run that ended on one of these never synthesized its agents'
+# results — the follow-up turn died before producing a report — so the run is
+# not done even though the turn completed "cleanly". Matched loosely against
+# the whole flattened reply (case-insensitive, anchored on the waiting
+# phrase) so wording changes do not defeat the guard.
+_INTERIM_SUBAGENT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bwaiting on\b",
+        r"\bwaiting for\b.*\bsubagent",
+        r"\bstill running\b.*\bsubagent",
+        r"\bshall report back\b",
+        r"\bwill report back\b",
+        r"\breport back once\b",
+    )
+)
 # Prompt used to resume a session after a mid-response connection drop. The
 # original prompt is NOT replayed — the partial turn already ran (and may have
 # executed tools), so we resume the existing session and ask it to continue,
@@ -804,6 +821,37 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
 # ── Data models ──────────────────────────────────────────────────────────
 
 
+def _normalize_chat_helper(value: Any) -> dict[str, Any]:
+    """Fail closed on lifecycle metadata supplied by older or invalid clients."""
+    if not isinstance(value, dict) or value.get("kind") != "proposal":
+        return {}
+    intent = str(value.get("intent") or "")
+    policy = str(value.get("archive_policy") or "")
+    if (intent, policy) not in {
+        ("resolve", "when_resolved"),
+        ("review", "manual"),
+    }:
+        return {}
+    raw_ids = value.get("proposal_ids")
+    if not isinstance(raw_ids, list):
+        return {}
+    proposal_ids = list(
+        dict.fromkeys(
+            item
+            for item in raw_ids[:100]
+            if isinstance(item, str) and 0 < len(item) <= 128
+        )
+    )
+    if not proposal_ids:
+        return {}
+    return {
+        "kind": "proposal",
+        "intent": intent,
+        "proposal_ids": proposal_ids,
+        "archive_policy": policy,
+    }
+
+
 @dataclass(slots=True)
 class ProjectInfo:
     project_id: str
@@ -979,6 +1027,10 @@ class ChatInfo:
     # only on the automation side). Empty for interactive chats.
     schedule_id: str = ""
     schedule_title: str = ""
+    # Server-owned lifecycle metadata for chats created by the proposal review
+    # UI. Resolution helpers may auto-archive only after their target proposal
+    # IDs have durably left the queue; discussion helpers always remain manual.
+    helper: dict = field(default_factory=dict)
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
     # off insights extraction, a project-doc fold, a trajectory and memory
     # proposals (ciao/insights.py:extract_and_append), and until now none of
@@ -1017,6 +1069,7 @@ class ChatInfo:
             "fork_base_title": self.fork_base_title,
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
+            "helper": dict(self.helper),
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1210,6 +1263,7 @@ class ProjectChatManager:
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
         self._pending_push: dict[str, asyncio.Task] = {}
+        self._archive_locks: dict[str, asyncio.Lock] = {}
         # Per-chat background subagent completion watchers. Each active turn
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
@@ -1368,6 +1422,7 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
+                helper=_normalize_chat_helper(cd.get("helper")),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1465,6 +1520,7 @@ class ProjectChatManager:
                     "fork_base_title": c.fork_base_title,
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
+                    "helper": c.helper,
                     "postprocess": c.postprocess,
                 }
                 for cid, c in self._chats.items()
@@ -3090,6 +3146,7 @@ class ProjectChatManager:
         model: str | None = None,
         mode: str | None = None,
         provider: str | None = None,
+        helper: dict | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -3133,6 +3190,7 @@ class ProjectChatManager:
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
             created_at=_now_iso(),
+            helper=_normalize_chat_helper(helper),
         )
         self._chats[cid] = chat
         self._save()
@@ -3704,6 +3762,39 @@ class ProjectChatManager:
         })
         return True
 
+    async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
+        """Archive a clean resolution helper once all owned proposals are gone."""
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            return False
+        helper = _normalize_chat_helper(chat.helper)
+        if helper.get("archive_policy") != "when_resolved":
+            return False
+        if (
+            self._broker.get(chat_id) is not None
+            or chat.last_response_status != "success"
+            or not chat.last_response.strip()
+            or chat.pending_question
+            or chat.pending_permission
+            or chat.retry_status
+            or self._background_agents_last.get(chat_id, 0) > 0
+        ):
+            return False
+        try:
+            from ciao.proposal_tracking import pending_proposal_ids
+
+            pending = pending_proposal_ids(self._config)
+        except Exception:  # noqa: BLE001 — uncertainty must keep the chat visible
+            logger.exception("Could not verify proposal helper %s", chat_id)
+            return False
+        if any(pid in pending for pid in helper["proposal_ids"]):
+            return False
+        project = self._projects.get(chat.project_id)
+        outcome = await self.archive_chat(chat_id)
+        if outcome is not None:
+            self.run_archive_postprocess(chat_id, outcome, chat, project)
+        return bool(chat.archived)
+
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
@@ -3748,6 +3839,19 @@ class ProjectChatManager:
         return turn_count, filtered_jsonl, result
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
+        """Serialize concurrent archive requests for one chat."""
+        lock = self._archive_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:
+                chat = self._chats.get(chat_id)
+                if chat is None or chat.archived:
+                    return None
+                return await self._archive_chat_unlocked(chat_id)
+        finally:
+            if not lock.locked():
+                self._archive_locks.pop(chat_id, None)
+
+    async def _archive_chat_unlocked(self, chat_id: str) -> ArchiveOutcome | None:
         """Archive a chat's transcript and mark it as archived.
 
         Also disconnects any live provider and reclaims provider-side session
@@ -4201,6 +4305,7 @@ class ProjectChatManager:
         chat.pending_queue = []
         chat.last_response = ""
         chat.last_response_status = ""
+        chat.helper = {}
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -5781,6 +5886,22 @@ class ProjectChatManager:
         flat = " ".join((text or "").strip().splitlines()).strip()
         return len(flat) >= _NUDGE_ANNOUNCE_MIN_CHARS
 
+    @staticmethod
+    def _is_interim_subagent_text(text: str) -> bool:
+        """True when ``text`` reads as "still waiting on my subagents".
+
+        An unattended run whose final output is one of these interim messages
+        never synthesized its background agents' results: the completion turn
+        died before producing a report, so anything the run was supposed to do
+        with the results (write the log, commit) did not happen. Used by
+        :meth:`dispatch_schedule` to keep such a run visible instead of
+        auto-archiving a stub (the 2026-08-30 daily-log failure).
+        """
+        flat = " ".join((text or "").strip().splitlines()).strip()
+        if not flat:
+            return False
+        return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
     def start_stream(
         self,
         chat_id: str,
@@ -6497,6 +6618,7 @@ class ProjectChatManager:
                     self._announce_result_ready(
                         chat_id, project_id, title, snippet
                     )
+                    asyncio.create_task(self._maybe_archive_proposal_helper(chat_id))
 
         asyncio.create_task(_drive())
         return stream
@@ -6742,6 +6864,21 @@ class ProjectChatManager:
 
         last_count = -1
         last_size = -1
+        # Pending-notification handling. The completion watcher delays the
+        # synthesis nudge while the CLI is still processing a
+        # <task-notification>: steering into that exact window is the race
+        # that killed the 2026-08-30 daily-log run (the two prompts crossed
+        # on the transport, the SDK read task was cancelled, and the run
+        # ended on an interim message with the agents' data never
+        # synthesized). The hold is bounded at two ticks (~6s): a CLI that
+        # died before answering — the other half of that same failure —
+        # must not leave the chat parked on the interim message until the
+        # deadline, and steer() queues on the persistent client, so firing
+        # after the grace still lands after whatever turn the CLI is
+        # running instead of interleaving with it. "Nudged" is reported to
+        # clients only once, with the zero-count publish it belongs to.
+        held_ticks = 0
+        nudged = False
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
@@ -6756,9 +6893,15 @@ class ProjectChatManager:
                     last_size = size
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
-                if count != last_count:
-                    nudged = False
-                    if count == 0 and last_count > 0:
+                pending = state.notification_pending
+                if pending:
+                    held_ticks += 1
+                grace_expired = pending and held_ticks > 2
+                ready_to_nudge = (
+                    count == 0 and not nudged and (not pending or grace_expired)
+                )
+                if count != last_count or ready_to_nudge:
+                    if ready_to_nudge:
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
@@ -6766,25 +6909,31 @@ class ProjectChatManager:
                         # Poke the parent to synthesize a final report. The
                         # CLI won't auto-continue the turn on its own, so
                         # without this the chat sits on the interim
-                        # "I'll report back" message forever. When the
-                        # nudge lands on the live client the between-turns
+                        # "I'll report back" message forever. The
+                        # unprocessed-notification hold above decides *when*:
+                        # not inside the CLI's own window (the race that
+                        # killed the 2026-08-30 daily-log run), or, if the
+                        # window never closes, after the bounded grace. When
+                        # the nudge lands on the live client the between-turns
                         # drain publishes the reply (and its own push); we
                         # only fall back to a bare push if the nudge could
-                        # not be delivered.
-                        # Nudge the parent to synthesize a final report; its
-                        # completion pushes the real chat notification. We
-                        # intentionally do NOT send a separate generic
-                        # "Background agents finished" push — it stacked a
-                        # second, content-free notification on top of the
-                        # chat's own result push (user feedback). The in-app
-                        # subagent count below still updates the UI.
+                        # not be delivered. We intentionally do NOT send a
+                        # separate generic "Background agents finished" push
+                        # — it stacked a second, content-free notification
+                        # on top of the chat's own result push (user
+                        # feedback). The in-app subagent count below still
+                        # updates the UI.
+                        # The question hold stays absolute (inside the
+                        # nudge call); only the notification hold above
+                        # carries the bounded grace.
                         nudged = await self._nudge_synthesis_after_subagents(
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
-                    self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
+                    if count != last_count or (ready_to_nudge and nudged):
+                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
-                if count == 0:
+                if count == 0 and (not pending or nudged or grace_expired):
                     break
                 await asyncio.sleep(3)
         finally:
@@ -6854,11 +7003,14 @@ class ProjectChatManager:
         a live client, False otherwise (caller falls back to a plain push).
 
         ``awaiting_user_answer`` holds the nudge back when the parent ended its
-        turn by asking the user a question: answering it is the user's move, and
-        nudging would both bury the question and answer on their behalf. The
-        question stays the last thing in the transcript; the finished agents are
-        still surfaced by the ``chat_subagents_ready`` count dropping to zero
-        and by the subagent panel refresh it triggers.
+        turn by asking the user a question: answering it is the user's move,
+        and nudging would both bury the question and answer on their behalf.
+        (A still-unprocessed completion notification is a second hold reason,
+        but it carries its own bounded grace in the watcher, so the watcher
+        passes the question signal only.) The question stays the last thing
+        in the transcript; the finished agents are still surfaced by the
+        ``chat_subagents_ready`` count dropping to zero and by the subagent
+        panel refresh it triggers.
         """
         if awaiting_user_answer:
             return False
@@ -7211,6 +7363,7 @@ class ProjectChatManager:
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
+                        asyncio.create_task(self._maybe_archive_proposal_helper(chat_id))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app
@@ -8065,6 +8218,28 @@ class ProjectChatManager:
                         outcome.final_text = synth_text
                     if synth_error:
                         outcome.is_error = True
+                    elif not synth_text:
+                        # A drain result that carries neither text nor error
+                        # says nothing; fall through to the interim-text
+                        # guard below with whatever the parent last said.
+                        pass
+                if not outcome.is_error and self._is_interim_subagent_text(
+                    outcome.final_text
+                ):
+                    # The synthesis turn never happened (or the CLI died
+                    # before writing one — the 2026-08-30 daily-log run: the
+                    # nudge and the final task-notification crossed, the SDK
+                    # read task was cancelled, and the run "ended" on an
+                    # interim message). The parent's data is un-synthesized
+                    # and whatever work was supposed to follow — writing the
+                    # log, committing — never ran. The run is not done: keep
+                    # the chat visible instead of archiving a stub.
+                    outcome.subagents_pending = True
+                    logger.warning(
+                        "Schedule chat %s ended on interim subagent text with "
+                        "no synthesis turn; keeping it visible",
+                        target_id,
+                    )
             self._last_drain_result.pop(target_id, None)
 
         needs_user = False

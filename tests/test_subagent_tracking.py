@@ -331,3 +331,84 @@ def test_running_background_agents_drops_agents_with_finished_transcripts(
         parent, "aaa111", [_assistant_text("Traced it.")], age_seconds=600
     )
     assert running_background_agents(parent, state) == 1
+
+
+# ── Pending-notification window (synthesis-nudge hold) ───────────────────
+
+
+def test_notification_pending_after_enqueue_without_reply(tmp_path: Path) -> None:
+    """An enqueued completion the CLI never answered leaves the window open.
+
+    This is the 2026-08-30 daily-log shape: the last agent's notification was
+    enqueued, the nudge raced it, and the run ended without any assistant
+    record after the enqueue.
+    """
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        _user_text(_notification("abc123")),  # interim turn already answered
+        _assistant_text("Waiting on the last agent."),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("def456"),
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is True
+
+
+def test_notification_pending_after_user_record_without_reply(
+    tmp_path: Path,
+) -> None:
+    """A notification user record no assistant answered holds the window too."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        # Trailing Stop-hook bookkeeping: not a reply, keeps the window open.
+        {"type": "system", "subtype": "stop_hook_summary"},
+        {"type": "attachment", "attachment": {"type": "hook_success"}},
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is True
+
+
+def test_notification_window_closes_when_cli_answers(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("abc123"),
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+        },
+        _assistant_text("All agents finished. Here is the report."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is False
+
+
+def test_non_notification_enqueue_never_holds_the_window(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "some plain queued message",
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_pending is False

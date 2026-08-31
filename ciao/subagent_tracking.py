@@ -163,6 +163,14 @@ class SessionSubagentState:
     # Last assistant message that carried prose. The synthesis nudge is held
     # back when it ends in a question to the user.
     last_assistant_text: str = ""
+    # True when a completed task-notification has been enqueued but not yet
+    # processed by the CLI (no assistant turn has followed it). The synthesis
+    # nudge must not be steered in that window: the two prompts cross on the
+    # transport and the run can end with the notification never synthesized
+    # (the 2026-08-30 daily-log failure: the CLI recorded the final
+    # notification as a prompt, the read task was cancelled, and the run
+    # archived on an interim "Waiting on X" message).
+    notification_pending: bool = False
 
     @property
     def awaiting_user_answer(self) -> bool:
@@ -416,6 +424,10 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # when the tool_result record lands.
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
+    # True while a completion notification is in flight but unprocessed: an
+    # enqueue (or notification user record) exists and no assistant record has
+    # followed it. Set, cleared, and consumed below.
+    notification_pending = False
 
     try:
         fh = path.open(encoding="utf-8")
@@ -440,18 +452,30 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # A completion notification can be enqueued and later removed
                 # without ever becoming a user record (e.g. the process exits
                 # first), so the enqueue itself must count as completion.
-                content = record.get("content")
-                if record.get("operation") == "enqueue" and isinstance(content, str):
-                    _apply_notification(state, content)
+                if record.get("operation") == "dequeue":
+                    # The CLI took the next prompt: the turn for it is being
+                    # built. The nudge must not steer into this window — the
+                    # two prompts would cross on the transport the same way
+                    # (the dequeue record never has assistant output after it
+                    # when the run dies, so the user-record path below cannot
+                    # clear this).
+                    notification_pending = False
+                else:
+                    content = record.get("content")
+                    if isinstance(content, str) and _notification_fields(content):
+                        _apply_notification(state, content)
+                        notification_pending = True
                 continue
 
-            message = record.get("message")
-
-            if rtype == "assistant" and isinstance(message, dict):
+            if rtype == "assistant":
+                # The CLI produced a turn: any notification sent before it is
+                # processed.
+                notification_pending = False
+                message = record.get("message")
                 assistant_text = _text_content(message)
                 if assistant_text.strip():
                     state.last_assistant_text = assistant_text
-                blocks = message.get("content")
+                blocks = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
@@ -473,6 +497,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
             if rtype != "user":
                 continue
 
+            message = record.get("message")
             tool_use_result = record.get("toolUseResult")
             if isinstance(tool_use_result, dict) and tool_use_result.get("agentId"):
                 agent_id = _normalize_agent_id(str(tool_use_result["agentId"]))
@@ -504,10 +529,16 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
             content = _text_content(message)
             if _notification_fields(content) is not None:
                 _apply_notification(state, content)
+                # A notification landed as a user record. If no assistant
+                # record follows it, the CLI has not turned it into a reply
+                # yet — that is exactly the window where steering the nudge
+                # kills the run (see notification_pending).
+                notification_pending = True
                 continue
             if _is_countable_user_turn(content):
                 user_idx += 1
 
+    state.notification_pending = notification_pending
     return state
 
 

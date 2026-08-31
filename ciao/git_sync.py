@@ -52,12 +52,20 @@ async def sync_workspace(workspace: Path) -> str | None:
     if not await _is_git_repo(workspace):
         return None
 
-    # Auto-commit local changes so pull can handle them cleanly.
+    # Auto-commit local changes so pull can handle them cleanly. Untracked
+    # files are staged too (`add -A`, unlike the historical `add -u`): notes,
+    # logs, and whole project folders that were never added by hand would
+    # otherwise sit out of every automatic backup indefinitely — the only
+    # path that commits anything (Settings "Sync with Remote") is manual, so
+    # an untracked file could live forever with "everything says it backed
+    # up" (the 2026-08-30 work-notes gap). `add -A` never stages gitignored
+    # paths, so runtime scratch and caches (`.runtime/`, `Logs/Chats/`) are
+    # untouched.
     rc, status_out, _ = await _git(workspace, "status", "--porcelain")
     has_changes = rc == 0 and bool(status_out.strip())
 
     if has_changes:
-        await _git(workspace, "add", "-u")
+        await _git(workspace, "add", "-A")
         rc, out, err = await _git(
             workspace, "commit", "-m", "auto-commit before startup sync",
         )
