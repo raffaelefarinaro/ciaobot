@@ -18,6 +18,20 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 
 Ciaobot is a local-first UI and UX layer for using Claude Code (and other backends) as a personal assistant and second brain. Chats, projects, files, schedules, memory, and archived knowledge live in one web app instead of being scattered across terminal sessions — and everything durable is plain markdown that works with any other tool even when Ciaobot is not running.
 
+## Connecting providers
+
+Ciaobot uses the provider CLI the user already has, rather than creating a
+second model account or storing a second provider credential. For Anthropic,
+the user installs and signs into [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview),
+then chooses Claude Code in Ciaobot; Ciaobot adds workspace/project context and
+handles archive-time insights and memory extraction around that session. For
+OpenAI access, OpenRouter, Ollama, or another cloud/local backend, the user
+installs [opencode](https://opencode.ai/docs/), configures and authenticates the
+provider there, then chooses opencode in Ciaobot. Its connected models appear
+in the Ciaobot picker. Point users to the live
+[`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
+for current commands; do not invent version-sensitive install or login syntax.
+
 ## Capability catalog
 
 ### 1. Chats, projects, and workspaces

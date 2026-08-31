@@ -18,27 +18,40 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 
 Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
 
-The workspace is your own folder. It contains your plain-Markdown vault, projects, chats, and configuration. You can keep it under version control or sync it with the storage workflow you prefer.
+During setup, choose the folder where Ciaobot should work. It can be a new folder or an existing one with notes and memories. Ciaobot creates or adopts the vault there and can help migrate existing memories when needed. The folder remains yours: you can keep it under version control, open it in Obsidian or a text editor, and reuse it with Claude Code, opencode, or another CLI.
+
+### Connect your agent
+
+Ciaobot does not replace the agent CLI or ask you to create a second model account. It runs the CLI you have already authenticated:
+
+- **Anthropic / Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), sign in with your personal or organization-provided Anthropic access, then choose **Claude Code** in Ciaobot. Ciaobot uses that official Claude Code session, adds the relevant workspace and project context, and handles chat archiving, memory extraction, and proposal review around it.
+- **OpenAI, OpenRouter, Ollama, and other providers:** install [opencode](https://opencode.ai/docs/), then configure and authenticate the provider in opencode. Choose **opencode** in Ciaobot; its connected models appear in Ciaobot's model picker. This also includes local models running on your own machine.
+
+Ciaobot keeps provider credentials in the provider's own CLI. It supplies the interface, workspace context, files, projects, scheduling, and second-brain memory around the agent. See [INTEGRATIONS.md](INTEGRATIONS.md) for current installation and authentication commands.
 
 Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-![Ciaobot PWA overview](docs/screenshots/pwa-overview.png)
 
 ## How it works
 
 The basic model is **workspace → project → chat**:
 
-- A **workspace** is a separate area such as personal, work, or a client. Each workspace has its own projects and memory, so a "personal" workspace never pollutes a "work" workspace.
+- A **workspace** is a named area such as personal, work, or a client inside the folder you selected during setup. Each workspace has its own projects and memory, so a "personal" workspace never pollutes a "work" workspace.
 - A **project** groups related work. Its frontmatter `description:` is included as project context in every turn, so you do not need to explain to the model which project you are working in every time.
 - A **chat** is where the work happens. When you finish, archive it and Ciaobot extracts useful insights and routes them into your memory or project documents.
 
 You can do everything from a chat. Ask Ciaobot to create a project, move a chat into a project, archive a conversation, find a file, update your memory, or set up a recurring prompt. The interface is there to make those CLI-powered workflows easy to use and keep their context together.
+
+![Ciaobot PWA overview with workspace, project, and chat](docs/screenshots/pwa-overview-labeled.png)
+
+The screenshot shows the selected **workspace** at the top of the sidebar, the **Projects** area below it, and a **chat** inside that project.
 
 ## Your second brain
 
 Memory is stored as ordinary Markdown in your workspace. You can read it in Ciaobot, Obsidian, a text editor, Claude Code, opencode, or any other tool that works with files.
 
 When you archive a conversation, Ciaobot extracts decisions, useful learnings, and other durable facts. Confident facts are filed automatically; uncertain ones become proposals for you to review. This lets your second brain grow from the work you actually do without making the vault a proprietary database.
+
+If you want to understand the extraction and memory pipeline in detail, point your agent to [`docs/MEMORY_DESIGN.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/MEMORY_DESIGN.md) and ask it to explain the relevant parts.
 
 ## Features
 

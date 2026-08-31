@@ -426,8 +426,9 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     user_idx = 0
     # True while a completion notification is in flight but unprocessed: an
     # enqueue (or notification user record) exists and no assistant record has
-    # followed it. Set, cleared, and consumed below.
+    # followed the notification turn. Set, cleared, and consumed below.
     notification_pending = False
+    notification_claimed = False
 
     try:
         fh = path.open(encoding="utf-8")
@@ -457,20 +458,26 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     # built. The nudge must not steer into this window — the
                     # two prompts would cross on the transport the same way
                     # (the dequeue record never has assistant output after it
-                    # when the run dies, so the assistant-record path below
-                    # must be the only thing that clears this.
+                    # when the run dies. This is evidence that an assistant
+                    # record may clear the pending flag.
+                    if notification_pending:
+                        notification_claimed = True
                     continue
                 else:
                     content = record.get("content")
                     if isinstance(content, str) and _notification_fields(content):
                         _apply_notification(state, content)
                         notification_pending = True
+                        notification_claimed = False
                 continue
 
             if rtype == "assistant":
-                # The CLI produced a turn: any notification sent before it is
-                # processed.
-                notification_pending = False
+                # Only an assistant reply to a dequeued/surfaced notification
+                # closes its window. A normal parent record after enqueue is
+                # not evidence that the completion notification was handled.
+                if notification_pending and notification_claimed:
+                    notification_pending = False
+                    notification_claimed = False
                 message = record.get("message")
                 assistant_text = _text_content(message)
                 if assistant_text.strip():
@@ -534,6 +541,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # yet — that is exactly the window where steering the nudge
                 # kills the run (see notification_pending).
                 notification_pending = True
+                notification_claimed = True
                 continue
             if _is_countable_user_turn(content):
                 user_idx += 1

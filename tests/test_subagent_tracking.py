@@ -413,6 +413,18 @@ def test_notification_stays_pending_after_dequeue_until_assistant_reply(tmp_path
     assert state.notification_pending is True
 
 
+def test_parent_assistant_record_does_not_clear_unclaimed_notification(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        _assistant_text("The parent is still working."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_pending is True
+
+
 def test_non_notification_enqueue_never_holds_the_window(tmp_path: Path) -> None:
     records = [
         _user_text("go"),
