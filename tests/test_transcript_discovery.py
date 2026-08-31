@@ -581,11 +581,11 @@ def test_schedule_chat_titled_after_routine_name(tmp_path: Path) -> None:
         chat_id=0,
         created_at="2026-01-01T00:00:00Z",
         web_project_id=general.project_id,
-        title="Workspace hygiene",
+        title="Workspace care",
         frequency="weekly",
     )
     chat_id = pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
     chat = pcm.get_chat(chat_id)
     assert chat is not None
-    assert chat.title.startswith("Workspace hygiene - ")
+    assert chat.title.startswith("Workspace care - ")
     assert "..." not in chat.title

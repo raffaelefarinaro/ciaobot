@@ -7963,7 +7963,7 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("Schedule target project %s not found, skipping", web_project_id)
                 return None
-            # Prefer the routine's own name ("Workspace hygiene") over a
+            # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
             routine_name = (getattr(entry, "title", "") or "").strip()
@@ -8009,7 +8009,7 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("System schedule %s has no default project, skipping", getattr(entry, "schedule_id", ""))
                 return None
-            # Prefer the routine's own name ("Workspace hygiene") over a
+            # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
             routine_name = (getattr(entry, "title", "") or "").strip()

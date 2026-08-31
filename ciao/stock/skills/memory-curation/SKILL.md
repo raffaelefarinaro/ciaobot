@@ -1,11 +1,11 @@
 ---
 name: memory-curation
-description: The nightly memory-curation procedure — process the proposals queue, consolidate bounded regions under their caps, re-verify aging and stale facts, maintain structured learnings, and keep the queue and logs separated. Used by the system memory-curation schedule; also loadable in an attended chat when the user asks to curate, consolidate, or clean up memory.
+description: Nightly Workspace care — process memory proposals and learnings every day, and run overdue weekly vault indexing, stale-note review, and safe workspace hygiene. Used by the system Workspace care schedule; also loadable in an attended chat when the user asks to curate, consolidate, or clean up memory.
 ---
 
 # Memory curation
 
-Curate this workspace's durable memory. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use the memory agent for vault writes. Work through the passes below in order; skip any pass with nothing to do.
+Care for this workspace's durable memory and vault. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use one memory agent for vault writes, and run every mutating pass sequentially. Work through the passes below in order; skip any pass with nothing to do.
 
 ## Ground rules
 
@@ -13,6 +13,10 @@ Curate this workspace's durable memory. The `<ciao-context>` block names the vau
 - **Nothing is dropped silently.** Before removing or replacing any region entry, copy its original text into `<vault>/Workspace/Memory-Consolidations.md` under a `## YYYY-MM-DD` heading naming the region — create the file if missing. It is the undo log; the user can restore any line.
 - **Queue and log stay separate.** `Workspace/Memory-Proposals.md` holds pending proposal bullets and nothing else — never append pass reports, notes, or prose there. Pass reports go to `Workspace/Curation-Log.md` only.
 - Report only what was processed. If nothing needs processing, reply with a one-line no-op and stop.
+
+## Choose the pass
+
+`Workspace/Curation-Log.md` carries `last_full_pass: YYYY-MM-DD` in its YAML frontmatter. Create the file/frontmatter if needed without discarding an existing body. Run the daily passes every night. Also run every pass marked **weekly** when the marker is absent or more than seven days old; this overdue rule matters more than the weekday, because a powered-off server must not permanently miss its weekly care. Update `last_full_pass` only after both the index refresh and final audit complete reliably. A failed or unreliable full pass remains due for the next run.
 
 ## 1. Process the proposals queue
 
@@ -43,21 +47,16 @@ When a removal needs judgment you cannot confidently make, do not remove it; que
 
 Never drop a durable fact merely to fit a cap. If a region remains over cap because every entry is genuinely high-signal, say so and give the user their options: raise `CIAO_MEMORY_CHAR_LIMIT` / `CIAO_USER_CHAR_LIMIT` in `.env` (restart Ciaobot to apply), or ask any attended chat to consolidate further.
 
-## 3. Re-verify aging and stale facts
+## 3. Re-verify memory
 
-Before changing any vault file, run the scoped `vault_review` tool (or the
-equivalent review endpoint) and inspect its evidence. It may queue candidates,
-but unattended curation must never trash or permanently delete a note. Keep,
-improve/link, and defer are the dispositions it records; trash is reversible
-and permanent deletion is a separate attended action requiring the candidate
-confirmation. Archiving a note is an ordinary vault edit, not a review
-disposition. Orphan status is only a linking signal, never proof
-that a note is disposable.
+Run `ciao memory-audit --json` daily and act on `aging_state_entries`, `event_shaped_entries`, and `superseded_state_candidates` under the pass-2 contract.
 
-Run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>` and act on three sections:
+For the **weekly** pass, first run the scoped `vault_review` tool (or the equivalent review endpoint) and inspect its evidence, then run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates, but unattended care must never trash or permanently delete a note. Keep, improve/link, archive non-destructively, and defer are allowed; trash and permanent deletion require an attended action. Orphan status is only a linking signal, never proof that a note is disposable.
+
+Act on these sections:
 
 - **`aging_state_entries`** — region entries whose `[as-of:]` or learned-at stamp has aged past its horizon. Re-verify each against recent chats and project docs: update the entry (fresh stamp) if the fact changed, refresh the stamp if it still holds, or treat it as a consolidation candidate (pass 2) if it no longer matters. Report malformed date tags instead of guessing.
-- **`stale_notes`** — open each note and re-verify its facts. If a fact changed, correct the note; if it still holds, set frontmatter `updated:` to today (YYYY-MM-DD); if the note no longer matters, delete it only after folding anything still useful into MEMORY.md, a person note, or the relevant project doc. A note marked `"retrieved_recently": false` is both stale and unused by recall — the strongest demotion candidate — but disuse alone never justifies deleting a durable fact.
+- **`stale_notes`** — open each note and re-verify its facts. If a fact changed, correct the note; if it still holds, set frontmatter `updated:` to today (YYYY-MM-DD); if it no longer matters, fold anything still useful into MEMORY.md, a person note, or the relevant project doc, then archive it non-destructively or defer it for attended review. Never delete it unattended. A note marked `"retrieved_recently": false` is both stale and unused by recall — the strongest demotion candidate — but disuse alone never justifies removing a durable fact.
 - **`event_shaped_entries` / `superseded_state_candidates`** — rephrase or merge under the pass-2 contract.
 
 ## 4. Maintain learnings
@@ -72,15 +71,26 @@ Run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>
 
 When you create or update People and project notes, add an `aliases:` frontmatter list with the relationship terms and paraphrases someone would actually search for ("brother-in-law", "hourly rate", a nickname). Recall is lexical; aliases are what make "how much do I charge per hour" find the consulting rate note.
 
-## 6. Rotate the logs
+## 6. Weekly workspace hygiene
+
+On a full pass:
+
+1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health or update `last_full_pass`.
+2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is safe to continue; exit 2 means unreliable evidence, so report scan errors, make no audit-derived repair, and leave the full pass due.
+3. When reliable, apply only low-risk unambiguous repairs: dead links, obvious MEMORY.md path drift, and a non-canonical `type:` whose exact canonical target is already named by VOCABULARY.md. Do not rewrite instruction conflicts, skills, orphaned or duplicate notes, expiration tags, schedules, or vocabulary proposals.
+4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. Update `last_full_pass` only when this verification is reliable.
+
+Install-wide runtime failures remain visible through startup triage and Settings → Automation; pending upgrade work appears in housekeeping. Do not duplicate those global checks in every workspace.
+
+## 7. Rotate the logs
 
 When `Workspace/Curation-Log.md` or `Workspace/Weekly-Review-Log.md` exceeds ~64KB, move its body to a dated archive (`Curation-Log-YYYY-MM.md`) with `search: false` frontmatter and start the live file fresh with a pointer to the archive.
 
-## 7. Skill proposals
+## 8. Skill proposals
 
 Review `Workspace/Skill-Proposals/`. A proposal already implemented, or one you decide is not worth building, is a resolved decision: remove it with `ciao skill-proposal-remove <name>` (or `python3 -m ciao.cli skill-proposal-remove <name>`) naming the proposal file or a unique substring. Only remove a proposal after its change is actually in place or decided against. Leave proposals that belong in a bounded region queued.
 
-## 8. Report
+## 9. Report
 
 Two audiences, two registers.
 

@@ -190,7 +190,7 @@ const runningJobs = ref<Record<string, boolean>>({})
 // Schedules for servers older than the API that reports `schedule_id`.
 const legacyJobSchedules: Record<string, string> = {
   memory_proposals: 'system-memory-curation',
-  vault_index: 'system-workspace-hygiene',
+  vault_index: 'system-memory-curation',
   skill_evolution: 'system-skill-evolution',
 }
 

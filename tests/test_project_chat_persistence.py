@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from unittest.mock import AsyncMock
 
 from ciao import native_sidecar
 from ciao.config import CiaoConfig
@@ -165,6 +166,86 @@ def test_registry_audit_records_chat_create_and_delete(tmp_path: Path) -> None:
         and chat.chat_id in event["chats"]["deleted"]
         for event in events
     )
+
+
+def test_proposal_helper_metadata_persists_and_new_session_clears_it(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Reviews", workspace="work")
+    helper = {
+        "kind": "proposal",
+        "intent": "resolve",
+        "proposal_ids": ["proposal-1"],
+        "archive_policy": "when_resolved",
+    }
+    chat = manager.create_chat(project.project_id, title="Merge fact", helper=helper)
+
+    restored = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert restored is not None
+    assert restored.helper == helper
+    assert restored.to_dict()["helper"] == helper
+
+    manager.new_session(chat.chat_id)
+    assert manager.get_chat(chat.chat_id).helper == {}
+
+
+def test_resolution_helper_archives_only_after_target_leaves_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Reviews", workspace="work")
+    chat = manager.create_chat(
+        project.project_id,
+        helper={
+            "kind": "proposal",
+            "intent": "resolve",
+            "proposal_ids": ["proposal-1"],
+            "archive_policy": "when_resolved",
+        },
+    )
+    chat.last_response = "Merged the fact."
+    chat.last_response_status = "success"
+    monkeypatch.setattr(
+        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: {"proposal-1"}
+    )
+    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
+
+    monkeypatch.setattr(
+        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: set()
+    )
+
+    async def archive(chat_id: str):
+        manager.get_chat(chat_id).archived = True
+        return None
+
+    archive_mock = AsyncMock(side_effect=archive)
+    monkeypatch.setattr(manager, "archive_chat", archive_mock)
+    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is True
+    archive_mock.assert_awaited_once_with(chat.chat_id)
+
+
+def test_review_helper_never_auto_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Reviews", workspace="work")
+    chat = manager.create_chat(
+        project.project_id,
+        helper={
+            "kind": "proposal",
+            "intent": "review",
+            "proposal_ids": ["proposal-1"],
+            "archive_policy": "manual",
+        },
+    )
+    chat.last_response = "Here is my recommendation."
+    chat.last_response_status = "success"
+    archive_mock = AsyncMock()
+    monkeypatch.setattr(manager, "archive_chat", archive_mock)
+
+    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
+    archive_mock.assert_not_awaited()
 
 
 def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> None:

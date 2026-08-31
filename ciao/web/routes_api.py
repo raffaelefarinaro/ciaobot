@@ -2564,6 +2564,7 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
+            helper=body.get("helper"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -7447,7 +7448,7 @@ async def cli_stats(request: Request) -> JSONResponse:
 _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 # The queue file lives at this relative path inside each workspace's vault.
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
-# Skill-proposal files live under this folder, one dated file per candidate.
+# Skill-reflection proposals live under this folder, one canonical file per skill.
 _SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 

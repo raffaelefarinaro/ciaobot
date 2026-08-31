@@ -317,7 +317,8 @@ downloads rather than executable inline content.
 **Chats**
 
 ```bash
-# Create — title/model/mode/provider all optional.
+# Create — title/model/mode/provider all optional. The proposal Review UI also
+# sends validated `helper` lifecycle metadata; ordinary clients should omit it.
 # provider is any id from the registry (`claude`, `opencode`); see
 # GET /api/models -> providers[] for the live list and per-provider
 # '' = auto from the project's configured workspace bucket. Legacy

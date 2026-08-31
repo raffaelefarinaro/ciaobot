@@ -21,14 +21,7 @@ EXPECTED_COMMANDS = {
 
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
-    # The index rebuild folded INTO hygiene: after the re-rooting each agent root
-    # owns its own INDEX.md + VOCABULARY.md, so there is no shared artifact left
-    # for a global routine to write. What replaced it is the global half of the
-    # audit, which stays single because its subject is the global runtime dir.
-    "system-install-health",
-    "system-workspace-hygiene",
     "system-skill-evolution",
-    "system-reviews-hygiene",
 }
 
 PRIVATE_MARKERS = {
@@ -143,6 +136,10 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "Curation-Log.md" in skill
     assert "search: false" in skill
     assert "aliases:" in skill
+    assert "last_full_pass" in skill
+    assert "ciao vault-index --write" in skill
+    assert "ciao os-audit --json --scope workspace" in skill
+    assert "Never delete it unattended" in skill
 
 
 def test_stock_memory_agent_role_matches_curator_contract() -> None:

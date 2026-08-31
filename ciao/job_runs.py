@@ -182,7 +182,7 @@ REGISTRY: tuple[JobSpec, ...] = (
             step_condition="if the chat belongs to a real project"),
     JobSpec("trajectory", "Trajectory capture", "content",
             "Records a structured trajectory of the session for skill mining.", False, True,
-            trigger="When a chat is archived. Feeds Skill evolution.",
+            trigger="When a chat is archived. Feeds Skill reflection.",
             step_of="insights",
             # Runs in a `finally`, so a failed extraction still leaves a
             # trajectory; and `run_archive_postprocess` writes one directly
@@ -198,9 +198,9 @@ REGISTRY: tuple[JobSpec, ...] = (
             schedule_id="system-memory-curation",
             step_of="insights",
             step_condition="if insights produced output"),
-    JobSpec("skill_evolution", "Skill evolution", "content",
+    JobSpec("skill_evolution", "Skill reflection", "content",
             "Weekly: proposes skill edits from underperforming trajectories.", True, True,
-            trigger="Weekly, via the system-skill-evolution schedule.",
+            trigger="Weekly per workspace, via the system-skill-evolution schedule.",
             schedule_id="system-skill-evolution", schedule_only=True),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
             "Fires scheduled chat turns and evaluates auto-archival.", True, True,
@@ -221,8 +221,8 @@ REGISTRY: tuple[JobSpec, ...] = (
             # The dedicated weekly routine is gone: the index is a per-root
             # artifact after the re-rooting, so rebuilding it belongs inside the
             # per-workspace hygiene pass rather than in one global run.
-            trigger="On server startup, and weekly inside system-workspace-hygiene.",
-            schedule_id="system-workspace-hygiene"),
+            trigger="On server startup, and during the full Workspace care pass.",
+            schedule_id="system-memory-curation"),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills.", False, False,
             trigger="On server startup."),
