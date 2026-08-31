@@ -9,6 +9,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
+import { pendingNewChat } from '../../lib/newChat'
 
 const toggleDictation = vi.fn()
 const toggleModelPicker = vi.fn()
@@ -95,6 +96,8 @@ describe('ChatLayout', () => {
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
+    // HomeRecentChats is NOT stubbed: the glanceable status now lives inside
+    // its lane header, under the workspace line, not in ChatLayout.
     const wrapper = mount(ChatLayout, {
       global: {
         plugins: [router],
@@ -107,13 +110,15 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
         },
       },
     })
     await flushPromises()
 
-    expect(wrapper.find('.empty-status-text').text()).toBe('1 chat needs your attention. no agents working.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('1 chat needs your attention. no agents working.')
+    // The greeting face is the first-run only header; with activity it stays
+    // off the screen.
+    expect(wrapper.find('.empty-home-header').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -217,6 +222,8 @@ describe('ChatLayout', () => {
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
+    // HomeRecentChats is NOT stubbed: the glanceable status now lives inside
+    // its lane header, under the workspace line, not in ChatLayout.
     const wrapper = mount(ChatLayout, {
       global: {
         plugins: [router],
@@ -229,13 +236,12 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
         },
       },
     })
     await flushPromises()
 
-    expect(wrapper.find('.empty-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
     wrapper.unmount()
   })
 
@@ -650,6 +656,60 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  it('Cmd+T opens the new-chat picker instead of creating a chat directly', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const newChatInGeneral = vi.spyOn(store, 'newChatInGeneral')
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 't', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(newChatInGeneral).not.toHaveBeenCalled()
+    expect(pendingNewChat.value).not.toBeNull()
+    pendingNewChat.value?.resolve(null)
+    wrapper.unmount()
+  })
+
   // The sidebar toggle follows the same split as the other modifier
   // shortcuts: Cmd+S in the desktop app, Option+S in the PWA, because a
   // browser has already spent Cmd+S on Save Page.
@@ -1008,6 +1068,7 @@ describe('ChatLayout home arrow navigation', () => {
         { path: '/project/:projectId', component: EmptyStub },
         { path: '/settings', component: EmptyStub },
         { path: '/schedules', component: EmptyStub },
+        { path: '/memory', component: EmptyStub },
       ],
     })
     await router.push(startPath)
@@ -1126,6 +1187,46 @@ describe('ChatLayout home arrow navigation', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }))
     await flushPromises()
     expect(store.activeWorkspace).toBe('work')
+    wrapper.unmount()
+  })
+
+  it('switches sections with Cmd+Arrow in the desktop app', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    const wrapper = await mountHome()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/memory')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    wrapper.unmount()
+  })
+
+  it('switches sections with Option+Arrow in the web PWA', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    wrapper.unmount()
+  })
+
+  it('does not treat bare arrow keys as section switches', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
     wrapper.unmount()
   })
 

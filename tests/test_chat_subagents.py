@@ -157,6 +157,10 @@ async def test_watch_subagent_completion_emits_ready_events(
     ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
     # First event is the initial running count emitted at watcher start (so the
     # PWA can show the indicator immediately); then one per drop down to zero.
+    # The final zero may be published twice: when the last agent's
+    # task-notification is still unprocessed the nudge is held one grace
+    # period, then (the CLI having answered it) a reconciling nudged=True
+    # event follows.
     assert len(ready_events) == 3
     assert ready_events[0]["remaining"] == 2
     assert ready_events[1]["remaining"] == 1
@@ -247,11 +251,16 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     assert pushes == []
 
     ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
-    assert len(ready_events) == 2
+    # First event is the initial running count (1), then the drop to zero.
+    # The count-0 arrival still had the CLI's task-notification unprocessed,
+    # so the nudge was held one grace period; once the assistant reply lands,
+    # the zero event is republished with nudged=True so clients reconcile.
+    assert len(ready_events) == 3
     assert ready_events[0]["remaining"] == 1
-    assert ready_events[0]["nudged"] is False
     assert ready_events[1]["remaining"] == 0
-    assert ready_events[1]["nudged"] is True
+    assert ready_events[1]["nudged"] is False
+    assert ready_events[2]["remaining"] == 0
+    assert ready_events[2]["nudged"] is True
 
 
 async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_question(
@@ -343,6 +352,226 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_questio
     # indicator and reconciles history; only the injected prompt is withheld.
     assert ready_events[-1]["remaining"] == 0
     assert ready_events[-1]["nudged"] is False
+
+
+async def test_watch_subagent_completion_holds_nudge_on_pending_notification(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A completion notification the CLI has not answered yet blocks the nudge.
+
+    The 2026-08-30 daily-log run: the last agent finished, its
+    ``<task-notification>`` was enqueued, and the watcher's nudge raced it —
+    the two prompts crossed on the transport, the SDK read task was
+    cancelled, and the run archived on an interim "Waiting on X" message
+    with the agent's data never synthesized. A notification in flight must
+    hold the nudge until the CLI turns it into a turn.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-notify-race", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-notify-race-test")
+    chat.session_id = "sess-nudge-race"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-race.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": (
+                "<task-notification>\n<task-id>agent-a</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            ),
+        },
+    ]
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    # The notification stays unprocessed for a couple of ticks (the window
+    # during which the nudge must be held), then an assistant record answers
+    # it — as the CLI's interim turn would — closing the window. The nudge
+    # then fires on that tick.
+    ticks: list[int] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks.append(len(ticks))
+        if len(ticks) == 2:
+            records.append(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "All agents finished. Here is the report."}
+                        ],
+                    },
+                }
+            )
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    # Held while the notification was in flight (no steer during the first
+    # two ticks), then fired once the CLI answered it.
+    assert len(steer_calls) == 1
+    ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready_events[-1]["remaining"] == 0
+    assert ready_events[-1]["nudged"] is True
+
+
+async def test_notification_grace_resets_between_windows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A closed notification window must not spend its grace on the next one.
+
+    Several agents finish at different times, so one watcher run can see more
+    than one ``<task-notification>`` window. The first window's held ticks
+    used to survive its own assistant answer, so a later notification
+    inherited "grace expired" on its first tick and the synthesis nudge
+    steered into the CLI's processing window — the prompt-crossing race the
+    hold exists to prevent.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-grace-reset", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-grace-reset-test")
+    chat.session_id = "sess-grace-reset"
+    pcm._save()
+
+    session_path = tmp_path / "sess-grace-reset.jsonl"
+    records: list[dict] = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        *_dispatch_records("toolu_2", "agent-b"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": (
+                "<task-notification>\n<task-id>agent-a</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            ),
+        },
+    ]
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    def assistant_record(text: str) -> dict:
+        return {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+
+    def notification(agent_id: str) -> dict:
+        return {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": (
+                f"<task-notification>\n<task-id>{agent_id}</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            ),
+        }
+
+    sleeps = 0
+    steer_at: list[int] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        # Window 1 stays pending through three ticks (its grace expires while
+        # agent-b is still running, so no nudge can fire yet), then the CLI
+        # answers it. Agent-b's own notification opens window 2, which is
+        # also answered before the nudge may fire.
+        if sleeps == 3:
+            records.append({"type": "queue-operation", "operation": "dequeue"})
+            records.append(assistant_record("First agents are done; report to follow."))
+            flush()
+        elif sleeps == 4:
+            records.append(notification("agent-b"))
+            flush()
+        elif sleeps == 5:
+            records.append({"type": "queue-operation", "operation": "dequeue"})
+            records.append(assistant_record("All agents finished. Here is the full report."))
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_at.append(sleeps)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    # The nudge fired exactly once, and only on the parse after the second
+    # window's answer landed. With the stale counter it fired on the first
+    # tick of window 2, while that answer was still missing.
+    assert len(steer_at) == 1
+    assert steer_at[0] >= 5
 
 
 async def test_watch_subagent_completion_clears_on_idle_agent_transcript(

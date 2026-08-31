@@ -508,7 +508,7 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 ],
                 "running",
             );
-            app.restart()
+            restart_after_update(&app)
         }
         // The engine moved but the app did not: restart so both halves come
         // back on the version the engine is now running.
@@ -524,7 +524,7 @@ async fn install_app_update(app: AppHandle, engine_updated: bool) -> Result<(), 
                 ],
                 "running",
             );
-            app.restart()
+            restart_after_update(&app)
         }
         None => Ok(()),
     }
@@ -908,6 +908,33 @@ fn current_app_bundle() -> Option<std::path::PathBuf> {
         (path.extension().and_then(|value| value.to_str()) == Some("app"))
             .then(|| path.to_path_buf())
     })
+}
+
+fn update_relaunch_script() -> [&'static str; 2] {
+    [
+        "delay 1",
+        "tell application id \"local.ciaobot.app\" to launch",
+    ]
+}
+
+// `app.restart()` relaunches before the old process has released the
+// single-instance lock. The new process is then forwarded to the old one and
+// the freshly installed bundle never becomes the running app. Give macOS a
+// short-lived launcher process so the old app can exit first.
+fn restart_after_update(app: &AppHandle) -> Result<(), String> {
+    if current_app_bundle().is_none() {
+        app.restart();
+    }
+    Command::new("/usr/bin/osascript")
+        .args(
+            update_relaunch_script()
+                .iter()
+                .flat_map(|script| ["-e", *script]),
+        )
+        .spawn()
+        .map_err(|error| format!("could not schedule Ciaobot relaunch: {error}"))?;
+    app.exit(0);
+    Ok(())
 }
 
 /// Opt a webview out of the system Writing Tools affordance.
@@ -1848,7 +1875,7 @@ mod tests {
         append_log, browser_event_script, create_desktop_drop_grant, download_percent,
         engine_already_current, engine_launch_action, flags_are_dataless, is_external_link,
         is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
-        should_show_main_window, should_stage,
+        should_show_main_window, should_stage, update_relaunch_script,
     };
     use crate::service::ServiceResult;
 
@@ -2068,6 +2095,17 @@ mod tests {
             serde_json::json!({"requires_confirmation": true})
         )));
         assert!(!requires_confirmation(&result_with(serde_json::json!({}))));
+    }
+
+    #[test]
+    fn app_update_relaunch_waits_for_the_single_instance_lock() {
+        assert_eq!(
+            update_relaunch_script(),
+            [
+                "delay 1",
+                "tell application id \"local.ciaobot.app\" to launch"
+            ]
+        );
     }
 
     // The updater hands the callback each chunk's length, not a running total.

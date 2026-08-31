@@ -188,7 +188,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const tidyRows = workLane.findAll('.home-tier--tidying .home-chat-item')
     expect(tidyRows).toHaveLength(2)
     expect(workLane.find('.home-tier--tidying .home-tier-label').text()).toBe('tidying up')
-    expect(workLane.find('.home-lane-summary').text()).toContain('2 tidying up')
+    expect(workLane.find('.home-lane-status-text').text()).toContain('2 chats tidying up')
     const tidyTitles = tidyRows.map(row => row.find('.home-chat-title').text())
     expect(tidyTitles).toContain('Archived work chat')
     expect(tidyTitles).toContain('Archived without file')
@@ -270,8 +270,12 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(failedRows[0].find('.home-chat-title').text()).toBe('Failed work chat')
     expect(failedRows[0].find('.home-chat-tidy-note').text()).toBe('insights failed')
     expect(failedRows[0].find('.home-chat-retry').exists()).toBe(true)
-    // Header carries the recovery count in the warn register.
-    expect(workLane.find('.home-lane-summary').text()).toContain('1 insights failed')
+    // The header names the failure as a failure. Folding it into the tidying
+    // count reported a stalled chat as still busy, and hid the one signal
+    // here that the user can act on.
+    const status = workLane.find('.home-lane-status-text').text()
+    expect(status).toContain('1 insights extraction failed')
+    expect(status).not.toContain('tidying up')
     wrapper.unmount()
   })
 
@@ -292,6 +296,12 @@ describe('HomeRecentChats lanes and tiers', () => {
     const workLane = wrapper.find('[data-lane-key="work"]')
     expect(workLane.find('.home-tier--failed').exists()).toBe(true)
     expect(workLane.find('.home-tier--failed .home-chat-title').text()).toBe('Failed chat')
+    // The lane's only signal is the failure, so the status has to name it.
+    // Counting it as tidy-up made the whole sentence read "nothing needs your
+    // attention. no agents working. 1 chat tidying up." — three clauses, none
+    // of which mention that something stopped and needs a retry.
+    expect(workLane.find('.home-lane-status-text').text())
+      .toBe('nothing needs your attention. no agents working. 1 insights extraction failed.')
     wrapper.unmount()
   })
 
@@ -450,7 +460,7 @@ describe('HomeRecentChats regressions', () => {
 
   it('does not print a quiet count and "all quiet" together', async () => {
     const wrapper = await mountHome()
-    for (const summary of wrapper.findAll('.home-lane-summary')) {
+    for (const summary of wrapper.findAll('.home-lane-status-text')) {
       expect(summary.text()).not.toMatch(/quiet\s+all quiet/)
     }
     wrapper.unmount()
@@ -473,10 +483,84 @@ describe('HomeRecentChats regressions', () => {
     await nextTick()
 
     const personalLane = wrapper.find('[data-lane-key="personal"]')
-    const summary = personalLane.find('.home-lane-summary').text()
+    const summary = personalLane.find('.home-lane-status-text').text()
     const rows = personalLane.findAll('.home-tier--needsYou .home-chat-item').length
-    const claimed = Number(/(\d+)\s+need/.exec(summary)?.[1] ?? 0)
+    const claimed = Number(/(\d+)\s+chat(?:s)?\s+need/.exec(summary)?.[1] ?? 0)
     expect(claimed).toBe(rows)
+    wrapper.unmount()
+  })
+})
+
+// The header is a single line: the workspace name and its status phrase sit
+// together in the topline row, with "+ new" at the far end. The old face-and-
+// sentence status row is gone.
+describe('the lane header line', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+    if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+  })
+
+  it('keeps the status phrase on the same line as the workspace name', async () => {
+    const wrapper = await mountHome()
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    const topline = lane.find('.home-lane-topline')
+    expect(topline.exists()).toBe(true)
+    // The name and the status phrase are siblings inside the same topline row.
+    expect(topline.find('.home-lane-name').exists()).toBe(true)
+    expect(topline.find('.home-lane-status-text').exists()).toBe(true)
+    // No separate status row under the line anymore.
+    expect(lane.find('.home-lane-status').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('speaks the needs and working state in the status phrase', async () => {
+    const wrapper = await mountHome()
+    const personal = wrapper.find('[data-lane-key="personal"]')
+    // Seeded: one needs-you chat in personal, no agents working.
+    expect(personal.find('.home-lane-status-text').text())
+      .toBe('1 chat needs your attention. no agents working.')
+    wrapper.unmount()
+  })
+
+  it('counts unread replies in the status phrase', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'unread', project_id: 'personal-project', title: 'Unread reply',
+        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(90),
+        archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('2 chats need your attention. no agents working.')
+    wrapper.unmount()
+  })
+
+  it('includes tidying in the status phrase', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'tidy', project_id: 'personal-project', title: 'Archived chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/tidy.md',
+        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('1 chat needs your attention. no agents working. 1 chat tidying up.')
     wrapper.unmount()
   })
 })

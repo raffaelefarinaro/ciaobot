@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import threading
 import tempfile
 from dataclasses import dataclass, asdict
 from datetime import UTC, datetime, timedelta
@@ -33,6 +35,8 @@ DISPOSITIONS = frozenset({"keep", "improve_link", "defer", "trash", "restore", "
 DECISION_DISPOSITIONS = frozenset({"keep", "improve_link", "defer"})
 _DEFER_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 _CANDIDATE_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+_QUEUE_LOCKS: dict[tuple[Path, str], threading.Lock] = {}
+_QUEUE_LOCKS_GUARD = threading.Lock()
 
 
 def _workspace_dir(root: Path) -> Path:
@@ -137,10 +141,24 @@ def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[
             continue
         reason = ", ".join(item.signals) or "weak provenance"
         lines.append(f"- `{item.path}` [{item.priority}] {reason} (candidate `{item.candidate_id}`)")
-    queue_path(root).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    destination = queue_path(root)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=destination.parent, delete=False
+    ) as handle:
+        handle.write("\n".join(lines) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    os.replace(temporary, destination)
 
 
-def generate_candidates(
+def _queue_lock(root: Path, workspace: str) -> threading.Lock:
+    key = (root, workspace)
+    with _QUEUE_LOCKS_GUARD:
+        return _QUEUE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _generate_candidates(
     root: Path,
     *,
     workspace: str,
@@ -242,6 +260,26 @@ def generate_candidates(
     return result
 
 
+def generate_candidates(
+    root: Path,
+    *,
+    workspace: str,
+    max_candidates: int = MAX_CANDIDATES,
+    now: datetime | None = None,
+    write_queue: bool = True,
+) -> list[ReviewCandidate]:
+    """Generate candidates with one consistent snapshot per workspace."""
+    root = Path(root).resolve()
+    with _queue_lock(root, workspace):
+        return _generate_candidates(
+            root,
+            workspace=workspace,
+            max_candidates=max_candidates,
+            now=now,
+            write_queue=write_queue,
+        )
+
+
 def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *, actor: str = "user", defer_days: int = 7) -> dict[str, Any]:
     if disposition not in DECISION_DISPOSITIONS:
         raise ValueError(f"unsupported vault review disposition: {disposition}")
@@ -341,9 +379,12 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     from ciao.vault_index import strip_references
 
     edited: list[str] = []
+    undo: dict[str, str] = {}
     cleanup_error = ""
     try:
-        edited = strip_references(Path(root), str(metadata["original_path"]))
+        edited = strip_references(
+            Path(root), str(metadata["original_path"]), undo=undo
+        )
     except OSError as exc:
         cleanup_error = str(exc)
     if cleanup_error:
@@ -357,12 +398,16 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
         _append(root, {**metadata, "edited_backlinks": edited, "disposition": "delete", "status": "deleted", "actor": actor, "deleted_at": _now()})
     except OSError as exc:
         if original.is_file() and not source.exists():
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8")
             shutil.move(str(original), str(source))
         raise ValueError(f"delete audit failed; recovery metadata was retained: {exc}") from exc
     try:
         original.unlink()
     except OSError as exc:
         if original.is_file() and not source.exists():
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8")
             shutil.move(str(original), str(source))
         _append(root, {
             **metadata, "edited_backlinks": edited, "disposition": "delete",

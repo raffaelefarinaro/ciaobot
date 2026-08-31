@@ -10,9 +10,7 @@
     </div>
   </div>
   <div v-else-if="hasHomeActivity" class="home-recent">
-    <div class="home-recent-toolbar">
-      <h2 class="home-recent-label">jump back in</h2>
-    </div>
+    <h2 class="home-recent-label">jump back in</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
         v-for="lane in lanes"
@@ -22,81 +20,70 @@
         :data-lane-key="lane.key"
       >
         <header class="home-lane-header" :data-workspace-color="lane.color">
-          <div class="home-lane-heading">
-            <!-- With a single workspace the key badge and the name are pure
-                 noise: there is nothing to switch to and the workspace is the
-                 only one. Keep the status summary and "+ new". -->
-            <template v-if="hasMultipleWorkspaces">
-              <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
-              <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
-            </template>
-            <span class="home-lane-summary" aria-live="polite">
-              <template v-if="laneNeedsCount(lane)"><b>{{ laneNeedsCount(lane) }}</b> need{{ laneNeedsCount(lane) === 1 ? '' : 's' }} you</template>
-              <template v-if="laneSummaryRest(lane)"><span v-if="laneNeedsCount(lane)"> · </span>{{ laneSummaryRest(lane) }}</template>
-              <!-- Archiving: the chat panel already closed, but the server hasn't
-                   confirmed the archive yet. Shown as the first muted fragment so
-                   the user sees where the chat went. -->
-              <span v-if="laneArchivingCount(lane)" class="home-lane-archiving"> · <span class="home-lane-archiving-dot" aria-hidden="true" />{{ laneArchivingLabel(lane) }}</span>
-              <!-- Third fragment, in the muted register: background tidy-up
-                   never needs the user, so it must not read as a demand. -->
-              <span v-if="laneTidyCount(lane)" class="home-lane-tidy"> · <span class="home-lane-tidy-dot" aria-hidden="true" />{{ laneTidyLabel(lane) }}</span>
-              <!-- A failed extraction is a recovery case, so it reads in the
-                   warn register — it is the one tidy signal that can act. -->
-              <span v-if="laneInsightsFailedCount(lane)" class="home-lane-failed"> · <b>{{ laneInsightsFailedCount(lane) }}</b> insights failed</span>
-            </span>
-          </div>
-          <div v-if="lane.newAction" class="home-lane-new-split">
-            <button
-              type="button"
-              class="home-lane-new"
-              :class="{ 'home-lane-new--split': lane.projects.length > 1, 'home-lane-new--creating': lane.newAction.isCreating }"
-              :data-workspace-color="lane.color"
-              :disabled="lane.newAction.isCreating"
-              :aria-label="`New chat in ${lane.label || 'workspace'}`"
-              @click="emit('new-workspace-chat', lane.newAction)"
-            ><span v-if="lane.newAction.isCreating" class="home-lane-new-spinner" aria-hidden="true" /><span>{{ lane.newAction.isCreating ? 'Creating…' : '+ new' }}</span></button>
-            <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
-                 phones, where there is no hover, so a hover-only affordance is
-                 simply missing. Hover and focus bring it up to full strength. -->
-            <button
-              v-if="lane.projects.length > 1"
-              type="button"
-              class="home-lane-new-caret"
-              :data-workspace-color="lane.color"
-              :disabled="lane.newAction.isCreating"
-              :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
-              aria-haspopup="menu"
-              :aria-expanded="openProjectLane === lane.key"
-              @click="toggleProjectMenu(lane)"
-              @keydown.down.prevent="openProjectMenu(lane)"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="3" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-            <!-- prevent, not stop: ChatLayout's window-level handler defers to
-                 any key a nested popup already consumed, which is the same
-                 contract ModelSelector relies on for Esc. Stopping propagation
-                 here would make this menu the one popup playing by its own
-                 rules. -->
-            <div
-              v-if="openProjectLane === lane.key"
-              class="home-lane-project-menu"
-              role="menu"
-              @keydown.esc.prevent="closeProjectMenu({ restoreFocus: true })"
-              @keydown.down.prevent="moveProjectMenuFocus(1)"
-              @keydown.up.prevent="moveProjectMenuFocus(-1)"
-            >
+          <div class="home-lane-topline">
+            <div class="home-lane-heading">
+              <!-- With a single workspace the key badge and the name are pure
+                   noise: there is nothing to switch to and the workspace is the
+                   only one. Keep the status summary and "+ new". -->
+              <template v-if="hasMultipleWorkspaces">
+                <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
+                <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
+              </template>
+              <span class="home-lane-status-text" aria-live="polite">{{ laneStatusText(lane) }}</span>
+            </div>
+            <div v-if="lane.newAction" class="home-lane-new-split">
               <button
-                v-for="project in lane.projects"
-                :key="project.project_id"
                 type="button"
-                role="menuitem"
-                class="home-lane-project-option"
-                :disabled="Boolean(store.creatingChatProjectIds[project.project_id])"
-                @click="createChatInProject(lane, project.project_id)"
-              >{{ project.name }}</button>
+                class="home-lane-new"
+                :class="{ 'home-lane-new--split': lane.projects.length > 1, 'home-lane-new--creating': lane.newAction.isCreating }"
+                :data-workspace-color="lane.color"
+                :disabled="lane.newAction.isCreating"
+                :aria-label="`New chat in ${lane.label || 'workspace'}`"
+                @click="emit('new-workspace-chat', lane.newAction)"
+              ><span v-if="lane.newAction.isCreating" class="home-lane-new-spinner" aria-hidden="true" /><span>{{ lane.newAction.isCreating ? 'Creating…' : '+ new' }}</span></button>
+              <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
+                   phones, where there is no hover, so a hover-only affordance is
+                   simply missing. Hover and focus bring it up to full strength. -->
+              <button
+                v-if="lane.projects.length > 1"
+                type="button"
+                class="home-lane-new-caret"
+                :data-workspace-color="lane.color"
+                :disabled="lane.newAction.isCreating"
+                :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
+                aria-haspopup="menu"
+                :aria-expanded="openProjectLane === lane.key"
+                @click="toggleProjectMenu(lane)"
+                @keydown.down.prevent="openProjectMenu(lane)"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="3" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              <!-- prevent, not stop: ChatLayout's window-level handler defers to
+                   any key a nested popup already consumed, which is the same
+                   contract ModelSelector relies on for Esc. Stopping propagation
+                   here would make this menu the one popup playing by its own
+                   rules. -->
+              <div
+                v-if="openProjectLane === lane.key"
+                class="home-lane-project-menu"
+                role="menu"
+                @keydown.esc.prevent="closeProjectMenu({ restoreFocus: true })"
+                @keydown.down.prevent="moveProjectMenuFocus(1)"
+                @keydown.up.prevent="moveProjectMenuFocus(-1)"
+              >
+                <button
+                  v-for="project in lane.projects"
+                  :key="project.project_id"
+                  type="button"
+                  role="menuitem"
+                  class="home-lane-project-option"
+                  :disabled="Boolean(store.creatingChatProjectIds[project.project_id])"
+                  @click="createChatInProject(lane, project.project_id)"
+                >{{ project.name }}</button>
+              </div>
             </div>
           </div>
         </header>
@@ -258,7 +245,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
+import { postprocessLabel } from '../lib/postprocessView'
 import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -464,22 +451,6 @@ function laneUnreadCount(lane: HomeLane): number {
   return lane.tiers.unread.length
 }
 
-function laneQuietCount(lane: HomeLane): number {
-  return lane.tiers.quiet.length + lane.tiers.older.length
-}
-
-// The header renders the needs count itself so it can carry the hue emphasis;
-// this is everything after it. Returning 'all quiet' only when the lane is
-// wholly empty keeps the header from printing "3 quiet all quiet".
-function laneSummaryRest(lane: HomeLane): string {
-  const parts: string[] = []
-  if (laneWorkingCount(lane)) parts.push(`${laneWorkingCount(lane)} working`)
-  if (laneUnreadCount(lane)) parts.push(`${laneUnreadCount(lane)} unread`)
-  if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
-  if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
-  return parts.join(' · ')
-}
-
 // Chats this workspace is still tidying up after archiving them. The chats
 // themselves stay out of the priority tiers — archiving must keep meaning —
 // but they are listed in the lane's own "tidying up" tier below quiet, so the
@@ -489,22 +460,45 @@ function laneTidyCount(lane: HomeLane): number {
   return lane.tidyChats.length
 }
 
-function laneTidyLabel(lane: HomeLane): string {
-  return tidyingSummary(laneTidyCount(lane))
-}
-
 function laneArchivingCount(lane: HomeLane): number {
   return lane.archivingChats.length
-}
-
-function laneArchivingLabel(lane: HomeLane): string {
-  const n = laneArchivingCount(lane)
-  return n === 1 ? '1 archiving' : `${n} archiving`
 }
 
 /** Insights-failed count for a lane's workspace, for the header fragment. */
 function laneInsightsFailedCount(lane: HomeLane): number {
   return lane.failedChats.length
+}
+
+// The glanceable sentence on the workspace line, in plain status grammar.
+// Counts come from the same tiers as the rows below, so it can never disagree
+// with what is rendered. Tidying/archiving ride along in their muted fragments
+// even though they are not part of the lane's active tiers.
+function laneStatusText(lane: HomeLane): string {
+  // Both actionable tiers, as the glanceable sentence has always counted
+  // them: an unread reply wants the user even though it is not blocking the
+  // agent on a direct answer, and counting only `needsYou` told a reader with
+  // unread replies waiting that "nothing needs your attention". The tiers are
+  // mutually exclusive, so adding them cannot double-count a chat.
+  const needs = laneNeedsCount(lane) + laneUnreadCount(lane)
+  const sentences: string[] = []
+  sentences.push(needs
+    ? `${needs} chat${needs === 1 ? '' : 's'} need${needs === 1 ? 's' : ''} your attention`
+    : 'nothing needs your attention')
+  const working = laneWorkingCount(lane)
+  sentences.push(working
+    ? `${working} agent${working === 1 ? '' : 's'} still working`
+    : 'no agents working')
+  // Tidying is work still in flight and needs nobody. A failed extraction is
+  // neither: processing has stopped and the row below offers a manual retry,
+  // so folding it in here reported a stalled chat as busy — and a workspace
+  // whose only signal was that failure read as "nothing needs your attention"
+  // with the recovery state hidden inside a muted "tidying up". It gets its
+  // own sentence, in the same warn register the header fragment used.
+  const tidying = laneTidyCount(lane) + laneArchivingCount(lane)
+  if (tidying) sentences.push(`${tidying} chat${tidying === 1 ? '' : 's'} tidying up`)
+  const failed = laneInsightsFailedCount(lane)
+  if (failed) sentences.push(`${failed} insights extraction${failed === 1 ? '' : 's'} failed`)
+  return sentences.join('. ') + '.'
 }
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
@@ -773,12 +767,6 @@ defineExpose({ onArrow })
   border: 0;
 }
 
-.home-recent-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  min-height: 28px;
-}
-
 .home-lanes {
   display: grid;
   /* One lane at a time: the grid holds the selected workspace only, so a
@@ -798,25 +786,46 @@ defineExpose({ onArrow })
      padding here was the last few pixels offsetting the lane's left edge from
      the status row above it. The shell padding already keeps focus rings
      clear of the scroll edges. */
-  padding: var(--space-2) 0;
+   padding: 0 0 var(--space-2);
   border-radius: var(--radius-sm);
   background: transparent;
 }
 
+/* The header is a single row now: the workspace line with its summary counts
+   and the "+ new" split. The accent border stays on the whole header, so the
+   divider lands below the line (above the tier labels). */
 .home-lane-header {
   display: flex;
+  flex-direction: row;
+  align-items: center;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+/* Row one of the header: the workspace line and the "+ new" split share it,
+   pushed to the two ends. The split must stay a compact control here — it
+   was previously caught by this row's own justify-content, which flung
+   "+ new" and the caret to opposite edges of the lane and centered the
+   workspace name in the leftover space. */
+.home-lane-topline {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   min-width: 0;
-  min-height: 44px;
-  padding: 6px 0 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  width: 100%;
 }
 
 .home-lane-heading {
   display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
   align-items: baseline;
+  justify-content: flex-start;
   gap: 7px;
   min-width: 0;
   overflow: hidden;
@@ -851,7 +860,8 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-.home-lane-summary {
+.home-lane-status-text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--fg2);
@@ -860,16 +870,7 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-.home-lane-summary b {
-  color: var(--accent);
-  font-weight: 700;
-}
-
 /* Muted, never accent: the count is information, not a call to act. */
-.home-lane-tidy {
-  color: var(--fg3);
-}
-
 .home-lane-tidy-dot {
   display: inline-block;
   width: 6px;
@@ -883,10 +884,6 @@ defineExpose({ onArrow })
 
 /* Archiving: same muted register as tidy-up, but with a spinner rather than
    a breathing dot — it is a short in-flight request, not background work. */
-.home-lane-archiving {
-  color: var(--fg3);
-}
-
 .home-lane-archiving-dot {
   display: inline-block;
   width: 6px;
@@ -901,16 +898,6 @@ defineExpose({ onArrow })
 
 @keyframes home-lane-archiving-spin {
   to { transform: rotate(360deg); }
-}
-
-/* A failed extraction is a recovery case, not a quiet background fact, so it
-   reads in the warn register — the one tidy signal that can act. */
-.home-lane-failed {
-  color: var(--warning);
-}
-
-.home-lane-failed b {
-  font-weight: 700;
 }
 
 @keyframes home-lane-tidy-breathe {
@@ -982,6 +969,8 @@ defineExpose({ onArrow })
   display: flex;
   flex: 0 0 auto;
   align-items: stretch;
+  /* Explicitly not the topline's space-between: both buttons hug one end. */
+  justify-content: flex-start;
 }
 
 .home-lane-new--split {
@@ -1264,17 +1253,16 @@ defineExpose({ onArrow })
   -webkit-line-clamp: 2;
 }
 
-/* Sits at the end of the title row in every density, so it shrinks to its
-   contents rather than spanning the card. `margin-left: auto` on the time is
-   inert here (there is no free space to absorb) - that is what puts the
-   project name directly next to the timestamp instead of at the far edge. */
+/* Keep project labels and timestamps in stable columns across every row. The
+   metadata used to shrink to each row's contents, making both columns jump
+   horizontally as project names and relative times changed. */
 .home-chat-meta {
   display: flex;
   align-items: baseline;
-  flex: 0 1 auto;
+  flex: 0 0 34%;
   gap: 7px;
   min-width: 0;
-  max-width: 45%;
+  max-width: 34%;
   margin-left: auto;
   color: var(--fg2);
   font-size: var(--text-xs);
@@ -1286,7 +1274,7 @@ defineExpose({ onArrow })
 
 .home-chat-project {
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   overflow: hidden;
   color: var(--fg2);
   letter-spacing: 0.03em;
@@ -1296,10 +1284,12 @@ defineExpose({ onArrow })
 }
 
 .home-chat-time {
-  flex: 0 0 auto;
+  flex: 0 0 7ch;
+  width: 7ch;
   margin-left: auto;
   color: var(--fg3);
   font-family: var(--font-mono);
+  text-align: right;
   white-space: nowrap;
 }
 

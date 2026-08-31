@@ -1,12 +1,12 @@
 """Post-setup grace window: system routines must not crowd out onboarding.
 
 A brand-new install runs its first launch with no missed-run history for the
-packaged system routines (memory curation, install health, workspace hygiene,
-skill evolution). Because the schedules are withheld during the setup wizard,
-the first post-setup startup sees every routine as past due and
-`ScheduleManager.catch_up` fires them all in parallel — the user meets four
-background chats before (or alongside) their onboarding chat. These tests
-cover the grace marker and the catch-up suppression it drives.
+packaged system routines (Workspace care, Skill reflection). Because the
+schedules are withheld during the setup wizard, the first post-setup startup
+sees every routine as past due and `ScheduleManager.catch_up` fires them all
+in parallel — the user meets background chats before (or alongside) their
+onboarding chat. These tests cover the grace marker and the catch-up
+suppression it drives.
 """
 
 from __future__ import annotations

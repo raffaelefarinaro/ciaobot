@@ -897,10 +897,7 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
     system = {e.schedule_id: e for e in store.list_entries() if e.scope == "system"}
     assert set(system) == {
         "system-memory-curation",
-        "system-install-health",
-        "system-workspace-hygiene",
         "system-skill-evolution",
-        "system-reviews-hygiene",
     }
     assert "system-weekly-review" not in system
     for entry in system.values():
@@ -944,49 +941,22 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     assert "Do not edit the bounded" not in entry.prompt
 
 
-def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:
-    """Hygiene rebuilds this root's index, then audits only this root.
+def test_workspace_care_skill_runs_overdue_structured_os_audit(tmp_path: Path) -> None:
+    """Workspace care owns both nightly memory and the overdue weekly audit."""
+    from importlib import resources
 
-    The rebuild came back INTO hygiene once the index became a per-root
-    artifact: there is no shared INDEX.md left for a global routine to write,
-    and the audit that reads it is already per-workspace.
-    """
     store = ScheduleStore(tmp_path, include_system=True)
-    entry = store.get("system-workspace-hygiene")
+    entry = store.get("system-memory-curation")
     assert entry is not None
-    prompt = entry.prompt.lower()
-    assert "ciao os-audit --json --scope workspace" in entry.prompt
-    assert "ciao vault-index --write" in entry.prompt
-    assert "ciao vault-lint" not in entry.prompt
-    assert "exit code 1" in prompt
-    assert "exit code 2" in prompt
-    assert "summarize command output" in prompt
-    assert "do not claim" in prompt
-    # Scoped by the dispatch env, so the static prompt must not name a workspace.
-    assert "--workspace-name" not in entry.prompt
-    # The rebuild feeds the audit, so it has to be ordered before it.
-    assert entry.prompt.index("vault-index --write") < entry.prompt.index("os-audit")
-
-
-def test_install_health_reports_the_global_half_once(tmp_path: Path) -> None:
-    """The sections whose subject is the global runtime dir, reported once.
-
-    Hygiene is `per_workspace: true`, so before the split it reported the same
-    job failures and upgrade actions once per workspace, which reads as N
-    problems rather than one.
-    """
-    store = ScheduleStore(tmp_path, include_system=True)
-    health = store.get("system-install-health")
-    hygiene = store.get("system-workspace-hygiene")
-    assert health is not None and hygiene is not None
-    assert "ciao os-audit --json --scope global" in health.prompt
-    # No global artifact is written, so ordering is not load-bearing, but a
-    # shared minute with the fanned-out hygiene rows would be.
-    assert health.daily_time_utc != hygiene.daily_time_utc
-    # It must not itself be per-workspace, or it reintroduces the duplication.
-    # Fan-out is asserted against a store with a resolver in
-    # tests/test_system_schedule_fanout.py.
-    assert health.workspace == ""
+    skill = (
+        resources.files("ciao.stock")
+        .joinpath("skills", "memory-curation", "SKILL.md")
+        .read_text(encoding="utf-8")
+    )
+    assert "ciao vault-index --write" in skill
+    assert "ciao os-audit --json --scope workspace" in skill
+    assert "last_full_pass" in skill
+    assert skill.index("vault-index --write") < skill.index("os-audit --json")
 
 
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:

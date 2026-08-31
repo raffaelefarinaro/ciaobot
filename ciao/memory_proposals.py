@@ -1113,6 +1113,34 @@ def _normalize_for_match(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+_NEGATION_RE = re.compile(r"\b(?:do not|don't|never|avoid)\b")
+
+# Where one fact ends and the next begins, in text that has already been
+# through `_normalize_for_match`. That collapse removes every newline, so a
+# markdown file arrives here as one line and the bullet markers that started
+# each item are the only separator left between two independent facts. Without
+# them a single "- Never commit secrets" bullet reads as the containing
+# sentence of everything below it, and every later fact in the file is scored
+# as negated — so an already-applied proposal fails this guard and is queued
+# back into Review, which is the exact loop the guard exists to close.
+_SEGMENT_SPLIT_RE = re.compile(r"[.!?;\n]|(?:^|(?<= ))(?:[-*+\u2022\u2013\u2014]|\d+\.) ")
+
+
+def _positive_contains(text: str, needle: str) -> bool:
+    """Match *needle* unless its containing sentence is negated."""
+    start = 0
+    while True:
+        at = text.find(needle, start)
+        if at < 0:
+            return False
+        boundary = 0
+        for match in _SEGMENT_SPLIT_RE.finditer(text, 0, at):
+            boundary = match.end()
+        if not _NEGATION_RE.search(text[boundary:at]):
+            return True
+        start = at + 1
+
+
 def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     """True when *path* already contains the proposal's substance."""
     try:
@@ -1124,11 +1152,8 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     if not norm_proposal:
         return False
     # Exact containment first (fast, precise for copy-paste facts like paths).
-    exact_at = norm_content.find(norm_proposal)
-    if exact_at >= 0:
-        prefix = norm_content[:exact_at]
-        if not re.search(r"(?:do not|don't|never|avoid)\s+$", prefix):
-            return True
+    if _positive_contains(norm_content, norm_proposal):
+        return True
     if len(norm_proposal) < _APPLIED_MIN_OVERLAP:
         return False
     # Also check the promotable variant for memory/profile: the region holds
@@ -1137,7 +1162,7 @@ def _is_already_in_file(path: Path, proposal_text: str) -> bool:
     promotable = _promotable_text(proposal_text)
     if promotable and promotable != proposal_text:
         norm_promotable = _normalize_for_match(promotable)
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_content:
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_content, norm_promotable):
             return True
     # Do not use unordered token overlap here. It treats contradictory or
     # unrelated sentences as equivalent (for example, "use Python" versus
@@ -1165,9 +1190,9 @@ def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> 
         norm_entry = _normalize_for_match(entry)
         if norm_promotable == norm_entry:
             return True
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and norm_promotable in norm_entry:
+        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_entry, norm_promotable):
             return True
-        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and norm_entry in norm_promotable:
+        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_promotable, norm_entry):
             return True
     return False
 

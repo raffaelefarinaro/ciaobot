@@ -394,7 +394,10 @@ class SDKHandle(ActiveHandle):
     async def stop(self) -> None:
         try:
             await self.client.interrupt()
-        except _CLAUDE_OP_ERRORS:
+        except Exception:  # noqa: BLE001 — best-effort: a hung CLI or a
+            # transport torn down under us (stop escalation disconnects the
+            # client while this ack is still pending) must never surface as
+            # an un-retrieved task exception.
             logger.debug("Claude interrupt failed; client is likely already idle")
 
 

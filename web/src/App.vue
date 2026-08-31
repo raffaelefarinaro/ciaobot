@@ -43,6 +43,7 @@
     <InAppToast />
     <ConfirmDialog />
     <PromptDialog />
+    <NewChatPicker />
   </div>
 </template>
 
@@ -52,6 +53,7 @@ import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
+import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'

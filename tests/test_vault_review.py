@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+import ciao.vault_review as review
 
 from ciao.fts_search import EXCLUDED_VAULT_DIRS
 from ciao.vault_index import scan_vault
@@ -109,6 +112,37 @@ def test_a_read_only_listing_does_not_write_the_queue(tmp_path: Path) -> None:
     assert not (tmp_path / "Workspace" / "Vault-Review.md").exists()
 
 
+def test_candidate_generation_serializes_workspace_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+    original = review._generate_candidates
+
+    def blocked(*args: object, **kwargs: object):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            started.set()
+            assert release.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(review, "_generate_candidates", blocked)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(generate_candidates, tmp_path, workspace="personal")
+        assert started.wait(2)
+        second = pool.submit(generate_candidates, tmp_path, workspace="personal")
+        assert not second.done()
+        release.set()
+        first.result()
+        second.result()
+
+
 def test_archive_is_not_an_accepted_disposition(tmp_path: Path) -> None:
     _note(tmp_path, "People/A.md", "An unlinked note.")
     candidate = generate_candidates(tmp_path, workspace="personal")[0]
@@ -157,6 +191,28 @@ def test_permanent_delete_keeps_backlinks_when_the_folder_is_read_only(tmp_path:
     assert "See [A](A.md)." in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")
     assert (tmp_path / "Workspace" / ".vault-trash" / f"{candidate.candidate_id}.md").is_file()
     assert read_ledger(tmp_path)[-1]["disposition"] == "trash"
+
+
+def test_permanent_delete_restores_backlinks_when_audit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _note(tmp_path, "People/A.md", "The canonical note.")
+    _note(tmp_path, "People/B.md", "See [A](A.md).")
+    candidate = next(
+        item for item in generate_candidates(tmp_path, workspace="personal", max_candidates=50)
+        if item.path.endswith("/A.md")
+    )
+    trash_note(tmp_path, candidate)
+
+    def fail_audit(*args: object, **kwargs: object) -> None:
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr("ciao.vault_review._append", fail_audit)
+    with pytest.raises(ValueError, match="audit failed"):
+        delete_permanently(tmp_path, candidate.candidate_id, confirm=candidate.candidate_id)
+
+    assert "See [A](A.md)." in (tmp_path / "People" / "B.md").read_text(encoding="utf-8")
+    assert (tmp_path / "Workspace" / ".vault-trash" / f"{candidate.candidate_id}.md").is_file()
 
 
 def test_an_earlier_unattended_turn_does_not_block_a_later_attended_trash(tmp_path: Path) -> None:

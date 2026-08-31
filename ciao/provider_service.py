@@ -66,6 +66,15 @@ class ProviderService:
     def _register_handle(self, handle: ActiveHandle | None) -> None:
         self._active_handle = handle
 
+    def active_handle(self) -> ActiveHandle | None:
+        """Snapshot the live operation handle, if any.
+
+        Callers that are about to tear a turn down (stop with escalation)
+        grab the handle first so the polite provider-level stop can still be
+        issued after the turn's own cleanup has unregistered it.
+        """
+        return self._active_handle
+
     async def stop_active(self) -> bool:
         if self._active_handle is None:
             return False
