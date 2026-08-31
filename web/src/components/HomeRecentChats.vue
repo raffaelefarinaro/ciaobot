@@ -245,7 +245,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import { postprocessLabel, tidyingSummary } from '../lib/postprocessView'
+import { postprocessLabel } from '../lib/postprocessView'
 import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -451,22 +451,6 @@ function laneUnreadCount(lane: HomeLane): number {
   return lane.tiers.unread.length
 }
 
-function laneQuietCount(lane: HomeLane): number {
-  return lane.tiers.quiet.length + lane.tiers.older.length
-}
-
-// The header renders the needs count itself so it can carry the hue emphasis;
-// this is everything after it. Returning 'all quiet' only when the lane is
-// wholly empty keeps the header from printing "3 quiet all quiet".
-function laneSummaryRest(lane: HomeLane): string {
-  const parts: string[] = []
-  if (laneWorkingCount(lane)) parts.push(`${laneWorkingCount(lane)} working`)
-  if (laneUnreadCount(lane)) parts.push(`${laneUnreadCount(lane)} unread`)
-  if (laneQuietCount(lane)) parts.push(`${laneQuietCount(lane)} quiet`)
-  if (!parts.length && !laneNeedsCount(lane)) return 'all quiet'
-  return parts.join(' · ')
-}
-
 // Chats this workspace is still tidying up after archiving them. The chats
 // themselves stay out of the priority tiers — archiving must keep meaning —
 // but they are listed in the lane's own "tidying up" tier below quiet, so the
@@ -476,17 +460,8 @@ function laneTidyCount(lane: HomeLane): number {
   return lane.tidyChats.length
 }
 
-function laneTidyLabel(lane: HomeLane): string {
-  return tidyingSummary(laneTidyCount(lane))
-}
-
 function laneArchivingCount(lane: HomeLane): number {
   return lane.archivingChats.length
-}
-
-function laneArchivingLabel(lane: HomeLane): string {
-  const n = laneArchivingCount(lane)
-  return n === 1 ? '1 archiving' : `${n} archiving`
 }
 
 /** Insights-failed count for a lane's workspace, for the header fragment. */

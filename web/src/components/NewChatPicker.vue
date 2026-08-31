@@ -47,11 +47,19 @@ interface PickerItem {
 const picker = pendingNewChat
 const store = useProjectStore()
 
-// The picker opens on the active workspace's projects. Number keys (1-9)
-// switch the workspace, which swaps the project list in place.
+// Which workspace's projects the picker is showing. Local to the picker, not
+// `store.activeWorkspace`: browsing with 1-9 is a preview, and assigning the
+// store directly made it a commitment. Escaping out left the app on the peeked
+// workspace with `activeChatId` still pointing at a chat in the old one, none
+// of it persisted - and on the create path it pre-satisfied the
+// `project.workspace !== activeWorkspace` check inside `newChatInProject`, so
+// the previous chat's WebSocket was never disconnected. `newChatInProject`
+// performs the real switch when a project is actually chosen.
+const previewWorkspace = ref<string>(store.activeWorkspace)
+
 const projectItems = computed<PickerItem[]>(() => {
   return store.projects
-    .filter(p => p.workspace === store.activeWorkspace)
+    .filter(p => p.workspace === previewWorkspace.value)
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
     .map(p => ({
       id: p.project_id,
@@ -65,7 +73,7 @@ const selected = ref<string>('')
 const itemButtons = ref<HTMLButtonElement[]>([])
 
 const hint = computed(() =>
-  `Projects in ${workspaceLabel(store.activeWorkspace)} — press 1-9 to switch workspace.`,
+  `Projects in ${workspaceLabel(previewWorkspace.value)} — press 1-9 to switch workspace.`,
 )
 
 function currentIndex(): number {
@@ -113,9 +121,8 @@ function onKeydown(event: KeyboardEvent) {
     const workspace = store.workspaceOptions[Number(event.key) - 1]
     if (workspace) {
       event.preventDefault()
-      store.activeWorkspace = workspace.name
-      const projects = projectItems.value
-      selected.value = projects[0]?.id ?? ''
+      previewWorkspace.value = workspace.name
+      selected.value = projectItems.value[0]?.id ?? ''
       focusItem(0)
     }
   }
@@ -128,6 +135,9 @@ watch(projectItems, () => {
 
 watch(picker, async value => {
   if (!value) return
+  // Every open starts from where the user actually is, not from whatever
+  // workspace the previous open happened to end on.
+  previewWorkspace.value = store.activeWorkspace
   selected.value = projectItems.value[0]?.id ?? ''
   await nextTick()
   itemButtons.value[0]?.focus()

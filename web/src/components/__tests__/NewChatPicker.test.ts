@@ -101,4 +101,62 @@ describe('NewChatPicker', () => {
     press('Escape')
     expect(await settle(answer)).toBeNull()
   })
+
+  it('browsing workspaces with 1-9 does not move the app', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+    expect(labels()).toEqual(['General'])
+
+    press('2')
+    await nextTick()
+
+    // The list previews the other workspace...
+    expect(labels()).toEqual(['General', 'Shipping'])
+    // ...but the app has not moved. Assigning store.activeWorkspace here left
+    // the user on the peeked workspace after Escape, with activeChatId still
+    // pointing at a chat in the old one and nothing persisted.
+    expect(store.activeWorkspace).toBe('home')
+
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
+    expect(store.activeWorkspace).toBe('home')
+  })
+
+  it('choosing a previewed project still resolves to that project', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    press('2')
+    await nextTick()
+    press('ArrowDown')
+    await nextTick()
+    press('Enter')
+
+    // newChatInProject performs the real workspace switch on the way in,
+    // which is what disconnects the previous chat's WebSocket.
+    expect(await settle(answer)).toBe('p-shipping')
+    expect(store.activeWorkspace).toBe('home')
+  })
+
+  it('reopening starts from the workspace the user is actually in', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const first = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+    press('2')
+    await nextTick()
+    press('Escape')
+    await settle(first)
+
+    const second = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+    expect(labels()).toEqual(['General'])
+    press('Escape')
+    expect(await settle(second)).toBeNull()
+  })
 })
