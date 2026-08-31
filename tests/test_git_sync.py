@@ -324,3 +324,59 @@ async def test_untracked_credential_in_an_unignored_dir_blocks_the_commit(
         ["git", "ls-files"], cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo)
     ).stdout.splitlines()
     assert ".codex/auth.json" not in tracked
+
+
+async def test_a_negation_that_re_includes_a_credential_is_repaired(
+    tmp_path: Path,
+) -> None:
+    """A guard line being present is not the same as the path being ignored.
+
+    `.claude/` followed by `!.claude/` reads as fully guarded to a membership
+    check — the line is right there — while git reports the token inside as
+    unignored, so `add -A` stages it and the backup loop pushes it to origin.
+    Asking git for the effective status is what closes this; the repair works
+    because gitignore resolves by last match, so the re-appended entry
+    outranks the negation.
+
+    (A negation *inside* an excluded directory, `.claude/` plus
+    `!.claude/.credentials.json`, is not a bypass: git cannot re-include a
+    file whose parent directory is excluded. The un-excluded directory is.)
+    """
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    (repo / ".gitignore").write_text(
+        ".env\nsecrets/\n.runtime/\n.claude/\n!.claude/\n"
+        ".agents/\n.opencode/\nopencode.json\n*.log\n",
+        encoding="utf-8",
+    )
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
+
+    await sync_workspace(repo)
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", ".claude/.credentials.json"],
+        cwd=str(repo), capture_output=True, env=_git_env(repo),
+    ).returncode
+    assert ignored == 0, "the token is still not ignored after the repair"
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo)
+    ).stdout.splitlines()
+    assert ".claude/.credentials.json" not in tracked
+
+
+async def test_an_intact_gitignore_is_not_rewritten_every_startup(
+    tmp_path: Path,
+) -> None:
+    """The effective check must not append a duplicate on every boot."""
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    (repo / ".gitignore").write_text(
+        "\n".join(WORKSPACE_GITIGNORE_ENTRIES) + "\n", encoding="utf-8"
+    )
+
+    await sync_workspace(repo)
+    first = (repo / ".gitignore").read_text(encoding="utf-8")
+    await sync_workspace(repo)
+
+    assert (repo / ".gitignore").read_text(encoding="utf-8") == first

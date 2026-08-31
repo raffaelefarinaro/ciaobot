@@ -60,15 +60,61 @@ _PROTECTED_KEY_NAMES = frozenset(
 )
 
 
-def _ensure_sync_ignores(workspace: Path) -> None:
-    """Keep startup snapshots from picking up credentials or runtime state."""
+# One path per guard entry, used to ask git whether that guard actually bites.
+# The probe is the worst thing the entry is there to hide, so a guard that no
+# longer covers it is treated as absent.
+_IGNORE_PROBES: tuple[tuple[str, str], ...] = (
+    (".env", ".env"),
+    ("secrets/", "secrets/token.json"),
+    (".runtime/", ".runtime/state.json"),
+    (".claude/", ".claude/.credentials.json"),
+    (".agents/", ".agents/notes.md"),
+    (".opencode/", ".opencode/auth.json"),
+    ("opencode.json", "opencode.json"),
+    ("*.log", "ciao.log"),
+)
+
+
+async def _ensure_sync_ignores(workspace: Path) -> None:
+    """Keep startup snapshots from picking up credentials or runtime state.
+
+    Effectiveness is asked of git, not inferred from the text of `.gitignore`.
+    A line being *present* is not the same as the path being *ignored*: a later
+    negation re-includes it, and
+
+        .claude/
+        !.claude/.credentials.json
+
+    reads as fully guarded to a membership check while git happily reports the
+    token as unignored — `add -A` then stages it and the backup loop pushes it
+    to origin. `git check-ignore` answers the question the guard is actually
+    asking. Re-appending a failed entry repairs it because gitignore resolves
+    by last match, so the appended rule outranks the earlier negation.
+    """
     path = workspace / ".gitignore"
+    missing: list[str] = []
+    for entry, probe in _IGNORE_PROBES:
+        rc, _, _ = await _git(workspace, "check-ignore", "-q", "--no-index", probe)
+        if rc == 0:
+            continue
+        if rc > 1:
+            # check-ignore failed rather than answering (128 = not a work tree,
+            # a broken .gitignore). Fall back to the membership check instead
+            # of appending an entry on every startup forever.
+            try:
+                present = {
+                    line.strip()
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                }
+            except OSError:
+                present = set()
+            if entry in present:
+                continue
+        missing.append(entry)
+    if not missing:
+        return
     try:
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        present = {line.strip() for line in existing.splitlines()}
-        missing = [entry for entry in WORKSPACE_GITIGNORE_ENTRIES if entry not in present]
-        if not missing:
-            return
         prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
         path.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
     except OSError:
@@ -159,7 +205,7 @@ async def sync_workspace(workspace: Path) -> str | None:
 
     # Existing workspaces predate the setup guard. Repair it before status so
     # newly ignored credential files never reach `git add -A`.
-    _ensure_sync_ignores(workspace)
+    await _ensure_sync_ignores(workspace)
 
     # Auto-commit local changes so pull can handle them cleanly. Untracked
     # files are staged too (`add -A`, unlike the historical `add -u`): notes,
