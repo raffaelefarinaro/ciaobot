@@ -1068,6 +1068,7 @@ describe('ChatLayout home arrow navigation', () => {
         { path: '/project/:projectId', component: EmptyStub },
         { path: '/settings', component: EmptyStub },
         { path: '/schedules', component: EmptyStub },
+        { path: '/memory', component: EmptyStub },
       ],
     })
     await router.push(startPath)
@@ -1186,6 +1187,46 @@ describe('ChatLayout home arrow navigation', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }))
     await flushPromises()
     expect(store.activeWorkspace).toBe('work')
+    wrapper.unmount()
+  })
+
+  it('switches sections with Cmd+Arrow in the desktop app', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    const wrapper = await mountHome()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/memory')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', metaKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    wrapper.unmount()
+  })
+
+  it('switches sections with Option+Arrow in the web PWA', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    wrapper.unmount()
+  })
+
+  it('does not treat bare arrow keys as section switches', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
     wrapper.unmount()
   })
 

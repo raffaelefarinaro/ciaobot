@@ -761,9 +761,16 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
-  // Option+Arrow switches top-level sections without commandeering the
-  // browser's native Tab focus traversal.
-  if (!e.metaKey && !e.ctrlKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+  // Switch top-level sections (chat → schedules → memory → settings). Desktop
+  // uses Cmd+Arrow; the web PWA uses Option+Arrow, because the browser has
+  // already spent Cmd+Left/Right on back/forward. Never Tab: that stays the
+  // native focus traversal.
+  const mod = e.metaKey || e.ctrlKey
+  const alt = e.altKey
+  const desktopSection = isDesktopApp() && mod && !alt
+  const webSection = !isDesktopApp() && alt && !mod
+  const isSectionArrow = (desktopSection || webSection) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+  if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     const sections = ['/', '/schedules', '/memory', '/settings']
     const current = viewMode.value === 'chat' || viewMode.value === 'project'
