@@ -723,6 +723,9 @@ def _real_title(title: str) -> str | None:
     return title
 
 
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+
+
 def _fallback_title(user_text: str) -> str | None:
     """Deterministic fallback title derived from the user's first message.
 
@@ -736,6 +739,14 @@ def _fallback_title(user_text: str) -> str | None:
     snippet = snippet.splitlines()[0].strip().strip('"').strip("'").strip()
     if not snippet:
         return None
+    # A leading URL truncates mid-host ("Check Zendesk ticket https://scand…"),
+    # which reads as broken text in the sidebar. Keep only the words before
+    # the first URL when there are any; a bare-URL prompt keeps the URL.
+    url_match = _URL_RE.search(snippet)
+    if url_match and url_match.start() > 0:
+        before = snippet[: url_match.start()].strip()
+        if before:
+            snippet = before
     # Cap at ~6 words or 60 chars.
     words = snippet.split()
     if len(words) > 6:
@@ -744,6 +755,42 @@ def _fallback_title(user_text: str) -> str | None:
     if len(snippet) > 60:
         snippet = snippet[:57].rstrip() + "..."
     return snippet or None
+
+
+# One-shot titler budget. Hosted models answer in a couple of seconds; a slow
+# local backend simply times out and the deterministic fallback applies, the
+# same trade the schedule attention classifier makes with a longer window.
+_TITLE_LLM_TIMEOUT_S = 45.0
+
+_TITLE_MAX_CHARS = 60
+
+
+def _clean_llm_title(text: str | None) -> str | None:
+    """Normalize a model-produced title, or None when it is not usable.
+
+    Models answer with trailing newlines, wrapping quotes, or — when their
+    own summarizer degrades — the literal first session message, which
+    carries our injected ``[CIAO_CONTEXT_BEGIN]`` capsule. Accepting any of
+    those would put them straight into the sidebar.
+    """
+    title = (text or "").strip()
+    if not title:
+        return None
+    # First non-empty line only; the prompt asks for one line anyway.
+    for line in title.splitlines():
+        line = line.strip()
+        if line:
+            title = line
+            break
+    title = title.strip().strip('"').strip("'").strip("`").strip()
+    title = title.rstrip(".!?:,")
+    if not title or _PLACEHOLDER_TITLE_RE.match(title):
+        return None
+    if _INJECTED_CONTEXT_MARKER in title:
+        return None
+    if len(title) > _TITLE_MAX_CHARS:
+        title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
+    return title or None
 
 
 _FRONTMATTER_DELIM = "---"
@@ -7593,25 +7640,24 @@ class ProjectChatManager:
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
     ) -> str | None:
-        """If chat title is still the default, read the provider's native title.
+        """If chat title is still the default, title the chat.
 
-        Each provider generates its own session title for free (opencode's
-        ``title`` agent or Claude Code's ``aiTitle``), so
-        there is no separate model call or title-model setting. Returns the new
-        title or None if nothing was changed.
+        Three tiers, in order:
 
-        The provider publishes that title some time after the turn, so this
-        polls ``_TITLE_POLL_DELAYS`` rather than reading once. Every wait
-        re-checks the chat, so a manual rename or a delete during the poll
-        stops it instead of overwriting the user. When the provider never
-        publishes a title within the poll window the deterministic
-        ``_fallback_title`` (first 6 words of the prompt) is returned so the
-        sidebar never stays stuck on "New Chat"; the late-turn poll can still
-        overwrite that fallback with the provider's native title when it
-        finally lands.
-
-        ``assistant_text`` is accepted for call-site compatibility but unused:
-        the native title is authoritative.
+        1. The provider's native session title (opencode's ``title`` agent or
+           Claude Code's ``aiTitle``) — free when it works, so it is polled
+           first via ``_TITLE_POLL_DELAYS``. Every wait re-checks the chat, so
+           a manual rename or a delete during the poll stops it instead of
+           overwriting the user.
+        2. A one-shot model call (``_llm_chat_title``) when the native title
+           never lands. The native path is not dependable: Claude Code
+           ≥ 2.1.246 skips its own title generation for prompts that open
+           with our injected ``[CIAO_CONTEXT_BEGIN]`` capsule — i.e. every
+           Ciaobot chat — so without this tier new chats sat on tier 3.
+        3. The deterministic ``_fallback_title`` (first 6 words of the
+           prompt) so the sidebar never stays stuck on "New Chat". The
+           late-turn poll can still upgrade it with a native title when one
+           finally lands.
         """
         fallback = _fallback_title(user_text)
 
@@ -7645,10 +7691,23 @@ class ProjectChatManager:
             chat.title = title
             self._save()
             return title
-        # Native title never arrived within the window — use the deterministic
-        # fallback so the sidebar leaves "New Chat". The late-turn poll
-        # (fired from _drive's finally) will still attempt to overwrite this
-        # with the native title when it lands.
+        # Native title never arrived within the window. Try the one-shot
+        # titler next: for Claude chats the native title is commonly absent
+        # (the CLI skips its own titler for capsule-prefixed prompts), and a
+        # model-generated label beats the raw 6-word prompt snippet. The
+        # late-turn poll (fired from _drive's finally) will still attempt to
+        # upgrade the deterministic fallback with a native title when one
+        # lands later.
+        chat = self._chats.get(chat_id)
+        if chat is not None and _is_titling_target(chat.title):
+            llm_title = await self._llm_chat_title(chat, user_text, assistant_text)
+            if llm_title:
+                # Re-check: user may have renamed while the model ran.
+                chat = self._chats.get(chat_id)
+                if chat is not None and _is_titling_target(chat.title):
+                    chat.title = llm_title
+                    self._save()
+                    return llm_title
         if fallback is None:
             return None
         chat = self._chats.get(chat_id)
@@ -7657,6 +7716,54 @@ class ProjectChatManager:
         chat.title = fallback
         self._save()
         return fallback
+
+    async def _llm_chat_title(
+        self, chat: ChatInfo, user_text: str, assistant_text: str
+    ) -> str | None:
+        """One-shot model fallback for the chat title, or None on any failure.
+
+        Runs through the same one-shot plumbing as insights and the schedule
+        attention classifier (model resolution included), so a slow local
+        model or an unavailable backend degrades to the deterministic
+        fallback instead of raising into the titler task.
+        """
+        provider = getattr(chat, "provider", "") or "claude"
+        user_text = (user_text or "").strip()
+        if not user_text:
+            return None
+        try:
+            from ciao.insights import _resolve_insights_call, resolve_insights_model
+            from ciao.providers.oneshot import run_oneshot
+
+            project = self._projects.get(chat.project_id)
+            workspace = getattr(project, "workspace", None) if project else None
+            model = resolve_insights_model(self._config, workspace, provider=provider)
+            model, provider, _note = _resolve_insights_call(
+                self._config, model, provider=provider
+            )
+            reply = (assistant_text or "").strip()
+            sections = [f"<user>{user_text[:1500]}</user>"]
+            if reply:
+                sections.append(f"<assistant>{reply[:800]}</assistant>")
+            text = await run_oneshot(
+                "<session>\n" + "\n".join(sections) + "\n</session>",
+                system_prompt=(
+                    "You name chat sessions for a sidebar. Reply with ONLY the title: "
+                    "a short specific noun phrase (3-8 words) naming the session's "
+                    "subject. No quotes, no trailing period, no explanation, no "
+                    "prefix verb when a noun carries the meaning. If the content is "
+                    "mostly a URL or reference, name what it points at. Write the "
+                    "title in the language the user wrote in."
+                ),
+                model=model,
+                timeout_s=_TITLE_LLM_TIMEOUT_S,
+                provider=provider,
+                cwd=self._agent_root_for_chat(chat.chat_id),
+            )
+        except Exception:  # noqa: BLE001 — any titler failure degrades to tier 3
+            logger.info("LLM title fallback failed for %s", chat.chat_id, exc_info=True)
+            return None
+        return _clean_llm_title(text)
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
