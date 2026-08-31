@@ -7,26 +7,24 @@
     aria-label="New chat"
     @click.self="cancel"
   >
-    <div class="newchat-card" role="listbox" aria-label="Choose a workspace for the new chat">
+    <div class="newchat-card" role="listbox" aria-label="Choose a project for the new chat">
       <p class="newchat-title">New chat</p>
-      <p class="newchat-hint">Create in General, or pick a workspace below.</p>
+      <p class="newchat-hint">{{ hint }}</p>
       <button
-        v-for="option in options"
-        :key="option.workspace"
+        v-for="item in projectItems"
+        :key="item.id"
         type="button"
-        ref="optionButtons"
+        ref="itemButtons"
         class="newchat-option"
-        :class="{ 'newchat-option--active': selected === option.workspace }"
-        :data-workspace-color="option.color"
+        :class="{ 'newchat-option--active': selected === item.id }"
+        :data-workspace-color="item.color"
         role="option"
-        :aria-selected="selected === option.workspace"
-        @click="create(option.workspace)"
-        @mouseenter="selected = option.workspace"
+        :aria-selected="selected === item.id"
+        @click="choose(item.id)"
+        @mouseenter="selected = item.id"
       >
-        <span v-if="indexOf(option.workspace) < 9" class="newchat-key" aria-hidden="true">{{ indexOf(option.workspace) + 1 }}</span>
-        <span v-else class="newchat-key newchat-key--empty" aria-hidden="true">·</span>
-        <span class="newchat-name">{{ option.label }}</span>
-        <span v-if="option.isGeneral" class="newchat-badge">General</span>
+        <span class="newchat-name">{{ item.label }}</span>
+        <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
       </button>
     </div>
   </div>
@@ -39,38 +37,53 @@ import { useProjectStore } from '../stores/projects'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 
-interface NewChatOption {
-  workspace: string
+interface PickerItem {
+  id: string
   label: string
   color: string
-  isGeneral: boolean
+  badge: string
 }
 
 const picker = pendingNewChat
 const store = useProjectStore()
 
-const options = computed<NewChatOption[]>(() => {
-  return store.workspaceOptions.map(ws => ({
-    workspace: ws.name,
-    label: workspaceLabel(ws.name),
-    color: normalizeWorkspaceColor(ws.color),
-    isGeneral: store.projects.some(p => p.workspace === ws.name && p.is_auto && p.name === 'General'),
-  }))
+// The picker opens on the active workspace's projects. Number keys (1-9)
+// switch the workspace, which swaps the project list in place.
+const projectItems = computed<PickerItem[]>(() => {
+  return store.projects
+    .filter(p => p.workspace === store.activeWorkspace)
+    .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+    .map(p => ({
+      id: p.project_id,
+      label: p.name,
+      color: normalizeWorkspaceColor(store.workspaceOptions.find(ws => ws.name === p.workspace)?.color),
+      badge: p.is_auto && p.name === 'General' ? 'General' : '',
+    }))
 })
 
 const selected = ref<string>('')
-const optionButtons = ref<HTMLButtonElement[]>([])
+const itemButtons = ref<HTMLButtonElement[]>([])
 
-function indexOf(workspace: string): number {
-  return options.value.findIndex(o => o.workspace === workspace)
+const hint = computed(() =>
+  `Projects in ${workspaceLabel(store.activeWorkspace)} — press 1-9 to switch workspace.`,
+)
+
+function currentIndex(): number {
+  return Math.max(0, projectItems.value.findIndex(o => o.id === selected.value))
 }
 
-function create(workspace: string) {
-  picker.value?.resolve(workspace)
+function choose(id: string) {
+  picker.value?.resolve(id)
 }
 
 function cancel() {
   picker.value?.resolve(null)
+}
+
+function focusItem(index: number) {
+  nextTick(() => {
+    itemButtons.value[index]?.focus()
+  })
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -83,42 +96,41 @@ function onKeydown(event: KeyboardEvent) {
   }
   if (event.key === 'Enter') {
     event.preventDefault()
-    create(selected.value)
+    choose(selected.value)
     return
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
-    const list = options.value
+    const list = projectItems.value
     if (!list.length) return
     const dir = event.key === 'ArrowDown' ? 1 : -1
-    const current = list.findIndex(o => o.workspace === selected.value)
-    const next = (current + dir + list.length) % list.length
-    selected.value = list[next].workspace
-    nextTick(() => {
-      const btn = optionButtons.value[next]
-      btn?.focus()
-    })
+    const next = (currentIndex() + dir + list.length) % list.length
+    selected.value = list[next].id
+    focusItem(next)
     return
   }
   if (/^[1-9]$/.test(event.key)) {
-    const option = options.value[Number(event.key) - 1]
-    if (option) {
+    const workspace = store.workspaceOptions[Number(event.key) - 1]
+    if (workspace) {
       event.preventDefault()
-      create(option.workspace)
+      store.activeWorkspace = workspace.name
+      const projects = projectItems.value
+      selected.value = projects[0]?.id ?? ''
+      focusItem(0)
     }
   }
 }
 
-watch(options, () => {
-  const current = options.value.find(o => o.workspace === selected.value)
-  if (!current) selected.value = options.value[0]?.workspace ?? ''
+watch(projectItems, () => {
+  const current = projectItems.value.find(o => o.id === selected.value)
+  if (!current) selected.value = projectItems.value[0]?.id ?? ''
 })
 
 watch(picker, async value => {
   if (!value) return
-  selected.value = options.value[0]?.workspace ?? ''
+  selected.value = projectItems.value[0]?.id ?? ''
   await nextTick()
-  optionButtons.value[0]?.focus()
+  itemButtons.value[0]?.focus()
 })
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
@@ -183,24 +195,6 @@ onBeforeUnmount(() => {
 .newchat-option--active {
   background: var(--bg3);
   border-color: var(--accent);
-}
-.newchat-key {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font-size: 11px;
-  line-height: 1;
-  font-weight: 700;
-  flex: 0 0 auto;
-}
-.newchat-key--empty {
-  border-color: transparent;
 }
 .newchat-name {
   overflow: hidden;

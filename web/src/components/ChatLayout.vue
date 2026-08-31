@@ -624,13 +624,13 @@ async function createWorkspaceChat(action: { workspace: string; projectId: strin
   await store.createChat(action.projectId)
 }
 
-// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker. Enter
-// creates the chat in the current workspace's General project without a pick.
+// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker, which drills
+// workspace → project and resolves to the chosen project's id.
 async function handleNewChatShortcut() {
   const { openNewChatPicker } = await import('../lib/newChat')
-  const workspace = await openNewChatPicker()
-  if (!workspace) return
-  await store.newChatInWorkspace(workspace)
+  const projectId = await openNewChatPicker()
+  if (!projectId) return
+  await store.newChatInProject(projectId)
 }
 const activePinKey = computed(() => {
   return store.activeChatId || currentProjectId.value

@@ -1081,14 +1081,13 @@ export const useProjectStore = defineStore('projects', () => {
     return createChat(general.project_id)
   }
 
-  // Cmd+T picker: open a fresh, empty chat in the chosen workspace's General
-  // project. Falls back to the active workspace's General project when the
-  // named workspace has none. Returns the created chat, or undefined when
-  // there was nowhere to put one.
-  async function newChatInWorkspace(workspace: WorkspaceName): Promise<ChatInfo | undefined> {
-    const project = generalProject(workspace) ?? generalProject()
+  // Cmd+T picker: open a fresh, empty chat in the chosen project, switching to
+  // its workspace first if needed. Returns the created chat, or undefined when
+  // the project could not be found.
+  async function newChatInProject(projectId: string): Promise<ChatInfo | undefined> {
+    const project = projects.value.find(p => p.project_id === projectId)
     if (!project) {
-      pushErrorToast('Cannot open a new chat', 'No General project found to create the chat in.')
+      pushErrorToast('Cannot open a new chat', 'No project found to create the chat in.')
       return
     }
     if (project.workspace !== activeWorkspace.value && activeChatId.value) {
@@ -5784,7 +5783,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, newChatInGeneral, newChatInWorkspace, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,

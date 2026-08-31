@@ -10,82 +10,95 @@ import { useProjectStore } from '../../stores/projects'
 
 describe('NewChatPicker', () => {
   let store: ReturnType<typeof useProjectStore>
+  let wrapper: ReturnType<typeof mount> | null = null
 
   beforeEach(() => {
     setActivePinia(createPinia())
     store = useProjectStore()
+    store.workspaces = [
+      { name: 'home', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'client', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
     store.projects = [
       { project_id: 'p-home', name: 'General', workspace: 'home', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
       { project_id: 'p-client', name: 'General', workspace: 'client', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-shipping', name: 'Shipping', workspace: 'client', context: '', created_at: '', order: 1, vault_folder: '' },
     ]
+    store.activeWorkspace = 'home'
   })
 
   afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
     pendingNewChat.value?.resolve(null)
   })
 
-  function mountPicker() {
-    return mount(NewChatPicker, { attachTo: document.body })
+  function labels() {
+    return wrapper!.findAll('.newchat-name').map(el => el.text())
   }
 
-  it('lists each workspace and marks General', async () => {
-    const wrapper = mountPicker()
+  function press(key: string) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key, cancelable: true }))
+  }
+
+  async function settle(answer: Promise<string | null>): Promise<string | null | 'TIMEOUT'> {
+    return Promise.race([
+      answer,
+      new Promise<'TIMEOUT'>(resolve => setTimeout(() => resolve('TIMEOUT'), 100)),
+    ])
+  }
+
+  it('opens directly on the active workspace\u2019s projects', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
     const answer = openNewChatPicker()
     await nextTick()
     await nextTick()
 
-    const labels = wrapper.findAll('.newchat-name').map(el => el.text())
-    expect(labels).toEqual(['Home', 'Client'])
-    expect(wrapper.findAll('.newchat-badge')).toHaveLength(2)
-    wrapper.unmount()
-    await expect(answer).resolves.toBeNull()
+    // Active workspace is "home", so only its projects are listed.
+    expect(labels()).toEqual(['General'])
+
+    press('Enter')
+    expect(await settle(answer)).toBe('p-home')
   })
 
-  it('Enter creates the chat in the first (default) workspace', async () => {
-    const wrapper = mountPicker()
+  it('a number key switches the workspace and swaps the project list', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
     const answer = openNewChatPicker()
     await nextTick()
     await nextTick()
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
-    await expect(answer).resolves.toBe('home')
-    wrapper.unmount()
+    expect(labels()).toEqual(['General'])
+
+    // "2" selects the second workspace ("client") and shows its projects.
+    press('2')
+    await nextTick()
+    expect(labels()).toEqual(['General', 'Shipping'])
+
+    press('Enter')
+    expect(await settle(answer)).toBe('p-client')
   })
 
-  it('arrows move the selection and Enter uses it', async () => {
-    const wrapper = mountPicker()
+  it('arrow keys move through the project list', async () => {
+    store.activeWorkspace = 'client'
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
     const answer = openNewChatPicker()
     await nextTick()
     await nextTick()
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true }))
+    expect(labels()).toEqual(['General', 'Shipping'])
+    press('ArrowDown')
     await nextTick()
-    expect(wrapper.get('.newchat-option--active').text()).toContain('Client')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
-    await expect(answer).resolves.toBe('client')
-    wrapper.unmount()
-  })
-
-  it('a number key picks that workspace directly', async () => {
-    const wrapper = mountPicker()
-    const answer = openNewChatPicker()
-    await nextTick()
-    await nextTick()
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', cancelable: true }))
-    await expect(answer).resolves.toBe('client')
-    wrapper.unmount()
+    press('Enter')
+    expect(await settle(answer)).toBe('p-shipping')
   })
 
   it('Escape cancels the picker', async () => {
-    const wrapper = mountPicker()
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
     const answer = openNewChatPicker()
     await nextTick()
     await nextTick()
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }))
-    await expect(answer).resolves.toBeNull()
-    wrapper.unmount()
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
   })
 })
