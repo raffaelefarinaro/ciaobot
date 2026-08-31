@@ -2582,8 +2582,11 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
     {
       key: 'claude',
       label: 'Anthropic (via Claude Code)',
+      // The Anthropic tiers are real model ids, and config._operator_default_model
+      // honors a `claude` entry in provider_default_models, so this picker edits
+      // the same override every other provider's does.
       options: settings.model_options.anthropic || [],
-      configurable: false,
+      configurable: true,
       available: true,
     },
   ]
