@@ -831,11 +831,11 @@
     </div>
 
     <!-- Image-capability question. The server paused before dispatch because
-         the selected model can't see images. The first candidate is the current
-         model, disabled; the rest are same-backend vision models. Picking one
-         switches the chat and re-dispatches the turn; "Open picker" hands over
-         to the full ModelSelector filtered to the current backend; Cancel (or
-         the 30s timeout) closes the turn with a system bubble. -->
+         the selected model can't see images. The card shows the full
+         provider-filtered ModelSelector (vision-capable models only) with the
+         current model visible but disabled. Picking one switches the chat and
+         re-dispatches the turn with the image; Cancel (or the 30s timeout)
+         closes the turn with a system bubble. -->
     <div v-if="activeCapabilityQuestions.length" class="question-card capability-card">
       <div class="question-card-header">
         <span class="question-card-icon">&#128444;</span>
@@ -845,21 +845,17 @@
       <div
         v-for="q in activeCapabilityQuestions"
         :key="q.request_id"
-        class="question-block"
+        class="question-block capability-picker-block"
       >
-        <div class="question-options">
-          <button
-            v-for="c in q.candidates"
-            :key="c.id"
-            type="button"
-            class="question-option"
-            :disabled="c.disabled || capabilityExpired(q)"
-            @click="switchCapabilityModel(q, c.id)"
-          >
-            <span class="question-option-label">{{ c.label }}</span>
-            <span v-if="c.disabled" class="question-option-desc">current model</span>
-          </button>
-        </div>
+        <ModelSelector
+          :model-value="q.current_model"
+          :sections="capabilitySectionsFor(q)"
+          :disabled="capabilityExpired(q)"
+          :active-models="[q.current_model]"
+          searchable
+          placeholder="Pick a vision model..."
+          @select="(val) => handleCapabilityPickerSelect(q, val)"
+        />
       </div>
       <div class="question-card-actions">
         <button
@@ -868,12 +864,6 @@
           :disabled="capabilityExpired(activeCapabilityQuestions[0])"
           @click="cancelCapability(activeCapabilityQuestions[0])"
         >Cancel</button>
-        <button
-          class="btn-sm"
-          type="button"
-          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
-          @click="openCapabilityPicker(activeCapabilityQuestions[0])"
-        >Open picker</button>
       </div>
     </div>
 
@@ -2440,13 +2430,33 @@ function switchCapabilityModel(q: { request_id: string }, modelId: string) {
   store.respondCapability(chat.value.chat_id, q.request_id, 'switch', modelId)
 }
 
-function openCapabilityPicker(q: { request_id: string }) {
-  if (!chat.value) return
-  store.respondCapability(chat.value.chat_id, q.request_id, 'picker')
-  // Land the picker on the current backend so the user only sees same-provider
-  // vision models, not the full cross-provider list.
-  capabilityPickerSection.value = capabilitySectionForBucket(activeBucket.value)
-  showModelPicker.value = true
+function handleCapabilityPickerSelect(q: { request_id: string }, val: string | string[]) {
+  const modelId = Array.isArray(val) ? val[0] : val
+  if (!modelId) return
+  switchCapabilityModel(q, modelId)
+}
+
+function capabilitySectionsFor(q: { current_model: string; candidates: Array<{ id: string; label: string; disabled?: boolean; supports_vision?: boolean }> }): import('../lib/modelSections').ModelSection[] {
+  const current = q.current_model
+  const visionCandidates = q.candidates.filter(c => c.supports_vision && !c.disabled)
+  const bucket = activeBucket.value
+  const labelMap: Record<string, string> = {}
+  for (const c of visionCandidates) labelMap[c.id] = c.label
+  const sections: import('../lib/modelSections').ModelSection[] = []
+  if (current) {
+    sections.push({ key: 'current', label: 'Current model — can’t see images', models: [current], disabled: true })
+  }
+  if (visionCandidates.length) {
+    const bucketSection = chatModelSections.value.find(s => s.key === capabilitySectionForBucket(bucket))
+    const label = bucketSection?.label || bucket
+    sections.push({
+      key: capabilitySectionForBucket(bucket),
+      label,
+      models: visionCandidates.map(c => c.id),
+      modelLabels: labelMap,
+    })
+  }
+  return sections
 }
 
 function cancelCapability(q: { request_id: string }) {
