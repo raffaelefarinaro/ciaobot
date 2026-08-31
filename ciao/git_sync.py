@@ -12,6 +12,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _REQUIRED_GITIGNORE_ENTRIES = (".env", "secrets/", ".runtime/")
+_PROTECTED_CONFIG_NAMES = frozenset({".npmrc", ".netrc", ".pypirc"})
 
 
 def _ensure_sync_ignores(workspace: Path) -> None:
@@ -34,6 +35,7 @@ def _protected_path(path: str) -> bool:
     env_template = name in {".env.example", ".env.sample", ".env.template", ".env.schema"}
     return (
         (name == ".env" or (name.startswith(".env.") and not env_template))
+        or name in _PROTECTED_CONFIG_NAMES
         or path.startswith("secrets/")
         or name.endswith((".pem", ".key", ".p12", ".pfx"))
     )

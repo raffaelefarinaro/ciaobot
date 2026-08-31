@@ -57,11 +57,14 @@ If you want to understand the extraction and memory pipeline in detail, point yo
 
 - **Workspaces and projects:** Keep personal, work, and client contexts separate; group chats around projects; switch context from the sidebar.
 - **Chats and agents:** Continue conversations, fork them, run prompts on a schedule, and follow the subagents working in the background.
-- **Files and documents:** Browse and edit workspace files, inspect outputs and history, pin documents, and comment on selected passages before sending your next prompt.
-- **Memory and archiving:** Archive completed chats, extract insights, review proposals, and maintain a searchable Markdown vault.
+- **Files and documents:** Work with the model and a document side by side. Open Markdown files natively, edit them, pin them beside the chat, and add precise comments about what to change and where before sending the instructions back to the model. CSV files open as editable tables, and PowerPoint files are shown as PDFs. Supported document attachments are converted to Markdown with AnyDoc so the model can read them quickly.
+- **Memory and archiving:** Every archived chat goes through memory extraction. Once a day, Ciaobot consolidates what was learned or asks you to review it before it becomes durable. The second-brain UI shows your notes and their connections so you can explore, adjust, and discuss them with the model.
+- **Adversarial review:** Send the same file, question, or idea to a panel of multiple configured agents and models, then compare their independent feedback and receive a synthesized verdict that helps select the strongest answer.
 - **Automations:** Run recurring or one-off prompts and see their status in Settings.
 - **Providers:** Use Claude Code or opencode with the model access you already have, including local models exposed through opencode.
-- **Remote access:** Use the PWA from another device over a private network such as [Tailscale](https://tailscale.com/).
+- **Google Workspace:** Use the native integration with Google's [`gws` CLI](https://github.com/googleworkspace/cli) to connect and set up your Google account from Ciaobot, then work with Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, and Tasks.
+- **Workspace extensions:** Add and manage skills, MCP servers, slash commands, and subagents per workspace through the UI, without manually editing configuration files.
+- **Host and client access:** Run Ciaobot on a main machine that owns the engine, workspace, and vault, then connect to it from another computer, phone, or tablet as a client. Use the PWA over a private network such as [Tailscale](https://tailscale.com/) while keeping the data and model sessions on the host.
 
 ## Documentation
 

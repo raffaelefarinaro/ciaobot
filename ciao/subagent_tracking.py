@@ -424,11 +424,9 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # when the tool_result record lands.
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
-    # True while a completion notification is in flight but unprocessed: an
-    # enqueue (or notification user record) exists and no assistant record has
-    # followed the notification turn. Set, cleared, and consumed below.
-    notification_pending = False
-    notification_claimed = False
+    # Track each completion independently. A single boolean loses a queued
+    # notification when several agents finish before the CLI processes them.
+    notification_windows: list[bool] = []
 
     try:
         fh = path.open(encoding="utf-8")
@@ -460,24 +458,26 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     # (the dequeue record never has assistant output after it
                     # when the run dies. This is evidence that an assistant
                     # record may clear the pending flag.
-                    if notification_pending:
-                        notification_claimed = True
+                    for index, claimed in enumerate(notification_windows):
+                        if not claimed:
+                            notification_windows[index] = True
+                            break
                     continue
                 else:
                     content = record.get("content")
                     if isinstance(content, str) and _notification_fields(content):
                         _apply_notification(state, content)
-                        notification_pending = True
-                        notification_claimed = False
+                        notification_windows.append(False)
                 continue
 
             if rtype == "assistant":
                 # Only an assistant reply to a dequeued/surfaced notification
                 # closes its window. A normal parent record after enqueue is
                 # not evidence that the completion notification was handled.
-                if notification_pending and notification_claimed:
-                    notification_pending = False
-                    notification_claimed = False
+                for index, claimed in enumerate(notification_windows):
+                    if claimed:
+                        notification_windows.pop(index)
+                        break
                 message = record.get("message")
                 assistant_text = _text_content(message)
                 if assistant_text.strip():
@@ -540,13 +540,12 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 # record follows it, the CLI has not turned it into a reply
                 # yet — that is exactly the window where steering the nudge
                 # kills the run (see notification_pending).
-                notification_pending = True
-                notification_claimed = True
+                notification_windows.append(True)
                 continue
             if _is_countable_user_turn(content):
                 user_idx += 1
 
-    state.notification_pending = notification_pending
+    state.notification_pending = bool(notification_windows)
     return state
 
 

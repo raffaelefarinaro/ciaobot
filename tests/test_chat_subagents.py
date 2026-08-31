@@ -538,12 +538,14 @@ async def test_notification_grace_resets_between_windows(
         # answers it. Agent-b's own notification opens window 2, which is
         # also answered before the nudge may fire.
         if sleeps == 3:
+            records.append({"type": "queue-operation", "operation": "dequeue"})
             records.append(assistant_record("First agents are done; report to follow."))
             flush()
         elif sleeps == 4:
             records.append(notification("agent-b"))
             flush()
         elif sleeps == 5:
+            records.append({"type": "queue-operation", "operation": "dequeue"})
             records.append(assistant_record("All agents finished. Here is the full report."))
             flush()
 

@@ -6,7 +6,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from ciao.git_sync import sync_workspace
+import pytest
+
+from ciao.git_sync import _protected_path, sync_workspace
 
 
 def _git_env(repo: Path) -> dict[str, str]:
@@ -155,6 +157,11 @@ async def test_startup_sync_rejects_nested_tracked_env_file(tmp_path: Path) -> N
 
     assert result is not None
     assert "config/.env.local" in result
+
+
+@pytest.mark.parametrize("path", [".npmrc", ".netrc", "config/.pypirc"])
+def test_protected_config_names_are_rejected(path: str) -> None:
+    assert _protected_path(path) is True
 
 
 async def test_startup_sync_clean_tree_reports_no_commit(tmp_path: Path) -> None:
