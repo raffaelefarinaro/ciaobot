@@ -4234,10 +4234,10 @@ class ProjectChatManager:
             # A system-schedule chat (memory curation, hygiene, skill
             # evolution) is the memory machinery itself. Its archive keeps the
             # insights section — the audit trail of what an unattended run did
-            # — but it may never write memory or project docs: extraction has
-            # been observed lifting the curation prompt's own rules as
-            # "Decisions" and auto-promoting the machinery's self-description
-            # into the bounded regions every session loads.
+            # — and memory proposals still run, but extraction is told to
+            # ignore unattended (automation) turns: a real user statement made
+            # mid-run is caught, while the machinery's self-description is not
+            # lifted as a fact. See the "unattended" rule in ciao/insights.py.
             is_system_chat = is_system_schedule_id(
                 chat_meta.schedule_id if chat_meta else ""
             )
@@ -4268,7 +4268,7 @@ class ProjectChatManager:
                 expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if proposal_vault_root is not None and not is_system_chat:
+            if proposal_vault_root is not None:
                 expected.append("memory_proposals")
             self._begin_postprocess(chat_id, expected)
             asyncio.create_task(
@@ -4296,7 +4296,7 @@ class ProjectChatManager:
                         ),
                         provider=chat_meta.provider if chat_meta else "claude",
                         project_doc_path=project_doc_path,
-                        memory_proposals_enabled=not is_system_chat,
+                        memory_proposals_enabled=True,
                     ),
                 )
             )

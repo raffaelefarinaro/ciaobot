@@ -64,6 +64,12 @@ def resolve_insights_model(
     return config.insights_model
 
 
+# The capsule marker an unattended (schedule/automation) turn carries in its
+# injected context. It survives into the raw session JSONL as part of the user
+# message, so extraction can tell a real user turn from the machinery that
+# fired it. See ciao/context/capsule.py.
+_UNATTENDED_MARKER = "unattended=true; this turn was fired automatically"
+
 _INSIGHTS_HEADER = "## Session insights"
 # Written by _append_section immediately before the header so the real
 # appended section is distinguishable from a transcript that merely quotes
@@ -350,6 +356,11 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
+- A user message flagged `"unattended": true` is an automation turn (a
+  schedule or routine fired it), not the user typing. Never extract a fact
+  from an unattended turn or from the assistant work it triggered. Only
+  extract facts from turns the user actually typed. A real user turn in an
+  otherwise-automated session is still fair game.
 """ + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
@@ -473,6 +484,11 @@ def filter_session_jsonl(
                     "ts": obj.get("timestamp", ""),
                     "content": kept_blocks,
                 }
+                # An unattended (schedule/automation) turn carries the capsule
+                # marker in its injected context. Flag it so the extraction
+                # model can tell machinery from a real user turn.
+                if otype == "user" and _UNATTENDED_MARKER in _stringify_content(content):
+                    record["unattended"] = True
                 out_lines.append(json.dumps(record, ensure_ascii=False))
     except OSError:
         logger.exception("Could not read session JSONL at %s", path)
@@ -1258,6 +1274,11 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
+- A user message flagged `"unattended": true` is an automation turn (a
+  schedule or routine fired it), not the user typing. Never extract a fact
+  from an unattended turn or from the assistant work it triggered. Only
+  extract facts from turns the user actually typed. A real user turn in an
+  otherwise-automated session is still fair game.
 """ + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.

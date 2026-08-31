@@ -169,6 +169,41 @@ def test_filter_drops_sidechain_entries(
     assert lines[0]["content"][0]["text"] == "main"
 
 
+def test_filter_flags_unattended_user_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An automation turn carries the capsule marker and is flagged unattended.
+
+    The marker is what lets extraction tell a real user turn from the machinery
+    that fired it, so a system-schedule chat can still surface a genuine user
+    statement without lifting the schedule's own rules as facts.
+    """
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    workspace = tmp_path / "ws"
+    session_id = "sess-unatt"
+    jsonl = _project_dir(workspace) / f"{session_id}.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"content": (
+            "[CIAO_CONTEXT_BEGIN]\n<ciao-context>\n"
+            "unattended=true; this turn was fired automatically. Do not ask "
+            "questions or wait for approval.\n</ciao-context>\n"
+            "[CIAO_CONTEXT_END]\n\nRun the nightly curation pass."
+        )}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Curation done."},
+        ]}},
+        {"type": "user", "message": {"content": "Actually, remember: never deploy on Fridays."}},
+    ])
+
+    out = insights.filter_session_jsonl(workspace, session_id)
+    assert out is not None
+    lines = [json.loads(line) for line in out.splitlines()]
+    assert lines[0]["unattended"] is True
+    assert "unattended" not in lines[1]
+    assert "unattended" not in lines[2]
+
+
 # ── extract_and_append ───────────────────────────────────────────────────
 
 

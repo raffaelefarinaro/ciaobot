@@ -295,17 +295,19 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
 
 
 @pytest.mark.asyncio
-async def test_archive_postprocess_system_chat_never_writes_memory(
+async def test_archive_postprocess_system_chat_keeps_memory_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A system-schedule chat keeps its insights but may not write memory.
+    """A system-schedule chat keeps insights AND memory proposals.
 
     The nightly curation chat's transcript contains the curation prompt's own
     rules; extracting them as "Decisions" auto-promoted the machinery's
-    self-description into the bounded regions. Insights still run (the archive
-    is the audit trail of the unattended run) but memory proposals and the
-    project-doc fold are disabled.
+    self-description into the bounded regions. That pollution is now blocked
+    at extraction time (the "unattended" rule in ciao/insights.py ignores
+    automation turns), so memory proposals stay enabled: a real user statement
+    made mid-run is still caught. Only the project-doc fold stays off, since
+    a system chat has no canonical project doc to fold into.
     """
     pcm = _make_manager(tmp_path)
     pcm._config.workspaces["work"] = WorkspaceConfig(
@@ -335,7 +337,7 @@ async def test_archive_postprocess_system_chat_never_writes_memory(
     await asyncio.sleep(0)
 
     assert calls, "insights must still run for system chats"
-    assert calls[0]["memory_proposals_enabled"] is False
+    assert calls[0]["memory_proposals_enabled"] is True
     assert calls[0]["project_doc_path"] == ""
 
 
