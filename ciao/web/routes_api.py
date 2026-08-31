@@ -3623,6 +3623,16 @@ async def _assemble_chat_messages(
                 entry["unattended"] = True
             user_idx += 1
         result.append(entry)
+    # Stitch the durable transcript's per-turn metadata (token usage with the
+    # context %, quota, effective model) onto the rendered rows — the session
+    # JSONL carries none of it, so without this the turn footer showed only
+    # the completion time and duration. The opencode branch has made the same
+    # overlay since the transcript store gained these fields.
+    current = pcm._transcripts.current_messages(
+        ChatContext.for_web(chat_id), provider
+    )
+    if current and result:
+        _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
     return [*handover_messages, *result]
 

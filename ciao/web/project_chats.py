@@ -3414,14 +3414,16 @@ class ProjectChatManager:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
         parts = re.split(r'^## Turn \d+', text, flags=re.MULTILINE)
-        
+
         for part in parts[1:]:
             user_match = re.search(r'### User\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
             assistant_match = re.search(r'### Assistant\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
-            
+
             time_match = re.search(r'-\s*Time:\s*([^\n]+)', part)
             timestamp = time_match.group(1).strip() if time_match else ""
-            
+
+            usage = self._parse_transcript_usage(part)
+
             if user_match:
                 user_content = user_match.group(1)
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
@@ -3431,17 +3433,41 @@ class ProjectChatManager:
                         "content": user_content,
                         "timestamp": timestamp,
                     })
-                    
+
             if assistant_match:
                 assistant_content = assistant_match.group(1)
                 if assistant_content.strip():
-                    turns_data.append({
+                    row = {
                         "role": "assistant",
                         "content": assistant_content,
                         "timestamp": timestamp,
-                    })
-                    
+                    }
+                    if usage:
+                        row["usage"] = usage
+                    turns_data.append(row)
+
         return turns_data
+
+    @staticmethod
+    def _parse_transcript_usage(part: str) -> dict[str, str]:
+        """Parse the archived turn's ``### Usage`` section into a dict.
+
+        The archive renders each persisted turn's usage dict as ``- key:
+        value`` lines, so an archived chat can serve the same token counts
+        (and the context %) the live transcript carried. Everything else in
+        the section is preserved as-is; a missing or empty section yields {}.
+        """
+        section = re.search(
+            r'### Usage\s*\n(.*?)(?=^### |\Z)', part, re.DOTALL | re.MULTILINE
+        )
+        if not section:
+            return {}
+        usage: dict[str, str] = {}
+        for line in section.group(1).splitlines():
+            item = re.match(r'^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$', line.strip())
+            if item:
+                usage[item.group(1)] = item.group(2).strip()
+        return usage
 
     def continue_archived_chat(self, chat_id: str) -> ChatInfo:
         """Create a new active chat continuing from an archived one.
