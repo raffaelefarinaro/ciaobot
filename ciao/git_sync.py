@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # which matches credential filenames wherever they sit, ignored or not.
 WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
+    ".envrc",
+    ".direnv/",
     "secrets/",
     ".runtime/",
     ".claude/",
@@ -37,7 +39,13 @@ _PROTECTED_CONFIG_NAMES = frozenset({".npmrc", ".netrc", ".pypirc"})
 # Directory names that hold credentials wherever they sit in the tree. Matched
 # per path segment, not as a prefix: `add -A` sweeps untracked files, so a
 # nested `sub/secrets/token` reaches the index the same as a root-level one.
-_PROTECTED_DIR_SEGMENTS = frozenset({"secrets", ".ssh", ".aws", ".gnupg"})
+_PROTECTED_DIR_SEGMENTS = frozenset(
+    {"secrets", ".ssh", ".aws", ".gnupg", ".direnv"}
+)
+# direnv keeps exported credentials in `.envrc`, which `add -A` sweeps up like
+# any other untracked file. It is not covered by the `.env` / `.env.*` rules
+# below — the name has no dot before `rc` — so it needs naming outright.
+_PROTECTED_ENV_NAMES = frozenset({".envrc", ".envrc.local", ".env.local"})
 # Credential filenames, matched wherever they sit. A directory-level guard is
 # not enough on its own: .gitignore does not hide files git already tracks, so
 # an older workspace that committed `.codex/auth.json` before any of this
@@ -65,6 +73,8 @@ _PROTECTED_KEY_NAMES = frozenset(
 # longer covers it is treated as absent.
 _IGNORE_PROBES: tuple[tuple[str, str], ...] = (
     (".env", ".env"),
+    (".envrc", ".envrc"),
+    (".direnv/", ".direnv/dump"),
     ("secrets/", "secrets/token.json"),
     (".runtime/", ".runtime/state.json"),
     (".claude/", ".claude/.credentials.json"),
@@ -129,6 +139,7 @@ def _protected_path(path: str) -> bool:
         return True
     return (
         (name == ".env" or (name.startswith(".env.") and not env_template))
+        or name in _PROTECTED_ENV_NAMES
         or name in _PROTECTED_CONFIG_NAMES
         or name in _PROTECTED_KEY_NAMES
         or name.endswith((".pem", ".key", ".p12", ".pfx"))

@@ -3115,18 +3115,33 @@ def _overlay_transcript_metadata(
             last = index
     if last is not None:
         targets.append(last)
-    # Right-align rather than zip from the front. The two lists cover
-    # different spans whenever the session file is shorter than the durable
-    # transcript — a resumed or handed-over chat's JSONL starts at the resume
-    # point while the transcript store holds every turn — and pairing from the
-    # front then attributed every token count and context % to the wrong turn,
-    # starting at the very first row. Both lists always end on the newest
-    # turn, so matching their tails keeps the pairing correct in either
-    # direction and simply leaves the unmatched head without metadata.
+    # The two lists cover different spans, and which end they disagree at
+    # decides how to pair them:
+    #
+    #   fewer session rows than transcript turns — a resumed or handed-over
+    #     chat, whose JSONL starts at the resume point while the transcript
+    #     store holds every turn. The rows they share are the NEWEST ones, so
+    #     match the tails; the unmatched head gets no metadata.
+    #
+    #   more session rows than transcript turns — a turn is in flight. The
+    #     session already carries the live assistant text while the transcript
+    #     still ends at the last completed turn, because `record_turn` only
+    #     runs once a turn finishes. The surplus is at the NEWEST end, so match
+    #     the heads and leave the live reply without metadata. Matching tails
+    #     here would shift every usage record forward by one and hang the
+    #     previous turn's token count on the reply still being written.
+    #
+    # Zipping from the front unconditionally (the original) got the first case
+    # wrong from its very first row; right-aligning unconditionally gets the
+    # second wrong the same way.
     pairs = min(len(targets), len(metadata))
     if not pairs:
         return
-    for index, source in zip(targets[-pairs:], metadata[-pairs:]):
+    if len(targets) <= len(metadata):
+        targets, metadata = targets[-pairs:], metadata[-pairs:]
+    else:
+        targets, metadata = targets[:pairs], metadata[:pairs]
+    for index, source in zip(targets, metadata):
         for key in ("usage", "quota", "effective_model"):
             if source.get(key):
                 entries[index][key] = source[key]

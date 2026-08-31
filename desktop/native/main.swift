@@ -391,6 +391,20 @@ final class SpeechCollector {
 /// mid-thought.
 let speechChunkLimit = 300
 
+/// Cut *token* into `speechChunkLimit`-sized pieces on character boundaries.
+/// The last resort for a word with no internal spaces to break on.
+func hardSplit(_ token: String) -> [String] {
+    var pieces: [String] = []
+    var index = token.startIndex
+    while index < token.endIndex {
+        let end = token.index(index, offsetBy: speechChunkLimit, limitedBy: token.endIndex)
+            ?? token.endIndex
+        pieces.append(String(token[index..<end]))
+        index = end
+    }
+    return pieces
+}
+
 /// Split *text* into utterance-sized pieces at real sentence boundaries.
 ///
 /// `components(separatedBy: ". ")` — the previous split — only saw a literal
@@ -427,6 +441,19 @@ func speechChunks(_ text: String) -> [String] {
         }
         var current = ""
         for word in sentence.split(separator: " ", omittingEmptySubsequences: true) {
+            // A single token can exceed the limit on its own — a long URL, or
+            // prose in a script that does not separate words with spaces. Word
+            // boundaries have nothing to offer there, so fall back to
+            // character boundaries rather than emitting an utterance that
+            // `write` will truncate anyway.
+            if word.count > speechChunkLimit {
+                if !current.isEmpty {
+                    chunks.append(current)
+                    current = ""
+                }
+                chunks.append(contentsOf: hardSplit(String(word)))
+                continue
+            }
             if current.isEmpty {
                 current = String(word)
             } else if current.count + 1 + word.count <= speechChunkLimit {

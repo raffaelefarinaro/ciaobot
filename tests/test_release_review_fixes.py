@@ -47,14 +47,47 @@ def test_overlay_aligns_on_the_newest_turn_when_the_session_is_shorter() -> None
 
 
 def test_overlay_leaves_the_unmatched_head_alone() -> None:
-    """Fewer transcript rows than rendered rows: the oldest simply get none."""
-    entries = [_user("q1"), _assistant("a1"), _user("q2"), _assistant("a2")]
-    metadata = [{"role": "assistant", "usage": {"total": "9"}}]
+    """Fewer session rows than transcript turns: the newest ones pair up.
+
+    The complement of the live-turn case above. Here the session is the short
+    list (it starts at the resume point), so the rows the two lists share are
+    the newest ones and the transcript's older turns have nothing to attach to.
+    """
+    entries = [_user("q2"), _assistant("a2")]
+    metadata = [
+        {"role": "assistant", "usage": {"total": "1"}},
+        {"role": "assistant", "usage": {"total": "2"}},
+    ]
 
     _overlay_transcript_metadata(entries, metadata)
 
-    assert "usage" not in entries[1]
-    assert entries[3]["usage"] == {"total": "9"}
+    assert entries[1]["usage"] == {"total": "2"}
+
+
+def test_overlay_leaves_a_live_turn_without_metadata() -> None:
+    """A turn in flight makes the session LONGER than the transcript.
+
+    `record_turn` only runs when a turn finishes, so mid-turn the session
+    already carries the live assistant text while the transcript still ends at
+    the previous completed turn. Matching tails there would shift every usage
+    record forward by one and hang the previous turn's token count on the reply
+    still being written.
+    """
+    entries = [
+        _user("q1"), _assistant("a1"),
+        _user("q2"), _assistant("a2"),
+        _user("q3"), _assistant("live"),
+    ]
+    metadata = [
+        {"role": "assistant", "usage": {"total": "1"}},
+        {"role": "assistant", "usage": {"total": "2"}},
+    ]
+
+    _overlay_transcript_metadata(entries, metadata)
+
+    assert entries[1]["usage"] == {"total": "1"}
+    assert entries[3]["usage"] == {"total": "2"}
+    assert "usage" not in entries[5]
 
 
 def test_overlay_with_no_metadata_is_a_no_op() -> None:

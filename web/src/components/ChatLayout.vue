@@ -253,6 +253,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -761,6 +762,14 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
+  // The new-chat picker is an aria-modal dialog: while it is open it owns the
+  // keyboard, and nothing here may act on the page behind it. Without this,
+  // the section chords below navigated underneath the still-open modal, so
+  // cancelling left the user in a different top-level section and choosing a
+  // project created the chat from an unexpectedly changed route. The picker
+  // claims the keys it uses in the capture phase; this covers every chord it
+  // does not.
+  if (pendingNewChat.value) return
   // Switch top-level sections (chat → schedules → memory → settings). Desktop
   // uses Cmd+Arrow; the web PWA uses Option+Arrow, because the browser has
   // already spent Cmd+Left/Right on back/forward. Never Tab: that stays the
@@ -938,6 +947,8 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 
 function onShortcutKeydown(e: KeyboardEvent) {
   if (!shortcutsActive.value) return
+  // See onUnreservedKeydown: the new-chat dialog owns the keyboard while open.
+  if (pendingNewChat.value) return
   // Holding the chord repeats the keydown at OS speed. None of these actions
   // are meant to fire more than once per press: New Chat created a fresh
   // "New Chat" on every repeat (each POST racing the server's empty-chat

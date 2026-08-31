@@ -167,6 +167,21 @@ describe('NewChatPicker', () => {
     }
   })
 
+  it('keeps Tab inside the dialog', async () => {
+    store.activeWorkspace = 'client'
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    // aria-modal: letting Tab walk out puts the keyboard on a page the user
+    // cannot see, where the next Enter activates something behind the overlay.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))
+    await nextTick()
+    press('Enter')
+    expect(await settle(answer)).toBe('p-shipping')
+  })
+
   it('reopening starts from the workspace the user is actually in', async () => {
     wrapper = mount(NewChatPicker, { attachTo: document.body })
     const first = openNewChatPicker()

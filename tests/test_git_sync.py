@@ -380,3 +380,16 @@ async def test_an_intact_gitignore_is_not_rewritten_every_startup(
     await sync_workspace(repo)
 
     assert (repo / ".gitignore").read_text(encoding="utf-8") == first
+
+
+@pytest.mark.parametrize(
+    "path", [".envrc", "project/.envrc", ".envrc.local", ".direnv/dump"]
+)
+def test_direnv_credentials_are_protected(path: str) -> None:
+    """direnv exports API keys from `.envrc`, which `add -A` sweeps up.
+
+    The `.env` / `.env.*` rules do not reach it — the name has no dot before
+    `rc` — so an untracked `.envrc` was committed and pushed like any other
+    new file.
+    """
+    assert _protected_path(path) is True

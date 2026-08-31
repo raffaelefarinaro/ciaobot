@@ -119,6 +119,21 @@ function onKeydown(event: KeyboardEvent) {
     choose(selected.value)
     return
   }
+  if (event.key === 'Tab') {
+    // Focus stays inside the dialog. Tab is deliberately left to native
+    // traversal everywhere else in the app, but this is an aria-modal dialog:
+    // letting focus walk out of it puts the keyboard on a page the user cannot
+    // see, and the next Enter or Space then activates something behind the
+    // overlay.
+    claim(event)
+    const list = projectItems.value
+    if (!list.length) return
+    const dir = event.shiftKey ? -1 : 1
+    const next = (currentIndex() + dir + list.length) % list.length
+    selected.value = list[next].id
+    focusItem(next)
+    return
+  }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     claim(event)
     const list = projectItems.value
