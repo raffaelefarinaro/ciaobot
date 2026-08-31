@@ -94,21 +94,33 @@ function focusItem(index: number) {
   })
 }
 
+// Every key the picker consumes is taken here and taken completely: the
+// listener is registered in the CAPTURE phase and calls stopImmediatePropagation.
+// ChatLayout's global shortcuts live on `window` too, and two listeners on the
+// same target run in registration order, which stopPropagation cannot influence
+// — so with a bubble-phase listener the global handler could win the race and
+// 1-9 would switch the real workspace before the picker previewed it, or Escape
+// would close the chat underneath instead of cancelling the dialog. Capture
+// always precedes bubble regardless of who registered first.
+function claim(event: KeyboardEvent) {
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (!picker.value) return
   if (event.key === 'Escape') {
-    event.preventDefault()
-    event.stopPropagation()
+    claim(event)
     cancel()
     return
   }
   if (event.key === 'Enter') {
-    event.preventDefault()
+    claim(event)
     choose(selected.value)
     return
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault()
+    claim(event)
     const list = projectItems.value
     if (!list.length) return
     const dir = event.key === 'ArrowDown' ? 1 : -1
@@ -120,7 +132,7 @@ function onKeydown(event: KeyboardEvent) {
   if (/^[1-9]$/.test(event.key)) {
     const workspace = store.workspaceOptions[Number(event.key) - 1]
     if (workspace) {
-      event.preventDefault()
+      claim(event)
       previewWorkspace.value = workspace.name
       selected.value = projectItems.value[0]?.id ?? ''
       focusItem(0)
@@ -143,9 +155,9 @@ watch(picker, async value => {
   itemButtons.value[0]?.focus()
 })
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => window.addEventListener('keydown', onKeydown, true))
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onKeydown, true)
   picker.value?.resolve(null)
 })
 </script>

@@ -57,7 +57,7 @@
         <button
           v-if="memoryPath"
           class="btn-icon"
-          @click="openInMemoryMap"
+          @click="void openInMemoryMap()"
           title="Open in memory map"
           aria-label="Open in memory map"
         >
@@ -313,6 +313,7 @@ import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
@@ -330,11 +331,21 @@ const fileViewer = useFileViewerStore()
 const memoryMapStore = useMemoryMapStore()
 const memoryPath = computed(() => /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
 
-function openInMemoryMap(): void {
+async function openInMemoryMap(): Promise<void> {
   const target = memoryPath.value
   if (!target) return
+  // Navigating to /memory makes ChatLayout unmount this panel, which throws
+  // away `editBuffer` and any comment draft with it. Ask first, the same way
+  // FileViewerModal's version awaits its guarded `close()`.
+  if (isBusyAuthoring.value && !await askConfirm(
+    'You have unsaved changes in this file. Are you sure you want to leave?',
+    { title: 'Discard unsaved changes?', confirmLabel: 'Discard and open map', destructive: true },
+  )) return
+  // Recorded only once the user has accepted: the focus request outlives this
+  // panel, so requesting it before the prompt would leave the map jumping to
+  // this note the next time /memory opens, after a navigation that was cancelled.
   memoryMapStore.requestFocusOnOpen(target)
-  void router.push('/memory')
+  await router.push('/memory')
 }
 
 // ── Loading & rendering ──────────────────────────────────────────────

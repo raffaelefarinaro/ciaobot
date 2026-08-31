@@ -3684,6 +3684,25 @@ describe('workspace and chat transitions', () => {
     expect(store.activeWorkspace).toBe('home')
   })
 
+  test('newChatInProject puts the workspace back when creation fails', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-home', name: 'General', workspace: 'home', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-client', name: 'General', workspace: 'client', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'home'
+    store.activeChatId = 'c-old'
+    apiPost.mockRejectedValue(new Error('nope'))
+
+    // The switch is committed before the POST, so a rejected creation used to
+    // leave the app scoped to 'client' while still showing the 'home' chat it
+    // had just disconnected.
+    await expect(store.newChatInProject('p-client')).rejects.toThrow('nope')
+
+    expect(store.activeWorkspace).toBe('home')
+    expect(store.activeChatId).toBe('c-old')
+  })
+
   test('newChatInProject surfaces a toast when the project is not found', async () => {
     const store = useProjectStore()
     store.projects = [

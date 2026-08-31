@@ -221,7 +221,6 @@ async def test_startup_sync_repairs_every_credential_ignore(tmp_path: Path) -> N
     _init_repo(repo, with_remote=True)
     for directory, name in (
         (".claude", ".credentials.json"),
-        (".codex", "auth.json"),
         (".opencode", "state.json"),
         (".agents", "notes.md"),
     ):
@@ -241,7 +240,7 @@ async def test_startup_sync_repairs_every_credential_ignore(tmp_path: Path) -> N
     assert [
         path
         for path in tracked
-        if path.startswith((".claude/", ".codex/", ".opencode/", ".agents/"))
+        if path.startswith((".claude/", ".opencode/", ".agents/"))
         or path in {"opencode.json", "run.log"}
     ] == []
 
@@ -274,3 +273,54 @@ def test_protected_paths_are_caught_anywhere_in_the_tree(path: str) -> None:
 )
 def test_ordinary_paths_stay_committable(path: str) -> None:
     assert _protected_path(path) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".codex/auth.json",
+        ".claude/.credentials.json",
+        ".opencode/auth.json",
+        "old/.codex/auth.json",
+    ],
+)
+def test_provider_credentials_are_protected_even_when_tracked(path: str) -> None:
+    """.gitignore does not hide files git already tracks.
+
+    An older workspace that committed a provider token before any of these
+    guards existed still reports it as modified on every sync, and `add -A`
+    would stage and push it. Matching the credential filename catches it
+    regardless of which provider directory it sits in, or whether that
+    directory is ignored at all - `.codex/` deliberately is not.
+    """
+    assert _protected_path(path) is True
+
+
+def test_codex_is_not_in_the_ignore_list() -> None:
+    """Codex is retired: sync_skills only prunes what older versions left."""
+    assert ".codex/" not in WORKSPACE_GITIGNORE_ENTRIES
+
+
+async def test_untracked_credential_in_an_unignored_dir_blocks_the_commit(
+    tmp_path: Path,
+) -> None:
+    """Codex is off the ignore list, so its stale files reach the guard.
+
+    git collapses a wholly untracked directory to one `?? .codex/` entry, which
+    hid every filename inside it from `_protected_path` — the sync then staged
+    the token it was meant to refuse. Listing untracked files individually is
+    what makes the filename check reachable.
+    """
+    repo = tmp_path / "ws"
+    _init_repo(repo, with_remote=True)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "auth.json").write_text('{"token": "x"}\n', encoding="utf-8")
+
+    result = await sync_workspace(repo)
+
+    assert result is not None
+    assert ".codex/auth.json" in result
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(repo), check=True, capture_output=True, text=True, env=_git_env(repo)
+    ).stdout.splitlines()
+    assert ".codex/auth.json" not in tracked

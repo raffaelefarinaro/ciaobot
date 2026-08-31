@@ -1090,12 +1090,29 @@ export const useProjectStore = defineStore('projects', () => {
       pushErrorToast('Cannot open a new chat', 'No project found to create the chat in.')
       return
     }
-    if (project.workspace !== activeWorkspace.value && activeChatId.value) {
-      disconnectWs(activeChatId.value)
+    const previousWorkspace = activeWorkspace.value
+    const previousChatId = activeChatId.value
+    const crossing = project.workspace !== previousWorkspace
+    if (crossing && previousChatId) {
+      disconnectWs(previousChatId)
     }
     activeWorkspace.value = project.workspace
     persistState()
-    return createChat(project.project_id)
+    try {
+      return await createChat(project.project_id)
+    } catch (err) {
+      // The switch is committed before the POST, so a rejected creation used
+      // to leave the app scoped to the new workspace while still showing (and
+      // having just disconnected) a chat from the old one. Put it back.
+      if (crossing) {
+        activeWorkspace.value = previousWorkspace
+        persistState()
+        if (previousChatId && activeChatId.value === previousChatId) {
+          connectWs(previousChatId)
+        }
+      }
+      throw err
+    }
   }
 
   // Recover a draft orphaned by a server-side empty-chat sweep (#277): open a

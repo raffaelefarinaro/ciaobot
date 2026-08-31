@@ -14,17 +14,21 @@ logger = logging.getLogger(__name__)
 # The one list of paths a workspace snapshot must never pick up. `cli.py`
 # writes it into a fresh workspace's .gitignore and `_ensure_sync_ignores`
 # repairs workspaces that predate that guard, so the two MUST agree: a shorter
-# repair list means `git add -A` stages provider credentials (`.claude/
-# .credentials.json`, `.codex/auth.json`) on exactly the old workspaces the
-# repair exists for. It lives here rather than in `cli.py` because this module
-# imports nothing from `ciao`, so either side can depend on it.
+# repair list means `git add -A` stages provider credentials
+# (`.claude/.credentials.json`) on exactly the old workspaces the repair exists
+# for. It lives here rather than in `cli.py` because this module imports
+# nothing from `ciao`, so either side can depend on it.
+#
+# No `.codex/` entry: codex is retired (`sync_skills` only prunes what older
+# versions left behind, it never writes there), so ignoring it would be dead
+# config. A stale `.codex/auth.json` is still caught — by `_protected_path`,
+# which matches credential filenames wherever they sit, ignored or not.
 WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
     "secrets/",
     ".runtime/",
     ".claude/",
     ".agents/",
-    ".codex/",
     ".opencode/",
     "opencode.json",
     "*.log",
@@ -34,8 +38,25 @@ _PROTECTED_CONFIG_NAMES = frozenset({".npmrc", ".netrc", ".pypirc"})
 # per path segment, not as a prefix: `add -A` sweeps untracked files, so a
 # nested `sub/secrets/token` reaches the index the same as a root-level one.
 _PROTECTED_DIR_SEGMENTS = frozenset({"secrets", ".ssh", ".aws", ".gnupg"})
+# Credential filenames, matched wherever they sit. A directory-level guard is
+# not enough on its own: .gitignore does not hide files git already tracks, so
+# an older workspace that committed `.codex/auth.json` before any of this
+# existed still shows it as modified, and `add -A` would stage and push the
+# token. Matching the filename catches it regardless of which provider
+# directory it lives in or whether that directory is ignored.
 _PROTECTED_KEY_NAMES = frozenset(
-    {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", ".credentials.json"}
+    {
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials",
+        "credentials.json",
+        ".credentials.json",
+        "auth.json",
+        ".auth.json",
+        "token.json",
+    }
 )
 
 
@@ -149,7 +170,12 @@ async def sync_workspace(workspace: Path) -> str | None:
     # up" (the 2026-08-30 work-notes gap). `add -A` never stages gitignored
     # paths, so runtime scratch and caches (`.runtime/`, `Logs/Chats/`) are
     # untouched.
-    rc, status_out, _ = await _git(workspace, "status", "--porcelain", "-z")
+    # `-uall`, not the default `-unormal`: git collapses a wholly untracked
+    # directory to a single `?? .codex/` entry, which hides every filename
+    # inside it from `_protected_path` — so an untracked credential file was
+    # invisible to the guard and `add -A` staged it anyway. Listing untracked
+    # files individually is what makes the filename check reachable.
+    rc, status_out, _ = await _git(workspace, "status", "--porcelain", "-z", "-uall")
     has_changes = rc == 0 and bool(status_out.strip())
 
     if has_changes:

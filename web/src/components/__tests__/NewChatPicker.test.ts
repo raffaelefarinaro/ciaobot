@@ -142,6 +142,31 @@ describe('NewChatPicker', () => {
     expect(store.activeWorkspace).toBe('home')
   })
 
+  it('claims its keys before any global window shortcut', async () => {
+    // ChatLayout binds its shortcuts on window too. Two listeners on the same
+    // target run in registration order, which stopPropagation cannot change,
+    // so a bubble-phase picker could lose the race: 1-9 would switch the real
+    // workspace before the preview, and Escape would close the chat behind the
+    // dialog. Capture always runs first.
+    const globalSeen: string[] = []
+    const globalListener = (e: KeyboardEvent) => globalSeen.push(e.key)
+    window.addEventListener('keydown', globalListener)
+    try {
+      wrapper = mount(NewChatPicker, { attachTo: document.body })
+      const answer = openNewChatPicker()
+      await nextTick()
+      await nextTick()
+
+      press('2')
+      press('ArrowDown')
+      press('Escape')
+      expect(globalSeen).toEqual([])
+      expect(await settle(answer)).toBeNull()
+    } finally {
+      window.removeEventListener('keydown', globalListener)
+    }
+  })
+
   it('reopening starts from the workspace the user is actually in', async () => {
     wrapper = mount(NewChatPicker, { attachTo: document.body })
     const first = openNewChatPicker()
