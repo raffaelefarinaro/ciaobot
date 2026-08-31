@@ -188,7 +188,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const tidyRows = workLane.findAll('.home-tier--tidying .home-chat-item')
     expect(tidyRows).toHaveLength(2)
     expect(workLane.find('.home-tier--tidying .home-tier-label').text()).toBe('tidying up')
-    expect(workLane.find('.home-lane-summary').text()).toContain('2 tidying up')
+    expect(workLane.find('.home-lane-status-text').text()).toContain('2 chats tidying up')
     const tidyTitles = tidyRows.map(row => row.find('.home-chat-title').text())
     expect(tidyTitles).toContain('Archived work chat')
     expect(tidyTitles).toContain('Archived without file')
@@ -270,8 +270,8 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(failedRows[0].find('.home-chat-title').text()).toBe('Failed work chat')
     expect(failedRows[0].find('.home-chat-tidy-note').text()).toBe('insights failed')
     expect(failedRows[0].find('.home-chat-retry').exists()).toBe(true)
-    // Header carries the recovery count in the warn register.
-    expect(workLane.find('.home-lane-summary').text()).toContain('1 insights failed')
+    // Header carries the recovery count in the tidying phrase.
+    expect(workLane.find('.home-lane-status-text').text()).toContain('1 chat tidying up')
     wrapper.unmount()
   })
 
@@ -450,7 +450,7 @@ describe('HomeRecentChats regressions', () => {
 
   it('does not print a quiet count and "all quiet" together', async () => {
     const wrapper = await mountHome()
-    for (const summary of wrapper.findAll('.home-lane-summary')) {
+    for (const summary of wrapper.findAll('.home-lane-status-text')) {
       expect(summary.text()).not.toMatch(/quiet\s+all quiet/)
     }
     wrapper.unmount()
@@ -473,37 +473,67 @@ describe('HomeRecentChats regressions', () => {
     await nextTick()
 
     const personalLane = wrapper.find('[data-lane-key="personal"]')
-    const summary = personalLane.find('.home-lane-summary').text()
+    const summary = personalLane.find('.home-lane-status-text').text()
     const rows = personalLane.findAll('.home-tier--needsYou .home-chat-item').length
-    const claimed = Number(/(\d+)\s+need/.exec(summary)?.[1] ?? 0)
+    const claimed = Number(/(\d+)\s+chat(?:s)?\s+need/.exec(summary)?.[1] ?? 0)
     expect(claimed).toBe(rows)
     wrapper.unmount()
   })
 })
 
-// The glanceable status moved out of ChatLayout into the lane header: face +
-// sentence under the workspace line it summarizes, divider below. One place,
-// derived from the same tiers as the rows.
-describe('the lane status row', () => {
+// The header is a single line: the workspace name and its status phrase sit
+// together in the topline row, with "+ new" at the far end. The old face-and-
+// sentence status row is gone.
+describe('the lane header line', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.restoreAllMocks()
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('renders under the workspace line with the face image and no greeting bubble', async () => {
+  it('keeps the status phrase on the same line as the workspace name', async () => {
     const wrapper = await mountHome()
     const lane = wrapper.find('[data-lane-key="personal"]')
-    const status = lane.find('.home-lane-status')
-    expect(status.exists()).toBe(true)
-    expect(status.find('.home-lane-status-face').exists()).toBe(true)
-    expect(status.find('.home-lane-status-face').attributes('src')).toBe('/face.png')
-    // Decoration beside a status line: a plain image, not a button.
-    expect(status.find('img').element.tagName).toBe('IMG')
+    const topline = lane.find('.home-lane-topline')
+    expect(topline.exists()).toBe(true)
+    // The name and the status phrase are siblings inside the same topline row.
+    expect(topline.find('.home-lane-name').exists()).toBe(true)
+    expect(topline.find('.home-lane-status-text').exists()).toBe(true)
+    // No separate status row under the line anymore.
+    expect(lane.find('.home-lane-status').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('speaks from the same tiers as the rows: needs, working, tidying', async () => {
+  it('speaks the needs and working state in the status phrase', async () => {
+    const wrapper = await mountHome()
+    const personal = wrapper.find('[data-lane-key="personal"]')
+    // Seeded: one needs-you chat in personal, no agents working.
+    expect(personal.find('.home-lane-status-text').text())
+      .toBe('1 chat needs your attention. no agents working.')
+    wrapper.unmount()
+  })
+
+  it('counts unread replies in the status phrase', async () => {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'unread', project_id: 'personal-project', title: 'Unread reply',
+        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(90),
+        archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const lane = wrapper.find('[data-lane-key="personal"]')
+    expect(lane.find('.home-lane-status-text').text())
+      .toBe('2 chats need your attention. no agents working.')
+    wrapper.unmount()
+  })
+
+  it('includes tidying in the status phrase', async () => {
     const store = seedChats()
     store.chats = [
       ...store.chats,
@@ -519,93 +549,8 @@ describe('the lane status row', () => {
     await nextTick()
 
     const lane = wrapper.find('[data-lane-key="personal"]')
-    // The seeded "needs" chat is still blocked; the archived chat only adds
-    // the muted tidying fragment.
     expect(lane.find('.home-lane-status-text').text())
       .toBe('1 chat needs your attention. no agents working. 1 chat tidying up.')
-    wrapper.unmount()
-  })
-
-  it('counts unread replies as needing attention', async () => {
-    const store = seedChats()
-    store.chats = [
-      ...store.chats,
-      {
-        chat_id: 'unread', project_id: 'personal-project', title: 'Unread reply',
-        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(90),
-        archived: false, local: true,
-      },
-    ] as unknown as typeof store.chats
-    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
-    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
-    await nextTick()
-
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    // An unread reply wants the user even though it is not blocking the agent
-    // on a direct answer; counting only the needs-you tier told a reader with
-    // replies waiting that nothing needed them.
-    expect(lane.find('.home-lane-status-text').text())
-      .toBe('2 chats need your attention. no agents working.')
-    // Only the blocked chat gets a nudge — the unread one is just unread.
-    expect(lane.findAll('.home-lane-nudge')).toHaveLength(1)
-    wrapper.unmount()
-  })
-
-  it('caps the nudge buttons and names each one for a screen reader', async () => {
-    const store = seedChats()
-    store.chats = [
-      ...store.chats,
-      ...['two', 'three', 'four'].map((suffix, index) => ({
-        chat_id: `asker-${suffix}`, project_id: 'personal-project', title: `Asks ${suffix}`,
-        pending_question: JSON.stringify({ questions: [{ question: 'And this?' }] }),
-        created_at: timestamp(20 + index), last_activity_at: timestamp(20 + index),
-        last_read_at: timestamp(20 + index), archived: false, local: true,
-      })),
-    ] as unknown as typeof store.chats
-    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
-    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
-    await nextTick()
-
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const nudges = lane.findAll('.home-lane-nudge')
-    // Four blocked chats, three buttons: the row is a single ellipsised line.
-    expect(nudges).toHaveLength(3)
-    // Identical accessible names read as "nudge, nudge, nudge"; each button
-    // has to say which chat it opens.
-    const names = nudges.map(button => button.attributes('aria-label'))
-    expect(new Set(names).size).toBe(3)
-    names.forEach(name => expect(name).toMatch(/^Open .+, which needs your attention$/))
-    expect(lane.find('.home-lane-nudge-more').text()).toBe('+1 more below')
-    wrapper.unmount()
-  })
-
-  it('names the needs-you chats and offers one nudge per blocked chat', async () => {
-    const store = seedChats()
-    store.chats = [
-      ...store.chats,
-      {
-        chat_id: 'asker-2', project_id: 'personal-project', title: 'Asks again',
-        pending_question: JSON.stringify({ questions: [{ question: 'Also this?' }] }),
-        created_at: timestamp(20), last_activity_at: timestamp(20), last_read_at: timestamp(20), archived: false, local: true,
-      },
-    ] as unknown as typeof store.chats
-    const switchSpy = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined)
-    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
-    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
-    await nextTick()
-
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    expect(lane.find('.home-lane-status-text').text())
-      .toBe('2 chats need your attention. no agents working.')
-
-    const nudges = lane.findAll('.home-lane-nudge')
-    expect(nudges).toHaveLength(2)
-    // The blocked chats — the seeded one and the new asker — each open their
-    // own chat so the real question/approval control remains intact.
-    await nudges[0].trigger('click')
-    expect(switchSpy).toHaveBeenCalledWith('asker-2')
-    await nudges[1].trigger('click')
-    expect(switchSpy).toHaveBeenCalledWith('needs')
     wrapper.unmount()
   })
 })

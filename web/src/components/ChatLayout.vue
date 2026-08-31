@@ -1300,6 +1300,7 @@ onBeforeUnmount(() => {
 .empty-state--active {
   align-items: stretch;
   justify-content: flex-start;
+  padding-top: var(--space-2);
   text-align: left;
 }
 
