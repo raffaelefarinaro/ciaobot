@@ -1114,14 +1114,20 @@ def _normalize_for_match(text: str) -> str:
 
 
 def _positive_contains(text: str, needle: str) -> bool:
-    """Match *needle* unless the containing sentence negates the match."""
+    """Match *needle* unless its containing sentence is negated."""
     start = 0
     while True:
         at = text.find(needle, start)
         if at < 0:
             return False
-        prefix = text[:at]
-        if not re.search(r"(?:\bdo not|\bdon't|\bnever|\bavoid)\s+$", prefix):
+        sentence_start = max(
+            text.rfind(".", 0, at),
+            text.rfind("!", 0, at),
+            text.rfind("?", 0, at),
+            text.rfind("\n", 0, at),
+        )
+        sentence = text[sentence_start + 1 : at]
+        if not re.search(r"\b(?:do not|don't|never|avoid)\b", sentence):
             return True
         start = at + 1
 

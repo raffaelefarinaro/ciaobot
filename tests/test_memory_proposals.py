@@ -655,6 +655,15 @@ def test_already_applied_guard_does_not_match_contradictions_or_shared_words(
     )
 
 
+def test_already_applied_guard_keeps_negation_over_repeated_matches(tmp_path: Path) -> None:
+    destination = tmp_path / "note.md"
+    destination.write_text(
+        "Do not deploy X or deploy X during freezes.\n", encoding="utf-8"
+    )
+
+    assert not mp._is_already_in_file(destination, "Deploy X during freezes.")
+
+
 def test_already_applied_guard_matches_short_exact_facts(tmp_path: Path) -> None:
     destination = tmp_path / "note.md"
     destination.write_text("Use PostgreSQL, not SQLite.\n", encoding="utf-8")
