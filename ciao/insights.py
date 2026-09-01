@@ -341,6 +341,7 @@ async def call_with_retry(
     model: str = "",
     check_apple_available: bool = True,
     check_context_overflow: bool = True,
+    budget_applies: bool = True,
 ) -> RetryOutcome:
     """Run ``call``; on a transient failure wait 30s and run it once more.
 
@@ -376,14 +377,27 @@ async def call_with_retry(
             logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
             return RetryOutcome("", detail, 1, "apple-unavailable")
         if check_context_overflow and is_context_overflow(exc):
-            logger.error(
-                "%s input still exceeds the model's context window (%s); "
-                "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS (currently %d) "
-                "or pick a model with a larger window.",
-                label,
-                exc,
-                _max_input_chars(),
-            )
+            # Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS,
+            # so naming that variable on a text-mode overflow sends the operator
+            # to a setting that does nothing for it. Both messages end at the
+            # remedy that always applies.
+            if budget_applies:
+                logger.error(
+                    "%s input still exceeds the model's context window (%s); "
+                    "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS "
+                    "(currently %d) or pick a model with a larger window.",
+                    label,
+                    exc,
+                    _max_input_chars(),
+                )
+            else:
+                logger.error(
+                    "%s input still exceeds the model's context window (%s); "
+                    "not retrying. This path sends the rendered archive whole, "
+                    "so pick a model with a larger window.",
+                    label,
+                    exc,
+                )
             return RetryOutcome("", detail, 1, "context-overflow")
         if is_terminal_failure(exc):
             # Quota / auth / bad-model. No traceback: this is an account or
@@ -1193,19 +1207,24 @@ async def _run_text_model_with_retry(
             body, model, provider=provider, cwd=cwd, context_block=context_block
         )
 
-    # `check_context_overflow=False` preserves this path's existing behaviour,
-    # which differed from the JSONL one: for a cloud model text mode sends the
-    # whole rendered archive without fitting it to a budget, so an overflow
-    # here is retried rather than refused. (Apple models are the exception —
-    # `_call_text_model` fits the body to the Apple window first, so for those
-    # the retry is as doomed as the JSONL path's would be.) Made explicit so
-    # the asymmetry is a decision on the page instead of a difference between
-    # two copies of the same code.
+    # An overflow is refused here for the same reason it is on the JSONL path:
+    # the payload does not change between attempts, so the retry buys a second
+    # slow call (the timeout budget is 600s) plus the 30s wait to reach the
+    # identical rejection. This path used to retry it, which was an accident of
+    # the policy existing in two copies rather than a decision.
+    #
+    # No fitting step, though, unlike the JSONL path — and measurement says it
+    # does not need one. Text mode's input is the *rendered* archive, which is
+    # the stripped rendering (no tool_use, tool_result or thinking blocks); the
+    # 320k-char budget exists for raw JSONL, observed at 131k-262k tokens
+    # against a 126k-token window. Across 1568 real archives the rendered form
+    # runs ~2.6k tokens at the median and ~23k at p99, with exactly one
+    # outlier (134k tokens) able to overflow a 126k-token model at all. Apple
+    # on-device is the one budget that genuinely bites here (8k chars, over half
+    # of all archives), and `_call_text_model` already fits for it. Truncating
+    # the rest would be a general mechanism for a single archive.
     outcome = await call_with_retry(
-        call,
-        label="Insights text call",
-        model=model,
-        check_context_overflow=False,
+        call, label="Insights text call", model=model, budget_applies=False
     )
     return outcome.output, outcome.error
 
@@ -1578,7 +1597,7 @@ async def backfill_insights_task(
                         label=f"Text fallback insights call for {archive_path.name}",
                         model=effective_model,
                         check_apple_available=False,
-                        check_context_overflow=False,
+                        budget_applies=False,
                     )
                     # No `gave_up` branch: every giving-up reason leaves the
                     # output empty, which the check below already reports as an

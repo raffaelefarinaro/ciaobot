@@ -1356,12 +1356,11 @@ def test_call_with_retry_never_retries_a_context_overflow() -> None:
 def test_call_with_retry_can_be_told_to_retry_an_overflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The text-mode path's deliberate asymmetry.
+    """The flag still exists for a caller that wants the old behaviour.
 
-    Text mode sends the whole rendered archive without fitting it to a budget,
-    so it retried an overflow before this policy existed and still does. The
-    flag is what keeps that a decision rather than a difference between two
-    copies of the same code.
+    No production path sets it today — text mode used to, by accident of the
+    policy existing in three copies, and now refuses an overflow like the JSONL
+    path does.
     """
     _no_sleep(monkeypatch)
     calls = 0
@@ -1446,3 +1445,117 @@ def test_retry_outcome_distinguishes_never_asked_from_answered_nothing(
     assert never_asked.output == answered_nothing.output == ""
     assert never_asked.gave_up == "terminal"
     assert answered_nothing.gave_up == ""
+
+def test_text_mode_does_not_retry_a_context_overflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An oversized archive fails once, not twice.
+
+    Text mode sends the rendered archive unchanged, so a second identical
+    request is rejected identically — at 600s of timeout budget plus the 30s
+    wait, that is ten minutes to learn nothing. It used to retry: the policy
+    existed in three copies and only the JSONL one made this check.
+    """
+    archive = tmp_path / "archive.md"
+    archive.write_text("## Turn 1\n\nhello\n", encoding="utf-8")
+    calls = 0
+
+    async def overflowing(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    monkeypatch.setattr(insights, "_call_text_model", overflowing)
+
+    # Zeroed rather than patched, so a regression that reintroduces the retry
+    # fails the call count instead of hanging for 30s.
+    _no_sleep(monkeypatch)
+
+    out, err = asyncio.run(
+        insights._run_text_model_with_retry(archive_path=archive, model="some-model")
+    )
+    assert out == ""
+    assert "too long" in err
+    assert calls == 1
+
+
+def test_text_mode_still_retries_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Refusing an overflow must not have turned off retrying in general."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("## Turn 1\n\nhello\n", encoding="utf-8")
+    calls = 0
+
+    async def flaky(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "## Decisions\n- shipped it"
+
+    monkeypatch.setattr(insights, "_call_text_model", flaky)
+    _no_sleep(monkeypatch)
+
+    out, err = asyncio.run(
+        insights._run_text_model_with_retry(archive_path=archive, model="some-model")
+    )
+    assert err == ""
+    assert "shipped it" in out
+    assert calls == 2
+
+
+def test_backfill_does_not_retry_a_context_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill worker refuses an overflow too.
+
+    It sends the rendered archive whole, exactly as text mode does, so a second
+    identical request is rejected identically. This path runs over every archive
+    missing insights, and each doomed retry holds a worker slot for two full
+    600s timeout budgets plus the 30s wait.
+    """
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def overflowing() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(
+            overflowing,
+            label="Text fallback insights call",
+            check_apple_available=False,
+            budget_applies=False,
+        )
+    )
+    assert outcome.gave_up == "context-overflow"
+    assert calls == 1
+
+
+def test_overflow_log_only_names_the_budget_that_applies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A text-mode overflow must not send the operator to an inert setting.
+
+    Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS.
+    Naming that variable on a path that ignores it is advice that cannot work.
+    """
+    async def overflowing() -> str:
+        raise RuntimeError("prompt is too long for this model")
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(insights.call_with_retry(overflowing, label="Insights model call"))
+    assert "CIAO_INSIGHTS_MAX_INPUT_CHARS" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            insights.call_with_retry(
+                overflowing, label="Insights text call", budget_applies=False
+            )
+        )
+    assert "CIAO_INSIGHTS_MAX_INPUT_CHARS" not in caplog.text
+    assert "larger window" in caplog.text
