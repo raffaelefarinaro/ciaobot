@@ -28,7 +28,9 @@ Start from the recent archived chats: prefer their existing session-insights sec
 - `[learnings]` files into `Workspace/Learnings.md` (see pass 4).
 - `[review]` has no destination yet — decide what it is first.
 
-File a fact into its destination first, then dismiss with `ciao memory-proposal-dismiss <text> --promoted` (the flag records a promotion; a plain dismissal means you decided against the fact — the reverse order can lose it). Dismiss already-covered facts without `--promoted`. Never remove a bullet by editing the file.
+File a fact into its destination first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> --promoted` (the flag records a promotion; a plain dismissal means you decided against the fact — the reverse order can lose it). Dismiss already-covered facts without `--promoted`. Never remove a bullet by editing the file.
+
+Pass the text via `--text-file`, not as an argument: a proposal is arbitrary user prose, and one containing `$(...)`, backticks or quotes would be run or mangled by the shell on its way to the command. A positional substring is still accepted for a value you have read and know is plain.
 
 When you discover a bounded-region fact yourself — e.g. reading a transcript whose chat never grew a session-insights section — write the fact verbatim to a scratch file and file it with `ciao memory-proposal-add --kind memory --source <chat id> --text-file <fact-file>`. The source is the chat's plain identifier, never its quoted title, and the fact never travels as a shell argument: `$()`, backticks, or quotes in either would run or mangle in a shell. When no chat id is at hand, omit `--source`. A fact that exists only as report prose has no review path and gets re-derived every night; re-filing a fact an earlier run already queued is a harmless no-op because the queue dedupes by text.
 
@@ -43,7 +45,7 @@ Check usage with `memory_status`. When a region is at or above ~85% of its cap (
 - Move project-scoped entries out to their owning project's canonical doc (move, never delete).
 - Preserve or add the trailing learned-at stamp `[YYYY-MM-DD]` on entries you rewrite (today's date for a merged entry).
 
-When a removal needs judgment you cannot confidently make, do not remove it; queue a yes/no question instead by appending `- [review] Keep "<entry text>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` to `Workspace/Memory-Proposals.md`. Flatten the entry onto that one line (newline → "; ") so the queue stays line-parseable, and skip appending when an unanswered question about the same entry is already queued. The queue itself cannot apply a drop: the user dismisses the question (`ciao memory-proposal-dismiss <text>`) to KEEP the entry, or asks an attended chat to drop it. The Proposals panel's accept button is intentionally disabled for review rows.
+When a removal needs judgment you cannot confidently make, do not remove it; queue a yes/no question instead by appending `- [review] Keep "<entry text>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` to `Workspace/Memory-Proposals.md`. Flatten the entry onto that one line (newline → "; ") so the queue stays line-parseable, and skip appending when an unanswered question about the same entry is already queued. The queue itself cannot apply a drop: the user dismisses the question (`ciao memory-proposal-dismiss --text-file <file>`, since the question template always contains double quotes) to KEEP the entry, or asks an attended chat to drop it. The Proposals panel's accept button is intentionally disabled for review rows.
 
 Never drop a durable fact merely to fit a cap. If a region remains over cap because every entry is genuinely high-signal, say so and give the user their options: raise `CIAO_MEMORY_CHAR_LIMIT` / `CIAO_USER_CHAR_LIMIT` in `.env` (restart Ciaobot to apply), or ask any attended chat to consolidate further.
 

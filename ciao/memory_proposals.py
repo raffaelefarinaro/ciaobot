@@ -1142,7 +1142,7 @@ _STUB_HEADER = (
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
-    "first, then dismiss with `ciao memory-proposal-dismiss <text> "
+    "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
     "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
@@ -1563,6 +1563,35 @@ def list_proposals(
                 }
             )
     return rows
+
+
+def find_proposal_matches(proposals_path: Path, needle: str) -> list[int]:
+    """Line indices of the pending bullets ``needle`` matches.
+
+    `remove_proposal_by_substring` returns None both for no match and for an
+    ambiguous one, which a caller that wants to try a second needle cannot act
+    on: retrying after an AMBIGUOUS match can uniquely hit a different row and
+    delete the wrong proposal. Indices rather than a count, because two needle
+    forms matching one row each is not the same as them matching the same row —
+    only the identities say which.
+
+    Same matching rule as the remover — casefolded substring over parsed
+    bullets — so the two never disagree.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    if not proposals_path.exists():
+        return []
+    needle = needle.strip()
+    if not needle:
+        return []
+    folded = needle.casefold()
+    lines = proposals_path.read_text(encoding="utf-8").splitlines()
+    return [
+        index
+        for index, line in enumerate(lines)
+        if parse_bullet(line) is not None and folded in line.casefold()
+    ]
 
 
 def remove_proposal_by_substring(
