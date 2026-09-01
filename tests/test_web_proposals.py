@@ -497,11 +497,20 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 
 
 def _region_entries(config, workspace: str, region: str) -> list[str]:
+    """A region's entries with their learned-at stamps removed.
+
+    Accepting a fact goes through the same guarded write as an archive-time
+    promotion, which appends `[YYYY-MM-DD]` — the stamp the aging audit reads to
+    surface facts that have not been re-verified. Stripping it here is the same
+    normalisation the production dedupe does, and keeps these assertions from
+    depending on today's date.
+    """
+    from ciao.memory_audit import strip_learned_stamp
     from ciao.memory_tool import read_region
 
     guide = Path(config.agent_root(workspace)) / "CLAUDE.md"
     entries, _diags = read_region(guide, region)
-    return entries
+    return [strip_learned_stamp(entry) for entry in entries]
 
 
 def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
@@ -1133,3 +1142,66 @@ def test_removing_a_bullet_that_is_already_gone_is_a_no_op():
 
     assert _remove_bullet_line(lines, 0, "- [memory] already dismissed") is False
     assert lines == ["- [memory] someone else's"]
+
+
+def test_accept_reports_the_text_it_actually_wrote(tmp_path: Path) -> None:
+    """What landed is not always the sentence on the row.
+
+    The event-shape guard promotes only a bullet's trailing "Durable rule:"
+    clause, so a caller echoing the row's own text would tell the user something
+    different from what is now in the region. The endpoint reports what it wrote.
+    """
+    config = _config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(
+        config,
+        "personal",
+        "# Memory Proposals\n\n"
+        "- [memory] User asked me to stop using em dashes. "
+        "Durable rule: Avoid em dashes; use commas.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["promoted"] is True
+    assert result["written"] == "Avoid em dashes; use commas."
+    assert "Avoid em dashes; use commas." in _region_entries(
+        config, row["workspace"], "memory"
+    )
+
+
+def test_accept_reports_a_duplicate_rather_than_claiming_a_write(tmp_path: Path) -> None:
+    """A row already in the region resolves, but nothing was written.
+
+    Without this the caller cannot tell "stored" from "was already there",
+    which is the difference between a write and a no-op.
+    """
+    config = _config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    fact = "Prefers direct implementation over discussion."
+    _write_queue(
+        config,
+        "personal",
+        f"# Memory Proposals\n\n- [memory] {fact}  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    first = client.post(f"/api/proposals/{row['id']}/accept")
+    assert first.status_code == 200
+    assert "duplicate" not in first.json()["result"]
+
+    # Queue the identical fact again; the region already holds it.
+    _write_queue(
+        config,
+        "personal",
+        f"# Memory Proposals\n\n- [memory] {fact}  _(from: Decisions)_\n",
+    )
+    again = _accept_kind_row(client, "memory")
+    resp = client.post(f"/api/proposals/{again['id']}/accept")
+    assert resp.status_code == 200
+    assert resp.json()["result"]["duplicate"] is True

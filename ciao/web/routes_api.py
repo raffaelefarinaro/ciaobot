@@ -8157,6 +8157,14 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     result["region"] = outcome.get("region", accept.region)
                     result["promoted"] = bool(outcome.get("ok"))
                     result["leak_warning"] = row.get("leak_warning", False)
+                    # What actually landed, which is not always the row's text:
+                    # the event-shape guard can promote only a bullet's trailing
+                    # "Durable rule:" clause. `duplicate` says the fact was
+                    # already there and nothing was written.
+                    if outcome.get("written"):
+                        result["written"] = outcome["written"]
+                    if outcome.get("duplicate"):
+                        result["duplicate"] = True
                     if failed:
                         result["error"] = outcome.get("error", "could not write the region")
                 elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
@@ -8186,18 +8194,24 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
     curation prompt states: the reverse loses the fact if anything fails between
     the two steps. So this returns a failure and the caller keeps the bullet.
 
+    Goes through ``accept_region_fact`` rather than ``update_region`` directly,
+    so a click gets what an archive-time promotion gets: the event-shape guard,
+    the stamp-stripped duplicate check, the learned-at stamp the aging audit
+    reads, and the consolidations undo log. It takes the same guide lock
+    ``update_region`` did.
+
+    The region cap stays ADVISORY, as `update_region` documents: enforcing it
+    made the accept button dead for 67 of 130 queued proposals on a real vault.
+    Usage is reported, never used to refuse.
+
     The guide is resolved through ``agent_root``, so before the re-rooting this
     writes the shared guide (and the row's ``leak_warning`` is why the UI asks
     for confirmation first) and afterwards that workspace's own.
     """
-    from ciao.memory_tool import ensure_regions, resolve_region as _resolve, update_region
+    from ciao.memory_proposals import accept_region_fact
+    from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
 
     region = _resolve(row.get("region") or row["kind"])
-    limit = int(
-        getattr(config, "memory_char_limit", 3000)
-        if region == "memory"
-        else getattr(config, "user_char_limit", 1375)
-    )
     guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
     try:
         # A guide with no region markers yet is not a reason to refuse a
@@ -8206,13 +8220,59 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         ensure_regions(guide)
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"could not prepare {guide}: {exc}", "region": region}
+
     try:
-        result = update_region(
-            guide, region, action="add", entry=row["text"], char_limit=limit
+        vault_root = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError):
+        # Only the undo log needs it; a promotion must not fail for want of one.
+        vault_root = None
+
+    try:
+        outcome, promotable = accept_region_fact(
+            guide_path=guide,
+            target=row.get("region") or row["kind"],
+            text=row["text"],
+            vault_root=vault_root,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
-    return {"ok": True, "region": region, "usage": result.get("usage", {})}
+
+    def _usage() -> dict[str, Any]:
+        try:
+            status = memory_status(
+                guide,
+                memory_char_limit=int(getattr(config, "memory_char_limit", 3000)),
+                user_char_limit=int(getattr(config, "user_char_limit", 1375)),
+            )
+        except Exception:  # noqa: BLE001 — usage is advisory reporting only
+            return {}
+        if not isinstance(status, dict):
+            return {}
+        entry = status.get(region, {})
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    if outcome == "written":
+        # `written` is reported because the guard can promote only the trailing
+        # durable-rule clause of a bullet, so what landed is not always the
+        # sentence the operator read on the row.
+        return {"ok": True, "region": region, "written": promotable, "usage": _usage()}
+    if outcome == "duplicate":
+        # Already remembered. The fact is in the region either way, so the row
+        # is resolved and may leave the queue.
+        return {"ok": True, "region": region, "duplicate": True, "usage": _usage()}
+    if outcome == "unshaped":
+        # Event-shaped text is exactly what the region must not hold; this used
+        # to be written verbatim. The row stays queued.
+        return {
+            "ok": False,
+            "region": region,
+            "error": (
+                "this reads as an event, not a standing rule, so it would rot "
+                "in always-loaded memory. Use \u201ctalk about it\u201d to rephrase it as "
+                "what is true from now on, then accept."
+            ),
+        }
+    return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
 
 
 def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
@@ -8425,6 +8485,12 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = True
             result["usage"] = promoted.get("usage", {})
             result["leak_warning"] = row.get("leak_warning", False)
+            # See the batch builder: the text written can differ from the row's,
+            # and a duplicate resolves the row without writing anything.
+            if promoted.get("written"):
+                result["written"] = promoted["written"]
+            if promoted.get("duplicate"):
+                result["duplicate"] = True
         elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
             result["promoted"] = True
             result["destination"] = promoted.get("destination", "")
