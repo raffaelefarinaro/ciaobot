@@ -144,7 +144,7 @@ def test_a_failed_move_rolls_the_committed_rewrites_back(
             raise OSError("move refused")
         return real_replace(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(vault_rehome, "_run_git", lambda root_, *a: (1, "fatal: nope"))
+    monkeypatch.setattr(vault_rehome, "run_git", lambda root_, *a: (1, "fatal: nope"))
     monkeypatch.setattr(vault_rehome.os, "replace", blocked_replace)
 
     result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
