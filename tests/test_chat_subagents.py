@@ -1101,7 +1101,7 @@ async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
 
@@ -1152,7 +1152,7 @@ async def test_watcher_does_not_wake_while_cli_is_alive(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
 
@@ -1200,7 +1200,7 @@ async def test_watcher_does_not_wake_for_completed_task(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
 
@@ -1233,7 +1233,7 @@ async def test_watcher_grace_needs_two_disconnected_ticks(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
 
@@ -1286,7 +1286,7 @@ async def test_agent_badge_unchanged_with_tasks_tracked(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
 
@@ -1342,7 +1342,7 @@ async def test_sweep_wakes_chat_with_running_cli_task_after_restart(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
 
     wakes: list[tuple[object, str, int]] = []
@@ -1409,7 +1409,7 @@ async def test_sweep_skips_task_already_woken(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
 
     wakes: list[tuple[object, str, int]] = []
@@ -1446,7 +1446,7 @@ async def test_sweep_skips_archived_and_non_claude_chats(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
 
     wakes: list[tuple[object, str, int]] = []
@@ -1482,7 +1482,7 @@ async def test_sweep_skips_chats_idle_for_more_than_a_week(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
 
     wakes: list[tuple[object, str, int]] = []
@@ -1516,7 +1516,7 @@ async def test_sweep_wakes_recently_active_chat(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
 
     wakes: list[tuple[object, str, int]] = []
@@ -1561,7 +1561,7 @@ async def test_task_only_watcher_exits_on_restart_drain(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda *args, **kwargs: session_path,
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
 
