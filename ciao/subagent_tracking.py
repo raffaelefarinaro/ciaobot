@@ -652,13 +652,19 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 continue
 
             content = _text_content(message)
-            if content.lstrip().startswith(CLI_TASK_WAKE_PREFIX):
+            if CLI_TASK_WAKE_PREFIX in content:
                 # Our own dead-CLI wake turn, recorded as the user prompt it
-                # was sent as. Mark every task it names lost so the watcher
-                # and the startup sweep never send a second wake for it. It
-                # still advances the turn counter below — it IS a prompt the
-                # server sent; the background-run wake is counted the same way.
-                for wake_id in _CLI_TASK_WAKE_ID_RE.findall(content):
+                # was sent as. The server persists prompts with the
+                # [CIAO_CONTEXT_BEGIN] capsule prepended, so matching on the
+                # prefix's presence (not a startswith, the same reason
+                # is_synthesis_nudge matches on the tail) and extracting ids
+                # only from the text after it. Mark every task it names lost
+                # so the watcher and the startup sweep never send a second
+                # wake. It still advances the turn counter below — it IS a
+                # prompt the server sent; the background-run wake is counted
+                # the same way.
+                wake_text = content.split(CLI_TASK_WAKE_PREFIX, 1)[1]
+                for wake_id in _CLI_TASK_WAKE_ID_RE.findall(wake_text):
                     wake_id = _normalize_agent_id(wake_id)
                     info = state.subagents.get(wake_id)
                     if info is None:
