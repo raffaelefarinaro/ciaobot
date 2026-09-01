@@ -1586,3 +1586,52 @@ async def test_task_only_watcher_exits_on_restart_drain(
 
     assert wakes == []
     assert chat.chat_id not in pcm.active_chat_ids()
+
+
+async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
+    """A wake that never reaches the JSONL must not re-arm forever."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-rearm", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-rearm-test")
+    chat.session_id = "sess-task-rearm-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-rearm-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    calls: list[tuple[object, str, int]] = []
+
+    def failing_wake(parent, prompt, *, count):
+        calls.append((parent, prompt, count))
+        # Deliberately writes nothing to the JSONL: the wake turn never
+        # persists, so nothing marks the task lost.
+        return "queued"
+
+    monkeypatch.setattr(pcm, "_deliver_wake", failing_wake)
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    # First run: the watcher fires the wake.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert len(calls) == 1
+
+    # A failed stream's cleanup would start a new watcher: it must not
+    # deliver again within the same process.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert len(calls) == 1
+
+    # The startup sweep after a crash must also skip the already-woken task.
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert len(calls) == 1

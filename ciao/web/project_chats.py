@@ -1325,6 +1325,15 @@ class ProjectChatManager:
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # CLI-task wakes already delivered this process, as (chat_id,
+        # task_id). Bounds redelivery to once per process lifetime: if the
+        # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
+        # is down), nothing marks the tasks lost, and without this set the
+        # failed stream's cleanup would re-arm the watcher and the wake
+        # every two ticks forever. Across a restart the JSONL "lost" marker
+        # written by a persisted wake is the durable guard, so a wake that
+        # never persisted is retried at most once per restart.
+        self._cli_task_wakes_sent: set[tuple[str, str]] = set()
         # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
         # At most one per chat; cancelled before a new user turn starts so
         # the drain never competes with receive_response for SDK messages.
@@ -7197,10 +7206,16 @@ class ProjectChatManager:
                 # the wake fires.
                 tasks = subagent_tracking.running_tasks(state)
                 if tasks and not task_wake_sent:
-                    cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
-                    if cli_gone_ticks >= 2:
-                        self._wake_for_dead_cli_tasks(chat, project_id, tasks)
+                    if not self._unwoken_tasks(chat_id, tasks):
+                        # Already woken this process; a wake whose turn never
+                        # persisted is retried at most once per restart, not
+                        # every tick.
                         task_wake_sent = True
+                    else:
+                        cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
+                        if cli_gone_ticks >= 2:
+                            self._wake_for_dead_cli_tasks(chat, project_id, tasks)
+                            task_wake_sent = True
                 if pending:
                     held_ticks += 1
                 else:
@@ -7410,10 +7425,39 @@ class ProjectChatManager:
             return False
         return provider_service.cli_connected
 
+    def _unwoken_tasks(
+        self, chat_id: str, tasks: list[SubagentInfo]
+    ) -> list[SubagentInfo]:
+        """CLI tasks in *tasks* this process has not already woken for.
+
+        ``_cli_task_wakes_sent`` bounds redelivery to once per process
+        lifetime: a wake whose turn never reached the JSONL (CLI cannot
+        reconnect, auth down) would otherwise re-arm on every watcher tick
+        or restart sweep, because nothing marks the tasks lost. Across a
+        restart the JSONL "lost" marker from a persisted wake is the durable
+        guard, so a wake that never persisted is retried at most once per
+        restart.
+        """
+        return [
+            task
+            for task in tasks
+            if (chat_id, task.agent_id) not in self._cli_task_wakes_sent
+        ]
+
     def _wake_for_dead_cli_tasks(
         self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
     ) -> None:
-        """Deliver one wake turn for CLI tasks whose owning CLI is gone."""
+        """Deliver one wake turn for CLI tasks whose owning CLI is gone.
+
+        Tasks already woken this process are filtered out first; if none
+        remain, nothing is delivered and the (chat_id, task_id) pairs are
+        recorded *before* delivery so a failed wake is not re-armed.
+        """
+        tasks = self._unwoken_tasks(parent.chat_id, tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            self._cli_task_wakes_sent.add((parent.chat_id, task.agent_id))
         prompt = self._build_cli_task_wake_prompt(tasks)
         self._deliver_wake(parent, prompt, count=len(tasks))
 
@@ -7431,7 +7475,11 @@ class ProjectChatManager:
         Delivery goes through the same deferred path as
         ``queue_background_wake`` — a bounded coalescing sleep, then
         ``_deliver_wake`` — so the sweep does not fire mid-startup and never
-        raises into the caller. Returns the number of chats armed for a wake.
+        raises into the caller. Tasks already woken this process
+        (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
+        "lost" marker from a persisted wake is the durable guard, so a wake
+        that never persisted is retried at most once per restart. Returns
+        the number of chats armed for a wake.
         """
         woken = 0
         for chat in list(self._chats.values()):
@@ -7455,7 +7503,9 @@ class ProjectChatManager:
                 if path is None:
                     continue
                 state = subagent_tracking.parse_session_subagents(path)
-                tasks = subagent_tracking.running_tasks(state)
+                tasks = self._unwoken_tasks(
+                    chat.chat_id, subagent_tracking.running_tasks(state)
+                )
                 if not tasks:
                     continue
                 woken += 1
@@ -7481,15 +7531,18 @@ class ProjectChatManager:
         """Wait out the startup coalescing window, then wake for dead-CLI tasks."""
         try:
             await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
-            tasks = subagent_tracking.running_tasks(
-                subagent_tracking.parse_session_subagents(
-                    subagent_tracking.find_parent_session_file(
-                        parent.session_id,
-                        self._config.workspace_root,
-                        agent_root=self._agent_root_for_chat(parent.chat_id),
+            tasks = self._unwoken_tasks(
+                parent.chat_id,
+                subagent_tracking.running_tasks(
+                    subagent_tracking.parse_session_subagents(
+                        subagent_tracking.find_parent_session_file(
+                            parent.session_id,
+                            self._config.workspace_root,
+                            agent_root=self._agent_root_for_chat(parent.chat_id),
+                        )
+                        or Path("nonexistent")
                     )
-                    or Path("nonexistent")
-                )
+                ),
             )
             if not tasks:
                 return
