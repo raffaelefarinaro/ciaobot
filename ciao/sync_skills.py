@@ -326,6 +326,12 @@ def _stock_command_marker(command_path: Path) -> Path:
     return command_path.with_name(command_path.name + STOCK_COMMAND_MARKER_SUFFIX)
 
 
+def _stock_command_marker_is_safe(command_path: Path) -> bool:
+    # A symlinked marker would make the writer truncate whatever it points at
+    # (e.g. ../../.env pulled in from a hostile git checkout).
+    return not _stock_command_marker(command_path).is_symlink()
+
+
 def _read_stock_command_marker(command_path: Path) -> str | None:
     marker = _stock_command_marker(command_path)
     if not marker.is_file():
@@ -334,7 +340,20 @@ def _read_stock_command_marker(command_path: Path) -> str | None:
 
 
 def _write_stock_command_marker(command_path: Path, digest: str) -> None:
-    _stock_command_marker(command_path).write_text(digest, encoding="utf-8")
+    marker = _stock_command_marker(command_path)
+    if marker.is_symlink():
+        # Belt and braces: the seed loop never reaches a symlinked marker.
+        print(
+            f"WARN: refusing to write symlinked stock-command marker {marker} "
+            f"-> {os.readlink(marker)}",
+            file=sys.stderr,
+        )
+        return
+    # Atomic replace so a crash mid-write can never leave a truncated digest
+    # behind (the digest is the managed copy's integrity check).
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(digest, encoding="utf-8")
+    os.replace(tmp, marker)
 
 
 def _unmark_stock_command(command_path: Path) -> None:
@@ -471,6 +490,14 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
         canonical = commands_dir / name
         if canonical.is_symlink():
             continue  # user-managed link, leave it alone
+        if not _stock_command_marker_is_safe(canonical):
+            marker = _stock_command_marker(canonical)
+            print(
+                f"WARN: skipping {name}; stock-command marker {marker} is a "
+                f"symlink to {os.readlink(marker)}",
+                file=sys.stderr,
+            )
+            continue  # never follow or replace a symlinked marker
         live.add(name)
         with resources.as_file(stock_entry) as stock_path:
             stock_bytes = stock_path.read_bytes()
@@ -514,6 +541,10 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     pruned = 0
     for marker in commands_dir.glob(f"*{STOCK_COMMAND_MARKER_SUFFIX}"):
         command_path = marker.with_name(marker.name[: -len(STOCK_COMMAND_MARKER_SUFFIX)])
+        if marker.is_symlink():
+            # Never unlink or read a symlinked marker: the link itself is not
+            # ours and its target must stay untouched.
+            continue
         if command_path.name in live:
             continue
         if command_path.is_file() and not command_path.is_symlink():

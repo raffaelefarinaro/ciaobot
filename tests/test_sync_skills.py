@@ -433,6 +433,46 @@ def test_symlinked_stock_command_is_ignored(tmp_path: Path) -> None:
     assert not (commands_dir / "remember.md.ciao-stock-command").exists()
 
 
+def test_symlinked_stock_command_marker_is_never_followed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    commands_dir = tmp_path / "workspace" / "commands"
+    commands_dir.mkdir(parents=True)
+    target = tmp_path / "secret.env"
+    target.write_text("SECRET=1", encoding="utf-8")
+    for present in (True, False):
+        canonical = commands_dir / "remember.md"
+        if present:
+            _write(canonical, "# Pre-existing\n")
+        else:
+            canonical.unlink(missing_ok=True)
+        marker = commands_dir / "remember.md.ciao-stock-command"
+        if marker.exists() or marker.is_symlink():
+            marker.unlink()
+        marker.symlink_to(target)
+
+        sync_skills.sync_workspace_skills(tmp_path / "workspace", refresh_upstream=False)
+
+        assert target.read_text(encoding="utf-8") == "SECRET=1"
+        assert marker.is_symlink()
+        assert marker.resolve() == target.resolve()
+        if present:
+            assert canonical.read_text(encoding="utf-8") == "# Pre-existing\n"
+        else:
+            assert not canonical.exists()
+
+
+def test_stock_command_marker_written_atomically(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert (workspace / "commands" / "remember.md.ciao-stock-command").is_file()
+    assert not list((workspace / "commands").glob("*.tmp"))
+
+
 def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
