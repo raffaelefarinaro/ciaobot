@@ -2592,7 +2592,13 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     nightly report. Re-filing an identical fact is a no-op; the queue dedupes
     by text.
     """
-    from ciao.memory_proposals import DESTINATIONS, MemoryProposal, append_proposals
+    from ciao.memory_proposals import (
+        DESTINATIONS,
+        MemoryProposal,
+        append_proposals,
+        was_dismissed,
+        was_promoted,
+    )
 
     workspace, vault = _resolve_workspace_and_vault(args)
     text_file = (getattr(args, "text_file", "") or "").strip()
@@ -2658,12 +2664,23 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         source_section=args.source.strip() or "curation",
         payload=payload,
     )
-    path = append_proposals([proposal], vault)
+    path = append_proposals(
+        [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
+    )
+    # `append_proposals` returns None for two different situations and the
+    # difference matters to whoever asked: a fact already queued is waiting for
+    # them, while a fact they dismissed before will never come back on its own.
+    # Reporting both as "already in the queue" told a user reconsidering an
+    # earlier decision that their request had landed when no row exists.
+    dismissed = path is None and was_dismissed(vault, text)
+    promoted = path is None and not dismissed and was_promoted(vault, text)
     if args.json:
         json.dump(
             {
                 "queued": path is not None,
                 "duplicate": path is None,
+                "dismissed_before": dismissed,
+                "promoted_before": promoted,
                 "path": str(path) if path else None,
                 "text": text,
                 # argparse supplies a Path when --workspace is explicit, and
@@ -2674,6 +2691,16 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             ensure_ascii=False,
         )
         sys.stdout.write("\n")
+    elif promoted:
+        print(
+            f"Already promoted, so NOT queued: {text!r}. "
+            "It should already be live in its destination."
+        )
+    elif dismissed:
+        print(
+            f"Previously dismissed, so NOT queued: {text!r}. "
+            "Say so explicitly to file it again."
+        )
     elif path is None:
         print(f"Already in the queue; nothing added for {text!r}.")
     else:
@@ -3515,6 +3542,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_vault_export_command)
 
+    # Registered for discoverability only; `main` intercepts "critique" before
+    # argparse so the panel's own flags reach `ciao.critique` untouched (the
+    # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
+    # a subparser's REMAINDER can see them). Do not give it a `func`.
+    #
+    # It needs a `ciao` entry point at all because the bundled runtime puts only
+    # a `ciao` wrapper on PATH (`scripts/build-bundled-runtime.sh`): on a
+    # packaged install `python3 -m ciao.critique` resolves some external
+    # interpreter that has neither `ciao` nor its dependencies, so /critique
+    # failed for every user who had not installed from source.
+    subparsers.add_parser(
+        "critique",
+        help="Run the multi-model critique panel on an artifact.",
+        add_help=False,
+    )
+
     lint_parser = subparsers.add_parser(
         "vault-lint",
         help="Run vault hygiene checks.",
@@ -3971,6 +4014,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
     )
+    memory_proposal_add_parser.add_argument(
+        "--allow-dismissed",
+        action="store_true",
+        help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
+    )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
     memory_proposal_dismiss_parser = subparsers.add_parser(
@@ -4263,6 +4311,42 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
+def _resolve_critique_paths(args: list[str]) -> list[str]:
+    """Make a relative ``--input`` absolute against the caller's directory.
+
+    The bundled launcher `cd`s into the runtime root before exec'ing Python
+    (`scripts/build-bundled-runtime.sh`), so a relative path — including the
+    `memory-vault/...` form the command doc explicitly supports — would resolve
+    against the app bundle and be reported missing. The launcher records where
+    the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
+    no cd and the current directory is already right.
+    """
+    base = os.environ.get("CIAO_INVOCATION_CWD", "").strip()
+    if not base:
+        return args
+    out = list(args)
+    for index, token in enumerate(out):
+        value = ""
+        if token == "--input" and index + 1 < len(out):
+            target = index + 1
+            value = out[target]
+        elif token.startswith("--input="):
+            target = index
+            value = token.split("=", 1)[1]
+        else:
+            continue
+        # A tilde path is never relative to the caller's directory. Quoted, it
+        # reaches here unexpanded and `Path("~/x").is_absolute()` is False, so
+        # rebasing would produce `<cwd>/~/x` and defeat the `expanduser()` that
+        # `ciao.critique` does later — turning an artifact that resolved fine
+        # into one reported missing. Left alone, that expansion still works.
+        if not value or value.startswith("~") or Path(value).is_absolute():
+            continue
+        resolved = str(Path(base) / value)
+        out[target] = resolved if target != index else f"--input={resolved}"
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
@@ -4273,6 +4357,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["critique"]:
+        from ciao.critique import main as critique_main
+
+        return critique_main(_resolve_critique_paths(argv_list[1:]))
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.
