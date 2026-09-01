@@ -4,6 +4,8 @@ import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalRow } from '../lib/types'
+import { descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
+import type { ProposalMergeFallback } from '../lib/proposalKinds'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -203,22 +205,6 @@ const groups = computed(() => {
 })
 
 
-const KIND_LABELS: Record<string, string> = {
-  memory: 'memory',
-  profile: 'profile',
-  user: 'profile',
-  rehome: 're-home',
-  project: 'project',
-  people: 'people',
-  learnings: 'learnings',
-  review: 'review',
-  skill: 'skill',
-}
-
-function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind
-}
-
 /** The one line that says what this row is about.
  *
  * A re-home bullet is a paragraph of prose that reprints both paths and a CLI
@@ -234,35 +220,13 @@ function rowTitle(row: ProposalRow): string {
   return row.text
 }
 
+/** The line under the title: where an accept would write.
+ *
+ * Every kind's answer lives in its descriptor, including the re-home row's
+ * `from → to · why` form and the skill row's path.
+ */
 function rowSubtitle(row: ProposalRow): string {
-  if (isRehome(row)) {
-    const sig = row.rehome
-    const from = row.workspace
-    if (sig?.candidates?.length && sig.candidates.length > 1) {
-      return `${from} → ${sig.candidates.join(' or ')} · tags name more than one`
-    }
-    if (sig?.destination) {
-      const to = sig.destination.split('/')[0]
-      return sig.justified
-        ? `${from} → ${to} · tags back this`
-        : `${from} → ${to} · no tag backs it`
-    }
-    // A stale row is not asking anything: its cause is gone. Saying "needs a
-    // decision" made litter look identical to a real question.
-    if (sig?.stale) return `${from} · no longer applies · safe to dismiss`
-    return `${from} · no destination, needs a decision`
-  }
-  // The path, not the words "a skill proposal file". The row's whole content is
-  // in that file, and naming it is what makes "view" obviously the first thing
-  // to press.
-  if (isSkill(row)) return row.path || 'a skill proposal file'
-  // Destination kinds name where an accept writes, so say that instead of the
-  // generic region form.
-  if (row.kind === 'project') return row.target || 'no project doc named'
-  if (row.kind === 'people') return `People/${row.target || '?'}.md`
-  if (row.kind === 'learnings') return 'Workspace/Learnings.md'
-  if (row.kind === 'review') return 'no destination yet — decide what it is'
-  return `ciao:${row.region ?? row.kind}`
+  return descriptorFor(row).destination(row)
 }
 
 /** The verbose original, kept behind a disclosure rather than on the surface. */
@@ -271,17 +235,9 @@ function rowDetail(row: ProposalRow): string {
   return row.source ? `from ${row.source}` : ''
 }
 
-/** Whether an accept can do what it says.
- *
- * A skill row has no accept descriptor on the server, a re-home row with no
- * backed destination has nowhere to go, and a review row has no known
- * destination at all — accepting one would be a guess wearing a button.
- */
+/** Whether an accept can do what it says. Each kind's descriptor decides. */
 function canAccept(row: ProposalRow): boolean {
-  if (isSkill(row)) return false
-  if (isRehome(row)) return rehomeMode(row) === 'accept'
-  if (row.kind === 'review') return false
-  return true
+  return descriptorFor(row).canAccept(row)
 }
 
 const allSelected = computed(() =>
@@ -329,27 +285,12 @@ const selectedAcceptable = computed(
   () => selectedVisible.value.filter(canAccept).map(r => r.id),
 )
 
-function isRegionKind(row: ProposalRow): boolean {
-  return row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user'
-}
-
 function isRehome(row: ProposalRow): boolean {
   return row.kind === 'rehome'
 }
 
 function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
-}
-
-// How a rehome row is presented. Never a pre-filled one-click accept for a
-// destination no tag backs: a single clean signal is a plain accept, multiple
-// candidates are a picker, and no signal is a question.
-function rehomeMode(row: ProposalRow): 'accept' | 'picker' | 'question' {
-  const sig = row.rehome
-  if (!sig) return 'question'
-  if (sig.candidates.length > 1) return 'picker'
-  if (sig.justified) return 'accept'
-  return 'question'
 }
 
 async function confirmAccept(row: ProposalRow) {
@@ -359,21 +300,22 @@ async function confirmAccept(row: ProposalRow) {
     confirmLeakId.value = row.id
     return
   }
-  await acceptWithPeopleFallback(row)
+  await acceptWithFallback(row)
 }
 
 async function doAccept(row: ProposalRow, workspace = '') {
   confirmLeakId.value = ''
-  await acceptWithPeopleFallback(row, workspace)
+  await acceptWithFallback(row, workspace)
 }
 
-async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
+async function acceptWithFallback(row: ProposalRow, workspace = '') {
   // Direct accept is best-effort by design – create-only for people
   // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
   // fold-guard for projects (`ciao/web/routes_api.py:7602`), cap/region
   // for memory (`ciao/web/routes_api.py:7518`). When it refuses, falling
   // back to a chat that merges keeps the prompt self-contained and nothing
-  // breaks – the row stays queued until the merge lands.
+  // breaks – the row stays queued until the merge lands. Which refusals are
+  // expected, and what the merge chat is told, is the kind's descriptor.
   const { api } = await import('../lib/api')
   store.setBusy(row.id, true)
   try {
@@ -383,13 +325,9 @@ async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    const isFallbackCase =
-      row.kind === 'people' && /already exists/i.test(msg) ||
-      row.kind === 'project' ||
-      row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user' ||
-      row.kind === 'learnings'
-    if (isFallbackCase) {
-      await mergeViaChat(row, msg)
+    const fallback = descriptorFor(row).fallback
+    if (fallback && fallback.when(msg)) {
+      await mergeViaChat(row, msg, fallback)
       return
     }
     store.error = msg
@@ -399,113 +337,28 @@ async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
   }
 }
 
-async function mergeViaChat(row: ProposalRow, errorMsg: string) {
-  // Reuse the people-specific helper for its title, otherwise generic.
-  if (row.kind === 'people') return mergePeopleViaChat(row)
-  if (row.kind === 'project') return mergeProjectViaChat(row, errorMsg)
-  if (row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user') return mergeMemoryViaChat(row, errorMsg)
-  if (row.kind === 'learnings') return mergeLearningsViaChat(row, errorMsg)
-  return mergePeopleViaChat(row)
-}
-
-async function mergePeopleViaChat(row: ProposalRow) {
+/** Hand a refused accept to a background chat that can merge it by hand.
+ *
+ * One function for every kind: the four that existed differed only in the chat
+ * title, the toast detail and the prompt, all three of which the descriptor now
+ * supplies.
+ */
+async function mergeViaChat(row: ProposalRow, errorMsg: string, fallback: ProposalMergeFallback) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`, resolutionHelper(row.id))
+    const chat = await openWorkspaceChatInBackground(
+      row.workspace,
+      fallback.chatTitle(row),
+      resolutionHelper(row.id),
+    )
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', `${row.target || 'Person'} fact — click to open the chat`)
+    projectStore.sendMessage(chat.chat_id, fallback.prompt(row, errorMsg))
+    pushBackgroundToast(chat.chat_id, 'Merging in background', fallback.toastDetail(row))
   } finally {
     chatBusy.value = false
   }
-}
-
-async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Project fact — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Memory fact — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Learning — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-function peopleMergePrompt(row: ProposalRow): string {
-  const target = row.target || '?'
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it. Work in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
-    `After the note is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` so it disappears from Review (the flag records the promotion; do not delete the bullet from the file directly — that skips the outcome log). ` +
-    `If the fact is already present verbatim, just dismiss the proposal. Leave other proposals untouched. Nothing is broken – this is the expected merge path for existing person notes.`
-  )
-}
-
-function projectMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const target = row.target || 'the project doc'
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`${target}\` (vault-relative, in the ${row.workspace} workspace), merge this fact into the appropriate section without duplicating existing content, and write it back. Keep frontmatter and structure intact.\n\n` +
-    `After the doc is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\`. If the fact is already covered, run the same command without \`--promoted\`. Do not delete the bullet from the file directly — that skips the outcome log. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
-  )
-}
-
-function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const region = row.region || row.kind
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
-    `After the region is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
-  )
-}
-
-function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
-    `After the file is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present, just dismiss. Leave other proposals untouched.`
-  )
 }
 
 /** The workspace a justified re-home row would move into. */
@@ -660,9 +513,7 @@ function discussPrompt(row: ProposalRow): string {
       'Leave the proposal queued either way; I will accept or dismiss it myself.'
     )
   }
-  const about = row.kind === 'review'
-    ? 'a fact with no decided destination'
-    : `a \`${row.kind}\` proposal`
+  const about = descriptorFor(row).discussLabel(row)
   return (
     `${about} is waiting for a decision (${where}): ${row.text}\n\n` +
     'Tell me whether this is durable and cross-session enough to keep, and where it ' +

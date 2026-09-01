@@ -1154,6 +1154,7 @@ import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
+import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { formatFileComments } from '../lib/commentContext'
@@ -1185,21 +1186,6 @@ onMounted(() => {
   void proposals.ensureLoaded()
 })
 
-const REVIEW_KIND_LABELS: Record<string, string> = {
-  memory: 'memory',
-  profile: 'profile',
-  user: 'profile',
-  rehome: 're-home',
-  project: 'project',
-  people: 'people',
-  learnings: 'learnings',
-  review: 'review',
-  skill: 'skill',
-}
-
-function reviewKindLabel(kind: string): string {
-  return REVIEW_KIND_LABELS[kind] ?? kind
-}
 // The unlinked list is the one section that can run to hundreds of entries on a
 // real vault, so it grows on demand rather than pushing every other section off
 // the bottom of the sidebar.
