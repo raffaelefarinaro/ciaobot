@@ -64,6 +64,7 @@ except ImportError:  # pragma: no cover
 import yaml
 
 from ciao import job_runs, provider_registry, subagent_tracking
+from ciao.subagent_tracking import SubagentInfo
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -206,6 +207,11 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
+# The orphaned-CLI-task startup sweep only wakes chats active within this
+# window: the first upgrade after the sweep shipped must not wake every chat
+# that ever left a Monitor running months ago, and a Monitor worth checking
+# is one from this week.
+_ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
@@ -1319,6 +1325,15 @@ class ProjectChatManager:
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # CLI-task wakes already delivered this process, as (chat_id,
+        # task_id). Bounds redelivery to once per process lifetime: if the
+        # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
+        # is down), nothing marks the tasks lost, and without this set the
+        # failed stream's cleanup would re-arm the watcher and the wake
+        # every two ticks forever. Across a restart the JSONL "lost" marker
+        # written by a persisted wake is the durable guard, so a wake that
+        # never persisted is retried at most once per restart.
+        self._cli_task_wakes_sent: set[tuple[str, str]] = set()
         # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
         # At most one per chat; cancelled before a new user turn starts so
         # the drain never competes with receive_response for SDK messages.
@@ -7167,6 +7182,8 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
+        task_wake_sent = False
+        cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
@@ -7182,6 +7199,23 @@ class ProjectChatManager:
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
                 pending = state.notification_pending
+                # CLI-owned tasks (Monitor / background Bash): when the CLI
+                # subprocess that owns them is gone, their completion will
+                # never be delivered. Two consecutive disconnected ticks give
+                # a normal between-turns reconnect time to come back before
+                # the wake fires.
+                tasks = subagent_tracking.running_tasks(state)
+                if tasks and not task_wake_sent:
+                    if not self._unwoken_tasks(chat_id, tasks):
+                        # Already woken this process; a wake whose turn never
+                        # persisted is retried at most once per restart, not
+                        # every tick.
+                        task_wake_sent = True
+                    else:
+                        cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
+                        if cli_gone_ticks >= 2:
+                            self._wake_for_dead_cli_tasks(chat, project_id, tasks)
+                            task_wake_sent = True
                 if pending:
                     held_ticks += 1
                 else:
@@ -7229,6 +7263,24 @@ class ProjectChatManager:
                     if count != last_count or (ready_to_nudge and nudged):
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
+                # Keep the watcher alive while tracked CLI tasks are still
+                # running and their wake has not gone out: once the owning
+                # CLI dies, nothing else would ever deliver the completion.
+                # After the wake (or once the tasks complete via
+                # notification) the normal exit rules apply — the CLI
+                # answers its own task-notifications on resume.
+                if count == 0 and tasks and not task_wake_sent:
+                    if self._restart_draining:
+                        # A restart must not wait an hour on this watcher:
+                        # active_chat_ids() counts it and the restart drain
+                        # has no timeout. sweep_orphaned_cli_tasks wakes the
+                        # chat after the restart, so there is nothing left
+                        # to guard here.
+                        break
+                    if time.perf_counter() >= deadline:
+                        break
+                    await asyncio.sleep(3)
+                    continue
                 if count == 0 and (not pending or nudged or grace_expired):
                     break
                 await asyncio.sleep(3)
@@ -7360,6 +7412,178 @@ class ProjectChatManager:
                 "Subagent synthesis nudge failed for chat %s", chat_id
             )
             return False
+
+    def _cli_owner_alive(self, chat_id: str) -> bool:
+        """True while the chat's CLI subprocess (if any) is still connected.
+
+        A chat with no provider entry at all (server restart) counts as gone:
+        nothing owns its CLI tasks any more. Providers without the concept
+        report alive so only a genuinely dead Claude CLI triggers a wake.
+        """
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None:
+            return False
+        return provider_service.cli_connected
+
+    def _unwoken_tasks(
+        self, chat_id: str, tasks: list[SubagentInfo]
+    ) -> list[SubagentInfo]:
+        """CLI tasks in *tasks* this process has not already woken for.
+
+        ``_cli_task_wakes_sent`` bounds redelivery to once per process
+        lifetime: a wake whose turn never reached the JSONL (CLI cannot
+        reconnect, auth down) would otherwise re-arm on every watcher tick
+        or restart sweep, because nothing marks the tasks lost. Across a
+        restart the JSONL "lost" marker from a persisted wake is the durable
+        guard, so a wake that never persisted is retried at most once per
+        restart.
+        """
+        return [
+            task
+            for task in tasks
+            if (chat_id, task.agent_id) not in self._cli_task_wakes_sent
+        ]
+
+    def _wake_for_dead_cli_tasks(
+        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
+    ) -> None:
+        """Deliver one wake turn for CLI tasks whose owning CLI is gone.
+
+        Tasks already woken this process are filtered out first; if none
+        remain, nothing is delivered and the (chat_id, task_id) pairs are
+        recorded *before* delivery so a failed wake is not re-armed.
+        """
+        tasks = self._unwoken_tasks(parent.chat_id, tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            self._cli_task_wakes_sent.add((parent.chat_id, task.agent_id))
+        prompt = self._build_cli_task_wake_prompt(tasks)
+        self._deliver_wake(parent, prompt, count=len(tasks))
+
+    def sweep_orphaned_cli_tasks(self) -> int:
+        """After a restart, wake chats whose CLI tasks (Monitor / background Bash)
+        were still running: the CLI that owned them died with the old server.
+
+        No watcher survives a restart (one is only armed when a turn finishes),
+        so without this sweep a task that was running at shutdown would never
+        produce a wake. Only chats active within
+        ``_ORPHANED_CLI_TASK_SWEEP_MAX_AGE`` are woken: the first upgrade after
+        the sweep shipped must not wake every chat that ever left a Monitor
+        running months ago. An unparseable or empty ``last_activity_at`` never
+        skips a chat — the wake is worth more than the risk of missing one.
+        Delivery goes through the same deferred path as
+        ``queue_background_wake`` — a bounded coalescing sleep, then
+        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
+        raises into the caller. Tasks already woken this process
+        (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
+        "lost" marker from a persisted wake is the durable guard, so a wake
+        that never persisted is retried at most once per restart. Returns
+        the number of chats armed for a wake.
+        """
+        woken = 0
+        for chat in list(self._chats.values()):
+            try:
+                if chat.archived or not chat.session_id:
+                    continue
+                if chat.provider != "claude":
+                    continue
+                last_active = _parse_iso(chat.last_activity_at)
+                if (
+                    last_active is not None
+                    and datetime.now(UTC) - last_active
+                    > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE
+                ):
+                    continue
+                path = subagent_tracking.find_parent_session_file(
+                    chat.session_id,
+                    self._config.workspace_root,
+                    agent_root=self._agent_root_for_chat(chat.chat_id),
+                )
+                if path is None:
+                    continue
+                state = subagent_tracking.parse_session_subagents(path)
+                tasks = self._unwoken_tasks(
+                    chat.chat_id, subagent_tracking.running_tasks(state)
+                )
+                if not tasks:
+                    continue
+                woken += 1
+                try:
+                    asyncio.create_task(self._deferred_cli_task_wake(chat))
+                except RuntimeError:
+                    # No running loop (e.g. a sync startup path). Dropping the
+                    # wake beats raising into the caller; the tasks stay
+                    # "running" in the JSONL, so nothing is lost by trying
+                    # again on the next sweep.
+                    logger.debug(
+                        "No event loop for orphaned CLI task wake of %s",
+                        chat.chat_id,
+                    )
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill startup
+                logger.exception(
+                    "Orphaned CLI task sweep failed for chat %s",
+                    getattr(chat, "chat_id", "?"),
+                )
+        return woken
+
+    async def _deferred_cli_task_wake(self, parent: ChatInfo) -> None:
+        """Wait out the startup coalescing window, then wake for dead-CLI tasks."""
+        try:
+            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
+            tasks = self._unwoken_tasks(
+                parent.chat_id,
+                subagent_tracking.running_tasks(
+                    subagent_tracking.parse_session_subagents(
+                        subagent_tracking.find_parent_session_file(
+                            parent.session_id,
+                            self._config.workspace_root,
+                            agent_root=self._agent_root_for_chat(parent.chat_id),
+                        )
+                        or Path("nonexistent")
+                    )
+                ),
+            )
+            if not tasks:
+                return
+            self._wake_for_dead_cli_tasks(parent, parent.project_id, tasks)
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception(
+                "Orphaned CLI task wake failed for chat %s", parent.chat_id
+            )
+
+    @staticmethod
+    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
+        """Compose the wake turn for CLI tasks orphaned by a dead CLI.
+
+        Mirrors the background-run wake: name the log/output the command was
+        writing and tell the chat to verify rather than assume. The first line
+        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
+        recognise this prompt in the JSONL later and mark the tasks lost —
+        the wake must never be sent twice.
+        """
+        lines = [
+            f"{subagent_tracking.CLI_TASK_WAKE_PREFIX} {len(tasks)} CLI task"
+            f"{'s' if len(tasks) != 1 else ''} you started "
+            "(Monitor / background shell) were lost: the Claude CLI process "
+            "that owned them has exited, so their completion will never be "
+            "delivered to this chat."
+        ]
+        for task in tasks:
+            lines.append("")
+            lines.append(f"— {task.subagent_type}: {task.description} (task {task.agent_id})")
+            if task.command:
+                lines.append(f"command: {task.command}")
+        lines.append("")
+        lines.append(
+            "Check the real state yourself now: read the log or output file "
+            "the command was writing, and inspect the process (pgrep/ps) "
+            "rather than assuming it finished or that the last lines tell the "
+            "whole story. For future long-running commands use the "
+            "`background_run_start` MCP tool, which survives CLI restarts and "
+            "wakes this chat with the exit code, log tail and log path."
+        )
+        return "\n".join(lines)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
         """Deliver one background-run wake turn into *parent* and announce it.
@@ -8216,7 +8440,8 @@ class ProjectChatManager:
                     return True, had_async
                 if not had_async:
                     had_async = any(
-                        info.is_async for info in state.subagents.values()
+                        info.is_async and info.kind == "agent"
+                        for info in state.subagents.values()
                     )
             # Recomputed every tick, not just when the parent file grows: a
             # completion the CLI never wrote there still shows up as the

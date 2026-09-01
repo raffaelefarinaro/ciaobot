@@ -710,6 +710,11 @@ class ClaudeProvider(BaseSDKProvider):
         """True when a connected client exists to drain between turns."""
         return self._client is not None and self._connected
 
+    @property
+    def cli_connected(self) -> bool:
+        """True while the persistent CLI subprocess this provider owns is alive."""
+        return self._client is not None and self._connected
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield SDK events arriving *between* turns until cancelled.
 
@@ -744,7 +749,27 @@ class ClaudeProvider(BaseSDKProvider):
                 async for msg in client.receive_messages():
                     for event in self._convert_message(msg):
                         merged.put_nowait(event)
+            except (CLIConnectionError, ProcessError):
+                logger.debug("Between-turns drain ended on SDK error", exc_info=True)
+                # The transport is gone (the CLI process died between turns).
+                # Only these two mean a dead process: ClaudeSDKError also
+                # covers MessageParseError, which is a bad payload from a
+                # still-alive CLI and must not kill the connection. Mirror
+                # disconnect()'s state clearing minus the awaited client
+                # call — we are inside the consumer task, so a disconnect()
+                # await here would deadlock the drain. _ensure_connected
+                # rebuilds the client on the next turn, exactly as after a
+                # disconnect(); leaving _connected True would make
+                # cli_connected lie to the CLI-task watcher.
+                self._client = None
+                self._connected = False
+                self._session_id = None
+                self._pending_quota = {}
+                self._mcp_token = ""
+                self._reset_settings()
             except _CLAUDE_OP_ERRORS:
+                # Other typed SDK errors (e.g. MessageParseError) are not
+                # transport death; end the drain, keep the client usable.
                 logger.debug("Between-turns drain ended on SDK error", exc_info=True)
             except Exception:
                 # The SDK raises bare ``Exception`` for some result shapes
