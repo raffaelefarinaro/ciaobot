@@ -368,13 +368,29 @@ def _promote_to_region(
     the consolidations undo log first — and ``{"action": "add"}`` or ``None``
     is the plain append path.
     """
-    from ciao.memory_tool import ensure_regions, read_region, resolve_region, write_region
+    from ciao.memory_tool import (
+        _guide_lock,
+        ensure_regions,
+        read_region,
+        resolve_region,
+        write_region,
+    )
 
     promotable = _promotable_text(proposal.text)
     if promotable is None:
         return "unshaped", None
     from ciao.memory_audit import strip_learned_stamp
 
+    # The whole read-merge-write, under the same lock `update_region` takes.
+    # Without it two concurrent accepts — or an accept racing an MCP
+    # /remember — both read the region, both append to their own snapshot, and
+    # the second write drops the first fact while its row is dismissed as
+    # promoted.
+    lock = None
+    try:
+        lock = _guide_lock(guide_path)
+    except Exception:  # noqa: BLE001 — a lock we cannot take must not block a write
+        lock = None
     try:
         ensure_regions(guide_path)
         region = resolve_region(proposal.target)
@@ -404,14 +420,23 @@ def _promote_to_region(
             # A model verdict, not a provable string match: leave a trace in
             # the undo log so a hallucinated "covered" never silently loses
             # the fact — the standing "nothing is dropped silently" contract.
-            if vault_root is not None:
+            # With nowhere to write that trace, honour the contract instead of
+            # the verdict and take the plain append: a duplicate is visible and
+            # removable, a silently dropped fact is neither.
+            if vault_root is None:
+                logger.info(
+                    "memory apply: reconcile said covered but there is no vault "
+                    "to log it to; appending instead of dropping %r",
+                    promotable[:80],
+                )
+            else:
                 _log_consolidation(
                     vault_root,
                     region,
                     f"(incoming fact judged covered; not written) {promotable}",
                     label="auto-reconcile covered",
                 )
-            return "duplicate", promotable
+                return "duplicate", promotable
         if action == "update" and vault_root is not None:
             index = decision.get("index")
             merged = str(decision.get("text", "")).strip()
@@ -436,9 +461,9 @@ def _promote_to_region(
                 )
             ):
                 old = entries[index - 1]
-                _log_consolidation(vault_root, region, old)
                 updated = list(entries)
                 updated[index - 1] = f"{merged} [{date.today().isoformat()}]"
+                _log_consolidation(vault_root, region, old)
                 write_region(guide_path, region, updated)
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
@@ -458,6 +483,46 @@ def _promote_to_region(
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
         logger.info("memory apply: falling back to proposals (%s)", exc)
         return "failed", promotable
+    finally:
+        if lock is not None:
+            try:
+                lock.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def accept_region_fact(
+    *,
+    guide_path: Path,
+    target: str,
+    text: str,
+    vault_root: Path | None,
+    decision: dict[str, Any] | None = None,
+) -> tuple[str, str | None]:
+    """Write one approved region fact through the guarded path.
+
+    The UI accept button used to call ``update_region(action="add")`` directly,
+    which skipped everything the archive-time path does: the event-shape guard
+    (so an event-shaped bullet landed verbatim in always-loaded context), the
+    stamp-stripped duplicate check, the learned-at stamp the aging audit reads,
+    and the consolidations undo log.
+
+    Deliberately synchronous and model-free. Reconciliation belongs here in
+    principle — accepting an updated preference still appends beside the entry
+    it supersedes — but one ``run_oneshot`` per row on a click is a 120s timeout
+    each, and the batch endpoint accepts rows sequentially inside one request.
+    A caller that has already reconciled elsewhere may pass ``decision``; the
+    click path passes none.
+
+    Returns ``_promote_to_region``'s ``(outcome, promotable)``.
+    """
+    proposal = MemoryProposal(target=target, text=text, source_section="review")
+    return _promote_to_region(
+        proposal,
+        guide_path,
+        vault_root=vault_root,
+        decision=decision,
+    )
 
 
 def _safe_name(name: str) -> str:
@@ -816,58 +881,88 @@ async def plan_region_reconcile(
     if not by_region:
         return None
 
-    from ciao.providers.oneshot import run_oneshot
-
     decisions: dict[str, dict[str, Any]] = {}
     for region_name, candidates in by_region.items():
-        entries = entries_by_region[region_name]
-        numbered = "\n".join(
-            f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
+        rows = await _reconcile_region(
+            region_name,
+            entries_by_region[region_name],
+            candidates,
+            model=model,
+            provider=provider,
+            cwd=cwd,
         )
-        lettered = "\n".join(
-            f"{chr(ord('A') + index)}. {fact}"
-            for index, fact in enumerate(candidates)
-        )
-        prompt = (
-            f"Region `ciao:{region_name}` current entries:\n{numbered}\n\n"
-            f"Candidate facts:\n{lettered}\n"
-        )
-        try:
-            reply = await run_oneshot(
-                prompt,
-                system_prompt=_RECONCILE_SYSTEM_PROMPT,
-                model=model,
-                timeout_s=_RECONCILE_TIMEOUT_S,
-                provider=provider,
-                cwd=cwd,
-            )
-        except Exception as exc:  # noqa: BLE001 — degrade to plain appends
-            logger.info("memory reconcile: call failed (%s); using plain adds", exc)
-            continue
-        rows = _parse_reconcile_reply(reply, len(candidates))
         if rows is None:
-            logger.info(
-                "memory reconcile: unparseable reply for ciao:%s; using plain adds",
-                region_name,
-            )
             continue
         for fact, row in zip(candidates, rows):
-            if row.get("action") == "update":
-                index = row.get("index")
-                if not (isinstance(index, int) and 1 <= index <= len(entries)):
-                    # Out-of-range against the very snapshot the model saw:
-                    # degrade now rather than carry a junk decision around.
-                    row = {"action": "add"}
-                else:
-                    # Snapshot the entry this index named at plan time. The
-                    # apply step re-reads the region and refuses the update if
-                    # the entry changed during the model call — the index
-                    # would otherwise overwrite an unrelated fact.
-                    row = dict(row)
-                    row["old"] = entries[index - 1]
             decisions[_decision_key(region_name, fact)] = row
 
     return decisions or None
+
+
+async def _reconcile_region(
+    region_name: str,
+    entries: list[str],
+    candidates: list[str],
+    *,
+    model: str,
+    provider: str = "claude",
+    cwd: Path | None = None,
+) -> list[dict[str, Any]] | None:
+    """One reconcile call: decide ADD / UPDATE / COVERED per candidate.
+
+    Returns one row per candidate in the given order, or None when the call
+    failed or replied unparseably — every caller then degrades to the plain
+    append path, which never blocks and never loses a fact.
+
+    An ``update`` row carries ``old``: the entry its index named in the snapshot
+    the model actually saw. The apply step re-reads the region and refuses the
+    update if that entry changed during the call, so a stale index cannot
+    overwrite an unrelated fact.
+    """
+    from ciao.providers.oneshot import run_oneshot
+
+    numbered = "\n".join(
+        f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
+    )
+    lettered = "\n".join(
+        f"{chr(ord('A') + index)}. {fact}" for index, fact in enumerate(candidates)
+    )
+    prompt = (
+        f"Region `ciao:{region_name}` current entries:\n{numbered}\n\n"
+        f"Candidate facts:\n{lettered}\n"
+    )
+    try:
+        reply = await run_oneshot(
+            prompt,
+            system_prompt=_RECONCILE_SYSTEM_PROMPT,
+            model=model,
+            timeout_s=_RECONCILE_TIMEOUT_S,
+            provider=provider,
+            cwd=cwd,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to plain appends
+        logger.info("memory reconcile: call failed (%s); using plain adds", exc)
+        return None
+    rows = _parse_reconcile_reply(reply, len(candidates))
+    if rows is None:
+        logger.info(
+            "memory reconcile: unparseable reply for ciao:%s; using plain adds",
+            region_name,
+        )
+        return None
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("action") == "update":
+            index = row.get("index")
+            if not (isinstance(index, int) and 1 <= index <= len(entries)):
+                # Out-of-range against the very snapshot the model saw:
+                # degrade now rather than carry a junk decision around.
+                row = {"action": "add"}
+            else:
+                row = dict(row)
+                row["old"] = entries[index - 1]
+        out.append(row)
+    return out
 
 
 # ── Persistence ───────────────────────────────────────────────────────────

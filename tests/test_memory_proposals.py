@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import unittest.mock
@@ -1494,3 +1495,156 @@ def test_already_applied_guard_scopes_negation_to_its_own_bullet(
     assert not mp._is_already_in_file(
         destination, "Commit secrets to the repository"
     )
+
+
+# ── accept_region_fact: the UI accept path's guards ───────────────────────
+#
+# Accepting a queued fact used to call `update_region(action="add")` directly,
+# which skipped every guard the archive-time path applies. These pin what a
+# click now gets — and, just as importantly, what it must NOT have acquired.
+
+
+def _guide_with(tmp_path: Path, region: str, entries: list[str]) -> Path:
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    if entries:
+        write_region(guide, region, entries)
+    return guide
+
+
+def _entries(guide: Path, region: str) -> list[str]:
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_tool import read_region
+
+    entries, _diags = read_region(guide, region)
+    return [strip_learned_stamp(e) for e in entries]
+
+
+def test_accept_refuses_event_shaped_text(tmp_path):
+    """The guard that matters most: always-loaded context must hold rules.
+
+    An event-shaped bullet used to be written verbatim, which is exactly the
+    rot the shipped memory audit flags.
+    """
+    guide = _guide_with(tmp_path, "memory", [])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="The user asked me to check the logs and I found the bug.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "unshaped"
+    assert _entries(guide, "memory") == []
+
+
+def test_accept_writes_a_state_shaped_fact_with_a_stamp(tmp_path):
+    guide = _guide_with(tmp_path, "memory", [])
+    outcome, promotable = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+    assert promotable == "Prefers tabs over spaces."
+    assert _entries(guide, "memory") == ["Prefers tabs over spaces."]
+    # The stamp the aging audit reads. Without it a UI-accepted fact was
+    # invisible to re-verification forever.
+    from ciao.memory_tool import read_region
+
+    raw, _ = read_region(guide, "memory")
+    assert re.search(r"\[\d{4}-\d{2}-\d{2}\]$", raw[0])
+
+
+def test_accept_drops_a_stamp_stripped_duplicate(tmp_path):
+    """The same fact accepted twice is one entry, whatever day it was."""
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "duplicate"
+    assert _entries(guide, "memory") == ["Prefers tabs over spaces."]
+
+
+def test_accept_still_writes_past_the_advisory_cap(tmp_path):
+    """The cap is ADVISORY and must stay that way.
+
+    `update_region` says so outright: enforcing it "made the accept button dead
+    for 67 of 130 queued proposals" on a real vault, and
+    tests/test_memory_tool.py pins that. Routing accept through the guarded
+    write must not quietly reinstate the wall.
+    """
+    guide = _guide_with(tmp_path, "memory", ["x" * 5000])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+    assert "Prefers tabs over spaces." in _entries(guide, "memory")
+
+
+def test_accept_makes_no_model_call(tmp_path, monkeypatch):
+    """A click must not block on a provider.
+
+    Reconciliation would be welcome here, but one `run_oneshot` per row is a
+    120s timeout each and the batch endpoint accepts rows sequentially inside a
+    single request — 30 rows would be up to an hour. It stays out of this path.
+    """
+    async def must_not_run(prompt, **kwargs):
+        raise AssertionError("the accept path must not call a model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", must_not_run)
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+
+
+def test_accept_applies_a_reconcile_decision_it_is_handed(tmp_path):
+    """The seam a future reconcile pass writes through."""
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=tmp_path,
+        decision={
+            "action": "update",
+            "index": 1,
+            "text": "Prefers spaces over tabs.",
+            "old": "Prefers tabs over spaces. [2020-01-01]",
+        },
+    )
+    assert outcome == "written"
+    assert _entries(guide, "memory") == ["Prefers spaces over tabs."]
+
+
+def test_a_covered_verdict_with_no_vault_appends_rather_than_dropping(tmp_path):
+    """Nothing is dropped without a trace — the standing contract.
+
+    `covered` is a model verdict, not a provable match. With no vault to log it
+    to, honour the contract instead of the verdict: a duplicate is visible and
+    removable, a silently dropped fact is neither.
+    """
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=None,
+        decision={"action": "covered"},
+    )
+    assert outcome == "written"
+    assert "Prefers spaces over tabs." in _entries(guide, "memory")
