@@ -126,6 +126,37 @@ def test_local_session_jsonl_paths_defaults_to_workspace_root(fake_home: Path) -
     assert routes_api._local_session_jsonl_paths(session, root) == [path]
 
 
+def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: a session present under several cwd slugs returns them all.
+
+    The interim implementation returned after the first match, so subagent
+    progress records stored in the other file were dropped by
+    _local_subagent_transcripts.
+    """
+    from ciao import transcripts
+
+    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    root = fake_home / "a"
+    preferred = _write_session(_projects_dir_for(root), session)
+    elsewhere_dir = fake_home / ".claude" / "projects" / "-elsewhere"
+    elsewhere = _write_session(elsewhere_dir, session)
+    third_dir = fake_home / ".claude" / "projects" / "-third"
+    third = _write_session(third_dir, session)
+
+    # A stale cache from a prior lookup must not hide the other matches:
+    # _global_session_matches stats each slug live. Seed the cache to prove
+    # freshness comes from the per-slug stat, not the cache age.
+    transcripts._global_session_scan_cache = None
+    paths = routes_api._local_session_jsonl_paths(session, root)
+    assert paths == [preferred, elsewhere, third]
+
+    # Order: preferred (workspace root) first, then cross-cwd matches.
+    assert paths[0] == preferred
+    assert set(paths[1:]) == {elsewhere, third}
+
+
 def test_claude_session_exists_reads_own_root(
     fake_home: Path, tmp_path: Path
 ) -> None:
