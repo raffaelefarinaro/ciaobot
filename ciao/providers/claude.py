@@ -741,6 +741,19 @@ class ClaudeProvider(BaseSDKProvider):
                         merged.put_nowait(event)
             except _CLAUDE_OP_ERRORS:
                 logger.debug("Between-turns drain ended on SDK error", exc_info=True)
+                # The transport is gone (the CLI process died between turns).
+                # Mirror disconnect()'s state clearing minus the awaited client
+                # call — we are inside the consumer task, so a disconnect()
+                # await here would deadlock the drain. _ensure_connected
+                # rebuilds the client on the next turn, exactly as after a
+                # disconnect(); leaving _connected True would make
+                # cli_connected lie to the CLI-task watcher.
+                self._client = None
+                self._connected = False
+                self._session_id = None
+                self._pending_quota = {}
+                self._mcp_token = ""
+                self._reset_settings()
             except Exception:
                 # The SDK raises bare ``Exception`` for some result shapes
                 # (e.g. result_type=user, stop_reason=tool_use) that aren't
