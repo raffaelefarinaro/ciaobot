@@ -1003,7 +1003,7 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 continue
             if not isinstance(entry, dict) or key not in entry:
                 continue
-            if str(entry.get("text", "")).strip() == wanted:
+            if _one_line(str(entry.get("text", ""))) == wanted:
                 return True
     return False
 
@@ -1183,7 +1183,7 @@ def _dismissed_texts(proposals_path: Path) -> set[str]:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            text = str(entry.get("text", "")).strip()
+            text = _one_line(str(entry.get("text", "")))
             if text:
                 out.add(text)
     return out

@@ -1086,3 +1086,38 @@ def test_add_does_not_call_a_promoted_fact_dismissed(tmp_path, monkeypatch, caps
     # it is in its destination. Three states, three messages.
     assert "Already in the queue" not in out
     assert "Already promoted" in out
+
+
+def test_add_dedupes_dismissed_direct_row_with_repeated_whitespace(
+    tmp_path, monkeypatch, capsys
+):
+    """Sidecar dedupe uses the same whitespace normalization as queue writes."""
+    from ciao import cli
+    from ciao.memory_proposals import record_dismissal
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Prefers   tabs over spaces.  _(from: curation)_\n",
+        encoding="utf-8",
+    )
+    record_dismissal(queue, text="Prefers   tabs over spaces.", kind="memory")
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    assert cli.main(
+        [
+            "memory-proposal-add",
+            "--workspace",
+            str(tmp_path),
+            "--vault-root",
+            str(vault),
+            "--kind",
+            "memory",
+            "Prefers tabs over spaces.",
+        ]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "Previously dismissed" in out
+    assert queue.read_text(encoding="utf-8").count("Prefers") == 1
