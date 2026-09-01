@@ -112,6 +112,28 @@ async def test_trailing_ampersand_is_denied() -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        "echo foo\\&bar",
+        "cat <<EOF\nResearch & Development\nEOF",
+        "ls # a & b",
+        "cat <<'EOF'\nx & y\nEOF",
+    ],
+)
+async def test_literal_ampersands_in_text_are_not_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-12",
+        None,
+    )
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
         "long_job & echo launched",
         "python x.py & sleep 1",
         "cmd &",
@@ -221,6 +243,29 @@ async def test_nested_shell_ordinary_commands_are_not_denied(command: str) -> No
     )
 
     assert out == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "nohup x &",
+        "job & echo launched",
+        "cat <<EOF > f\nhi\nEOF\n./job &",
+    ],
+)
+async def test_detached_jobs_are_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-13",
+        None,
+    )
+
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+    assert "background_run_start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio

@@ -42,34 +42,48 @@ BACKGROUND_RUN_GUIDANCE = (
     "Use `background_run_status` only if you need the state mid-turn."
 )
 
-# Detached-shell shapes we deny. Quoted substrings are stripped before
-# matching, but quotes are not parsed, so an unquoted odd `&` in text (e.g.
-# ``echo a & b``) is a known false positive that gets pointed at
-# ``background_run_start`` rather than executed.
+# Detached-shell shapes we deny. Quoted substrings, heredoc bodies, and
+# comments are stripped before matching, but quotes are not parsed, so an
+# unquoted odd `&` in text (e.g. ``echo a & b``) remains a known false
+# positive. A wrongly denied command is acceptable: it only asks the model
+# to rephrase or use ``background_run_start``, it never runs anything.
 _DETACHED_SHELL_RE = re.compile(
-    r"(^|[;&|]\s*)nohup\s"          # nohup anywhere as a command start
-    r"|(?<![&>|<])&(?![&>|])"       # a standalone & (not &&, 2>&1, >&, <&, |&, &>)
+    r"(^|[;&|]\s*)nohup\s"              # nohup anywhere as a command start
+    r"|(?<![&>|<\\])&(?![&>|])"         # a standalone & (not &&, 2>&1, >&, <&, |&, &>, \&)
     r"|(^|[;&|]\s*)(setsid|disown)\b",
     re.MULTILINE,
 )
 
 _QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 
+# Heredoc body: from the end of the ``<<DELIM`` line through the line that
+# equals the delimiter.
+_HEREDOC_RE = re.compile(
+    r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n[ \t]*\1[ \t]*(?=\n|$)",
+    re.MULTILINE | re.DOTALL,
+)
+
 _NESTED_SHELL_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b[^|;&]*?\s-[A-Za-z]*c\b")
+
+_COMMENT_RE = re.compile(r"(?m)(^|\s)#[^\n]*")
 
 
 def _looks_detached(command: str) -> bool:
     """Return True when a Bash command spawns a process detached from the
     CLI's lifetime (``nohup``, a bare trailing ``&``, ``setsid``/``disown``).
 
-    Single/double-quoted substrings are stripped first so message text like
-    ``git commit -m "fix & polish"`` does not read as a background launch.
-    A nested shell invocation (``bash -c '...'``, ``sh -c "..."``, ``eval``)
-    gets its quoted inner text inspected too, so ``bash -c 'nohup job &'``
-    is still denied.
+    The command is normalised before matching: heredoc bodies, single/double
+    quoted substrings, and comments are removed, so message text like
+    ``git commit -m "fix & polish"``, an escaped ``echo foo\\&bar``, or an
+    ``&`` inside a comment or heredoc does not read as a background launch.
+    A nested shell invocation (``bash -c '...'``, ``sh -c "..."``,
+    ``eval``) gets its quoted inner text inspected too, so
+    ``bash -c 'nohup job &'`` is still denied.
     """
     quoted = _QUOTED_RE.findall(command)
-    stripped = _QUOTED_RE.sub(" ", command)
+    no_heredocs = _HEREDOC_RE.sub(lambda m: m.group(0).split("\n", 1)[0], command)
+    stripped = _QUOTED_RE.sub(" ", no_heredocs)
+    stripped = _COMMENT_RE.sub(lambda m: m.group(1), stripped)
     if _DETACHED_SHELL_RE.search(stripped):
         return True
     if _NESTED_SHELL_RE.search(stripped) or re.search(r"\beval\b", stripped):
