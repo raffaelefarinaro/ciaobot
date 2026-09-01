@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
+import { createPinia as newPinia, setActivePinia } from 'pinia'
 import type { ProjectInfo, ChatInfo } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
@@ -84,6 +84,30 @@ class FakeWebSocket {
 
 let fakeSockets: FakeWebSocket[] = []
 let localStorageData: Record<string, string> = {}
+
+// Pinia does not dispose the instance it replaces, so without this every store
+// a test creates stays alive for the rest of the file — including the intervals
+// and listeners it registered, which then fire on the real clock and add
+// requests to tests that are counting them under fake timers.
+//
+// Tracking every pinia rather than asking for the active one: a test that swaps
+// the pinia mid-run (see "persists the dismissal across store recreation") left
+// its first store attached to an instance nothing could reach afterwards, so
+// disposing only the survivor let exactly the store under test leak.
+type DisposablePinia = { _s: Map<string, { $dispose: () => void }> }
+const piniasCreated: DisposablePinia[] = []
+
+function createPinia(): ReturnType<typeof newPinia> {
+  const pinia = newPinia()
+  piniasCreated.push(pinia as unknown as DisposablePinia)
+  return pinia
+}
+
+afterEach(() => {
+  for (const pinia of piniasCreated.splice(0)) {
+    pinia._s.forEach((store) => store.$dispose())
+  }
+})
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -4777,6 +4801,92 @@ describe('running subagent poll', () => {
     }
   })
 
+  test('a disposed store stops polling', async () => {
+    // The watcher owns the interval, so stopping the watcher is not enough —
+    // an interval it already created keeps firing on its own. Without the
+    // store's onScopeDispose cleanup, every test in this file left one behind
+    // and they went on making requests for the rest of the run.
+    const store = useProjectStore()
+    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
+    mockRunning({ c1: row })
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running')).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store stops its liveness watchdog and window listeners', async () => {
+    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
+    // focus/blur/visibility listeners are registered at setup time, so every
+    // store a test builds kept a real-clock 2s timer and a live focus handler
+    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
+    // push a FakeWebSocket onto the module-level array later tests read.
+    const store = useProjectStore()
+    apiGet.mockImplementation(() => Promise.resolve([]))
+
+    vi.useFakeTimers()
+    try {
+      store.$dispose()
+      const socketsBefore = fakeSockets.length
+      apiGet.mockClear()
+
+      // Nothing the disposed store registered may still fire.
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(apiGet.mock.calls).toEqual([])
+      expect(fakeSockets.length).toBe(socketsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a store left on a superseded pinia is disposed too', async () => {
+    // A test that swaps the pinia mid-run strands its first store on an
+    // instance `getActivePinia()` can no longer reach. Disposing only the
+    // survivor left that one holding its watchdog and listeners, which is the
+    // leak this file's cleanup exists to prevent — so the cleanup tracks every
+    // pinia it created rather than the current one.
+    const stranded = useProjectStore()
+    stranded.streaming = { c1: true }
+    await Promise.resolve()
+
+    setActivePinia(createPinia())
+    const current = useProjectStore()
+    expect(current).not.toBe(stranded)
+
+    // Both are reachable for disposal, which is what afterEach relies on.
+    expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
+    for (const pinia of piniasCreated) {
+      pinia._s.forEach((store) => store.$dispose())
+    }
+
+    apiGet.mockClear()
+    vi.useFakeTimers()
+    try {
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
     const store = useProjectStore()
     const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
@@ -4790,11 +4900,15 @@ describe('running subagent poll', () => {
       await vi.advanceTimersByTimeAsync(0)
 
       await vi.advanceTimersByTimeAsync(95_000)
-      const callsAtDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+      // Count from a clean slate rather than diffing two totals: the totals
+      // include anything else that polled this endpoint, so a stray request
+      // between the two reads used to fail this test for reasons that had
+      // nothing to do with the drain.
+      apiGet.mockClear()
 
       await vi.advanceTimersByTimeAsync(60_000)
-      const callsAfter = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-      expect(callsAfter).toBe(callsAtDeadline)
+      const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+      expect(pollsAfterDeadline).toBe(0)
     } finally {
       vi.useRealTimers()
     }

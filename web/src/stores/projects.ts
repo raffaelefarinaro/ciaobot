@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, watch, toRaw } from 'vue'
+import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
@@ -743,6 +743,51 @@ export const useProjectStore = defineStore('projects', () => {
       }, 4000)
     },
   )
+
+  // Both polls below are owned by a watcher, which means nothing clears them
+  // when the store itself goes away — the watcher stops, but an interval it
+  // already created keeps firing. In the app the store outlives everything so
+  // it never mattered; under test it does, because each test replaces the
+  // pinia instance without disposing the old one and the orphaned intervals
+  // then fire on the real clock for the rest of the run. That is what made the
+  // bounded-drain test flaky: it counts poll requests either side of a fake
+  // timer advance, and leaked intervals from earlier tests added real-clock
+  // requests in between whenever the machine was loaded enough for the advance
+  // to take real milliseconds.
+  // Anything that outlives the watcher or handler that created it registers its
+  // undo here. The app has exactly one immortal store so none of this ever
+  // mattered in production, but under test each case leaks into every later
+  // test in the file: pinia replaces the active instance without disposing the
+  // old one, so a store built by test 3 keeps its real-clock timers and its
+  // window listeners for the rest of the run.
+  const teardowns: Array<() => void> = []
+
+  /** Register an interval and its clear in one call. */
+  function everyMs(fn: () => void, ms: number): void {
+    const id = window.setInterval(fn, ms)
+    teardowns.push(() => window.clearInterval(id))
+  }
+
+  /** Register a listener and its removal in one call. */
+  function listen(
+    target: EventTarget,
+    type: string,
+    handler: EventListenerOrEventListenerObject,
+  ): void {
+    target.addEventListener(type, handler)
+    teardowns.push(() => target.removeEventListener(type, handler))
+  }
+
+  onScopeDispose(() => {
+    if (subagentPollTimer !== null) {
+      clearInterval(subagentPollTimer)
+      subagentPollTimer = null
+    }
+    stopRunningSubagentPoll()
+    for (const undo of teardowns.splice(0)) {
+      try { undo() } catch { /* a disposed store must not throw */ }
+    }
+  })
 
   // Anything working anywhere: a streaming turn or background agents. Gates
   // the running-subagent poll so an idle app makes no requests at all.
@@ -1760,7 +1805,7 @@ export const useProjectStore = defineStore('projects', () => {
       checkPendingTarget()
       if (!bootstrapped.value) {
         void checkPackageStatus()
-        window.setInterval(checkPackageStatus, UPDATE_CHECK_INTERVAL_MS)
+        everyMs(() => { void checkPackageStatus() }, UPDATE_CHECK_INTERVAL_MS)
       }
     } finally {
       bootstrapped.value = true
@@ -2015,7 +2060,7 @@ export const useProjectStore = defineStore('projects', () => {
     // the watch's prior post landed on null/old controller and was lost,
     // and the watch source string didn't change so no re-fire happens.
     // Force a sync on takeover to clear stale OS-level badge counts.
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
+    listen(navigator.serviceWorker, 'controllerchange', () => {
       postUnreadSync()
     })
     // Also sync once the SW is "ready" (registration + active worker
@@ -3699,20 +3744,20 @@ export const useProjectStore = defineStore('projects', () => {
     }
 
     // Liveness watchdog: cheap timer, only acts on genuinely stale sockets.
-    window.setInterval(checkWsLiveness, WS_LIVENESS_CHECK_MS)
+    everyMs(checkWsLiveness, WS_LIVENESS_CHECK_MS)
 
     // WKWebView can keep the document visible while the native window loses
     // key focus (another app, hide, or minimize). Report those standard
     // browser focus transitions so the engine does not suppress a native
     // notification for a chat the user cannot currently see.
-    window.addEventListener('focus', () => {
+    listen(window, 'focus', () => {
       if (activeChatId.value) sendFocus(activeChatId.value)
     })
-    window.addEventListener('blur', () => {
+    listen(window, 'blur', () => {
       if (activeChatId.value) sendFocus(activeChatId.value)
     })
 
-    document.addEventListener('visibilitychange', () => {
+    listen(document, 'visibilitychange', () => {
       documentVisible.value = document.visibilityState === 'visible'
       if (document.visibilityState === 'visible') {
         // iOS Safari / WKWebView suspends JS and sockets when the PWA
@@ -3739,22 +3784,22 @@ export const useProjectStore = defineStore('projects', () => {
     // pageshow fires when the PWA is restored from the bfcache (iOS
     // home→back pattern). visibilitychange often doesn't fire in that
     // case, so force-refresh here too.
-    window.addEventListener('pageshow', (ev) => {
+    listen(window, 'pageshow', ((ev: Event) => {
       if ((ev as PageTransitionEvent).persisted || document.visibilityState === 'visible') {
         void resumeActiveChat()
         checkPendingTarget()
       }
-    })
+    }) as EventListener)
 
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', (ev) => {
-        const data = ev.data
+      listen(navigator.serviceWorker, 'message', ((ev: Event) => {
+        const data = (ev as MessageEvent).data
         if (data && data.type === 'open-chat' && data.chat_id) {
           void openChatFromDeepLink(data.chat_id)
         } else if (data && data.type === 'pending-target' && data.chat_id) {
           void openChatFromDeepLink(data.chat_id)
         }
-      })
+      }) as EventListener)
     }
   }
 
