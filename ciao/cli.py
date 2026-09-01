@@ -813,7 +813,6 @@ def setup_workspace(
         written.append(root / ".runtime" / "workspaces.json")
 
     stock = resources.files("ciao.stock")
-    stock_commands = stock.joinpath("commands")
     stock_workspace = stock.joinpath("workspace")
 
     # Canonical user-authored asset sources (mirrored into .claude/ by
@@ -823,6 +822,7 @@ def setup_workspace(
     from ciao.sync_skills import (
         _ensure_linked_workspace_guides,
         _install_stock_agents,
+        _seed_stock_commands,
         sync_workspace_skills,
     )
 
@@ -838,7 +838,7 @@ def setup_workspace(
             (asset_root / asset_dir).mkdir(parents=True, exist_ok=True)
         _install_stock_agents(asset_root)
         written.append(asset_root / ".claude" / "agents")
-        written.extend(_copy_tree_if_missing(stock_commands, asset_root / "commands"))
+        _seed_stock_commands(asset_root)
         written.append(asset_root / "commands")
         written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
         _ensure_linked_workspace_guides(asset_root)
