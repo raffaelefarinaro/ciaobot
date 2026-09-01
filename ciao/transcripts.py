@@ -787,28 +787,31 @@ def _claude_projects_dir(workspace_root: Path) -> Path:
 # hundreds of opendir calls per probe, and probes arrive on the event loop
 # from polling endpoints — a multi-second scandir storm that stalls every
 # in-flight stream (observed: 238 stale eval dirs, ~10ms per glob, loop wedged
-# for minutes). Cache the directory listing and reuse it across probes; a
-# brand-new session file is found by the per-root preferred path first, so a
-# short TTL only delays the cross-cwd fallback, never the common hit.
+# for minutes). Cache the *slug directory list* (one cheap iterdir of the
+# projects root) and resolve each probe with one O(1) stat per slug dir —
+# no per-dir content enumeration, so a session file created moments ago is
+# found immediately. A brand-new cwd gets its slug dir on the next refresh,
+# which a session-id miss forces (rate-limited so absent-session polling
+# costs at most one extra iterdir per interval): callers treat a lookup miss
+# as final — the subagent completion watcher exits without retrying, and the
+# schedule wait reports the agents settled — so a miss must never be served
+# from a listing that cannot contain the session.
 _GLOBAL_SESSION_SCAN_TTL = 30.0
-_global_session_scan_lock: threading.Lock | None = None
+_GLOBAL_SESSION_RESCAN_MIN_INTERVAL = 2.0
+# Serializes the slug walk so N concurrent probes cost one walk, and
+# coalesces miss-triggered refreshes the same way.
+_global_session_scan_lock = threading.Lock()
 # Keyed by the projects root so a changed home() (tests, relocatable homes)
-# invalidates naturally instead of serving another tree's listing.
+# invalidates naturally instead of serving another tree's listing. The float
+# is the monotonic time the slug list was captured; it also gates the
+# miss-triggered refresh.
 _global_session_scan_cache: tuple[Path, float, list[Path]] | None = None
 
 
-def _global_session_candidates() -> list[Path]:
-    """One cached pass over ``~/.claude/projects/*/`` returning *.jsonl paths.
-
-    The listing is shared by every session probe within the TTL window, so N
-    concurrent probes cost one directory walk instead of N. Callers still
-    filter by session id and may ``stat`` a candidate before trusting it.
-    """
-    global _global_session_scan_cache, _global_session_scan_lock
-    if _global_session_scan_lock is None:
-        _global_session_scan_lock = threading.Lock()
-    projects_root = Path.home() / ".claude" / "projects"
-    now = time.monotonic()
+def _global_session_slugs_fresh(
+    projects_root: Path, now: float
+) -> list[Path] | None:
+    """The cached slug-dir list when fresh for ``projects_root``, else None."""
     cached = _global_session_scan_cache
     if (
         cached is not None
@@ -816,27 +819,97 @@ def _global_session_candidates() -> list[Path]:
         and now - cached[1] < _GLOBAL_SESSION_SCAN_TTL
     ):
         return cached[2]
-    with _global_session_scan_lock:
+    return None
+
+
+def _global_session_slugs_locked(
+    projects_root: Path, now: float
+) -> list[Path]:
+    """Re-walk ``projects_root`` and refresh the slug list. Lock is held.
+
+    A failed walk keeps the previous list (even a stale one) rather than
+    poisoning the cache with an empty result over a transient OSError.
+    """
+    global _global_session_scan_cache
+    slugs: list[Path] = []
+    try:
+        for entry in projects_root.iterdir():
+            if entry.is_dir():
+                slugs.append(entry)
+    except OSError:
         cached = _global_session_scan_cache
-        if (
-            cached is not None
-            and cached[0] == projects_root
-            and now - cached[1] < _GLOBAL_SESSION_SCAN_TTL
-        ):
+        if cached is not None and cached[0] == projects_root:
             return cached[2]
-        candidates: list[Path] = []
+        return []
+    _global_session_scan_cache = (projects_root, now, slugs)
+    return slugs
+
+
+def _global_session_matches(session_id: str) -> list[Path]:
+    """Cross-cwd paths for ``<session_id>.jsonl``, always fresh at file level.
+
+    The slug-dir list is cached (one shared iterdir per TTL window); each
+    lookup stats ``<slug>/<sid>.jsonl`` directly, so a session created under
+    an existing cwd mid-window is found on the next probe. On a total miss
+    the slug list is refreshed once per rescan interval — a brand-new cwd
+    gets picked up without absent-session polling rebuilding the per-probe
+    scandir storm this cache exists to prevent.
+    """
+    if not session_id:
+        return []
+    target = f"{session_id}.jsonl"
+    projects_root = Path.home() / ".claude" / "projects"
+    now = time.monotonic()
+    slugs = _global_session_slugs_fresh(projects_root, now)
+    if slugs is None:
+        with _global_session_scan_lock:
+            now = time.monotonic()
+            slugs = _global_session_slugs_fresh(projects_root, now)
+            if slugs is None:
+                slugs = _global_session_slugs_locked(projects_root, now)
+        if not slugs:
+            return []
+    matches = [slug / target for slug in slugs if (slug / target).exists()]
+    if matches:
+        return matches
+    # Miss. A session created in a slug dir the cached list does not know
+    # yet is only reachable after a refresh; coalesce and rate-limit it.
+    with _global_session_scan_lock:
+        now = time.monotonic()
+        entry = _global_session_scan_cache
+        if entry is not None and now - entry[1] < _GLOBAL_SESSION_RESCAN_MIN_INTERVAL:
+            # The list was captured moments ago (cold walk or a concurrent
+            # refresh); a new slug dir cannot have appeared inside the
+            # window often enough to justify another walk per probe.
+            return []
+        slugs = _global_session_slugs_locked(projects_root, now)
+        return [slug / target for slug in slugs if (slug / target).exists()]
+
+
+def _global_session_candidates() -> list[Path]:
+    """One cached pass over ``~/.claude/projects/*/`` returning *.jsonl paths.
+
+    Kept for callers that want the full unfiltered listing; session lookups
+    should prefer :func:`_global_session_matches`, which stays file-fresh
+    via per-slug stats and refreshes the slug list on a miss. Callers may
+    ``stat`` a candidate before trusting it.
+    """
+    projects_root = Path.home() / ".claude" / "projects"
+    now = time.monotonic()
+    slugs = _global_session_slugs_fresh(projects_root, now)
+    if slugs is None:
+        with _global_session_scan_lock:
+            now = time.monotonic()
+            slugs = _global_session_slugs_fresh(projects_root, now)
+            if slugs is None:
+                slugs = _global_session_slugs_locked(projects_root, now)
+    candidates: list[Path] = []
+    for slug in slugs or []:
         try:
-            for entry in projects_root.iterdir():
-                if not entry.is_dir():
-                    continue
-                try:
-                    candidates.extend(entry.glob("*.jsonl"))
-                except OSError:
-                    continue
+            candidates.extend(slug.glob("*.jsonl"))
         except OSError:
-            return cached[2] if cached is not None else []
-        _global_session_scan_cache = (projects_root, now, candidates)
-        return candidates
+            continue
+    return candidates
 
 
 def find_claude_session_file(
@@ -857,10 +930,8 @@ def find_claude_session_file(
     preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if preferred.exists():
         return preferred
-    for path in _global_session_candidates():
-        if path.name == f"{session_id}.jsonl":
-            return path
-    return None
+    matches = _global_session_matches(session_id)
+    return matches[0] if matches else None
 
 
 def get_session_messages_full(

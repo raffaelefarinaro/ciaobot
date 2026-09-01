@@ -98,7 +98,7 @@ from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
     _claude_projects_dir,
-    _global_session_candidates,
+    _global_session_matches,
     _journal_event_record,
 )
 from ciao.web.chat_broker import (
@@ -2488,14 +2488,13 @@ class ProjectChatManager:
         # The cross-cwd fallback stays for every caller. The projects dir is a
         # slug of the cwd, so a session recorded under a different cwd is only
         # findable this way. It is served from a cached directory listing (see
-        # transcripts._global_session_candidates) so N probes cost one walk,
+        # transcripts._global_session_matches) so N probes cost one walk,
         # not N — the uncached glob used to stall the event loop for minutes
-        # on installs with hundreds of stale project slug dirs.
+        # on installs with hundreds of stale project slug dirs. A miss
+        # refreshes the listing (rate-limited) so a session created under
+        # another cwd inside the TTL window is not reported absent.
         try:
-            return any(
-                p.name == f"{session_id}.jsonl"
-                for p in _global_session_candidates()
-            )
+            return bool(_global_session_matches(session_id))
         except OSError:
             return False
 

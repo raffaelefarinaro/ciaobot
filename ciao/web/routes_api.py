@@ -718,7 +718,7 @@ def _local_session_jsonl_paths(
     try:
         from ciao.transcripts import (
             _claude_projects_dir,
-            _global_session_candidates,
+            _global_session_matches,
             find_claude_session_file,
         )
     except ImportError:
@@ -740,11 +740,12 @@ def _local_session_jsonl_paths(
         return paths
     # The shared helper came up empty; sweep the cached listing so callers
     # that rely on the multi-match behaviour keep working. The listing is
-    # cached (transcripts._global_session_candidates) so this costs one walk
-    # per TTL window, not one per poll.
+    # cached (transcripts._global_session_matches) so this costs one walk
+    # per TTL window, not one per poll — and a miss re-scans (rate-limited)
+    # so a session created mid-window is not missed.
     try:
-        for path in _global_session_candidates():
-            if path.name == f"{session_id}.jsonl" and path not in paths:
+        for path in _global_session_matches(session_id):
+            if path not in paths:
                 paths.append(path)
     except OSError:
         pass
