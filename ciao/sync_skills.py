@@ -428,7 +428,9 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
             key=lambda item: item.name,
         )
     except (ModuleNotFoundError, FileNotFoundError, OSError):
-        stock_files = []
+        # An unreadable package must not look like "every stock command was
+        # removed": that would prune each managed copy on the next sync.
+        return StockCommandSync()
 
     seeded = 0
     refreshed = 0
