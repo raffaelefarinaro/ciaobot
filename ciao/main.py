@@ -847,6 +847,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 len(orphaned), ", ".join(run.run_id for run in orphaned),
             )
 
+        # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
+        # still running when the old server died: no completion watcher
+        # survives a restart, so the wake must be armed here.
+        swept = pcm.sweep_orphaned_cli_tasks()
+        if swept:
+            logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
+
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from

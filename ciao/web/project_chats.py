@@ -7398,15 +7398,88 @@ class ProjectChatManager:
         prompt = self._build_cli_task_wake_prompt(tasks)
         self._deliver_wake(parent, prompt, count=len(tasks))
 
+    def sweep_orphaned_cli_tasks(self) -> int:
+        """After a restart, wake chats whose CLI tasks (Monitor / background Bash)
+        were still running: the CLI that owned them died with the old server.
+
+        No watcher survives a restart (one is only armed when a turn finishes),
+        so without this sweep a task that was running at shutdown would never
+        produce a wake. Delivery goes through the same deferred path as
+        ``queue_background_wake`` — a bounded coalescing sleep, then
+        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
+        raises into the caller. Returns the number of chats armed for a wake.
+        """
+        woken = 0
+        for chat in list(self._chats.values()):
+            try:
+                if chat.archived or not chat.session_id:
+                    continue
+                if chat.provider != "claude":
+                    continue
+                path = subagent_tracking.find_parent_session_file(
+                    chat.session_id,
+                    self._config.workspace_root,
+                    agent_root=self._agent_root_for_chat(chat.chat_id),
+                )
+                if path is None:
+                    continue
+                state = subagent_tracking.parse_session_subagents(path)
+                tasks = subagent_tracking.running_tasks(state)
+                if not tasks:
+                    continue
+                woken += 1
+                try:
+                    asyncio.create_task(self._deferred_cli_task_wake(chat))
+                except RuntimeError:
+                    # No running loop (e.g. a sync startup path). Dropping the
+                    # wake beats raising into the caller; the tasks stay
+                    # "running" in the JSONL, so nothing is lost by trying
+                    # again on the next sweep.
+                    logger.debug(
+                        "No event loop for orphaned CLI task wake of %s",
+                        chat.chat_id,
+                    )
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill startup
+                logger.exception(
+                    "Orphaned CLI task sweep failed for chat %s",
+                    getattr(chat, "chat_id", "?"),
+                )
+        return woken
+
+    async def _deferred_cli_task_wake(self, parent: ChatInfo) -> None:
+        """Wait out the startup coalescing window, then wake for dead-CLI tasks."""
+        try:
+            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
+            tasks = subagent_tracking.running_tasks(
+                subagent_tracking.parse_session_subagents(
+                    subagent_tracking.find_parent_session_file(
+                        parent.session_id,
+                        self._config.workspace_root,
+                        agent_root=self._agent_root_for_chat(parent.chat_id),
+                    )
+                    or Path("nonexistent")
+                )
+            )
+            if not tasks:
+                return
+            self._wake_for_dead_cli_tasks(parent, parent.project_id, tasks)
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception(
+                "Orphaned CLI task wake failed for chat %s", parent.chat_id
+            )
+
     @staticmethod
     def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
         """Compose the wake turn for CLI tasks orphaned by a dead CLI.
 
         Mirrors the background-run wake: name the log/output the command was
-        writing and tell the chat to verify rather than assume.
+        writing and tell the chat to verify rather than assume. The first line
+        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
+        recognise this prompt in the JSONL later and mark the tasks lost —
+        the wake must never be sent twice.
         """
         lines = [
-            f"[Ciaobot] {len(tasks)} CLI task"
+            f"{subagent_tracking.CLI_TASK_WAKE_PREFIX} {len(tasks)} CLI task"
             f"{'s' if len(tasks) != 1 else ''} you started "
             "(Monitor / background shell) were lost: the Claude CLI process "
             "that owned them has exited, so their completion will never be "

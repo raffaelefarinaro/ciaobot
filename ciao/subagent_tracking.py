@@ -112,6 +112,15 @@ SUBAGENT_SYNTHESIS_NUDGE = (
     "report, reply with a brief confirmation instead of repeating it."
 )
 
+# Prefix of the wake prompt the server sends for CLI tasks orphaned by a dead
+# CLI (``ProjectChatManager._build_cli_task_wake_prompt``). The prompt lands in
+# the parent JSONL as the user record it was sent as; recognising it here lets
+# the parser mark those tasks ``lost`` so the watcher (and the startup sweep)
+# never wake for them twice. Kept beside SUBAGENT_SYNTHESIS_NUDGE for the same
+# reason: the sender and the parser need the same string.
+CLI_TASK_WAKE_PREFIX = "[Ciaobot] Lost CLI tasks:"
+_CLI_TASK_WAKE_ID_RE = re.compile(r"\(task ([A-Za-z0-9_-]+)\)")
+
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -641,6 +650,22 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 continue
 
             content = _text_content(message)
+            if content.lstrip().startswith(CLI_TASK_WAKE_PREFIX):
+                # Our own dead-CLI wake turn, recorded as the user prompt it
+                # was sent as. Mark every task it names lost so the watcher
+                # and the startup sweep never send a second wake for it. It
+                # still advances the turn counter below — it IS a prompt the
+                # server sent; the background-run wake is counted the same way.
+                for wake_id in _CLI_TASK_WAKE_ID_RE.findall(content):
+                    wake_id = _normalize_agent_id(wake_id)
+                    info = state.subagents.get(wake_id)
+                    if info is None:
+                        info = SubagentInfo(
+                            agent_id=wake_id, is_async=True, kind="task"
+                        )
+                        state.subagents[wake_id] = info
+                    info.status = "lost"
+                    info.raw_status = "lost"
             if _notification_fields(content) is not None:
                 _apply_notification(state, content)
                 # A notification landed as a user record. If no assistant

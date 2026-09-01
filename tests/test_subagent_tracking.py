@@ -684,3 +684,25 @@ def test_running_agents_ignores_tasks(tmp_path: Path) -> None:
     agents = running_background_agents(path, state)  # exercises running_agents
     assert agents == 0
     assert all(info.kind == "task" for info in state.subagents.values())
+
+
+def test_cli_task_wake_marks_tasks_lost(tmp_path: Path) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+        _user_text(
+            CLI_TASK_WAKE_PREFIX
+            + " 1 CLI task you started (Monitor / background shell) were lost: "
+            "the Claude CLI process that owned them has exited.\n\n"
+            "— Monitor: adoption report (task bl7dzu4ku)"
+        ),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bl7dzu4ku"]
+    assert info.status == "lost"
+    assert info.raw_status == "lost"
+    assert info.kind == "task"
+    assert running_tasks(state) == []

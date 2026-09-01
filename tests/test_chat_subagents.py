@@ -1323,3 +1323,138 @@ async def test_agent_badge_unchanged_with_tasks_tracked(
     ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
     assert ready == [0]
     assert len(wakes) == 1
+
+
+async def test_sweep_wakes_chat_with_running_cli_task_after_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-sweep", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-sweep-test")
+    chat.session_id = "sess-task-sweep-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-sweep-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    swept = pcm.sweep_orphaned_cli_tasks()
+    assert swept == 1
+
+    # Let the deferred wake task run out its (patched) sleep.
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
+    _parent, prompt, count = wakes[0]
+    assert count == 1
+    assert prompt.startswith(subagent_tracking.CLI_TASK_WAKE_PREFIX)
+    assert "bl7dzu4ku" in prompt
+
+
+async def test_sweep_skips_task_already_woken(tmp_path: Path, monkeypatch) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-swept", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-swept-test")
+    chat.session_id = "sess-task-swept-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-swept-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [
+            *_monitor_task_records(),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        CLI_TASK_WAKE_PREFIX
+                        + " 1 CLI task you started (Monitor / background shell) "
+                        "were lost.\n\n— Monitor: adoption report (task bl7dzu4ku)"
+                    ),
+                },
+            },
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
+
+
+async def test_sweep_skips_archived_and_non_claude_chats(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-skip", workspace="personal")
+    archived = pcm.create_chat(project.project_id, title="task-archived")
+    archived.session_id = "sess-task-archived-1"
+    archived.archived = True
+    opencode_chat = pcm.create_chat(project.project_id, title="task-opencode")
+    opencode_chat.session_id = "sess-task-opencode-1"
+    opencode_chat.provider = "opencode"
+    claude_chat = pcm.create_chat(project.project_id, title="task-no-session")
+    claude_chat.session_id = ""
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-archived-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
