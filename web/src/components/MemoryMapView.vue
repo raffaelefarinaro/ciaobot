@@ -259,6 +259,28 @@ import {
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
+import {
+  COOLING_DURATION_MS,
+  DEFAULT_SCALE,
+  LABEL_CELL,
+  LABEL_FONT_PX,
+  LABEL_MAX_W,
+  LABEL_PAD,
+  SETTLE_FRAMES_REQUIRED,
+  SETTLE_VELOCITY_EPS,
+  clampScale,
+  ellipsize as ellipsizeTo,
+  fitCameraFor,
+  hexToRgba,
+  hitTest as hitTestNodes,
+  labelDegreeFloor,
+  labelsVisible,
+  nodeRadius,
+  screenToWorld as toWorld,
+  stepSimulation as stepLayout,
+  warmupStepsFor,
+  worldToScreen as toScreen,
+} from '../lib/graphLayout'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -370,10 +392,13 @@ function colorForNode(n: MemoryGraphNode): string {
   return categoryColorFor(catKeyFor(n))
 }
 
-// Mirrors the canvas's own label threshold so the hint can tell the user why
-// note titles are not on screen yet (they appear past this zoom; before it,
-// names are available on hover).
-const zoomedOut = computed(() => zoomRatio() < LABEL_MIN_RATIO)
+// The canvas's own label gate, so the hint can tell the user why note titles
+// are not on screen yet (they appear past this zoom; before it, names are
+// available on hover). Asking `labelsVisible` rather than re-deriving the
+// threshold: the zoom gate exempts a sparse view, so a filtered view of six
+// notes paints its titles at fit scale while this still claimed "zoom in for
+// titles".
+const zoomedOut = computed(() => !labelsVisible(mm.visibleNodes.length, zoomRatio()))
 
 // The graph always follows the workspace switcher shared with every other
 // view (sidebar toggle, number-key shortcut, chat header) — the store
@@ -482,7 +507,7 @@ watch(() => mm.focusSignal.seq, () => {
   if (!n) return
   const magnify = mm.focusSignal.magnify && zoomRatio() < FOCUS_ZOOM_RATIO
   const scale = magnify
-    ? Math.max(0.15, Math.min(3, (fitScale.value || 0.55) * FOCUS_ZOOM_RATIO))
+    ? clampScale((fitScale.value || DEFAULT_SCALE) * FOCUS_ZOOM_RATIO)
     : camera.scale
   flyTo({ x: -n.x * scale, y: -n.y * scale, scale })
   // The pulse is what answers "which one is it?" on arrival. A centred dot in
@@ -502,41 +527,10 @@ let ro: ResizeObserver | null = null
 // visibly settled. Stop scheduling frames once every node's speed has been
 // below the threshold for SETTLE_FRAMES_REQUIRED in a row, and only wake it
 // again on something that can actually move nodes.
-//
-// That alone isn't enough at real vault scale, though: a hub note with 60+
-// links asks 60+ neighbors to all sit ~SPRING_LEN from it while also mutually
-// repelling each other, which has no configuration where every pairwise force
-// is simultaneously satisfied — a few nodes keep oscillating indefinitely
-// instead of settling under naive damping (confirmed: a 5-note test vault
-// converges fine, a 318-note one with such a hub does not). A cooling
-// schedule — the same technique classic force-directed layouts
-// (Fruchterman-Reingold) use — bounds convergence time regardless: force
-// output is scaled by a "temperature" that ramps from 1 to 0 over a fixed
-// step budget, so velocity is driven to exactly zero by the time the budget
-// elapses no matter how the layout was oscillating. Velocity clamping
-// (MAX_SPEED) additionally stops any single step from overshooting wildly,
-// which is what let close-packed nodes near a hub swing further apart each
-// step instead of settling closer.
-const SETTLE_VELOCITY_EPS = 0.05
-const SETTLE_FRAMES_REQUIRED = 30
-const MAX_SPEED = 40
+// Progress through the cooling schedule. The schedule itself (and why it
+// exists) is in graphLayout; how far this canvas has got through it is state.
 let calmFrames = 0
-// The *visible* cooling window is a wall-clock budget, not a frame count: a
-// frame-count budget converged in ~15s on a real 300-note vault instead of
-// the intended "a few seconds", because each step's O(n^2) repulsion cost
-// (and this environment's software canvas) meant far fewer frames actually
-// ran per second than assumed. Tying it to real elapsed time instead makes
-// "how long the settle animation visibly runs" independent of frame rate,
-// node count, or how fast any given machine/browser executes each step.
-const COOLING_DURATION_MS = 2500
 let coolingStartedAt = 0
-// The one-time synchronous warmup (before first paint, so it costs load
-// time rather than animation time) still scales with node count: a denser,
-// hub-heavy graph needs more iterations to work out a stable configuration
-// before the user ever sees it.
-function warmupStepsFor(nodeCount: number): number {
-  return Math.max(80, Math.min(400, nodeCount * 3))
-}
 let W = 0
 let H = 0
 const camera = reactive({ x: 0, y: 0, scale: 1 })
@@ -557,46 +551,23 @@ function resizeCanvas() {
 // for a full vault. Measure the settled bounding box and fit it instead.
 // Falls back to the old constant only before the canvas has been sized or
 // while there is nothing to frame, where there is no extent to measure.
-const FIT_MARGIN = 1.12
-const fitScale = ref(0.55)
+const fitScale = ref(DEFAULT_SCALE)
 /** 1 = graph exactly framed; 2 = zoomed to twice that. */
 function zoomRatio(): number {
-  return camera.scale / (fitScale.value || 0.55)
+  return camera.scale / (fitScale.value || DEFAULT_SCALE)
 }
 /** @param animate Ease there instead of cutting — for the reset control, where
  * the user is asking to go back to a view they have seen and the tween is what
  * shows them how the current view relates to it. Layout-driven fits (first
  * paint, a filter change) still cut, since there is no continuity to preserve. */
 function fitCamera(animate = false) {
-  const vis = simNodes
-  if (!vis.length || !W || !H) {
-    cancelCameraTween()
-    camera.x = 0
-    camera.y = 0
-    camera.scale = 0.55
-    fitScale.value = 0.55
-    requestRedraw()
-    return
-  }
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-  for (const n of vis) {
-    if (n.x < minX) minX = n.x
-    if (n.x > maxX) maxX = n.x
-    if (n.y < minY) minY = n.y
-    if (n.y > maxY) maxY = n.y
-  }
-  const bw = Math.max(1, maxX - minX) * FIT_MARGIN
-  const bh = Math.max(1, maxY - minY) * FIT_MARGIN
-  const scale = Math.max(0.15, Math.min(3, Math.min(W / bw, H / bh)))
-  const cx = (minX + maxX) / 2
-  const cy = (minY + maxY) / 2
+  const target = fitCameraFor(simNodes, W, H)
   // Remember what "fully zoomed out" means for this particular graph, so the
-  // label thresholds below can be expressed as "how far in has the user zoomed
-  // from the framed view" instead of absolute scale values. Absolute thresholds
+  // label thresholds can be expressed as "how far in has the user zoomed from
+  // the framed view" instead of absolute scale values. Absolute thresholds
   // stopped being meaningful the moment the default zoom became data-dependent.
-  fitScale.value = scale
-  const target = { x: -cx * scale, y: -cy * scale, scale }
-  if (animate) {
+  fitScale.value = target.scale
+  if (animate && simNodes.length && W && H) {
     flyTo(target)
     return
   }
@@ -611,7 +582,7 @@ function resetCamera(animate = false) {
   fitCamera(animate)
 }
 function zoom(factor: number) {
-  flyTo({ x: camera.x, y: camera.y, scale: Math.max(0.15, Math.min(3, camera.scale * factor)) }, ZOOM_TWEEN_MS)
+  flyTo({ x: camera.x, y: camera.y, scale: clampScale(camera.scale * factor) }, ZOOM_TWEEN_MS)
 }
 
 // ---------- camera tween + arrival pulse ----------
@@ -675,21 +646,13 @@ function stepAnim() {
   // draw() clears a finished pulse, so this check has to come after it.
   if (camTween || pulse) startAnimLoop()
 }
+// Thin wrappers so the call sites stay readable: the maths is in graphLayout,
+// the camera and viewport it reads are this component's reactive state.
 function worldToScreen(x: number, y: number): [number, number] {
-  return [x * camera.scale + W / 2 + camera.x, y * camera.scale + H / 2 + camera.y]
+  return toScreen(x, y, camera, W, H)
 }
 function screenToWorld(sx: number, sy: number): [number, number] {
-  return [(sx - W / 2 - camera.x) / camera.scale, (sy - H / 2 - camera.y) / camera.scale]
-}
-function nodeRadius(n: MemoryGraphNode): number {
-  return 5 + Math.min(12, Math.sqrt(n.degree + 1) * 2.7)
-}
-function hexToRgba(hex: string, a: number): string {
-  const v = hex.replace('#', '')
-  const r = parseInt(v.substring(0, 2), 16)
-  const g = parseInt(v.substring(2, 4), 16)
-  const b = parseInt(v.substring(4, 6), 16)
-  return `rgba(${r},${g},${b},${a})`
+  return toWorld(sx, sy, camera, W, H)
 }
 
 // `v-if="loading"` (and the load-error branch) unmount the `<canvas>` and
@@ -795,95 +758,6 @@ function refreshSimNodes() {
   simById = new Map(simNodes.map(n => [n.id, n]))
 }
 
-/** Advances the layout by one step; returns the fastest node's speed this step. */
-/** @param cooling 1 = full force, ramping to 0 forces velocity to zero regardless of residual imbalance. */
-// Repulsion is weighted by degree and springs are normalized by it, because a
-// uniform force model turns this vault's degree distribution (top hubs at 65,
-// 62, 50 links; median 2) into a hairball: 38% of notes ended up inside the
-// middle 40% of the layout's radius, so the core was unreadable while the
-// outer canvas sat empty. Two corrections, measured against the real 318-note
-// graph:
-//   - A hub's neighbours must be pushed apart from *each other*, not just from
-//     the hub, so repulsion scales with both endpoints' degree.
-//   - An un-normalized spring gives a 65-link note 65 inward pulls, which
-//     collapses its whole neighbourhood; dividing each endpoint's pull by
-//     sqrt(degree) keeps a hub from out-voting its own neighbours.
-// Together these take the core fraction 38% -> 23% and raise the number of
-// collision-free labels that fit at the default view by ~48%. Note that
-// spreading the layout in *world* units alone does nothing for legibility —
-// fitCamera() just zooms further out and the density returns; only making the
-// density uniform actually buys label room.
-const MIN_GAP = 40
-function stepSimulation(cooling = 1): number {
-  const vis = simNodes
-  const REPEL = 2600
-  const SPRING = 0.02
-  const SPRING_LEN = 90
-  const CENTER = 0.0025
-  const DAMP = 0.85
-  const forces = new Map<string, { fx: number; fy: number }>()
-  for (let i = 0; i < vis.length; i++) {
-    const a = vis[i]
-    const aw = 1 + Math.sqrt(a.degree) * 0.5
-    let fx = 0
-    let fy = 0
-    for (let j = 0; j < vis.length; j++) {
-      if (i === j) continue
-      const b = vis[j]
-      let dx = a.x - b.x
-      let dy = a.y - b.y
-      let d2 = dx * dx + dy * dy
-      if (d2 < 0.01) d2 = 0.01
-      const d = Math.sqrt(d2)
-      let f = (REPEL / d2) * aw * (1 + Math.sqrt(b.degree) * 0.5)
-      // Short-range shove: 1/d^2 is too weak to separate two nodes that are
-      // already nearly coincident, which is how label-on-label pairs survived
-      // an otherwise settled layout.
-      if (d < MIN_GAP) f += (MIN_GAP - d) * 0.25
-      fx += (dx / d) * f
-      fy += (dy / d) * f
-    }
-    fx += -a.x * CENTER
-    fy += -a.y * CENTER
-    forces.set(a.id, { fx, fy })
-  }
-  mm.edges.forEach(e => {
-    const a = simById.get(e.source)
-    const b = simById.get(e.target)
-    if (!a || !b) return
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    const d = Math.sqrt(dx * dx + dy * dy) || 0.01
-    const stretch = (d - SPRING_LEN) * SPRING
-    const fx = (dx / d) * stretch
-    const fy = (dy / d) * stretch
-    const fa = forces.get(a.id)
-    const fb = forces.get(b.id)
-    const na = Math.sqrt(Math.max(1, a.degree))
-    const nb = Math.sqrt(Math.max(1, b.degree))
-    if (fa) { fa.fx += fx / na; fa.fy += fy / na }
-    if (fb) { fb.fx -= fx / nb; fb.fy -= fy / nb }
-  })
-  let maxSpeed = 0
-  vis.forEach(n => {
-    const f = forces.get(n.id)
-    if (!f) return
-    n.vx = (n.vx + f.fx) * DAMP * cooling
-    n.vy = (n.vy + f.fy) * DAMP * cooling
-    const rawSpeed = Math.hypot(n.vx, n.vy)
-    if (rawSpeed > MAX_SPEED) {
-      const scale = MAX_SPEED / rawSpeed
-      n.vx *= scale
-      n.vy *= scale
-    }
-    n.x += n.vx
-    n.y += n.vy
-    const speed = Math.hypot(n.vx, n.vy)
-    if (speed > maxSpeed) maxSpeed = speed
-  })
-  return maxSpeed
-}
-
 /**
  * Run the layout forward toward its settled shape before handing it to the
  * cooling animation, so the graph does not visibly explode outward from random
@@ -915,7 +789,7 @@ function beginWarmup(steps: number) {
 function stepWarmupFrame(): boolean {
   const deadline = performance.now() + WARMUP_FRAME_BUDGET_MS
   do {
-    stepSimulation(Math.max(0, warmupStepsLeft / warmupStepsTotal))
+    stepLayout(simNodes, mm.edges, Math.max(0, warmupStepsLeft / warmupStepsTotal))
     warmupStepsLeft -= 1
   } while (warmupStepsLeft > 0 && performance.now() < deadline)
   if (warmupStepsLeft > 0) return true
@@ -1082,60 +956,21 @@ function drawPulse() {
 // only if its box is still free — so density is capped by the pixels actually
 // available rather than by a node count, and the labels that survive are the
 // ones worth reading.
-const LABEL_FONT_PX = 11
-const LABEL_MAX_W = 170
-const LABEL_PAD = 3
-const LABEL_CELL = 96
-
-// Below this zoom the canvas draws *no* labels at all: at the framed view a
-// 300-note vault has no room for 300 titles, and even a handful of pills over
-// the hairball read as clutter. Names stay reachable two other ways — hover
-// shows one under the cursor, and zooming past this ratio brings titles back.
-const LABEL_MIN_RATIO = 1.6
-/**
- * The degree floor is a response to label *pressure*, not to zoom on its own.
- * A small filtered view framed at fit scale has a low zoom ratio but acres of
- * free space, and hiding every title there would hide the only four notes the
- * user came to read. At or below this many visible notes, the canvas is sparse
- * enough that labels are exempt from both the zoom gate and the degree floor.
- */
-const SPARSE_VIEW_NODES = 40
-// Minimum degree a node needs before it may claim a label, graded by how far
-// the user has zoomed in from the framed view: far out only hubs are legible at
-// all, close in everything that fits is welcome. This replaces the binary
-// hubs-only/everything switch that made one notch of zoom paint all 318.
-function labelDegreeFloor(visibleCount: number): number {
-  // A sparse view has room for everything; gating by degree there would leave
-  // a local neighbourhood of leaf notes completely unlabelled.
-  if (visibleCount <= SPARSE_VIEW_NODES) return 0
-  const ratio = zoomRatio()
-  if (ratio >= 3.5) return 0
-  if (ratio >= 2.5) return 1
-  return 3
-}
-
+/** The canvas measures text; the truncation maths lives in graphLayout. */
 function ellipsize(text: string, maxW: number): string {
-  if (ctx!.measureText(text).width <= maxW) return text
-  let lo = 0
-  let hi = text.length
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1
-    if (ctx!.measureText(text.slice(0, mid) + '\u2026').width <= maxW) lo = mid
-    else hi = mid - 1
-  }
-  return text.slice(0, lo) + '\u2026'
+  return ellipsizeTo(text, maxW, (t) => ctx!.measureText(t).width)
 }
 
 function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
   // Far out, nothing at all: titles only earn their pixels once the user has
   // zoomed in past LABEL_MIN_RATIO — or the view is sparse enough not to need
   // the room. Identification before that is hover's job.
-  if (vis.length > SPARSE_VIEW_NODES && zoomRatio() < LABEL_MIN_RATIO) return
+  if (!labelsVisible(vis.length, zoomRatio())) return
   ctx!.font = `${LABEL_FONT_PX * dpr}px -apple-system, sans-serif`
   ctx!.textBaseline = 'middle'
   ctx!.fillStyle = themeColors.label
 
-  const floor = labelDegreeFloor(vis.length)
+  const floor = labelDegreeFloor(vis.length, zoomRatio())
   const halfH = (LABEL_FONT_PX / 2 + LABEL_PAD) * dpr
   const maxW = LABEL_MAX_W * dpr
   const cell = LABEL_CELL * dpr
@@ -1213,7 +1048,7 @@ function tick() {
   // equilibrium on its own.
   const elapsed = performance.now() - coolingStartedAt
   const cooling = Math.max(0, 1 - elapsed / COOLING_DURATION_MS)
-  const maxSpeed = stepSimulation(cooling)
+  const maxSpeed = stepLayout(simNodes, mm.edges, cooling)
   draw()
   if (maxSpeed < SETTLE_VELOCITY_EPS) {
     calmFrames += 1
@@ -1230,15 +1065,7 @@ function tick() {
 }
 
 function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  const vis = simNodes
-  for (let i = vis.length - 1; i >= 0; i--) {
-    const n = vis[i]
-    const r = nodeRadius(n) + 3
-    const dx = n.x - wx
-    const dy = n.y - wy
-    if (dx * dx + dy * dy <= r * r) return n
-  }
-  return null
+  return hitTestNodes(simNodes, wx, wy)
 }
 
 // ---------- hover name overlay ----------
@@ -1348,7 +1175,7 @@ function onWheel(e: WheelEvent) {
   const sy = (e.clientY - rect.top) * dpr
   const [wx, wy] = screenToWorld(sx, sy)
   const delta = -e.deltaY * 0.0012
-  const newScale = Math.max(0.15, Math.min(3, camera.scale * (1 + delta)))
+  const newScale = clampScale(camera.scale * (1 + delta))
   if (newScale === camera.scale) return
   // Keep the world point under the cursor fixed while the scale changes.
   camera.scale = newScale
