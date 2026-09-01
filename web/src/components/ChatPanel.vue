@@ -754,19 +754,22 @@
       />
       </div>
     </div>
-
+      <!-- Scroll-to-bottom floats inside the scroll area so it tracks the
+           composer height: .chat-with-sidebar ends at the top of the input
+           bar, so bottom:12px stays 12px above the composer even when the
+           textarea expands to 200px. Previously it was absolute to
+           .chat-panel at bottom:72px and was overlapped by an expanding
+           composer (see screenshot where the chevron sits mid-text). -->
+      <button
+        v-if="showScrollBtn"
+        class="scroll-to-bottom-btn"
+        @click="scrollToBottom"
+        title="Scroll to bottom"
+        aria-label="Scroll to bottom"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
     </div>
-
-    <!-- Scroll-to-bottom float button -->
-    <button
-      v-if="showScrollBtn"
-      class="scroll-to-bottom-btn"
-      @click="scrollToBottom"
-      title="Scroll to bottom"
-      aria-label="Scroll to bottom"
-    >
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-    </button>
 
     <!-- AskUserQuestion picker. The model paused mid-turn to ask the user
          a structured question; we render an interactive option list so the
@@ -4532,11 +4535,14 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   pointer-events: none;
 }
 
-/* Scroll-to-bottom float button — centered above the input bar so it
-   doesn't overlap the send button on the right. */
+/* Scroll-to-bottom float button — centered inside .chat-with-sidebar
+   (which ends at the top of the composer) so bottom:12px stays 12px
+   above the composer even when the textarea expands. Previously it was
+   absolute to .chat-panel at bottom:72px and was overlapped by a
+   tall composer. */
 .scroll-to-bottom-btn {
   position: absolute;
-  bottom: 72px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   width: 36px;

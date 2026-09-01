@@ -1405,6 +1405,19 @@ defineExpose({ onArrow })
   }
 }
 
+@container (max-width: 560px) {
+  /* On a phone the lane header (badge + workspace name + status sentence +
+     "+ new") has ~320px to share. Keeping name and status on one flex row
+     made both ellipsis to ~2–3 chars ("WO…", "nothing needs…") — neither
+     was readable. Hiding the status when a workspace name is present gives
+     the name its full width; the single-workspace case has no name, so its
+     status stays visible as the only heading text. Two-line stacking is the
+     alternative if the status must remain glanceable on mobile. */
+  .home-lane-name ~ .home-lane-status-text {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .home-chat-item { transition: none; }
   .title-shimmer { animation: none; }
