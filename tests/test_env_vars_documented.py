@@ -15,6 +15,7 @@ from pathlib import Path
 # their new var really belongs here.
 INTERNAL_VARS: dict[str, str] = {
     "CIAO_ACTIVE_PROJECT": "per-turn context injected by the SDK hook; not operator-settable",
+    "CIAO_INVOCATION_CWD": "set by the bundled launcher before it cds, so a relative path in an argument still resolves against the caller",
     "CIAO_LEGACY_ENTITY_WORKSPACE": "per-turn registry owner for unprefixed legacy vault entities",
     "CIAO_CHAT_ID": "subprocess IPC marker for the chat the spawned CLI belongs to",
     "CIAO_MODEL": "subprocess IPC marker for the model selected for the spawned chat",

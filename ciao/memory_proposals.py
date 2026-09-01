@@ -968,6 +968,63 @@ async def _reconcile_region(
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
+def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
+    """Whether ``text`` was *rejected* before, not merely decided before.
+
+    `append_proposals` dedupes against both pending bullets and the decision
+    sidecar and returns None for either, so a caller cannot otherwise tell "it
+    is already waiting for you" from "you rejected this before, and it will not
+    come back". Those need different words: the second is the one that silently
+    loses a user who has changed their mind.
+
+    Reads the sidecar directly rather than through `_dismissed_texts`, which
+    returns every decided text — `record_promotion` writes to the same log with
+    a `promoted_at` key. Reusing it would tell someone their fact had been
+    rejected when it was in fact accepted and may already be live.
+
+    Compared through `_one_line`, exactly as `append_proposals` compares.
+    """
+    out_path = Path(workspace_vault_root) / _PROPOSALS_RELATIVE
+    if not out_path.exists():
+        return False
+    wanted = _one_line(text)
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = out_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or key not in entry:
+                continue
+            if str(entry.get("text", "")).strip() == wanted:
+                return True
+    return False
+
+
+
+def was_dismissed(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was rejected before."""
+    return _decided_with(workspace_vault_root, text, "dismissed_at")
+
+
+def was_promoted(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was accepted before, and so may already be live.
+
+    The third state a caller needs. `append_proposals` refuses a re-file for a
+    promoted fact exactly as it does for a dismissed one, and reporting either
+    as "already in the queue" is wrong — a promoted fact is not in the queue at
+    all, it is in its destination.
+    """
+    return _decided_with(workspace_vault_root, text, "promoted_at")
+
+
 def append_proposals(
     proposals: list[MemoryProposal],
     workspace_vault_root: Path,

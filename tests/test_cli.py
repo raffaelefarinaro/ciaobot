@@ -1316,3 +1316,57 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     assert "Alba" not in out
     # And the link points at the note that actually exists on disk.
     assert str(work_vault / "People" / "Aymen.md") in out
+
+
+def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
+    """`/critique` must not depend on an external `python3`.
+
+    The bundled runtime puts only a `ciao` wrapper on PATH
+    (`scripts/build-bundled-runtime.sh` writes `$output/bin/ciao` and nothing
+    else), so `python3 -m ciao.critique` resolves whatever interpreter the
+    user's shell has — one with neither `ciao` nor its dependencies. The
+    command doc therefore names `ciao critique`, and this pins that it works.
+    """
+    from ciao import cli
+
+    seen: list[list[str]] = []
+
+    def fake_main(argv):
+        seen.append(list(argv))
+        return 0
+
+    monkeypatch.setattr("ciao.critique.main", fake_main)
+    assert cli.main(["critique", "--input", "a.md", "--type", "plan"]) == 0
+    # Flags reach the panel untouched: argparse must not eat them on the way.
+    assert seen == [["--input", "a.md", "--type", "plan"]]
+
+
+def test_ciao_help_lists_critique():
+    """Registered as a subparser too, so `ciao --help` discloses it."""
+    from ciao import cli
+
+    parser = cli.build_parser()
+    action = next(a for a in parser._subparsers._actions if hasattr(a, "choices") and a.choices)
+    assert "critique" in action.choices
+
+
+def test_critique_leaves_a_home_relative_input_for_expanduser(monkeypatch):
+    """A quoted `~/...` reaches the CLI unexpanded and must not be rebased.
+
+    `Path("~/x").is_absolute()` is False, so rebasing it against the caller's
+    directory yields `<cwd>/~/x` and defeats the `expanduser()` that
+    `ciao.critique` does later — an artifact that resolved fine before would be
+    reported missing.
+    """
+    from ciao import cli
+
+    monkeypatch.setenv("CIAO_INVOCATION_CWD", "/some/workspace")
+    seen: list[list[str]] = []
+    monkeypatch.setattr("ciao.critique.main", lambda argv: seen.append(list(argv)) or 0)
+
+    assert cli.main(["critique", "--input", "~/Documents/plan.md"]) == 0
+    assert seen == [["--input", "~/Documents/plan.md"]]
+
+    seen.clear()
+    assert cli.main(["critique", "--input=~/plan.md"]) == 0
+    assert seen == [["--input=~/plan.md"]]

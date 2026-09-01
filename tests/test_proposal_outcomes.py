@@ -1000,3 +1000,89 @@ def test_add_refuses_both_payload_forms(tmp_path, monkeypatch, capsys):
 
     assert rc == 2
     assert "not both" in capsys.readouterr().err
+
+
+def test_add_says_previously_dismissed_rather_than_already_queued(tmp_path, monkeypatch, capsys):
+    """A user who changed their mind must not be told their request landed.
+
+    `append_proposals` returns None both for a fact already queued and for one
+    already dismissed, and the CLI reported both as "already in the queue" —
+    so an explicit /remember of a previously rejected fact created no row while
+    the agent confirmed success.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    fact = "Prefers tabs over spaces."
+
+    assert cli.main([
+        "memory-proposal-add", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), "--kind", "memory", fact,
+    ]) == 0
+    assert cli.main([
+        "memory-proposal-dismiss", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), fact,
+    ]) == 0
+    capsys.readouterr()
+
+    assert cli.main([
+        "memory-proposal-add", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), "--kind", "memory", fact,
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "Previously dismissed" in out
+    assert "Already in the queue" not in out
+
+
+def test_add_still_says_already_queued_for_a_pending_row(tmp_path, monkeypatch, capsys):
+    """The other None case keeps its own, different message."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    fact = "Prefers tabs over spaces."
+
+    for _ in range(2):
+        assert cli.main([
+            "memory-proposal-add", "--workspace", str(tmp_path),
+            "--vault-root", str(vault), "--kind", "memory", fact,
+        ]) == 0
+    out = capsys.readouterr().out
+    assert "Already in the queue" in out
+    assert "Previously dismissed" not in out
+
+
+def test_add_does_not_call_a_promoted_fact_dismissed(tmp_path, monkeypatch, capsys):
+    """`record_promotion` writes to the same sidecar as `record_dismissal`.
+
+    Reading every logged text would tell someone their fact had been rejected
+    when it was in fact accepted and may already be live in the region — the
+    opposite of what happened, and it would invite them to re-file something
+    that is already there.
+    """
+    from ciao import cli
+    from ciao.memory_proposals import record_promotion
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("# Memory Proposals\n", encoding="utf-8")
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    fact = "Prefers tabs over spaces."
+
+    record_promotion(queue, text=fact, kind="memory")
+    capsys.readouterr()
+
+    assert cli.main([
+        "memory-proposal-add", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), "--kind", "memory", fact,
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "Previously dismissed" not in out
+    # Nor "already in the queue": a promoted fact is not in the queue at all,
+    # it is in its destination. Three states, three messages.
+    assert "Already in the queue" not in out
+    assert "Already promoted" in out
