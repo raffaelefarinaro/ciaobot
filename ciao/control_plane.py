@@ -1336,8 +1336,8 @@ class CiaoControlPlane:
 
     def schedule_update(self, principal: McpPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
-        if entry.scope == "system" and any(key not in {"enabled", "workspace"} for key in changes):
-            raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace changes.")
+        if entry.scope == "system" and any(key not in {"enabled", "workspace", "model", "provider", "archive_policy", "provider_model", "archivePolicy"} for key in changes):
+            raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace/model/provider/archive_policy changes.")
         # Where this schedule's run bindings actually live: the bound project's
         # own workspace when there is one (an entry written before the workspace
         # field existed carries none of its own), else the stored field.

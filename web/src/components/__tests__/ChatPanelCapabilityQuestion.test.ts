@@ -46,7 +46,13 @@ const CommentPopoverStub = vi.hoisted(() => ({
 vi.mock('../PaneHeader.vue', () => ({ default: NoopStub }))
 vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
-vi.mock('../ModelSelector.vue', () => ({ default: NoopStub }))
+const ModelSelectorStub = vi.hoisted(() => ({
+  name: 'ModelSelector',
+  props: ['modelValue', 'sections', 'disabled', 'activeModels', 'searchable', 'placeholder', 'filterSection'],
+  emits: ['select', 'update:modelValue', 'close'],
+  template: `<div class="model-selector-stub" :data-disabled="String(disabled)"><div v-for="s in sections" :key="s.key" :data-section="s.key" :data-disabled="String(s.disabled)"><span class="section-label">{{ s.label }}</span><button v-for="m in s.models" :key="m" class="model-option" :data-model="m" :disabled="s.disabled" @click="$emit('select', m, s.key)">{{ m }}</button></div></div>`,
+}))
+vi.mock('../ModelSelector.vue', () => ({ default: ModelSelectorStub }))
 vi.mock('../ChatCommentPopover.vue', () => ({ default: CommentPopoverStub }))
 vi.mock('../CommentComposePopover.vue', () => ({ default: NoopStub }))
 
@@ -101,7 +107,7 @@ beforeEach(() => {
 })
 
 describe('image-capability question card', () => {
-  test('renders the card with header, countdown, candidates and actions', async () => {
+  test('renders the card with header, countdown, inline picker and Cancel', async () => {
     const store = useProjectStore()
     store.chats = [makeChat()]
     store.activeChatId = CHAT_ID
@@ -114,20 +120,24 @@ describe('image-capability question card', () => {
     expect(card.text()).toContain("This model can't see images")
     // Countdown renders as "<remaining>s" (30s window, just opened).
     expect(card.text()).toMatch(/\d+s/)
-    // Current model is listed and marked disabled.
-    const current = card.find('button[disabled]')
-    expect(current.text()).toContain('deepseek-v4-flash:cloud')
-    expect(card.text()).toContain('current model')
+    // Inline ModelSelector is rendered (stubbed), showing current disabled and vision models.
+    const selector = wrapper.find('.model-selector-stub')
+    expect(selector.exists()).toBe(true)
+    // Current model is in a disabled section.
+    const disabledSection = selector.find('[data-section="current"]')
+    expect(disabledSection.exists()).toBe(true)
+    expect(disabledSection.attributes('data-disabled')).toBe('true')
+    expect(disabledSection.text()).toContain('deepseek-v4-flash:cloud')
     // Vision candidate is clickable.
-    const candidate = card.findAll('button.question-option').find(b => b.text().includes('minimax-m3:cloud'))
-    expect(candidate).toBeDefined()
-    expect(candidate!.attributes('disabled')).toBeUndefined()
-    // Actions.
-    expect(card.text()).toContain('Open picker')
+    const candidate = selector.find('[data-model="minimax-m3:cloud"]')
+    expect(candidate.exists()).toBe(true)
+    expect(candidate.attributes('disabled')).toBeUndefined()
+    // Only Cancel action remains; Open picker is gone (its purpose is subsumed by the inline picker).
     expect(card.text()).toContain('Cancel')
+    expect(card.text()).not.toContain('Open picker')
   })
 
-  test('clicking a candidate switches the model', async () => {
+  test('picking a vision model from the inline picker switches the model', async () => {
     const store = useProjectStore()
     store.chats = [makeChat()]
     store.activeChatId = CHAT_ID
@@ -135,15 +145,13 @@ describe('image-capability question card', () => {
     const respond = vi.spyOn(store, 'respondCapability')
 
     const wrapper = await mountPanel()
-    const candidate = wrapper
-      .findAll('button.question-option')
-      .find(b => b.text().includes('minimax-m3:cloud'))!
+    const candidate = wrapper.find('[data-model="minimax-m3:cloud"]')
     await candidate.trigger('click')
 
     expect(respond).toHaveBeenCalledWith(CHAT_ID, REQ_ID, 'switch', 'minimax-m3:cloud')
   })
 
-  test('Open picker sends picker and opens the model selector', async () => {
+  test('current model entry is disabled and not switchable', async () => {
     const store = useProjectStore()
     store.chats = [makeChat()]
     store.activeChatId = CHAT_ID
@@ -151,12 +159,11 @@ describe('image-capability question card', () => {
     const respond = vi.spyOn(store, 'respondCapability')
 
     const wrapper = await mountPanel()
-    const picker = wrapper.findAll('button.btn-sm').find(b => b.text() === 'Open picker')!
-    await picker.trigger('click')
-
-    expect(respond).toHaveBeenCalledWith(CHAT_ID, REQ_ID, 'picker')
-    // The picker opens (ModelSelector is stubbed, but the v-if flips).
-    expect(wrapper.findComponent({ name: 'NoopStub' }).exists()).toBe(true)
+    const current = wrapper.find('[data-section="current"] [data-model="deepseek-v4-flash:cloud"]')
+    expect(current.attributes('disabled')).toBeDefined()
+    await current.trigger('click')
+    // Disabled button does not emit select, so no switch.
+    expect(respond).not.toHaveBeenCalled()
   })
 
   test('Cancel sends cancel', async () => {
@@ -173,7 +180,7 @@ describe('image-capability question card', () => {
     expect(respond).toHaveBeenCalledWith(CHAT_ID, REQ_ID, 'cancel')
   })
 
-  test('expired question disables the buttons', async () => {
+  test('expired question disables the picker and Cancel', async () => {
     const store = useProjectStore()
     store.chats = [makeChat()]
     store.activeChatId = CHAT_ID
@@ -183,11 +190,12 @@ describe('image-capability question card', () => {
 
     const wrapper = await mountPanel()
     const card = wrapper.find('.capability-card')
-    const buttons = card.findAll('button')
-    expect(buttons.length).toBeGreaterThan(0)
-    for (const b of buttons) {
-      expect(b.attributes('disabled')).toBeDefined()
-    }
+    // Inline picker is disabled via ModelSelector prop.
+    const selector = wrapper.find('.model-selector-stub')
+    expect(selector.attributes('data-disabled')).toBe('true')
+    // Cancel is also disabled.
+    const cancel = wrapper.findAll('button.btn-sm').find(b => b.text() === 'Cancel')!
+    expect(cancel.attributes('disabled')).toBeDefined()
     // Countdown is clamped at 0.
     expect(card.text()).toContain('0s')
   })
