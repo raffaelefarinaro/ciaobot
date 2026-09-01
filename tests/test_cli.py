@@ -457,6 +457,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert "ciao:memory" in (
         root / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
+    # setup seeds through _seed_stock_commands, so each stock copy carries the
+    # sibling marker (with the sha256 of the written bytes) from the start.
+    assert (root / "commands" / "remember.md.ciao-stock-command").is_file()
     assert (root / "CLAUDE.md").is_file()
     assert (root / "AGENTS.md").is_symlink()
     assert (root / "AGENTS.md").readlink() == Path("CLAUDE.md")
