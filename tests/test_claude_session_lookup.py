@@ -318,9 +318,8 @@ def test_forced_refresh_via_subagent_tracking(
 ) -> None:
     """find_parent_session_file threads force_refresh through to the scan.
 
-    The wrapper's miss path also runs an uncached glob net, so the file is
-    found either way; the forced path reaches it through the shared cache
-    refresh (cheap, shared) instead of the per-caller net.
+    The forced path reaches a brand-new slug through the shared cache
+    refresh — exactly one walk, no per-caller uncached net.
     """
     from ciao import subagent_tracking
 
@@ -343,10 +342,89 @@ def test_forced_refresh_via_subagent_tracking(
 
     monkeypatch.setattr(Path, "iterdir", counting_iterdir)
 
-    # Forced lookup refreshes the shared slug list and finds the file —
-    # exactly one walk, no per-caller uncached net.
     found = subagent_tracking.find_parent_session_file(
         sid, Path("/Users/me/proj"), force_refresh=True
     )
     assert found == late_slug / f"{sid}.jsonl"
     assert calls["n"] == 1
+
+
+def test_subagent_tracking_miss_skips_uncached_glob(
+    tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: a cached miss must not fall back to glob over every slug.
+
+    The 4s running-subagents endpoint probes through this wrapper; the
+    uncached net on the miss path rebuilt the per-probe opendir storm this
+    cache exists to prevent. The miss must be answered from the cache alone
+    (rate-limited refresh), and the uncached net reserved for the
+    import-failure case.
+    """
+    from ciao import subagent_tracking
+
+    sid = _sid(15)
+    # Cold probe populates the slug list; the file does not exist yet.
+    assert (
+        subagent_tracking.find_parent_session_file(sid, Path("/Users/me/proj"))
+        is None
+    )
+    # Session lands in a brand-new cwd moments later.
+    late_slug = _slug(projects_root, "/late-cwd")
+    (late_slug / f"{sid}.jsonl").write_text("{}")
+
+    iter_calls = {"n": 0}
+    glob_calls = {"n": 0}
+    real_iterdir = Path.iterdir
+    real_glob = Path.glob
+
+    def counting_iterdir(self: Path):
+        if self == projects_root:
+            iter_calls["n"] += 1
+        return real_iterdir(self)
+
+    def counting_glob(self: Path, pattern):
+        if self == projects_root and "jsonl" in str(pattern):
+            glob_calls["n"] += 1
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    # Default (rate-limited) miss: no uncached glob walk, no extra iterdir.
+    assert (
+        subagent_tracking.find_parent_session_file(sid, Path("/Users/me/proj"))
+        is None
+    )
+    assert iter_calls["n"] == 0
+    assert glob_calls["n"] == 0
+
+    # Forced lookup: one slug-list refresh, still no uncached glob.
+    found = subagent_tracking.find_parent_session_file(
+        sid, Path("/Users/me/proj"), force_refresh=True
+    )
+    assert found == late_slug / f"{sid}.jsonl"
+    assert iter_calls["n"] == 1
+    assert glob_calls["n"] == 0
+
+
+def test_subagent_tracking_uncached_net_survives_import_failure(
+    tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the transcripts helper, the uncached glob net still finds it."""
+    import sys
+    from ciao import subagent_tracking
+
+    sid = _sid(16)
+    late_slug = _slug(projects_root, "/late-cwd")
+    (late_slug / f"{sid}.jsonl").write_text("{}")
+
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "ciao.transcripts":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    found = subagent_tracking.find_parent_session_file(sid, Path("/Users/me/proj"))
+    assert found == late_slug / f"{sid}.jsonl"

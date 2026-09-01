@@ -197,35 +197,28 @@ def find_parent_session_file(
 
     ``force_refresh`` bypasses the shared cache's rescan rate limit. Callers
     that look the file up exactly once (the subagent completion watcher and
-    the schedule drain wait) must pass True: it skips the gate outright
-    instead of paying the uncached net below.
+    the schedule drain wait) must pass True: a miss here is final for them,
+    so the rate-limit gate must never suppress their decisive probe.
     """
     if not session_id:
         return None
     try:
         from ciao.transcripts import find_claude_session_file
-
-        found = find_claude_session_file(
-            session_id, workspace_root, agent_root=agent_root,
-            force_refresh=force_refresh,
-        )
-        if found is not None:
-            return found
     except Exception:  # noqa: BLE001 — fall through to the glob scan
-        pass
-    # Last-resort uncached scan. The cached helper above misses whenever the
-    # session's slug dir is newer than its list — either rate-limit-suppressed
-    # (default) or genuinely absent — and this uncached net is what keeps a
-    # one-shot caller's negative result evidence-based rather than gate-
-    # suppressed. It only ever runs on the miss path, so the storm cost is
-    # bounded to exactly the lookups that need the freshest possible answer.
-    projects_root = Path.home() / ".claude" / "projects"
-    try:
-        for path in projects_root.glob(f"*/{session_id}.jsonl"):
-            return path
-    except OSError:
-        pass
-    return None
+        # No cached helper available. The uncached net below is then the
+        # only lookup; it is bounded by this import-failure path, never the
+        # ordinary miss path.
+        projects_root = Path.home() / ".claude" / "projects"
+        try:
+            for path in projects_root.glob(f"*/{session_id}.jsonl"):
+                return path
+        except OSError:
+            pass
+        return None
+    return find_claude_session_file(
+        session_id, workspace_root, agent_root=agent_root,
+        force_refresh=force_refresh,
+    )
 
 
 def subagent_transcript_path(parent_path: Path, agent_id: str) -> Path:
