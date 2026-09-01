@@ -915,7 +915,7 @@ def test_the_dirty_check_only_looks_at_files_the_plan_would_touch(
             return 0, "abc123\n"
         return 0, porcelain
 
-    monkeypatch.setattr("ciao.vault_rehome._run_git", fake_run_git)
+    monkeypatch.setattr("ciao.vault_rehome.run_git", fake_run_git)
     monkeypatch.setattr("ciao.vault_rehome.shutil.which", lambda name: "/usr/bin/git")
 
     # Dirt in a note the plan *does* rewrite refuses...
@@ -1290,7 +1290,7 @@ def test_a_table_cells_escaped_alias_pipe_survives_a_move(tmp_path: Path) -> Non
 
     Inside a table cell the alias pipe is `\\|`, because a bare one closes the
     cell. Re-emitting the repointed link with a bare `|` would break the row —
-    and this went unnoticed while `_parse_wikilink` read the backslash as part
+    and this went unnoticed while `parse_wikilink` read the backslash as part
     of the ref, because resolution then failed and the link was skipped
     entirely: a roster table's edges were silently left pointing at the old
     path.

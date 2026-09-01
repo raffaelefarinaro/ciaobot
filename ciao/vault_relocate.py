@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.workspace_reroot import (
-    _run_git,
+    run_git,
     _write_registry,
     dirty_tracked_paths,
     ensure_rollback_history,
@@ -480,21 +480,21 @@ def apply(
     # planned sources so new notes move through the same tracked, undoable path.
     staged: list[str] = []
     for src_rel, _dst_rel in moves_to_apply:
-        code, out = _run_git(install_root, "add", "-A", "--", src_rel)
+        code, out = run_git(install_root, "add", "-A", "--", src_rel)
         if code != 0:
             # Reset only what THIS attempt staged: a refusal must not change
             # the user's index — staging previously untracked notes would
             # make the next commit include data the operator never meant to
             # stage, even though nothing was moved.
             if staged:
-                _run_git(install_root, "reset", "-q", "--", *set(staged))
+                run_git(install_root, "reset", "-q", "--", *set(staged))
             payload["status"] = "refused"
             payload["refusals"] = [f"could not stage {src_rel}: {out}"]
             payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
             return payload
         staged.append(src_rel)
 
-    code, head = _run_git(install_root, "rev-parse", "HEAD")
+    code, head = run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""
 
     if not result.whole_directory:
@@ -521,7 +521,7 @@ def apply(
         first_error: str | None = None
         for done in reversed(applied):
             (install_root / done["source"]).parent.mkdir(parents=True, exist_ok=True)
-            rb_code, rb_out = _run_git(
+            rb_code, rb_out = run_git(
                 install_root, "mv", done["destination"], done["source"]
             )
             if rb_code != 0 and first_error is None:
@@ -530,7 +530,7 @@ def apply(
 
     for src_rel, dst_rel in moves_to_apply:
         (install_root / dst_rel).parent.mkdir(parents=True, exist_ok=True)
-        code, out = _run_git(install_root, "mv", src_rel, dst_rel)
+        code, out = run_git(install_root, "mv", src_rel, dst_rel)
         if code != 0:
             rollback_error = _unwind_applied()
             refusals = [f"git mv failed for {src_rel}: {out}"]
@@ -626,7 +626,7 @@ def apply(
                 (install_root / done["destination"]).parent.mkdir(
                     parents=True, exist_ok=True
                 )
-                fwd_code, fwd_out = _run_git(
+                fwd_code, fwd_out = run_git(
                     install_root, "mv", done["source"], done["destination"]
                 )
                 if fwd_code != 0:
@@ -736,7 +736,7 @@ def undo(
         ):
             continue
         source.parent.mkdir(parents=True, exist_ok=True)
-        code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])
+        code, out = run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
             # Roll the earlier reversals forward again: the receipt and the
             # registry still describe the relocated layout, so leaving those
@@ -759,7 +759,7 @@ def undo(
                 (install_root / origin["source"]).parent.mkdir(
                     parents=True, exist_ok=True
                 )
-                code, out = _run_git(
+                code, out = run_git(
                     install_root, "mv", origin["source"], origin["destination"]
                 )
                 if code != 0:
@@ -803,7 +803,7 @@ def undo(
                     (install_root / entry["destination"]).parent.mkdir(
                         parents=True, exist_ok=True
                     )
-                    code, out = _run_git(install_root, "mv", entry["source"], entry["destination"])
+                    code, out = run_git(install_root, "mv", entry["source"], entry["destination"])
                     if code != 0:
                         rollback_error = out
             try:

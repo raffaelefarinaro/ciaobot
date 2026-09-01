@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from ciao.vault_index import FRONTMATTER_RE
+from ciao.vault_links import FRONTMATTER_RE
 from ciao.vault_rehome import vault_workspaces
 
 

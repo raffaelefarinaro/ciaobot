@@ -19,6 +19,7 @@ from ciao.vault_index import (
     resolve_vault_link,
     vault_link_ref,
 )
+from ciao.vault_links import is_escaped
 
 # Fenced code blocks and inline code spans are prose *about* links, not real
 # links — guides and changelogs routinely document link syntax. Strip them
@@ -225,15 +226,6 @@ def _without_code(text: str) -> str:
     return _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
 
 
-def _is_escaped(text: str, index: int) -> bool:
-    backslashes = 0
-    index -= 1
-    while index >= 0 and text[index] == "\\":
-        backslashes += 1
-        index -= 1
-    return backslashes % 2 == 1
-
-
 def _matching_bracket(text: str, opening: int) -> int | None:
     depth = 0
     index = opening
@@ -358,7 +350,7 @@ def _inline_markdown_destinations(text: str):
         else:
             index += 1
             continue
-        if _is_escaped(text, source):
+        if is_escaped(text, source):
             index += 1
             continue
 
@@ -403,7 +395,7 @@ def _markdown_destinations_in(text: str):
         *[
             (match.start(), match.group(1))
             for match in _REFERENCE_DESTINATION_RE.finditer(stripped)
-            if not _is_escaped(stripped, match.start())
+            if not is_escaped(stripped, match.start())
         ],
     ]
     for _, raw in sorted(matches, key=lambda item: item[0]):

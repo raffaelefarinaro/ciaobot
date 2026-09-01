@@ -36,7 +36,7 @@ notes for 70 broken ones. Two dialects have to survive the move, because a vault
 may be mid-conversion (see `vault_migrate_links`):
 
 * `[[personal/People/Mo]]`, `[[People/Mo|Mo]]`, `[[Mo]]` — resolved through the
-  same `_build_filename_index`/`_resolve_related` pair the index uses, then
+  same `build_filename_index`/`resolve_related` pair the index uses, then
   rewritten to the **full** new vault-relative ref. A bare `[[Mo]]` would keep
   resolving on its own (the index also keys the filename stem), but spelling the
   path out is what makes the link survive a second note called `Mo` later.
@@ -93,29 +93,28 @@ from ciao.vault_index import (
     DIR_TYPE_MAP,
     EXCLUDED_TOP_DIRS,
     Entry,
-    FENCED_CODE_RE,
-    FRONTMATTER_RE,
-    INLINE_CODE_RE,
-    MARKDOWN_LINK_RE,
-    _build_filename_index,
-    _FM_LIST_ITEM_RE,
-    _FM_RELATED_KEY_RE,
-    _is_link_start,
-    _resolve_related,
+    build_filename_index,
     markdown_destination,
+    resolve_related,
     resolve_vault_link,
     scan_targets,
     scan_vault,
     vault_link_ref,
 )
-from ciao.vault_lint import _is_escaped
-from ciao.vault_migrate_links import (
+from ciao.vault_links import (
+    FENCED_CODE_RE,
+    FM_LIST_ITEM_RE,
+    FM_RELATED_KEY_RE,
+    FRONTMATTER_RE,
+    INLINE_CODE_RE,
+    MARKDOWN_LINK_RE,
     WIKILINK_RE,
-    _alias_separator,
-    _is_skipped,
-    _parse_wikilink,
-    _run_git,
+    alias_separator,
+    is_escaped,
+    is_link_start,
+    parse_wikilink,
 )
+from ciao.vault_migrate_links import is_skipped, run_git
 
 logger = logging.getLogger(__name__)
 
@@ -378,17 +377,17 @@ def vault_git_state(vault_root: Path, *, touched: Iterable[str] = ()) -> dict[st
     state: dict[str, Any] = {"is_repo": False, "head": "", "dirty": False, "dirty_paths": []}
     if not root.is_dir() or shutil.which("git") is None:
         return state
-    code, out = _run_git(root, "rev-parse", "--is-inside-work-tree")
+    code, out = run_git(root, "rev-parse", "--is-inside-work-tree")
     if code != 0 or out.strip() != "true":
         return state
     state["is_repo"] = True
-    code, out = _run_git(root, "rev-parse", "HEAD")
+    code, out = run_git(root, "rev-parse", "HEAD")
     if code == 0:
         state["head"] = out.strip()
     wanted = {str(path) for path in touched}
     if not wanted:
         return state
-    code, out = _run_git(root, "status", "--porcelain", "--", ".")
+    code, out = run_git(root, "status", "--porcelain", "--", ".")
     if code != 0:
         return state
     dirty: list[str] = []
@@ -890,7 +889,7 @@ def _wikilink_edits(
 ) -> list[_Edit]:
     """Repoint wikilinks whose *resolved* target moved.
 
-    Resolution goes through `_resolve_related`, so `[[Mo]]`, `[[People/Mo]]` and
+    Resolution goes through `resolve_related`, so `[[Mo]]`, `[[People/Mo]]` and
     `[[personal/People/Mo]]` are all recognised as the same edge — which is the
     only way to catch the partial refs a real vault is full of. The replacement
     is always the full new path: a bare stem would keep resolving today and
@@ -902,20 +901,20 @@ def _wikilink_edits(
         start = match.start()
         if any(low <= start < high for low, high in excluded):
             continue
-        if _is_escaped(body, start):
+        if is_escaped(body, start):
             continue
-        ref, anchor, alias = _parse_wikilink(match.group(0))
+        ref, anchor, alias = parse_wikilink(match.group(0))
         if not ref:
             continue
-        target = _resolve_related(ref, filename_index)
+        target = resolve_related(ref, filename_index)
         if target is None:
             continue
         new_ref = moved_by_repo.get(target.as_posix())
         if not new_ref or _new_ref(ref) == new_ref:
             continue
-        # `_alias_separator`, not a bare `|`: a wikilink in a table cell spells
+        # `alias_separator`, not a bare `|`: a wikilink in a table cell spells
         # its alias pipe `\|`, and re-emitting it unescaped closes the cell.
-        separator = _alias_separator(match.group(0))
+        separator = alias_separator(match.group(0))
         rendered = (
             new_ref
             + (f"#{anchor}" if anchor else "")
@@ -960,7 +959,7 @@ def _markdown_edits(
         start = match.start()
         if any(low <= start < high for low, high in excluded):
             continue
-        if not _is_link_start(body, start):
+        if not is_link_start(body, start):
             continue  # an image embed, or an escaped bracket documenting syntax
         angle = match.group("angle")
         raw = angle if angle is not None else (match.group("bare") or "")
@@ -1016,7 +1015,7 @@ def _frontmatter_value_spans(value: str, offset: int) -> list[tuple[int, int, st
     """Split a frontmatter value into its individual ref tokens.
 
     Handles a single value (`related: People/Mo`) and the inline flow list
-    (`related: [People/Mo, Ideas/Thing]`) `_FM_RELATED_KEY_RE` documents. Each
+    (`related: [People/Mo, Ideas/Thing]`) `FM_RELATED_KEY_RE` documents. Each
     token comes back with the exact span of its *unquoted* text, so a rewrite
     replaces the ref and leaves quoting, spacing and commas byte-identical.
     """
@@ -1053,7 +1052,7 @@ def _frontmatter_edits(
     `_normalize_related_value` expects and the link migration normalises to.
 
     Never a markdown link: YAML reads `[Mo](./People/Mo.md)` as one opaque
-    string, which `_resolve_related` cannot resolve.
+    string, which `resolve_related` cannot resolve.
     """
     block = match.group(1)
     base = match.start(1)
@@ -1061,18 +1060,18 @@ def _frontmatter_edits(
     covered: list[tuple[int, int]] = []
 
     for link in WIKILINK_RE.finditer(block):
-        ref, anchor, alias = _parse_wikilink(link.group(0))
+        ref, anchor, alias = parse_wikilink(link.group(0))
         if not ref:
             continue
-        target = _resolve_related(ref, filename_index)
+        target = resolve_related(ref, filename_index)
         if target is None:
             continue
         new_ref = moved_by_repo.get(target.as_posix())
         if not new_ref or _new_ref(ref) == new_ref:
             continue
-        # `_alias_separator`, not a bare `|`: a wikilink in a table cell spells
+        # `alias_separator`, not a bare `|`: a wikilink in a table cell spells
         # its alias pipe `\|`, and re-emitting it unescaped closes the cell.
-        separator = _alias_separator(link.group(0))
+        separator = alias_separator(link.group(0))
         rendered = (
             new_ref
             + (f"#{anchor}" if anchor else "")
@@ -1091,8 +1090,8 @@ def _frontmatter_edits(
     in_related = False
     offset = 0
     for line in block.split("\n"):
-        key = _FM_RELATED_KEY_RE.match(line)
-        item = _FM_LIST_ITEM_RE.match(line) if in_related else None
+        key = FM_RELATED_KEY_RE.match(line)
+        item = FM_LIST_ITEM_RE.match(line) if in_related else None
         if key is not None:
             in_related = True
             spans = _frontmatter_value_spans(key.group(2), offset + key.start(2))
@@ -1110,7 +1109,7 @@ def _frontmatter_edits(
                 continue  # already handled above; overlapping edits corrupt text
             if any(low <= start < high for low, high in covered):
                 continue
-            target = _resolve_related(token, filename_index)
+            target = resolve_related(token, filename_index)
             if target is None:
                 continue
             new_ref = moved_by_repo.get(target.as_posix())
@@ -1149,7 +1148,7 @@ def rewrite_references(
     empty change list means nothing pointed at a moved note, so the driver can
     leave the file's mtime alone.
     """
-    # `_resolve_related` answers with the repo-relative path *including* `.md`
+    # `resolve_related` answers with the repo-relative path *including* `.md`
     # (that is what `Entry.path` carries), so the lookup table has to be keyed the
     # same way — refs are extension-less, resolved targets are not.
     #
@@ -1514,7 +1513,7 @@ def move_note_between_roots(
 
         try:
             dest_file.parent.mkdir(parents=True, exist_ok=True)
-            code, output = _run_git(install_root, "mv", source, destination)
+            code, output = run_git(install_root, "mv", source, destination)
             if code != 0:
                 # Untracked, or no repository: still a move, just without history
                 # following it. Recorded so the caller can say which happened.
@@ -1628,10 +1627,10 @@ def plan_rehome(
         plan["moves"].append({"from": candidate.path, "to": candidate.destination})
         moved_by_ref[candidate.path[:-3]] = candidate.destination[:-3]
 
-    filename_index = _build_filename_index(entries)
+    filename_index = build_filename_index(entries)
     for md_path in sorted(root.rglob("*.md")):
         relative = md_path.relative_to(root)
-        if _is_skipped(relative):
+        if is_skipped(relative):
             continue
         plan["notes_scanned"] += 1
         try:

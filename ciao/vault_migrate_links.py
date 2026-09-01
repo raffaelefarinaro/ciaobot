@@ -20,12 +20,12 @@ broken-link check the vault already has.
 What this module will and will not touch
 ----------------------------------------
 * **Body wikilinks** become markdown links, resolved through the same
-  `_build_filename_index`/`_resolve_related` pair the index uses, so a link the
+  `build_filename_index`/`resolve_related` pair the index uses, so a link the
   graph could follow becomes a link that points at the same file.
 * **Frontmatter `related:` values** are normalised to *bare* refs
   (`[[People/Mo]]` -> `People/Mo`) and never to markdown links: YAML sees
   `[Mo](./People/Mo.md)` as a plain string and hands that literal text to
-  `_resolve_related`, which fails. Bare refs already work.
+  `resolve_related`, which fails. Bare refs already work.
 * **Skipped entirely:** `Logs/`, `Templates/`, `.obsidian/` (already excluded
   from index, lint, and search), the regenerated `INDEX.md`/`VOCABULARY.md`
   (but *not* the hand-curated `MEMORY.md`, whose links are real content),
@@ -75,16 +75,21 @@ from typing import Any
 
 from ciao.vault_index import (
     EXCLUDED_TOP_DIRS,
+    build_filename_index,
+    is_excluded,
+    markdown_destination,
+    resolve_related,
+    scan_vault,
+)
+from ciao.vault_lint import EXCLUDE_DIRS
+from ciao.vault_links import (
     FENCED_CODE_RE,
     FRONTMATTER_RE,
     INLINE_CODE_RE,
-    _build_filename_index,
-    _is_excluded,
-    _resolve_related,
-    markdown_destination,
-    scan_vault,
+    WIKILINK_RE,
+    is_escaped,
+    parse_wikilink,
 )
-from ciao.vault_lint import EXCLUDE_DIRS, _is_escaped
 
 logger = logging.getLogger(__name__)
 
@@ -93,28 +98,11 @@ RECEIPT_VERSION = 1
 
 VAULT_PREFIX = "memory-vault"
 
-# `_is_excluded` covers Logs/Templates/.obsidian; `EXCLUDE_DIRS` adds the
+# `is_excluded` covers Logs/Templates/.obsidian; `EXCLUDE_DIRS` adds the
 # directories that are not vault prose at all (`.git`, `.venv`, `node_modules`,
 # agent state). Rewriting a checked-out dependency's README is never wanted, and
 # both sets already exist, so the migration honours the union of them.
 _SKIP_DIRS = EXCLUDED_TOP_DIRS | EXCLUDE_DIRS
-
-# The retired dialect, kept alive here and nowhere else. `vault_index` used to
-# own these; once the readers stopped parsing wikilinks the pattern had no other
-# caller, and this module is the one place that still has to *recognise* a
-# wikilink in order to remove it. Same shape as the pattern the readers used, so
-# the migration converts exactly what the graph used to follow: group 1 is the
-# ref (anchor and alias excluded), group 2 the alias. `[[#Heading]]` cannot match
-# — group 1 needs a non-`#` character — which is why a pure in-page anchor is
-# left alone for free.
-#
-# `[` is excluded from the ref for the same reason `]` is: it is a bracket this
-# pattern is responsible for balancing, not a character a note name has. Letting
-# it in made `people: [[[People/Mo]]]` — a wikilink inside a flow sequence —
-# match from the outer bracket with the ref `[People/Mo`, so the conversion ate
-# the sequence's opening bracket and left `people: Mo]` behind. Excluded, the
-# match starts one character later and the bracket survives.
-WIKILINK_RE = re.compile(r"\[\[([^\[\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]")
 
 
 # ---- receipt ---------------------------------------------------------------
@@ -288,7 +276,14 @@ def remove_receipt(runtime_root: Path) -> bool:
 # ---- git rail --------------------------------------------------------------
 
 
-def _run_git(root: Path, *args: str) -> tuple[int, str]:
+def run_git(root: Path, *args: str) -> tuple[int, str]:
+    """Run one git command in ``root``, returning (exit code, stdout).
+
+    Not the same helper as :func:`ciao.workspace_reroot.run_git`, which folds
+    stderr into the output and lets a missing git raise. This one is called
+    behind a `shutil.which("git")` check on a vault that may not be a repo at
+    all, so a vanished git is a soft "no git state", not an error.
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), *args],
@@ -317,14 +312,14 @@ def vault_git_state(vault_root: Path) -> dict[str, Any]:
     state: dict[str, Any] = {"is_repo": False, "head": "", "dirty": False}
     if not root.is_dir() or shutil.which("git") is None:
         return state
-    code, out = _run_git(root, "rev-parse", "--is-inside-work-tree")
+    code, out = run_git(root, "rev-parse", "--is-inside-work-tree")
     if code != 0 or out.strip() != "true":
         return state
     state["is_repo"] = True
-    code, out = _run_git(root, "rev-parse", "HEAD")
+    code, out = run_git(root, "rev-parse", "HEAD")
     if code == 0:
         state["head"] = out.strip()
-    code, out = _run_git(root, "status", "--porcelain", "--", ".")
+    code, out = run_git(root, "status", "--porcelain", "--", ".")
     if code == 0:
         # Only dirt in files this migration could actually rewrite counts.
         # `--porcelain -- .` also reports untracked transcript folders under
@@ -344,14 +339,14 @@ def vault_git_state(vault_root: Path) -> dict[str, Any]:
             if entry.endswith("/"):
                 # An untracked directory: dirty only if it holds a migratable note.
                 if any(
-                    not _is_skipped(path.relative_to(root))
+                    not is_skipped(path.relative_to(root))
                     for path in candidate.rglob("*.md")
                 ):
                     dirty.append(entry)
                 continue
             if candidate.suffix.lower() != ".md":
                 continue
-            if not _is_skipped(Path(entry)):
+            if not is_skipped(Path(entry)):
                 dirty.append(entry)
         state["dirty"] = bool(dirty)
         state["dirty_paths"] = sorted(dirty)[:20]
@@ -377,7 +372,7 @@ class _Edit:
 def _vault_relative(path: Path) -> Path:
     """Strip the `memory-vault/` prefix that `Entry.path` carries.
 
-    `_build_filename_index` keys by vault-relative stem but stores repo-relative
+    `build_filename_index` keys by vault-relative stem but stores repo-relative
     paths, so a resolved target arrives one segment too long for computing a
     path relative to the note that links to it.
     """
@@ -390,49 +385,6 @@ def _vault_relative(path: Path) -> Path:
 def _escape_label(label: str) -> str:
     """Keep a label from re-opening a bracket the renderer has to balance."""
     return label.replace("\\", "\\\\").replace("[", "\\[")
-
-
-def _parse_wikilink(matched: str) -> tuple[str, str, str]:
-    """Split a `[[ref#anchor|alias]]` match into its three parts.
-
-    `WIKILINK_RE` captures ref and alias but leaves the anchor in a
-    non-capturing group, and the anchor is exactly what the receipt has to keep.
-    Parsing the already-matched text avoids a second wikilink pattern that could
-    disagree with the first about what a wikilink even is.
-
-    The alias pipe is spelled `\\|` inside a markdown table, where a bare `|`
-    would close the cell instead — correct GFM, correct Obsidian, and the only
-    way to write a roster table of people notes. The backslash belongs to the
-    *delimiter*, so it is dropped here rather than left to trail into the ref:
-    `[[People/Mo\\|Mo]]` used to parse as the ref `People/Mo\\`, which resolves to
-    nothing, and the migration then emitted `./People/Mo\\.md` — a path with a
-    stray backslash in it — and reported the link as one that was *already*
-    dead. Every wikilink in a table cell hit this.
-    """
-    inner = matched[2:-2]
-    alias = ""
-    if "|" in inner:
-        inner, alias = inner.split("|", 1)
-        if inner.endswith("\\"):
-            inner = inner[:-1]
-    anchor = ""
-    if "#" in inner:
-        inner, anchor = inner.split("#", 1)
-    return inner.strip(), anchor.strip(), alias.strip()
-
-
-def _alias_separator(matched: str) -> str:
-    """How ``matched`` spelled its alias pipe, `\\|` or `|`.
-
-    For callers that re-emit a wikilink rather than replace it (`vault_rehome`
-    repoints a moved target and keeps the dialect). Re-rendering a table cell's
-    `\\|` as a bare `|` would close the cell early and break the row, which is
-    exactly what `_parse_wikilink` dropping the backslash would otherwise cause.
-    """
-    head, separator, _ = matched[2:-2].partition("|")
-    if not separator:
-        return "|"
-    return "\\|" if head.endswith("\\") else "|"
 
 
 def _resolved_destination(source_dir: str, target: Path) -> str:
@@ -481,13 +433,13 @@ def _body_edits(
         start = match.start()
         if any(low <= start < high for low, high in excluded):
             continue
-        if _is_escaped(body, start):
+        if is_escaped(body, start):
             # `\[[People/Mo]]` is a deliberately un-linked mention.
             continue
-        ref, anchor, alias = _parse_wikilink(match.group(0))
+        ref, anchor, alias = parse_wikilink(match.group(0))
         if not ref:
             continue
-        target = _resolve_related(ref, filename_index)
+        target = resolve_related(ref, filename_index)
         destination = (
             _resolved_destination(source_dir, target)
             if target is not None
@@ -523,7 +475,7 @@ def _frontmatter_edits(text: str, match: re.Match[str]) -> list[_Edit]:
 
     * **The whole value** (`product: [[work/products/slc]]`, a `related:` list
       item, `- "[[People/Mo|Mo]]"`) is a reference. It keeps the **bare ref** —
-      the full path, not the label — because that is what `_resolve_related`
+      the full path, not the label — because that is what `resolve_related`
       reads and what a human needs to find the target again. Reducing
       `work/products/slc` to `slc` would throw the path away.
     * **Embedded in surrounding text** (`description: asked [[People/Mo|Mo]] to
@@ -541,7 +493,7 @@ def _frontmatter_edits(text: str, match: re.Match[str]) -> list[_Edit]:
     offset = match.start(1)
     for line in match.group(1).split("\n"):
         for link in WIKILINK_RE.finditer(line):
-            ref, anchor, alias = _parse_wikilink(link.group(0))
+            ref, anchor, alias = parse_wikilink(link.group(0))
             if not ref:
                 continue
             if _is_whole_frontmatter_value(line, link):
@@ -679,7 +631,7 @@ def has_unmigrated_links(vault_root: Path) -> str:
             relative = path.relative_to(root)
         except ValueError:
             continue
-        if _is_skipped(relative):
+        if is_skipped(relative):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -687,7 +639,7 @@ def has_unmigrated_links(vault_root: Path) -> str:
             continue
         stripped = INLINE_CODE_RE.sub("", FENCED_CODE_RE.sub("", text))
         for match in WIKILINK_RE.finditer(stripped):
-            if not _is_escaped(stripped, match.start()):
+            if not is_escaped(stripped, match.start()):
                 return relative.as_posix()
     return ""
 
@@ -703,10 +655,10 @@ def has_unmigrated_links(vault_root: Path) -> str:
 _REGENERATED_FILES = frozenset({"index.md", "vocabulary.md"})
 
 
-def _is_skipped(relative: Path) -> bool:
+def is_skipped(relative: Path) -> bool:
     if relative.name.casefold() in _REGENERATED_FILES:
         return True
-    if _is_excluded(relative):
+    if is_excluded(relative):
         return True
     return any(part in _SKIP_DIRS for part in relative.parts[:-1])
 
@@ -737,10 +689,10 @@ def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, A
         summary["skipped"] = "vault root does not exist"
         return summary
 
-    filename_index = _build_filename_index(scan_vault(root))
+    filename_index = build_filename_index(scan_vault(root))
     for md_path in sorted(root.rglob("*.md")):
         relative = md_path.relative_to(root)
-        if _is_skipped(relative):
+        if is_skipped(relative):
             continue
         try:
             text = md_path.read_text(encoding="utf-8")

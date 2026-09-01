@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from ciao.vault_index import (
-    _build_filename_index,
+    build_filename_index,
     _extract_body_links,
     markdown_destination,
     scan_vault,
@@ -213,7 +213,7 @@ def test_a_destination_with_a_space_is_spelled_by_the_shared_emitter(
 
 
 def test_frontmatter_related_becomes_a_bare_ref(tmp_path: Path) -> None:
-    """A markdown link in YAML is just a string, and `_resolve_related` fails on
+    """A markdown link in YAML is just a string, and `resolve_related` fails on
     the literal text — so the graph edge would disappear. Bare refs already
     work, and quoting/indentation must survive untouched."""
     vault = _vault(tmp_path)
@@ -242,7 +242,7 @@ def test_a_wikilink_in_a_prose_frontmatter_field_becomes_its_display_text(
     """`description:` is rendered — `scan_vault` reads it into `Entry.description`
     and the index and PWA show it — so a wikilink left there displays as literal
     `[[People/Mo]]` once nothing parses the dialect. It cannot become a markdown
-    link either (YAML would hand the literal string to `_resolve_related`), so it
+    link either (YAML would hand the literal string to `resolve_related`), so it
     reduces to the text a reader was meant to see.
     """
     vault = tmp_path / "memory-vault"
@@ -347,7 +347,7 @@ def test_a_note_with_no_wikilinks_keeps_its_mtime(tmp_path: Path) -> None:
 
 def test_rewrite_note_reports_the_line_of_each_change(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    index = _build_filename_index(scan_vault(vault))
+    index = build_filename_index(scan_vault(vault))
 
     new_text, changes = rewrite_note(_FOO, Path("personal/Projects/Foo.md"), index)
 
@@ -361,7 +361,7 @@ def test_rewrite_note_reports_the_line_of_each_change(tmp_path: Path) -> None:
 
 def test_rewrite_note_accepts_a_repo_relative_source_path(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    index = _build_filename_index(scan_vault(vault))
+    index = build_filename_index(scan_vault(vault))
 
     new_text, _ = rewrite_note(
         _FOO, Path("memory-vault/personal/Projects/Foo.md"), index
