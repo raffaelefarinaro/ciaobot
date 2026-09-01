@@ -99,6 +99,9 @@ SYSTEM_STATE_FIELDS = {
     "last_run_chat_id",
     "last_status",
     "workspace",
+    "model",
+    "provider",
+    "archive_policy",
 }
 
 # Separator between a packaged system routine's id and the workspace it was
