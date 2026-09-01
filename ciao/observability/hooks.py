@@ -67,6 +67,9 @@ _NESTED_SHELL_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b[^|;&]*?\s-[A-Za-z]*c\b")
 
 _COMMENT_RE = re.compile(r"(?m)(^|\s)#[^\n]*")
 
+# Command substitution bodies (innermost, non-nested): $(...) and `...`.
+_CMD_SUB_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
 
 def _looks_detached(command: str) -> bool:
     """Return True when a Bash command spawns a process detached from the
@@ -76,11 +79,17 @@ def _looks_detached(command: str) -> bool:
     quoted substrings, and comments are removed, so message text like
     ``git commit -m "fix & polish"``, an escaped ``echo foo\\&bar``, or an
     ``&`` inside a comment or heredoc does not read as a background launch.
-    A nested shell invocation (``bash -c '...'``, ``sh -c "..."``,
-    ``eval``) gets its quoted inner text inspected too, so
-    ``bash -c 'nohup job &'`` is still denied.
+    Command-substitution bodies (``$(...)`` and backticks) are inspected
+    from the original text before stripping, so
+    ``echo "$(nohup x &)"`` is still denied. A nested shell invocation
+    (``bash -c '...'``, ``sh -c "..."``, ``eval``) gets its quoted inner
+    text inspected too, so ``bash -c 'nohup job &'`` is still denied.
     """
     quoted = _QUOTED_RE.findall(command)
+    for match in _CMD_SUB_RE.finditer(command):
+        body = match.group(1) if match.group(1) is not None else match.group(2)
+        if _looks_detached(body):
+            return True
     no_heredocs = _HEREDOC_RE.sub(lambda m: m.group(0).split("\n", 1)[0], command)
     stripped = _QUOTED_RE.sub(" ", no_heredocs)
     stripped = _COMMENT_RE.sub(lambda m: m.group(1), stripped)

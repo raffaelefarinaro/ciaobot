@@ -112,6 +112,50 @@ async def test_trailing_ampersand_is_denied() -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        'echo "$(nohup sleep 60 >/tmp/x.log 2>&1 &)"',
+        "x=$(nohup job &)",
+        "echo `setsid ./run.sh`",
+    ],
+)
+async def test_command_substitution_detached_launches_are_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-14",
+        None,
+    )
+
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+    assert "background_run_start" in specific["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "$(date)"',
+        "v=$(git rev-parse HEAD)",
+        'echo "$(echo a && echo b)"',
+    ],
+)
+async def test_benign_command_substitutions_are_not_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-15",
+        None,
+    )
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
         "echo foo\\&bar",
         "cat <<EOF\nResearch & Development\nEOF",
         "ls # a & b",
