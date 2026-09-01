@@ -409,6 +409,50 @@ def test_subagent_requires_paths_are_formatted_from_ctx(
     assert ctx["agent"].ok is True
 
 
+def test_subagent_runs_in_payload_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subagent subprocess runs in ``payload['cwd']`` so its relative
+    writes land where relative ``requires`` paths resolve."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with_cwd = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi", "cwd": str(tmp_path)},
+        )
+    ]
+    ctx = run(with_cwd, [], job="unit", label="subagent-cwd")
+    assert ctx["agent"].ok is True
+    assert captured["cwd"] == str(tmp_path)
+
+    captured.clear()
+    without_cwd = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi"},
+        )
+    ]
+    ctx = run(without_cwd, [], job="unit", label="subagent-no-cwd")
+    assert ctx["agent"].ok is True
+    assert captured["cwd"] is None
+
+
 def test_subagent_requires_regex_with_quantifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

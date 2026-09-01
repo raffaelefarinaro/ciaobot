@@ -305,6 +305,10 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     nodes. ``payload['cli']`` defaults to ``claude``. The subprocess
     captures stdout and returns it on success, exit code 0 means ok=true.
 
+    ``payload['cwd']`` is the subprocess working directory (None inherits
+    the current one) and the base that relative ``requires`` paths
+    resolve against.
+
     ``payload['requires']`` is an optional opt-in post-condition list
     checked only when the subprocess exits 0. Each item is either a file
     path (str) that must exist and be non-empty, or a dict
@@ -331,6 +335,7 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
         proc = subprocess.run(
             argv,
             input=rendered,
+            cwd=node.payload.get("cwd"),
             env=env,
             capture_output=True,
             text=True,

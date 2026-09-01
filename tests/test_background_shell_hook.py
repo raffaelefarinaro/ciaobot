@@ -112,10 +112,34 @@ async def test_trailing_ampersand_is_denied() -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        "long_job & echo launched",
+        "python x.py & sleep 1",
+        "cmd &",
+    ],
+)
+async def test_midline_ampersand_jobs_are_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-11",
+        None,
+    )
+
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+    assert "background_run_start" in specific["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
         "a && b",
         "cmd > log 2>&1",
         "cmd 2>&1 | tee x",
         "cmd |& grep x",
+        "cmd &> log",
         'echo "a & b"',
         'git commit -m "fix & polish"',
     ],

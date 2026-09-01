@@ -48,7 +48,7 @@ BACKGROUND_RUN_GUIDANCE = (
 # ``background_run_start`` rather than executed.
 _DETACHED_SHELL_RE = re.compile(
     r"(^|[;&|]\s*)nohup\s"          # nohup anywhere as a command start
-    r"|(?<![&>|])&\s*(?:$|;|\n)"    # a bare trailing & (not &&, not 2>&1, not |&)
+    r"|(?<![&>|<])&(?![&>|])"       # a standalone & (not &&, 2>&1, >&, <&, |&, &>)
     r"|(^|[;&|]\s*)(setsid|disown)\b",
     re.MULTILINE,
 )
