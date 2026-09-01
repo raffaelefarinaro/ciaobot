@@ -225,9 +225,14 @@ describe('SchedulePanel property cards', () => {
     expect(wrapper.findAll('.card-edit')).toHaveLength(4)
   })
 
-  it('hides the per-card edit buttons on system routines', async () => {
+  it('limits system routines to the Engine and Advanced edit cards', async () => {
     const wrapper = await mountPanel(makeSchedule({ scope: 'system' }))
-    expect(wrapper.findAll('.card-edit')).toHaveLength(0)
+    // Title, cadence, and delivery target are fixed for a system routine;
+    // only the engine override and archive behavior are editable.
+    expect(card(wrapper, 'Schedule').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Delivery').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Engine').find('.card-edit').exists()).toBe(true)
+    expect(card(wrapper, 'Advanced').find('.card-edit').exists()).toBe(true)
     // …but the system workspace switcher is still reachable.
     expect(card(wrapper, 'Delivery').find('.system-workspace-control').exists()).toBe(true)
   })
