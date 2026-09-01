@@ -2597,6 +2597,23 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     workspace, vault = _resolve_workspace_and_vault(args)
     text_file = (getattr(args, "text_file", "") or "").strip()
     text = (args.text or "").strip()
+    # The payload is a project doc path or a person's name — user-controlled
+    # like the fact, and just as unsafe to hand to a shell. `--payload-file` is
+    # the same door `--text-file` opens for the text.
+    payload_file = (getattr(args, "payload_file", "") or "").strip()
+    payload = (getattr(args, "payload", "") or "").strip()
+    if payload and payload_file:
+        print(
+            "pass the payload either as --payload or via --payload-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if payload_file:
+        try:
+            payload = Path(payload_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {payload_file}: {exc}", file=sys.stderr)
+            return 2
     if text and text_file:
         print(
             "pass the fact either as text or via --text-file, not both",
@@ -2607,7 +2624,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         fact_path = Path(text_file)
         try:
             text = fact_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             print(f"could not read {text_file}: {exc}", file=sys.stderr)
             return 2
     if not text:
@@ -2625,7 +2642,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    payload = args.payload.strip()
     if kind in {"people", "project"} and not payload:
         # The PWA accept handlers refuse these bullets ("the bullet names no
         # person" / "...no project doc"), so queueing one would create a row
@@ -2675,14 +2691,68 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     substring.
     """
     from ciao import proposal_outcomes
-    from ciao.memory_proposals import record_dismissal, remove_proposal_by_substring
+    from ciao.memory_proposals import (
+        find_proposal_matches,
+        record_dismissal,
+        remove_proposal_by_substring,
+    )
 
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
-    needle = args.text.strip()
+    # Same resolution as `memory-proposal-add`. A proposal's text is arbitrary
+    # user prose, so putting it in argv is the hazard `--text-file` exists to
+    # avoid there; a dismissal names the same text and needed the same door.
+    text_file = (getattr(args, "text_file", "") or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        needle_path = Path(text_file)
+        try:
+            # Stripped, like the add path: a trailing newline is an artifact of
+            # writing the file, never part of the proposal it has to match.
+            needle = needle_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            # UnicodeDecodeError is a ValueError, not an OSError, so an
+            # undecodable file used to escape as a traceback and abort an
+            # unattended curation run.
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
+    # Two needle forms, because rows reach the queue two ways:
+    # `memory-proposal-add` flattens what it writes, while the curation skill
+    # appends `[review]` questions directly and may keep repeated whitespace.
+    # A needle read from the very file a fact was filed from needs the flattened
+    # form; a directly written row needs the raw one.
+    #
+    # Both are resolved to ROW IDENTITIES and unioned, rather than tried in
+    # turn. Trying in turn is wrong twice over: the remover reports "no match"
+    # and "ambiguous" identically, so a fallback after an ambiguous first pass
+    # can uniquely hit a differently spaced row; and a raw form that uniquely
+    # matches one row while the flattened form uniquely matches a DIFFERENT one
+    # would silently delete whichever was tried first. Either way the outcome is
+    # recorded against a proposal nobody named. One row or nothing.
+    flattened = " ".join(needle.split())
+    raw_matches = find_proposal_matches(path, needle)
+    flat_matches = (
+        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
+    )
+    union = set(raw_matches) | set(flat_matches)
+    if len(union) > 1:
+        print(
+            f"{len(union)} memory proposals match {needle!r}; "
+            "pass a longer, unique substring.",
+            file=sys.stderr,
+        )
+        return 1
+    if not raw_matches and flat_matches:
+        needle = flattened
     removed = remove_proposal_by_substring(path, needle)
     if removed is None:
         print(
@@ -3802,7 +3872,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Lists the reviewable memory proposals produced from archived "
             "chats. Read-only. Each pending bullet is emitted with its kind, "
             "text, and source. Decide each item (promote via a region Edit, "
-            "or dismiss with `ciao memory-proposal-dismiss <text>`), keeping "
+            "or dismiss with `ciao memory-proposal-dismiss --text-file <file>`), keeping "
             "the queue clean so the nightly curator has real signal to work "
             "with."
         ),
@@ -3843,6 +3913,15 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default="",
         help="The durable fact to queue. Omit when --text-file supplies it.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--payload-file",
+        default="",
+        help=(
+            "Read --payload from this file. The payload is a document path or a "
+            "person's name, both user-controlled, so it needs the same door out "
+            "of argv that --text-file gives the fact."
+        ),
     )
     memory_proposal_add_parser.add_argument(
         "--text-file",
@@ -3907,7 +3986,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposal_dismiss_parser.add_argument(
         "text",
-        help="Proposal text or unique substring to dismiss.",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--text-file",
+        default="",
+        help=(
+            "Read the substring from this file instead of the argument. Use it "
+            "whenever the text is not known to be free of shell metacharacters "
+            "-- the same reason `memory-proposal-add` has one."
+        ),
     )
     memory_proposal_dismiss_parser.add_argument(
         "--workspace",
