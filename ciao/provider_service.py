@@ -119,6 +119,17 @@ class ProviderService:
         """True when the provider has a live client to drain between turns."""
         return bool(self._provider is not None and getattr(self._provider, "can_drain", False))
 
+    @property
+    def cli_connected(self) -> bool:
+        """True while the provider's persistent CLI subprocess is alive.
+
+        Providers without the concept (they keep no long-lived subprocess)
+        report True so callers only react to a genuinely gone CLI.
+        """
+        if self._provider is None:
+            return False
+        return bool(getattr(self._provider, "cli_connected", True))
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
         if self._provider is None:

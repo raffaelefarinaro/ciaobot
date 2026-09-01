@@ -700,6 +700,11 @@ class ClaudeProvider(BaseSDKProvider):
         """True when a connected client exists to drain between turns."""
         return self._client is not None and self._connected
 
+    @property
+    def cli_connected(self) -> bool:
+        """True while the persistent CLI subprocess this provider owns is alive."""
+        return self._client is not None and self._connected
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield SDK events arriving *between* turns until cancelled.
 

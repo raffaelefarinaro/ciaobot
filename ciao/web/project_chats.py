@@ -64,6 +64,7 @@ except ImportError:  # pragma: no cover
 import yaml
 
 from ciao import job_runs, provider_registry, subagent_tracking
+from ciao.subagent_tracking import SubagentInfo
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -7160,6 +7161,8 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
+        task_wake_sent = False
+        cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
@@ -7175,6 +7178,17 @@ class ProjectChatManager:
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
                 pending = state.notification_pending
+                # CLI-owned tasks (Monitor / background Bash): when the CLI
+                # subprocess that owns them is gone, their completion will
+                # never be delivered. Two consecutive disconnected ticks give
+                # a normal between-turns reconnect time to come back before
+                # the wake fires.
+                tasks = subagent_tracking.running_tasks(state)
+                if tasks and not task_wake_sent:
+                    cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
+                    if cli_gone_ticks >= 2:
+                        self._wake_for_dead_cli_tasks(chat, project_id, tasks)
+                        task_wake_sent = True
                 if pending:
                     held_ticks += 1
                 else:
@@ -7222,6 +7236,17 @@ class ProjectChatManager:
                     if count != last_count or (ready_to_nudge and nudged):
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
+                # Keep the watcher alive while tracked CLI tasks are still
+                # running and their wake has not gone out: once the owning
+                # CLI dies, nothing else would ever deliver the completion.
+                # After the wake (or once the tasks complete via
+                # notification) the normal exit rules apply — the CLI
+                # answers its own task-notifications on resume.
+                if count == 0 and tasks and not task_wake_sent:
+                    if time.perf_counter() >= deadline:
+                        break
+                    await asyncio.sleep(3)
+                    continue
                 if count == 0 and (not pending or nudged or grace_expired):
                     break
                 await asyncio.sleep(3)
@@ -7353,6 +7378,55 @@ class ProjectChatManager:
                 "Subagent synthesis nudge failed for chat %s", chat_id
             )
             return False
+
+    def _cli_owner_alive(self, chat_id: str) -> bool:
+        """True while the chat's CLI subprocess (if any) is still connected.
+
+        A chat with no provider entry at all (server restart) counts as gone:
+        nothing owns its CLI tasks any more. Providers without the concept
+        report alive so only a genuinely dead Claude CLI triggers a wake.
+        """
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None:
+            return False
+        return provider_service.cli_connected
+
+    def _wake_for_dead_cli_tasks(
+        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
+    ) -> None:
+        """Deliver one wake turn for CLI tasks whose owning CLI is gone."""
+        prompt = self._build_cli_task_wake_prompt(tasks)
+        self._deliver_wake(parent, prompt, count=len(tasks))
+
+    @staticmethod
+    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
+        """Compose the wake turn for CLI tasks orphaned by a dead CLI.
+
+        Mirrors the background-run wake: name the log/output the command was
+        writing and tell the chat to verify rather than assume.
+        """
+        lines = [
+            f"[Ciaobot] {len(tasks)} CLI task"
+            f"{'s' if len(tasks) != 1 else ''} you started "
+            "(Monitor / background shell) were lost: the Claude CLI process "
+            "that owned them has exited, so their completion will never be "
+            "delivered to this chat."
+        ]
+        for task in tasks:
+            lines.append("")
+            lines.append(f"— {task.subagent_type}: {task.description} (task {task.agent_id})")
+            if task.command:
+                lines.append(f"command: {task.command}")
+        lines.append("")
+        lines.append(
+            "Check the real state yourself now: read the log or output file "
+            "the command was writing, and inspect the process (pgrep/ps) "
+            "rather than assuming it finished or that the last lines tell the "
+            "whole story. For future long-running commands use the "
+            "`background_run_start` MCP tool, which survives CLI restarts and "
+            "wakes this chat with the exit code, log tail and log path."
+        )
+        return "\n".join(lines)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
         """Deliver one background-run wake turn into *parent* and announce it.
@@ -8205,7 +8279,8 @@ class ProjectChatManager:
                     return True, had_async
                 if not had_async:
                     had_async = any(
-                        info.is_async for info in state.subagents.values()
+                        info.is_async and info.kind == "agent"
+                        for info in state.subagents.values()
                     )
             # Recomputed every tick, not just when the parent file grows: a
             # completion the CLI never wrote there still shows up as the
