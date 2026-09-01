@@ -782,6 +782,87 @@ def _claude_projects_dir(workspace_root: Path) -> Path:
     return Path.home() / ".claude" / "projects" / f"-{slug}"
 
 
+# The global session-lookup fallback (``~/.claude/projects/*/<sid>.jsonl``)
+# walks every project slug dir. On a machine with a few hundred slugs that is
+# hundreds of opendir calls per probe, and probes arrive on the event loop
+# from polling endpoints — a multi-second scandir storm that stalls every
+# in-flight stream (observed: 238 stale eval dirs, ~10ms per glob, loop wedged
+# for minutes). Cache the directory listing and reuse it across probes; a
+# brand-new session file is found by the per-root preferred path first, so a
+# short TTL only delays the cross-cwd fallback, never the common hit.
+_GLOBAL_SESSION_SCAN_TTL = 30.0
+_global_session_scan_lock: threading.Lock | None = None
+# Keyed by the projects root so a changed home() (tests, relocatable homes)
+# invalidates naturally instead of serving another tree's listing.
+_global_session_scan_cache: tuple[Path, float, list[Path]] | None = None
+
+
+def _global_session_candidates() -> list[Path]:
+    """One cached pass over ``~/.claude/projects/*/`` returning *.jsonl paths.
+
+    The listing is shared by every session probe within the TTL window, so N
+    concurrent probes cost one directory walk instead of N. Callers still
+    filter by session id and may ``stat`` a candidate before trusting it.
+    """
+    global _global_session_scan_cache, _global_session_scan_lock
+    if _global_session_scan_lock is None:
+        _global_session_scan_lock = threading.Lock()
+    projects_root = Path.home() / ".claude" / "projects"
+    now = time.monotonic()
+    cached = _global_session_scan_cache
+    if (
+        cached is not None
+        and cached[0] == projects_root
+        and now - cached[1] < _GLOBAL_SESSION_SCAN_TTL
+    ):
+        return cached[2]
+    with _global_session_scan_lock:
+        cached = _global_session_scan_cache
+        if (
+            cached is not None
+            and cached[0] == projects_root
+            and now - cached[1] < _GLOBAL_SESSION_SCAN_TTL
+        ):
+            return cached[2]
+        candidates: list[Path] = []
+        try:
+            for entry in projects_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                try:
+                    candidates.extend(entry.glob("*.jsonl"))
+                except OSError:
+                    continue
+        except OSError:
+            return cached[2] if cached is not None else []
+        _global_session_scan_cache = (projects_root, now, candidates)
+        return candidates
+
+
+def find_claude_session_file(
+    session_id: str,
+    workspace_root: Path | str,
+    *,
+    agent_root: Path | str | None = None,
+) -> Path | None:
+    """Locate ``<session_id>.jsonl`` for a Claude session on this machine.
+
+    Checks the workspace slug dir first, then falls back to one cached scan
+    over ``~/.claude/projects`` for sessions recorded under a different cwd.
+    Returns the path (not verified to be non-empty) or None.
+    """
+    if not session_id:
+        return None
+    root = Path(agent_root) if agent_root is not None else Path(workspace_root)
+    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
+    if preferred.exists():
+        return preferred
+    for path in _global_session_candidates():
+        if path.name == f"{session_id}.jsonl":
+            return path
+    return None
+
+
 def get_session_messages_full(
     session_id: str,
     directory: str | None = None,

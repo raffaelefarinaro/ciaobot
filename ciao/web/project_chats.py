@@ -98,6 +98,7 @@ from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
     _claude_projects_dir,
+    _global_session_candidates,
     _journal_event_record,
 )
 from ciao.web.chat_broker import (
@@ -2484,14 +2485,17 @@ class ProjectChatManager:
         projects_dir = _claude_projects_dir(root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
-        # The glob scan stays for every caller. The projects dir is a slug of
-        # the cwd, so a session recorded under a different cwd is only findable
-        # this way. Isolating roots belongs in the re-rooting release, when
-        # agent_root actually differs; removing the net now would drop sessions
-        # while the hazard is still live.
+        # The cross-cwd fallback stays for every caller. The projects dir is a
+        # slug of the cwd, so a session recorded under a different cwd is only
+        # findable this way. It is served from a cached directory listing (see
+        # transcripts._global_session_candidates) so N probes cost one walk,
+        # not N — the uncached glob used to stall the event loop for minutes
+        # on installs with hundreds of stale project slug dirs.
         try:
-            projects_root = Path.home() / ".claude" / "projects"
-            return projects_root.exists() and any(projects_root.glob(f"*/{session_id}.jsonl"))
+            return any(
+                p.name == f"{session_id}.jsonl"
+                for p in _global_session_candidates()
+            )
         except OSError:
             return False
 

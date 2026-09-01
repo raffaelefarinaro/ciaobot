@@ -4,7 +4,21 @@ import pytest
 from pathlib import Path
 from ciao import job_runs as jr
 from ciao import proposal_outcomes as po
+from ciao import transcripts
 from types import SimpleNamespace
+
+
+@pytest.fixture(autouse=True)
+def _reset_claude_session_scan_cache() -> None:
+    """Drop the cross-test ``~/.claude/projects`` listing cache.
+
+    The cache in ``transcripts`` is module-level and keyed by the projects
+    root; tests that monkeypatch ``Path.home`` would otherwise serve the
+    previous test's directory listing within the TTL window.
+    """
+    transcripts._global_session_scan_cache = None
+    yield
+    transcripts._global_session_scan_cache = None
 
 
 @pytest.fixture(autouse=True)

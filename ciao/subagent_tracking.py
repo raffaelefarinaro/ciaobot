@@ -196,20 +196,18 @@ def find_parent_session_file(
     if not session_id:
         return None
     try:
-        from ciao.transcripts import _claude_projects_dir
+        from ciao.transcripts import find_claude_session_file
 
-        root = agent_root if agent_root is not None else workspace_root
-        preferred = _claude_projects_dir(Path(root)) / f"{session_id}.jsonl"
-        if preferred.exists():
-            return preferred
+        found = find_claude_session_file(
+            session_id, workspace_root, agent_root=agent_root
+        )
+        if found is not None:
+            return found
     except Exception:  # noqa: BLE001 — fall through to the glob scan
         pass
-    # The glob scan stays for every caller, with or without an agent root.
-    # It is the safety net for the exact failure this phase guards against: the
-    # projects dir is a slug of the cwd, so a session recorded under a different
-    # cwd is only findable this way. Isolating roots from each other is correct
-    # once agent_root actually differs per workspace, and wrong before then,
-    # because today it would remove the net while the hazard is still live.
+    # Last-resort uncached scan, kept for callers that hold an agent root so
+    # narrow it would hide a cross-cwd session. The common path above is
+    # cached; this only runs when the shared helper could not be imported.
     projects_root = Path.home() / ".claude" / "projects"
     try:
         for path in projects_root.glob(f"*/{session_id}.jsonl"):
