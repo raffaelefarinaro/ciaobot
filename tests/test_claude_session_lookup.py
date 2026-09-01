@@ -222,6 +222,45 @@ def test_absent_session_polling_rate_limited(
     assert calls["n"] == 1
 
 
+def test_forced_refresh_beats_rate_limit(
+    tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: a final-result lookup must not be suppressed by the gate.
+
+    The watcher and schedule wait call the lookup exactly once; the 2s
+    rescan gate would swallow their decisive probe when a brand-new slug
+    dir appeared moments after the last refresh, abandoning completion
+    tracking or archiving the chat early. force_refresh must re-walk.
+    """
+    sid = _sid(13)
+    # Cold probe populates the slug list without /fresh.
+    assert find_claude_session_file(sid, Path("/Users/me/proj")) is None
+
+    # Session lands in a brand-new cwd seconds later.
+    fresh_slug = _slug(projects_root, "/fresh-cwd")
+    (fresh_slug / f"{sid}.jsonl").write_text("{}")
+
+    calls = {"n": 0}
+    real_iterdir = Path.iterdir
+
+    def counting_iterdir(self: Path):
+        if self == projects_root:
+            calls["n"] += 1
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    # Default lookup: gate suppresses the refresh (rate-limited pollers).
+    assert find_claude_session_file(sid, Path("/Users/me/proj")) is None
+    assert calls["n"] == 0
+    # Forced lookup: the gate is bypassed and the session is found.
+    found = find_claude_session_file(
+        sid, Path("/Users/me/proj"), force_refresh=True
+    )
+    assert found == fresh_slug / f"{sid}.jsonl"
+    assert calls["n"] == 1
+
+
 def test_concurrent_misses_coalesce_to_one_refresh(
     tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,3 +311,42 @@ def test_scan_cache_empty_when_projects_root_absent(
     # home() has no .claude/projects at all; must not raise.
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert _global_session_matches(_sid(12)) == []
+
+
+def test_forced_refresh_via_subagent_tracking(
+    tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_parent_session_file threads force_refresh through to the scan.
+
+    The wrapper's miss path also runs an uncached glob net, so the file is
+    found either way; the forced path reaches it through the shared cache
+    refresh (cheap, shared) instead of the per-caller net.
+    """
+    from ciao import subagent_tracking
+
+    sid = _sid(14)
+    # Cold probe populates the slug list without /late-cwd.
+    assert (
+        subagent_tracking.find_parent_session_file(sid, Path("/Users/me/proj"))
+        is None
+    )
+    late_slug = _slug(projects_root, "/late-cwd")
+    (late_slug / f"{sid}.jsonl").write_text("{}")
+
+    calls = {"n": 0}
+    real_iterdir = Path.iterdir
+
+    def counting_iterdir(self: Path):
+        if self == projects_root:
+            calls["n"] += 1
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    # Forced lookup refreshes the shared slug list and finds the file —
+    # exactly one walk, no per-caller uncached net.
+    found = subagent_tracking.find_parent_session_file(
+        sid, Path("/Users/me/proj"), force_refresh=True
+    )
+    assert found == late_slug / f"{sid}.jsonl"
+    assert calls["n"] == 1

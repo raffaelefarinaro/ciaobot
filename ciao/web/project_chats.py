@@ -7137,10 +7137,14 @@ class ProjectChatManager:
         if chat.provider == "opencode":
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
+        # This watcher looks the file up exactly once; a miss here is final
+        # (the loop below would never run), so force the cross-cwd fallback
+        # past the shared cache's rescan rate limit — see subagent_tracking.
         path = subagent_tracking.find_parent_session_file(
             chat.session_id,
             self._config.workspace_root,
             agent_root=self._agent_root_for_chat(chat_id),
+            force_refresh=True,
         )
         if path is None:
             return
@@ -8175,10 +8179,14 @@ class ProjectChatManager:
         if chat.provider != "claude":
             return True, False
         try:
+            # Single-shot lookup: a miss reports the agents settled and can
+            # archive the chat, so force the lookup past the shared cache's
+            # rescan rate limit — see subagent_tracking.find_parent_session_file.
             path = subagent_tracking.find_parent_session_file(
                 chat.session_id,
                 self._config.workspace_root,
                 agent_root=self._agent_root_for_chat(chat_id),
+                force_refresh=True,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Subagent wait: session file lookup failed for %s", chat_id)

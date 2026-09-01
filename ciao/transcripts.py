@@ -845,7 +845,9 @@ def _global_session_slugs_locked(
     return slugs
 
 
-def _global_session_matches(session_id: str) -> list[Path]:
+def _global_session_matches(
+    session_id: str, *, force_refresh: bool = False
+) -> list[Path]:
     """Cross-cwd paths for ``<session_id>.jsonl``, always fresh at file level.
 
     The slug-dir list is cached (one shared iterdir per TTL window); each
@@ -854,6 +856,12 @@ def _global_session_matches(session_id: str) -> list[Path]:
     the slug list is refreshed once per rescan interval — a brand-new cwd
     gets picked up without absent-session polling rebuilding the per-probe
     scandir storm this cache exists to prevent.
+
+    ``force_refresh`` bypasses that interval. Callers whose single lookup
+    miss is final (the subagent completion watcher stops tracking; the
+    schedule wait reports the agents settled) must pass True so the gate
+    cannot suppress their one decisive probe; high-frequency pollers keep
+    the default and absorb the bounded window.
     """
     if not session_id:
         return []
@@ -873,11 +881,16 @@ def _global_session_matches(session_id: str) -> list[Path]:
     if matches:
         return matches
     # Miss. A session created in a slug dir the cached list does not know
-    # yet is only reachable after a refresh; coalesce and rate-limit it.
+    # yet is only reachable after a refresh; coalesce and rate-limit it
+    # unless the caller cannot tolerate a suppressed miss.
     with _global_session_scan_lock:
         now = time.monotonic()
         entry = _global_session_scan_cache
-        if entry is not None and now - entry[1] < _GLOBAL_SESSION_RESCAN_MIN_INTERVAL:
+        if (
+            not force_refresh
+            and entry is not None
+            and now - entry[1] < _GLOBAL_SESSION_RESCAN_MIN_INTERVAL
+        ):
             # The list was captured moments ago (cold walk or a concurrent
             # refresh); a new slug dir cannot have appeared inside the
             # window often enough to justify another walk per probe.
@@ -917,12 +930,15 @@ def find_claude_session_file(
     workspace_root: Path | str,
     *,
     agent_root: Path | str | None = None,
+    force_refresh: bool = False,
 ) -> Path | None:
     """Locate ``<session_id>.jsonl`` for a Claude session on this machine.
 
-    Checks the workspace slug dir first, then falls back to one cached scan
-    over ``~/.claude/projects`` for sessions recorded under a different cwd.
-    Returns the path (not verified to be non-empty) or None.
+    Checks the workspace slug dir first, then falls back to the cached scan
+    over ``~/.claude/projects`` for sessions recorded under a different cwd
+    (see :func:`_global_session_matches` for the freshness contract and when
+    ``force_refresh`` is required). Returns the path (not verified to be
+    non-empty) or None.
     """
     if not session_id:
         return None
@@ -930,7 +946,7 @@ def find_claude_session_file(
     preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
     if preferred.exists():
         return preferred
-    matches = _global_session_matches(session_id)
+    matches = _global_session_matches(session_id, force_refresh=force_refresh)
     return matches[0] if matches else None
 
 
