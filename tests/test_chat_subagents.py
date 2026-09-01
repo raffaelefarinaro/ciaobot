@@ -1542,3 +1542,47 @@ async def test_sweep_wakes_recently_active_chat(tmp_path: Path, monkeypatch) -> 
         await asyncio.gather(*pending, return_exceptions=True)
 
     assert len(wakes) == 1
+
+
+async def test_task_only_watcher_exits_on_restart_drain(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-drain", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-drain-test")
+    chat.session_id = "sess-task-drain-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-drain-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fail_sleep(seconds: float) -> None:
+        raise AssertionError("task-only watcher must exit when a restart drains")
+
+    monkeypatch.setattr(asyncio, "sleep", fail_sleep)
+
+    pcm.begin_restart_drain()
+
+    await asyncio.wait_for(
+        pcm._watch_subagent_completion(chat.chat_id, project.project_id),
+        timeout=5,
+    )
+
+    assert wakes == []
+    assert chat.chat_id not in pcm.active_chat_ids()

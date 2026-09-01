@@ -7248,6 +7248,13 @@ class ProjectChatManager:
                 # notification) the normal exit rules apply — the CLI
                 # answers its own task-notifications on resume.
                 if count == 0 and tasks and not task_wake_sent:
+                    if self._restart_draining:
+                        # A restart must not wait an hour on this watcher:
+                        # active_chat_ids() counts it and the restart drain
+                        # has no timeout. sweep_orphaned_cli_tasks wakes the
+                        # chat after the restart, so there is nothing left
+                        # to guard here.
+                        break
                     if time.perf_counter() >= deadline:
                         break
                     await asyncio.sleep(3)
