@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from ciao import job_runs
@@ -250,11 +252,73 @@ def _exec_gate(node: Node, ctx: dict[str, Any]) -> NodeResult:
     )
 
 
+def _validate_requires_items(node_id: str, requires: Any) -> None:
+    """Fail fast on malformed ``requires`` items, before spawning."""
+    if not isinstance(requires, list):
+        raise ValueError(
+            f"subagent node '{node_id}' payload['requires'] must be a list of "
+            "str or {path, contains} items"
+        )
+    for item in requires:
+        if isinstance(item, str):
+            continue
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            continue
+        raise ValueError(
+            f"subagent node '{node_id}' payload['requires'] items must be str "
+            "or {path, contains}"
+        )
+
+
+def _check_requires(payload: dict[str, Any], ctx: dict[str, Any]) -> list[str]:
+    """Return one human-readable failure per unmet post-condition (empty = ok)."""
+    requires = payload.get("requires")
+    if not requires:
+        return []
+    cwd = payload.get("cwd")
+    base = Path(cwd) if cwd else Path.cwd()
+    unmet: list[str] = []
+    for raw in requires:
+        if isinstance(raw, str):
+            item_path, contains = raw, None
+        else:
+            item_path, contains = raw["path"], raw.get("contains")
+        path = (base / str(item_path).format_map(_SafeFormatDict(ctx))).resolve()
+        if not path.is_file():
+            unmet.append(f"missing: {path}")
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        if not content.strip():
+            unmet.append(f"empty: {path}")
+            continue
+        if contains is not None:
+            # Used verbatim: format_map would choke on regex quantifiers
+            # like ``^v\d{2}$`` (positional-field syntax).
+            if not re.search(str(contains), content, re.MULTILINE):
+                unmet.append(f"no line matching /{contains}/ in {path}")
+    return unmet
+
+
 def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     """Spawn a sub-CLI subprocess (``claude -p``). The prompt may
     reference ctx via the same ``.format_map`` rules as ``prompt``
     nodes. ``payload['cli']`` defaults to ``claude``. The subprocess
     captures stdout and returns it on success, exit code 0 means ok=true.
+
+    ``payload['cwd']`` is the subprocess working directory (None inherits
+    the current one) and the base that relative ``requires`` paths
+    resolve against.
+
+    ``payload['requires']`` is an optional opt-in post-condition list
+    checked only when the subprocess exits 0. Each item is either a file
+    path (str) that must exist and be non-empty, or a dict
+    ``{"path": ..., "contains": <regex>}`` where at least one line of the
+    file must match the regex. Paths may reference ctx via the same
+    ``.format_map`` rules as the prompt and resolve against
+    ``payload['cwd']``; ``contains`` regexes are used verbatim, never
+    ctx-formatted. Exit 0 with unmet requirements is a
+    node failure (a silent no-op subagent must not count as success);
+    nodes without ``requires`` behave as before.
     """
     cmd = node.payload.get("cli", "claude")
     prompt = node.payload.get("prompt", "")
@@ -262,12 +326,16 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     env = _subprocess_env(node.payload)
     if not prompt:
         raise ValueError(f"subagent node '{node.id}' missing payload['prompt']")
+    requires = node.payload.get("requires")
+    if requires is not None:
+        _validate_requires_items(node.id, requires)
     argv = [cmd, "-p", "--model", node.model or "sonnet", *extra_args]
     rendered = prompt.format_map(_SafeFormatDict(ctx))
     try:
         proc = subprocess.run(
             argv,
             input=rendered,
+            cwd=node.payload.get("cwd"),
             env=env,
             capture_output=True,
             text=True,
@@ -277,6 +345,18 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     except subprocess.TimeoutExpired as exc:
         return NodeResult(ok=False, error=f"timeout after {node.timeout_s}s: {exc}")
     if proc.returncode == 0:
+        unmet = _check_requires(node.payload, ctx)
+        if unmet:
+            return NodeResult(
+                ok=False,
+                output=proc.stdout,
+                error=(
+                    "subagent exited 0 without producing the required output: "
+                    + "; ".join(unmet)
+                    + ". Check that the subagent's tools/MCP servers are authenticated "
+                    "and that it wrote to the expected path."
+                ),
+            )
         return NodeResult(ok=True, output=proc.stdout)
     detail = proc.stderr.strip() or proc.stdout.strip() or "<no output>"
     return NodeResult(

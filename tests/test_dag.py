@@ -259,6 +259,281 @@ def test_subagent_failure_uses_stdout_when_stderr_is_empty(monkeypatch) -> None:
     assert "Not logged in" in (ctx["agent"].error or "")
 
 
+# ── Subagent: requires post-conditions ───────────────────────────────────
+
+
+def _fake_subagent_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch subprocess.run with a returncode-0 subagent stub."""
+
+    class Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+
+
+def test_subagent_requires_passes_when_files_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    report = tmp_path / "report.md"
+    report.write_text("## Adoption\nok\n", encoding="utf-8")
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [
+                    str(report),
+                    {"path": str(report), "contains": r"^## Adoption"},
+                ],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-ok")
+
+    assert ctx["agent"].ok is True
+
+
+def test_subagent_requires_fails_on_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [str(tmp_path / "absent.md")],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-missing")
+
+    assert ctx["agent"].ok is False
+    error = ctx["agent"].error or ""
+    assert "missing:" in error
+    assert "exited 0 without producing" in error
+    assert "authenticated" in error
+
+
+def test_subagent_requires_fails_on_empty_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    empty = tmp_path / "empty.md"
+    empty.write_text("", encoding="utf-8")
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [str(empty)],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-empty")
+
+    assert ctx["agent"].ok is False
+    assert "empty:" in (ctx["agent"].error or "")
+
+
+def test_subagent_requires_fails_when_regex_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    report = tmp_path / "report.md"
+    report.write_text("## Something else\n", encoding="utf-8")
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [
+                    {"path": str(report), "contains": r"^## Adoption"},
+                ],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-regex")
+
+    assert ctx["agent"].ok is False
+    error = ctx["agent"].error or ""
+    assert "no line matching" in error
+    assert "^## Adoption" in error
+
+
+def test_subagent_requires_paths_are_formatted_from_ctx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    # The fake subprocess stub returns stdout "ok" for the bash node too,
+    # so the ctx-derived filename is ok.md.
+    (tmp_path / "ok.md").write_text("## Adoption\nok\n", encoding="utf-8")
+    dag = [
+        Node(id="prev", kind="bash", payload={"cmd": "echo done"}),
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                # A bash node's output is {"stdout": ..., "stderr": ..., "code": 0};
+                # format syntax indexes it like prompt nodes do.
+                "prompt": "report about {prev.output[stdout]}",
+                "requires": [str(tmp_path) + "/{prev.output[stdout]}.md"],
+            },
+        ),
+    ]
+    edges = [Edge(src="prev", dst="agent")]
+
+    ctx = run(dag, edges, job="unit", label="subagent-requires-ctx")
+
+    assert ctx["agent"].ok is True
+
+
+def test_subagent_runs_in_payload_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subagent subprocess runs in ``payload['cwd']`` so its relative
+    writes land where relative ``requires`` paths resolve."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with_cwd = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi", "cwd": str(tmp_path)},
+        )
+    ]
+    ctx = run(with_cwd, [], job="unit", label="subagent-cwd")
+    assert ctx["agent"].ok is True
+    assert captured["cwd"] == str(tmp_path)
+
+    captured.clear()
+    without_cwd = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi"},
+        )
+    ]
+    ctx = run(without_cwd, [], job="unit", label="subagent-no-cwd")
+    assert ctx["agent"].ok is True
+    assert captured["cwd"] is None
+
+
+def test_subagent_requires_regex_with_quantifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `contains` regex is used verbatim, so quantifiers like ``{2}``
+    are regex syntax, not format placeholders."""
+    _fake_subagent_ok(monkeypatch)
+    report = tmp_path / "version.md"
+    report.write_text("v12\n", encoding="utf-8")
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [{"path": str(report), "contains": r"^v\d{2}$"}],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-quantifier")
+    assert ctx["agent"].ok is True
+
+    report.write_text("v1\n", encoding="utf-8")
+    ctx = run(dag, [], job="unit", label="subagent-requires-quantifier-short")
+    assert ctx["agent"].ok is False
+    assert "no line matching" in (ctx["agent"].error or "")
+
+
+def test_subagent_requires_not_checked_on_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [str(tmp_path / "never-written.md")],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-nonzero")
+
+    assert ctx["agent"].ok is False
+    error = ctx["agent"].error or ""
+    assert "exit 1" in error
+    assert "missing:" not in error
+
+
+def test_subagent_requires_rejects_bad_item_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_subagent_ok(monkeypatch)
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [42],
+            },
+        )
+    ]
+
+    with pytest.raises(ValueError, match="requires"):
+        run(dag, [], job="unit", label="subagent-requires-bad-shape")
+
+
 # ── Retention kind: never blocks ────────────────────────────────────────
 
 
