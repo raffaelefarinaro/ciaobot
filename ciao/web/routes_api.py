@@ -716,7 +716,10 @@ def _local_session_jsonl_paths(
 ) -> list[Path]:
     """Find local Claude Code JSONL files for ``session_id``."""
     try:
-        from ciao.transcripts import _claude_projects_dir
+        from ciao.transcripts import (
+            _claude_projects_dir,
+            _global_session_matches,
+        )
     except ImportError:
         return []
     paths: list[Path] = []
@@ -730,9 +733,14 @@ def _local_session_jsonl_paths(
     # scan so callers that supply nothing behave exactly as today.
     if agent_root is not None:
         return paths
-    projects_root = Path.home() / ".claude" / "projects"
+    # Sweep every cross-cwd match, not just the first: a session resumed or
+    # copied under another cwd can have subagent progress records spread
+    # across the files, and _local_subagent_transcripts reads them all. The
+    # listing is cached (transcripts._global_session_matches) so this costs
+    # one walk per TTL window, not one per poll — and a miss re-scans
+    # (rate-limited) so a session created mid-window is not missed.
     try:
-        for path in projects_root.glob(f"*/{session_id}.jsonl"):
+        for path in _global_session_matches(session_id):
             if path not in paths:
                 paths.append(path)
     except OSError:
@@ -785,9 +793,24 @@ def _local_subagent_transcripts(
     grouped: dict[str, list[dict]] = {}
 
     try:
-        nested_paths = sorted(projects_root.glob(f"*/{session_id}/subagents/*.jsonl"))
+        # The projects dir holds one slug folder per cwd; a bare glob over
+        # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
+        # dirs the cached listing already knows, so a stale-slug pileup
+        # cannot turn this fallback into a multi-second scandir storm.
+        candidate_dirs = [
+            entry
+            for entry in projects_root.iterdir()
+            if entry.is_dir() and (entry / session_id / "subagents").is_dir()
+        ]
     except OSError:
-        nested_paths = []
+        candidate_dirs = []
+    nested_paths: list[Path] = []
+    for entry in candidate_dirs:
+        subagents_dir = entry / session_id / "subagents"
+        try:
+            nested_paths.extend(sorted(subagents_dir.glob("*.jsonl")))
+        except OSError:
+            continue
     for path in nested_paths:
         msgs = _read_jsonl_messages(path)
         if msgs:

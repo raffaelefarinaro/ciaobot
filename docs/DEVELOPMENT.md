@@ -29,6 +29,7 @@ ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
+ciao critique --input plan.md --type plan
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
@@ -239,6 +240,7 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
+ciao critique --input plan.md --type plan # Multi-model adversarial review panel
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
 cd web && npm test             # Frontend unit tests
