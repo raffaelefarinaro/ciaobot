@@ -224,32 +224,34 @@ def find_parent_session_file(
     workspace_root: Path | str,
     *,
     agent_root: Path | str | None = None,
+    force_refresh: bool = False,
 ) -> Path | None:
-    """Locate the parent session JSONL for ``session_id`` on this machine."""
+    """Locate the parent session JSONL for ``session_id`` on this machine.
+
+    ``force_refresh`` bypasses the shared cache's rescan rate limit. Callers
+    that look the file up exactly once (the subagent completion watcher and
+    the schedule drain wait) must pass True: a miss here is final for them,
+    so the rate-limit gate must never suppress their decisive probe.
+    """
     if not session_id:
         return None
     try:
-        from ciao.transcripts import _claude_projects_dir
-
-        root = agent_root if agent_root is not None else workspace_root
-        preferred = _claude_projects_dir(Path(root)) / f"{session_id}.jsonl"
-        if preferred.exists():
-            return preferred
+        from ciao.transcripts import find_claude_session_file
     except Exception:  # noqa: BLE001 — fall through to the glob scan
-        pass
-    # The glob scan stays for every caller, with or without an agent root.
-    # It is the safety net for the exact failure this phase guards against: the
-    # projects dir is a slug of the cwd, so a session recorded under a different
-    # cwd is only findable this way. Isolating roots from each other is correct
-    # once agent_root actually differs per workspace, and wrong before then,
-    # because today it would remove the net while the hazard is still live.
-    projects_root = Path.home() / ".claude" / "projects"
-    try:
-        for path in projects_root.glob(f"*/{session_id}.jsonl"):
-            return path
-    except OSError:
-        pass
-    return None
+        # No cached helper available. The uncached net below is then the
+        # only lookup; it is bounded by this import-failure path, never the
+        # ordinary miss path.
+        projects_root = Path.home() / ".claude" / "projects"
+        try:
+            for path in projects_root.glob(f"*/{session_id}.jsonl"):
+                return path
+        except OSError:
+            pass
+        return None
+    return find_claude_session_file(
+        session_id, workspace_root, agent_root=agent_root,
+        force_refresh=force_refresh,
+    )
 
 
 def subagent_transcript_path(parent_path: Path, agent_id: str) -> Path:

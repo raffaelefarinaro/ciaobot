@@ -113,7 +113,7 @@ def test_lists_the_agents_the_parent_session_knows_are_running(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session,
     )
 
     payload = _client(
@@ -140,7 +140,7 @@ def test_finished_agents_leave_no_row(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session,
     )
 
     payload = _client(
@@ -159,7 +159,7 @@ def test_only_active_chats_are_scanned(tmp_path: Path, monkeypatch) -> None:
     ])
     scanned: list[str] = []
 
-    def fake_find(session_id, workspace_root, *, agent_root=None):
+    def fake_find(session_id, workspace_root, *, agent_root=None, force_refresh=False):
         scanned.append(session_id)
         return session
 
@@ -196,7 +196,7 @@ def test_one_unreadable_session_does_not_blank_the_sidebar(
         *_dispatch("toolu_1", "ok", background=True, description="Sweep"),
     ])
 
-    def fake_find(session_id, workspace_root, *, agent_root=None):
+    def fake_find(session_id, workspace_root, *, agent_root=None, force_refresh=False):
         if session_id == "sess-bad":
             raise OSError("session file exploded")
         return good

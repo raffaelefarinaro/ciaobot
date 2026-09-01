@@ -136,6 +136,12 @@ cat > "$output/bin/ciao" <<'LAUNCHER'
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# Where the caller ran us, captured before the cd below throws it away. A
+# relative path in an argument -- `ciao critique --input memory-vault/x.md` --
+# means "relative to the workspace I am standing in", and after `cd "$root"`
+# Python would resolve it against the app bundle and report the file missing.
+CIAO_INVOCATION_CWD=$PWD
+export CIAO_INVOCATION_CWD
 cd "$root"
 python="$root/python/arm64/bin/python3.12"
 site="$root/site-packages/arm64"

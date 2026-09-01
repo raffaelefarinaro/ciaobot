@@ -475,7 +475,11 @@ class CiaoConfig:
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
     pwa_port: int = 8443
-    pwa_host: str = "127.0.0.1"
+    # The server binds all interfaces by default so the PWA is reachable over
+    # LAN and Tailscale; the dashboard password + login rate limit are the
+    # access control. Set ``PWA_HOST=127.0.0.1`` in ``.env`` for loopback-only.
+    # This must stay equal to the ``PWA_HOST`` fallback in ``from_env`` below.
+    pwa_host: str = "0.0.0.0"
     gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
@@ -1396,7 +1400,7 @@ class CiaoConfig:
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
-            pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
+            pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
             gws_default_profile=gws_default_profile,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()

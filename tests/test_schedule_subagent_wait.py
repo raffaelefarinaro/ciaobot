@@ -108,7 +108,7 @@ async def test_await_subagents_settles_when_background_agent_finishes(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     # Each poll sleep appends the completion notification so running 1 → 0.
@@ -188,7 +188,7 @@ async def test_await_subagents_times_out_while_running(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     async def fake_sleep(_seconds: float) -> None:

@@ -968,11 +968,69 @@ async def _reconcile_region(
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
+def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
+    """Whether ``text`` was *rejected* before, not merely decided before.
+
+    `append_proposals` dedupes against both pending bullets and the decision
+    sidecar and returns None for either, so a caller cannot otherwise tell "it
+    is already waiting for you" from "you rejected this before, and it will not
+    come back". Those need different words: the second is the one that silently
+    loses a user who has changed their mind.
+
+    Reads the sidecar directly rather than through `_dismissed_texts`, which
+    returns every decided text — `record_promotion` writes to the same log with
+    a `promoted_at` key. Reusing it would tell someone their fact had been
+    rejected when it was in fact accepted and may already be live.
+
+    Compared through `_one_line`, exactly as `append_proposals` compares.
+    """
+    out_path = Path(workspace_vault_root) / _PROPOSALS_RELATIVE
+    if not out_path.exists():
+        return False
+    wanted = _one_line(text)
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = out_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or key not in entry:
+                continue
+            if _one_line(str(entry.get("text", ""))) == wanted:
+                return True
+    return False
+
+
+
+def was_dismissed(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was rejected before."""
+    return _decided_with(workspace_vault_root, text, "dismissed_at")
+
+
+def was_promoted(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was accepted before, and so may already be live.
+
+    The third state a caller needs. `append_proposals` refuses a re-file for a
+    promoted fact exactly as it does for a dismissed one, and reporting either
+    as "already in the queue" is wrong — a promoted fact is not in the queue at
+    all, it is in its destination.
+    """
+    return _decided_with(workspace_vault_root, text, "promoted_at")
+
+
 def append_proposals(
     proposals: list[MemoryProposal],
     workspace_vault_root: Path,
     *,
     source_path: Path | None = None,
+    allow_dismissed: bool = False,
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``."""
     if not proposals:
@@ -990,7 +1048,8 @@ def append_proposals(
     else:
         existing = _STUB_HEADER
 
-    already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
+    decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
+    already = _existing_proposal_texts(existing) | decided
     # Compare the text exactly as ``as_bullet`` will write it, or a proposal
     # whose text is only whitespace-different from a queued/dismissed one
     # slips past dedupe and lands as a visually identical duplicate row.
@@ -1112,6 +1171,17 @@ def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) ->
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
     """Texts of previously decided proposals, from the sidecar log."""
+    # Older sidecars recorded only ``text`` and ``kind``; keep treating those
+    # entries as decisions when rebuilding the general dedupe set.
+    return _decision_texts(proposals_path, keys=())
+
+
+def _promoted_texts(proposals_path: Path) -> set[str]:
+    """Texts of proposals previously accepted into their destination."""
+    return _decision_texts(proposals_path, keys=("promoted_at",))
+
+
+def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     out: set[str] = set()
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         try:
@@ -1126,7 +1196,9 @@ def _dismissed_texts(proposals_path: Path) -> set[str]:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            text = str(entry.get("text", "")).strip()
+            if not isinstance(entry, dict) or (keys and not any(key in entry for key in keys)):
+                continue
+            text = _one_line(str(entry.get("text", "")))
             if text:
                 out.add(text)
     return out

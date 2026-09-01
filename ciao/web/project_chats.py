@@ -99,6 +99,7 @@ from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
     _claude_projects_dir,
+    _global_session_matches,
     _journal_event_record,
 )
 from ciao.web.chat_broker import (
@@ -2490,14 +2491,16 @@ class ProjectChatManager:
         projects_dir = _claude_projects_dir(root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
-        # The glob scan stays for every caller. The projects dir is a slug of
-        # the cwd, so a session recorded under a different cwd is only findable
-        # this way. Isolating roots belongs in the re-rooting release, when
-        # agent_root actually differs; removing the net now would drop sessions
-        # while the hazard is still live.
+        # The cross-cwd fallback stays for every caller. The projects dir is a
+        # slug of the cwd, so a session recorded under a different cwd is only
+        # findable this way. It is served from a cached directory listing (see
+        # transcripts._global_session_matches) so N probes cost one walk,
+        # not N — the uncached glob used to stall the event loop for minutes
+        # on installs with hundreds of stale project slug dirs. A miss
+        # refreshes the listing (rate-limited) so a session created under
+        # another cwd inside the TTL window is not reported absent.
         try:
-            projects_root = Path.home() / ".claude" / "projects"
-            return projects_root.exists() and any(projects_root.glob(f"*/{session_id}.jsonl"))
+            return bool(_global_session_matches(session_id))
         except OSError:
             return False
 
@@ -7141,10 +7144,14 @@ class ProjectChatManager:
         if chat.provider == "opencode":
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
+        # This watcher looks the file up exactly once; a miss here is final
+        # (the loop below would never run), so force the cross-cwd fallback
+        # past the shared cache's rescan rate limit — see subagent_tracking.
         path = subagent_tracking.find_parent_session_file(
             chat.session_id,
             self._config.workspace_root,
             agent_root=self._agent_root_for_chat(chat_id),
+            force_refresh=True,
         )
         if path is None:
             return
@@ -8344,10 +8351,14 @@ class ProjectChatManager:
         if chat.provider != "claude":
             return True, False
         try:
+            # Single-shot lookup: a miss reports the agents settled and can
+            # archive the chat, so force the lookup past the shared cache's
+            # rescan rate limit — see subagent_tracking.find_parent_session_file.
             path = subagent_tracking.find_parent_session_file(
                 chat.session_id,
                 self._config.workspace_root,
                 agent_root=self._agent_root_for_chat(chat_id),
+                force_refresh=True,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
