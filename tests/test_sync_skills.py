@@ -316,6 +316,70 @@ def test_pre_existing_identical_copy_is_adopted(tmp_path: Path) -> None:
     assert result.stock_commands_refreshed == 0
 
 
+def test_unmarked_older_shipped_revision_is_refreshed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import hashlib
+
+    workspace = tmp_path / "workspace"
+    canonical = workspace / "commands" / "remember.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(b"# Old shipped remember\n")
+    monkeypatch.setitem(
+        sync_skills.SHIPPED_STOCK_COMMAND_DIGESTS,
+        "remember.md",
+        frozenset({sync_skills._digest(b"# Old shipped remember\n")}),
+    )
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    text = canonical.read_text(encoding="utf-8")
+    assert "ciao:memory" in text
+    marker = workspace / "commands" / "remember.md.ciao-stock-command"
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == hashlib.sha256(
+        canonical.read_bytes()
+    ).hexdigest()
+    assert result.stock_commands_refreshed == 1
+    assert result.stock_commands_customised == 0
+
+
+def test_unmarked_unknown_text_is_still_customised(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "workspace"
+    canonical = workspace / "commands" / "remember.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(b"# My own remember\n")
+    monkeypatch.setitem(
+        sync_skills.SHIPPED_STOCK_COMMAND_DIGESTS,
+        "remember.md",
+        frozenset({sync_skills._digest(b"# Old shipped remember\n")}),
+    )
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert canonical.read_bytes() == b"# My own remember\n"
+    assert not (workspace / "commands" / "remember.md.ciao-stock-command").exists()
+    assert result.stock_commands_customised == 1
+
+
+def test_stock_command_revision_registry_is_current() -> None:
+    from importlib import resources
+
+    stock_commands = resources.files("ciao.stock").joinpath("commands")
+    for entry in stock_commands.iterdir():
+        if not entry.name.endswith(".md"):
+            continue
+        digest = sync_skills._digest(entry.read_bytes())
+        assert digest in sync_skills.SHIPPED_STOCK_COMMAND_DIGESTS[entry.name], (
+            f"{entry.name} changed: append the digest {digest} of the new text "
+            "to SHIPPED_STOCK_COMMAND_DIGESTS in ciao/sync_skills.py"
+        )
+
+
 def test_pre_existing_different_copy_without_marker_is_customised(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     canonical = workspace / "commands" / "remember.md"
