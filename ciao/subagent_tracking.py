@@ -13,6 +13,14 @@ session spawned and whether they are still running:
   ``<task-notification>`` envelope naming the ``<task-id>`` (the agent id)
   and a ``<status>``.
 
+The CLI also owns tasks that outlive a turn and have no subagent
+transcript: ``Monitor`` calls, ``Bash`` calls with ``run_in_background``,
+and workflow launches. Their ``tool_result`` carries
+``toolUseResult.taskId`` (not ``agentId``). Those are recorded here too,
+with ``kind="task"``, so the completion watcher can wake the chat when the
+CLI process that owned them is gone; agent counts
+(``running_background``, ``running_agents``) exclude them.
+
 ``list_subagents`` in the SDK only enumerates transcript *files*, which
 persist after completion, so it can never answer "how many are still
 running". Parsing the parent JSONL is the reliable signal, and it also
@@ -33,6 +41,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DISPATCH_TOOL_NAMES = {"Agent", "Task", "agent", "task"}
+
+# CLI-owned task tools: their tool_result carries ``toolUseResult.taskId``
+# instead of ``agentId``, and they have no subagent transcript file. ``Bash``
+# only counts when it actually ran detached (``run_in_background``).
+_TASK_TOOL_NAMES = {"Monitor", "Bash"}
 
 # How long a background agent's own transcript must sit untouched before we
 # treat it as finished without a ``<task-notification>``. See
@@ -153,6 +166,17 @@ class SubagentInfo:
     # the `turn_index` the /messages endpoint stamps on user bubbles. None
     # when the dispatch happened before any countable user turn.
     turn_index: int | None = None
+    # "agent" for Agent/Task dispatches (with a transcript) or "task" for
+    # CLI-owned Monitor / background Bash / workflow tasks (no transcript,
+    # identified by toolUseResult.taskId).
+    kind: str = "agent"
+    # Raw <status> from the CLI's <task-notification> ("stopped" maps to
+    # "completed" in `status`). Kept so the wake prompt can distinguish the
+    # CLI's synthetic "no completion record" case.
+    raw_status: str = ""
+    # First 200 chars of the dispatch command (Monitor / background Bash), so
+    # a wake prompt can name the log or output file to check.
+    command: str = ""
 
 
 @dataclass
@@ -182,7 +206,7 @@ class SessionSubagentState:
         return sum(
             1
             for info in self.subagents.values()
-            if info.is_async and info.status == "running"
+            if info.is_async and info.status == "running" and info.kind == "agent"
         )
 
 
@@ -340,15 +364,33 @@ def running_agents(
     mid-dispatch never writes the ``tool_result`` (or the
     ``<task-notification>``) that would move the status off "running", so
     without it a dead row would sit in the sidebar forever.
+
+    CLI-owned tasks (``kind == "task"``) never appear here: they have no
+    transcript file, so the lookup below would be meaningless for them — see
+    ``running_tasks`` instead.
     """
     return [
         info
         for info in state.subagents.values()
         if info.status == "running"
+        and info.kind == "agent"
         and (info.is_async or not only_async)
         and not has_finished_transcript(
             parent_path, info.agent_id, now=now, idle_seconds=idle_seconds
         )
+    ]
+
+
+def running_tasks(state: SessionSubagentState) -> list[SubagentInfo]:
+    """CLI-owned tasks (Monitor / background Bash / workflows) still running.
+
+    These have no transcript, so their lifecycle is the parent JSONL's:
+    ``running`` until a ``<task-notification>`` lands for the taskId.
+    """
+    return [
+        info
+        for info in state.subagents.values()
+        if info.kind == "task" and info.status == "running"
     ]
 
 
@@ -503,18 +545,36 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
-                    if (
+                    if not (
                         isinstance(block, dict)
                         and block.get("type") == "tool_use"
-                        and block.get("name") in _DISPATCH_TOOL_NAMES
                         and block.get("id")
                     ):
-                        tool_input = block.get("input") or {}
-                        if not isinstance(tool_input, dict):
-                            tool_input = {}
+                        continue
+                    tool_input = block.get("input") or {}
+                    if not isinstance(tool_input, dict):
+                        tool_input = {}
+                    name = str(block.get("name") or "")
+                    if name in _DISPATCH_TOOL_NAMES:
                         dispatch_inputs[str(block["id"])] = {
                             "description": str(tool_input.get("description") or ""),
                             "subagent_type": str(tool_input.get("subagent_type") or ""),
+                            "kind": "agent",
+                        }
+                    elif name in _TASK_TOOL_NAMES:
+                        # Only a detached Bash carries a taskId; a foreground
+                        # Bash has no task lifecycle to track.
+                        if name == "Bash" and not tool_input.get("run_in_background"):
+                            continue
+                        command = str(tool_input.get("command") or "")[:200]
+                        dispatch_inputs[str(block["id"])] = {
+                            "description": str(
+                                tool_input.get("description")
+                                or command[:80]
+                            ),
+                            "tool_name": name,
+                            "kind": "task",
+                            "command": command,
                         }
                 continue
 
@@ -547,6 +607,36 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     is_async=is_async,
                     status=status,
                     turn_index=user_idx - 1 if user_idx > 0 else None,
+                )
+                continue
+
+            if isinstance(tool_use_result, dict) and tool_use_result.get("taskId"):
+                # CLI-owned task launch receipt (Monitor, background Bash,
+                # workflow): no agentId, no transcript, keyed by taskId.
+                task_id = _normalize_agent_id(str(tool_use_result["taskId"]))
+                tool_use_id = _tool_result_use_id(message)
+                dispatched = dispatch_inputs.get(tool_use_id, {})
+                existing = state.subagents.get(task_id)
+                # Same never-downgrade rule as agents.
+                status = "running"
+                if existing is not None and existing.status not in ("", "running"):
+                    status = existing.status
+                state.subagents[task_id] = SubagentInfo(
+                    agent_id=task_id,
+                    tool_use_id=tool_use_id,
+                    description=str(dispatched.get("description") or ""),
+                    # The tool name (Monitor/Bash) labels the task in the UI;
+                    # an unknown tool falls back to the CLI's taskType.
+                    subagent_type=str(
+                        dispatched.get("tool_name")
+                        or tool_use_result.get("taskType")
+                        or "task"
+                    ),
+                    is_async=True,
+                    status=status,
+                    turn_index=user_idx - 1 if user_idx > 0 else None,
+                    kind="task",
+                    command=str(dispatched.get("command") or ""),
                 )
                 continue
 
@@ -596,7 +686,8 @@ def _apply_notification(state: SessionSubagentState, content: str) -> None:
     task_id = _normalize_agent_id(fields.get("task-id", ""))
     if not task_id:
         return
-    status = fields.get("status", "") or "completed"
+    raw_status = fields.get("status", "") or "completed"
+    status = raw_status
     if status not in ("completed", "failed"):
         # The CLI's vocabulary may grow; anything non-failed counts as done
         # for "is it still running" purposes.
@@ -607,7 +698,11 @@ def _apply_notification(state: SessionSubagentState, content: str) -> None:
         # (e.g. an agent spawned by another subagent). Record it so the
         # transcript endpoint can still attach a status.
         state.subagents[task_id] = SubagentInfo(
-            agent_id=task_id, is_async=True, status=status
+            agent_id=task_id,
+            is_async=True,
+            status=status,
+            raw_status=raw_status,
         )
     else:
         info.status = status
+        info.raw_status = raw_status
