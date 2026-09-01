@@ -1121,3 +1121,43 @@ def test_add_dedupes_dismissed_direct_row_with_repeated_whitespace(
     out = capsys.readouterr().out
     assert "Previously dismissed" in out
     assert queue.read_text(encoding="utf-8").count("Prefers") == 1
+
+
+def test_add_can_refile_dismissed_fact_when_explicitly_allowed(
+    tmp_path, monkeypatch, capsys
+):
+    """An explicit reconsideration can bypass dismissal, but not promotion."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    fact = "Prefers tabs over spaces."
+
+    assert cli.main(
+        ["memory-proposal-add", "--workspace", str(tmp_path), "--vault-root", str(vault), fact]
+    ) == 0
+    assert cli.main(
+        [
+            "memory-proposal-dismiss",
+            "--workspace",
+            str(tmp_path),
+            "--vault-root",
+            str(vault),
+            fact,
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert cli.main(
+        [
+            "memory-proposal-add",
+            "--workspace",
+            str(tmp_path),
+            "--vault-root",
+            str(vault),
+            "--allow-dismissed",
+            fact,
+        ]
+    ) == 0
+    assert "Queued" in capsys.readouterr().out

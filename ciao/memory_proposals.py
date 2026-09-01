@@ -1030,6 +1030,7 @@ def append_proposals(
     workspace_vault_root: Path,
     *,
     source_path: Path | None = None,
+    allow_dismissed: bool = False,
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``."""
     if not proposals:
@@ -1047,7 +1048,8 @@ def append_proposals(
     else:
         existing = _STUB_HEADER
 
-    already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
+    decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
+    already = _existing_proposal_texts(existing) | decided
     # Compare the text exactly as ``as_bullet`` will write it, or a proposal
     # whose text is only whitespace-different from a queued/dismissed one
     # slips past dedupe and lands as a visually identical duplicate row.
@@ -1169,6 +1171,17 @@ def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) ->
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
     """Texts of previously decided proposals, from the sidecar log."""
+    # Older sidecars recorded only ``text`` and ``kind``; keep treating those
+    # entries as decisions when rebuilding the general dedupe set.
+    return _decision_texts(proposals_path, keys=())
+
+
+def _promoted_texts(proposals_path: Path) -> set[str]:
+    """Texts of proposals previously accepted into their destination."""
+    return _decision_texts(proposals_path, keys=("promoted_at",))
+
+
+def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     out: set[str] = set()
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         try:
@@ -1182,6 +1195,8 @@ def _dismissed_texts(proposals_path: Path) -> set[str]:
             try:
                 entry = json.loads(line)
             except ValueError:
+                continue
+            if not isinstance(entry, dict) or (keys and not any(key in entry for key in keys)):
                 continue
             text = _one_line(str(entry.get("text", "")))
             if text:

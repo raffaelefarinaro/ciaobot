@@ -5,7 +5,7 @@ argument-hint: <what to remember>
 
 # Remember: $ARGUMENTS
 
-Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X → assistant did Y" — and queue it for review instead of writing memory directly, so a person sees it before it becomes always-loaded context and the outcome is logged. The queue dedupes by exact text; it does **not** reconcile a fact against the entries already there, so accepting an updated preference appends it beside the superseded one. Say so when that is likely, and curate the region in the same pass.
+Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X → assistant did Y" — and queue it for review instead of writing memory directly, so a person sees it before it becomes always-loaded context and the outcome is logged. The queue dedupes by exact text; it does **not** reconcile a fact against the entries already there, so accepting an updated preference appends it beside the superseded one. Say so when that is likely, but do not edit existing always-loaded memory before this proposal is approved unless the user explicitly asks for an immediate write.
 
 1. **Shape the fact.** One sentence, present tense, stating what IS true from now on. If it is only true from or until a date, append `[as-of: YYYY-MM-DD]` or `[expires: YYYY-MM-DD]`.
 2. **Pick the destination** the way the insights extractor tags bullets:
@@ -16,7 +16,7 @@ Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X �
    - reusable how-to knowledge spanning projects → `learnings`
    - durable but unsure where it belongs → `review`
 3. **File it.** Write the fact verbatim to a scratch file and run `ciao memory-proposal-add --kind <destination> --text-file <fact-file>`, adding `--payload-file <payload-file>` for `project` and `people`. Neither the fact nor the payload travels as a shell argument: both are user-controlled — the payload is a doc path or a person's name — and `$()`, backticks, or quotes in either would be run or mangled. Re-filing an identical fact is a harmless no-op; the queue dedupes by text.
-4. **Confirm what actually happened** — read the command's own output, do not assume it queued. It reports one of three things: queued, already in the queue, or *previously dismissed and therefore NOT queued*. The last one means the user rejected this fact before and the queue will not re-offer it; say so and ask whether to file it anyway rather than reporting success. When it did queue, tell them it is waiting for review in `Workspace/Memory-Proposals.md` (the PWA Proposals panel shows it), not silently written into memory.
+4. **Confirm what actually happened** — read the command's own output, do not assume it queued. It reports queued, already in the queue, *previously dismissed and therefore NOT queued*, or already promoted. A dismissed fact was rejected before and the queue will not re-offer it; ask whether to file it again, and if they say yes, rerun with `--allow-dismissed`. A promoted fact should already be live in its destination. When it did queue, tell them it is waiting for review in `Workspace/Memory-Proposals.md` (the PWA Proposals panel shows it), not silently written into memory.
 
 If the user explicitly wants it live immediately, write it where step 2 routed it — the destination does not change just because the review step is skipped:
 

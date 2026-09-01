@@ -2664,7 +2664,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         source_section=args.source.strip() or "curation",
         payload=payload,
     )
-    path = append_proposals([proposal], vault)
+    path = append_proposals(
+        [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
+    )
     # `append_proposals` returns None for two different situations and the
     # difference matters to whoever asked: a fact already queued is waiting for
     # them, while a fact they dismissed before will never come back on its own.
@@ -4011,6 +4013,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--allow-dismissed",
+        action="store_true",
+        help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
     )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
