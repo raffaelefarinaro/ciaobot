@@ -1243,3 +1243,206 @@ def test_text_user_prompt_prepends_context():
     assert plain.startswith("Below is a rendered")
     assert augmented.startswith("## Known context")
     assert augmented.endswith(plain)
+
+
+# ── call_with_retry: the one retry policy ────────────────────────────────
+#
+# The policy used to exist three times (JSONL input, rendered-archive input,
+# and inline in the backfill worker) and the copies had drifted. These pin the
+# shared one, including the two flags that preserve the drift on purpose.
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the retry wait without patching `asyncio.sleep` process-wide.
+
+    `insights.asyncio` *is* the asyncio module, so setattr'ing `sleep` on it
+    would make every `asyncio.sleep` in the process a no-op for the duration
+    of the test. Zeroing the delay constant is the narrow equivalent.
+    """
+    monkeypatch.setattr(insights, "_RETRY_DELAY_S", 0)
+
+
+class _Terminal(Exception):
+    """A provider rejection the provider already classified as non-transient."""
+
+    transient = False
+
+
+def test_call_with_retry_succeeds_first_time() -> None:
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        return "output"
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert (outcome.output, outcome.error, outcome.attempts) == ("output", "", 1)
+    assert outcome.gave_up == ""
+    assert calls == 1
+
+
+def test_call_with_retry_retries_a_transient_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "second try"
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.output == "second try"
+    assert outcome.attempts == 2
+    assert outcome.gave_up == ""
+    assert calls == 2
+
+
+def test_call_with_retry_gives_up_after_two_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("boom")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "failed-twice"
+    assert outcome.attempts == 2
+    assert outcome.error == "boom"
+    assert calls == 2
+
+
+def test_call_with_retry_never_retries_a_terminal_rejection() -> None:
+    """Quota/auth/bad-model fail identically on a second call.
+
+    Re-sending costs another rejected request plus the 30s wait, once per
+    archive across a whole backfill run.
+    """
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise _Terminal("over quota")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "terminal"
+    assert outcome.attempts == 1
+    assert outcome.error == "over quota"
+    assert calls == 1
+
+
+def test_call_with_retry_never_retries_a_context_overflow() -> None:
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "context-overflow"
+    assert calls == 1
+
+
+def test_call_with_retry_can_be_told_to_retry_an_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text-mode path's deliberate asymmetry.
+
+    Text mode sends the whole rendered archive without fitting it to a budget,
+    so it retried an overflow before this policy existed and still does. The
+    flag is what keeps that a decision rather than a difference between two
+    copies of the same code.
+    """
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(call, label="test call", check_context_overflow=False)
+    )
+    assert outcome.gave_up == "failed-twice"
+    assert calls == 2
+
+
+def test_call_with_retry_skips_an_unavailable_apple_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(insights.native_sidecar, "is_apple_model", lambda model: True)
+    monkeypatch.setattr(insights.native_sidecar, "apple_model_available", lambda: False)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("sidecar missing")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(call, label="test call", model="apple-on-device")
+    )
+    assert outcome.gave_up == "apple-unavailable"
+    assert calls == 1
+
+
+def test_call_with_retry_can_be_told_not_to_check_the_apple_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill worker's deliberate asymmetry: it never made that check."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(insights.native_sidecar, "is_apple_model", lambda model: True)
+    monkeypatch.setattr(insights.native_sidecar, "apple_model_available", lambda: False)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("sidecar missing")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(
+            call,
+            label="test call",
+            model="apple-on-device",
+            check_apple_available=False,
+        )
+    )
+    assert outcome.gave_up == "failed-twice"
+    assert calls == 2
+
+
+def test_retry_outcome_distinguishes_never_asked_from_answered_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the outcome is typed at all.
+
+    Both cases used to surface as an empty string plus a log line, so a caller
+    could not tell "the account is over quota, the model was never asked" from
+    "the model answered nothing twice".
+    """
+    _no_sleep(monkeypatch)
+
+    async def refused() -> str:
+        raise _Terminal("over quota")
+
+    async def empty() -> str:
+        return ""
+
+    never_asked = asyncio.run(insights.call_with_retry(refused, label="test call"))
+    answered_nothing = asyncio.run(insights.call_with_retry(empty, label="test call"))
+
+    assert never_asked.output == answered_nothing.output == ""
+    assert never_asked.gave_up == "terminal"
+    assert answered_nothing.gave_up == ""
