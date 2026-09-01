@@ -409,6 +409,36 @@ def test_subagent_requires_paths_are_formatted_from_ctx(
     assert ctx["agent"].ok is True
 
 
+def test_subagent_requires_regex_with_quantifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `contains` regex is used verbatim, so quantifiers like ``{2}``
+    are regex syntax, not format placeholders."""
+    _fake_subagent_ok(monkeypatch)
+    report = tmp_path / "version.md"
+    report.write_text("v12\n", encoding="utf-8")
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [{"path": str(report), "contains": r"^v\d{2}$"}],
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-requires-quantifier")
+    assert ctx["agent"].ok is True
+
+    report.write_text("v1\n", encoding="utf-8")
+    ctx = run(dag, [], job="unit", label="subagent-requires-quantifier-short")
+    assert ctx["agent"].ok is False
+    assert "no line matching" in (ctx["agent"].error or "")
+
+
 def test_subagent_requires_not_checked_on_nonzero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

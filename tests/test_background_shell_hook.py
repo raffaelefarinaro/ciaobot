@@ -133,6 +133,73 @@ async def test_ordinary_shell_operators_are_not_denied(command: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_detached_command_with_run_in_background_is_denied() -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "nohup python x.py > /tmp/x.log 2>&1 &",
+                "run_in_background": True,
+            },
+        },
+        "tool-use-8",
+        None,
+    )
+
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+    assert "updatedInput" not in specific
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'nohup job &'",
+        'sh -c "python x.py &"',
+        "zsh -lc 'setsid ./run.sh'",
+        'eval "nohup x &"',
+    ],
+)
+async def test_nested_shell_detached_commands_are_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-9",
+        None,
+    )
+
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+    assert "background_run_start" in specific["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bash -c "python x.py"',
+        'bash -c \'echo "a & b"\'',
+        'git commit -m "fix & polish"',
+        "sh -c 'a && b'",
+    ],
+)
+async def test_nested_shell_ordinary_commands_are_not_denied(command: str) -> None:
+    hook = build_foreground_bash_hook()
+
+    out = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        "tool-use-10",
+        None,
+    )
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
 async def test_monitor_tool_is_denied() -> None:
     hook = build_monitor_deny_hook()
 

@@ -292,8 +292,9 @@ def _check_requires(payload: dict[str, Any], ctx: dict[str, Any]) -> list[str]:
             unmet.append(f"empty: {path}")
             continue
         if contains is not None:
-            pattern = str(contains).format_map(_SafeFormatDict(ctx))
-            if not re.search(pattern, content, re.MULTILINE):
+            # Used verbatim: format_map would choke on regex quantifiers
+            # like ``^v\d{2}$`` (positional-field syntax).
+            if not re.search(str(contains), content, re.MULTILINE):
                 unmet.append(f"no line matching /{contains}/ in {path}")
     return unmet
 
@@ -309,8 +310,9 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     path (str) that must exist and be non-empty, or a dict
     ``{"path": ..., "contains": <regex>}`` where at least one line of the
     file must match the regex. Paths may reference ctx via the same
-    ``.format_map`` rules as the prompt, and resolve against
-    ``payload['cwd']`` when present. Exit 0 with unmet requirements is a
+    ``.format_map`` rules as the prompt and resolve against
+    ``payload['cwd']``; ``contains`` regexes are used verbatim, never
+    ctx-formatted. Exit 0 with unmet requirements is a
     node failure (a silent no-op subagent must not count as success);
     nodes without ``requires`` behave as before.
     """

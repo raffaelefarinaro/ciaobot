@@ -55,6 +55,8 @@ _DETACHED_SHELL_RE = re.compile(
 
 _QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 
+_NESTED_SHELL_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b[^|;&]*?\s-[A-Za-z]*c\b")
+
 
 def _looks_detached(command: str) -> bool:
     """Return True when a Bash command spawns a process detached from the
@@ -62,9 +64,19 @@ def _looks_detached(command: str) -> bool:
 
     Single/double-quoted substrings are stripped first so message text like
     ``git commit -m "fix & polish"`` does not read as a background launch.
+    A nested shell invocation (``bash -c '...'``, ``sh -c "..."``, ``eval``)
+    gets its quoted inner text inspected too, so ``bash -c 'nohup job &'``
+    is still denied.
     """
+    quoted = _QUOTED_RE.findall(command)
     stripped = _QUOTED_RE.sub(" ", command)
-    return bool(_DETACHED_SHELL_RE.search(stripped))
+    if _DETACHED_SHELL_RE.search(stripped):
+        return True
+    if _NESTED_SHELL_RE.search(stripped) or re.search(r"\beval\b", stripped):
+        for inner in quoted:
+            if _looks_detached(inner[1:-1]):
+                return True
+    return False
 
 
 def build_foreground_bash_hook():
@@ -97,18 +109,8 @@ def build_foreground_bash_hook():
         tool_input = input_data.get("tool_input")
         if not isinstance(tool_input, dict):
             return {}
-        if tool_input.get("run_in_background") is True:
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "updatedInput": {**tool_input, "run_in_background": False},
-                    "additionalContext": (
-                        "Ciaobot kept this Bash command in the foreground because "
-                        "background shell processes stop when the SDK turn ends. "
-                        "Wait for the tool result before replying."
-                    ),
-                }
-            }
+        # Detach check comes first: a rewrite alone would still launch the
+        # detached child (e.g. ``nohup job &`` with run_in_background=true).
         command = tool_input.get("command")
         if isinstance(command, str) and _looks_detached(command):
             return {
@@ -119,6 +121,18 @@ def build_foreground_bash_hook():
                         BACKGROUND_RUN_GUIDANCE
                         + " The command you tried: "
                         + command[:200]
+                    ),
+                }
+            }
+        if tool_input.get("run_in_background") is True:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": {**tool_input, "run_in_background": False},
+                    "additionalContext": (
+                        "Ciaobot kept this Bash command in the foreground because "
+                        "background shell processes stop when the SDK turn ends. "
+                        "Wait for the tool result before replying."
                     ),
                 }
             }
