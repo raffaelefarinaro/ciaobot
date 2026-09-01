@@ -206,6 +206,11 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
+# The orphaned-CLI-task startup sweep only wakes chats active within this
+# window: the first upgrade after the sweep shipped must not wake every chat
+# that ever left a Monitor running months ago, and a Monitor worth checking
+# is one from this week.
+_ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
@@ -7404,7 +7409,12 @@ class ProjectChatManager:
 
         No watcher survives a restart (one is only armed when a turn finishes),
         so without this sweep a task that was running at shutdown would never
-        produce a wake. Delivery goes through the same deferred path as
+        produce a wake. Only chats active within
+        ``_ORPHANED_CLI_TASK_SWEEP_MAX_AGE`` are woken: the first upgrade after
+        the sweep shipped must not wake every chat that ever left a Monitor
+        running months ago. An unparseable or empty ``last_activity_at`` never
+        skips a chat — the wake is worth more than the risk of missing one.
+        Delivery goes through the same deferred path as
         ``queue_background_wake`` — a bounded coalescing sleep, then
         ``_deliver_wake`` — so the sweep does not fire mid-startup and never
         raises into the caller. Returns the number of chats armed for a wake.
@@ -7415,6 +7425,13 @@ class ProjectChatManager:
                 if chat.archived or not chat.session_id:
                     continue
                 if chat.provider != "claude":
+                    continue
+                last_active = _parse_iso(chat.last_activity_at)
+                if (
+                    last_active is not None
+                    and datetime.now(UTC) - last_active
+                    > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE
+                ):
                     continue
                 path = subagent_tracking.find_parent_session_file(
                     chat.session_id,

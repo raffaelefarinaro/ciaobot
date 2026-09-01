@@ -1458,3 +1458,87 @@ async def test_sweep_skips_archived_and_non_claude_chats(
 
     assert pcm.sweep_orphaned_cli_tasks() == 0
     assert wakes == []
+
+
+async def test_sweep_skips_chats_idle_for_more_than_a_week(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-stale", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-stale-test")
+    chat.session_id = "sess-task-stale-1"
+    chat.last_activity_at = (
+        datetime.now(UTC) - timedelta(days=8)
+    ).isoformat().replace("+00:00", "Z")
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-stale-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
+
+
+async def test_sweep_wakes_recently_active_chat(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-fresh", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-fresh-test")
+    chat.session_id = "sess-task-fresh-1"
+    chat.last_activity_at = (
+        datetime.now(UTC) - timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-fresh-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert pcm.sweep_orphaned_cli_tasks() == 1
+
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
