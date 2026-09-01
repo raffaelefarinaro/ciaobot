@@ -1024,3 +1024,28 @@ async def test_drain_keeps_connection_on_unhandled_result(
     assert provider.cli_connected is True
     assert provider._client is not None
     _ = StreamEvent  # imported shape parity with real drain payloads
+
+
+@pytest.mark.asyncio
+async def test_drain_keeps_connection_on_message_parse_error(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A bad payload from a still-alive CLI must not kill the connection."""
+    from claude_agent_sdk._errors import MessageParseError
+
+    class ParseErrorClient:
+        async def receive_messages(self):
+            raise MessageParseError("bad payload", data=None)
+            yield  # pragma: no cover
+
+    provider = claude_provider
+    provider._client = ParseErrorClient()
+    provider._connected = True
+
+    events = []
+    async for event in provider.drain_events():
+        events.append(event)
+
+    assert events == []
+    assert provider.cli_connected is True
+    assert provider._client is not None

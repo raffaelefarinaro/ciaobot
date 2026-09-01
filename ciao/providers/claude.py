@@ -739,10 +739,13 @@ class ClaudeProvider(BaseSDKProvider):
                 async for msg in client.receive_messages():
                     for event in self._convert_message(msg):
                         merged.put_nowait(event)
-            except _CLAUDE_OP_ERRORS:
+            except (CLIConnectionError, ProcessError):
                 logger.debug("Between-turns drain ended on SDK error", exc_info=True)
                 # The transport is gone (the CLI process died between turns).
-                # Mirror disconnect()'s state clearing minus the awaited client
+                # Only these two mean a dead process: ClaudeSDKError also
+                # covers MessageParseError, which is a bad payload from a
+                # still-alive CLI and must not kill the connection. Mirror
+                # disconnect()'s state clearing minus the awaited client
                 # call — we are inside the consumer task, so a disconnect()
                 # await here would deadlock the drain. _ensure_connected
                 # rebuilds the client on the next turn, exactly as after a
@@ -754,6 +757,10 @@ class ClaudeProvider(BaseSDKProvider):
                 self._pending_quota = {}
                 self._mcp_token = ""
                 self._reset_settings()
+            except _CLAUDE_OP_ERRORS:
+                # Other typed SDK errors (e.g. MessageParseError) are not
+                # transport death; end the drain, keep the client usable.
+                logger.debug("Between-turns drain ended on SDK error", exc_info=True)
             except Exception:
                 # The SDK raises bare ``Exception`` for some result shapes
                 # (e.g. result_type=user, stop_reason=tool_use) that aren't
