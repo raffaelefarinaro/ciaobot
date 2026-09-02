@@ -95,10 +95,6 @@ export interface McpStatus {
   url?: string
   tool_count: number
   tools?: string[]
-  // Lazy discovery: `tools` is everything registered and callable, while
-  // `listed_tools` is the subset a chat sees in tools/list up front.
-  lazy_tools?: boolean
-  listed_tools?: string[]
   env_path?: string
   project_servers?: McpProjectServer[]
   active_sessions?: number

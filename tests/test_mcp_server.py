@@ -1779,224 +1779,23 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     assert "Stdio" in result["tools_note"]
 
 
-def _lazy_service(
-    tmp_path: Path, *, lazy: bool = True, mode: str = "auto"
-) -> tuple[CiaoMcpService, _FakeControlPlane]:
-    config = SimpleNamespace(
-        state_path=tmp_path / ".runtime" / "state.json",
-        pwa_port=18443,
-        mcp_lazy_tools=lazy,
-    )
-    service = CiaoMcpService(config)
-    control_plane = _FakeControlPlane(mode=mode)
-    service.bind(control_plane)  # type: ignore[arg-type]
-    return service, control_plane
+def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
+    """Every registered tool is listed with its schema.
 
-
-def test_tool_groups_cover_every_registered_tool(tmp_path: Path) -> None:
-    """A tool absent from _TOOL_GROUPS is unreachable through tools_search.
-
-    tools_search advertises its catalog from the group map, so a new tool that
-    nobody added to a group would be hidden from tools/list and invisible to
-    discovery at the same time.
+    A lazy variant once listed only a core and deferred the rest to a
+    tools_search / tools_call pair. It cut ~9k tokens of schema per chat but
+    models stopped using tools they could no longer see, so the whole catalog
+    is listed again and there is no dispatcher to route around a tool's own
+    approval card and telemetry.
     """
     service, _control_plane = _service(tmp_path)
-    grouped = {
-        name for names in mcp_server._TOOL_GROUPS.values() for name in names
-    }
-    registered = service._tool_names - mcp_server._META_TOOLS
 
-    assert grouped == registered
-    # One group each; the description would list a tool twice otherwise.
-    flat = [n for names in mcp_server._TOOL_GROUPS.values() for n in names]
-    assert len(flat) == len(set(flat))
+    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
 
-
-def test_lazy_listing_hides_the_bulk_but_keeps_destructive_tools(
-    tmp_path: Path,
-) -> None:
-    """Destructive tools must stay named in tools/list.
-
-    Auto-approval is a static name allowlist on the provider side, so a
-    destructive tool reached through tools_call would inherit the dispatcher's
-    approval instead of raising its own card.
-    """
-    service, _control_plane = _service(tmp_path)
-    listed = {tool.name for tool in asyncio.run(service._list_visible_tools())}
-
-    assert {"tools_search", "tools_call"} <= listed
-    assert {"context_get", "memory_status", "vault_search"} <= listed
-    assert service._destructive_tool_names() <= listed
-    # The rest of the catalog is registered but not listed.
-    assert "chat_send" in service._tool_names
-    assert "chat_send" not in listed
-    assert "schedule" not in listed
-    assert len(listed) < len(service._tool_names)
-    assert set(service.status()["listed_tools"]) == listed
-    assert service.status()["lazy_tools"] is True
-
-
-def test_lazy_listing_off_lists_the_whole_catalog(tmp_path: Path) -> None:
-    service, _control_plane = _lazy_service(tmp_path, lazy=False)
-    tools = asyncio.run(service.server.list_tools())
-
-    assert {tool.name for tool in tools} == service._tool_names
-    assert service.status()["lazy_tools"] is False
-
-
-def test_tools_search_returns_schemas_for_a_group(tmp_path: Path) -> None:
-    service, _control_plane = _service(tmp_path)
-
-    result = asyncio.run(service._tools_search("loops"))
-
-    assert result["ok"] is True
-    names = {row["name"] for row in result["data"]["tools"]}
-    assert names == set(mcp_server._TOOL_GROUPS["loops"])
-    row = next(r for r in result["data"]["tools"] if r["name"] == "loop")
-    assert row["group"] == "loops"
-    assert row["listed"] is False
-    assert "action" in row["input_schema"]["properties"]
-    # loop_action is destructive, so it is already listed.
-    assert next(
-        r for r in result["data"]["tools"] if r["name"] == "loop_action"
-    )["listed"] is True
-
-
-def test_tools_search_without_a_query_returns_the_summary_catalog(
-    tmp_path: Path,
-) -> None:
-    service, _control_plane = _service(tmp_path)
-
-    result = asyncio.run(service._tools_search(""))
-
-    catalog = result["data"]["catalog"]
-    assert result["data"]["matched"] == 0
-    assert {row["name"] for row in catalog} == (
-        service._tool_names - mcp_server._META_TOOLS
-    )
-    # Summaries only — the point is not to pay for the schemas here.
-    assert all("input_schema" not in row for row in catalog)
-    assert all(row["summary"] for row in catalog)
-
-
-def test_tools_search_falls_back_to_the_catalog_on_no_match(tmp_path: Path) -> None:
-    service, _control_plane = _service(tmp_path)
-
-    result = asyncio.run(service._tools_search("zzzz-nothing"))
-
-    assert result["data"]["matched"] == 0
-    assert result["data"]["catalog"]
-
-
-def test_tools_search_description_lists_every_group_and_tool() -> None:
-    description = mcp_server._tools_search_description()
-
-    for group, names in mcp_server._TOOL_GROUPS.items():
-        assert group in description
-        for name in names:
-            assert name in description
-
-
-def test_tools_call_dispatches_and_records_the_inner_tool_name(
-    tmp_path: Path,
-) -> None:
-    service, control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
-
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "tools_call",
-                "arguments": {
-                    "name": "schedule",
-                    "arguments": {"action": "create", "prompt": "do a thing"},
-                },
-            },
-        )
-
-    assert called.status_code == 200
-    payload = called.json()["result"]["structuredContent"]
-    assert payload["ok"] is True
-    assert control_plane.create_calls == 1
-    # Telemetry and the status panel must see the real tool, not the wrapper.
-    record = json.loads(
-        service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1]
-    )
-    assert record["tool"] == "schedule"
-    assert record["chat_id"] == "chat-1"
-    assert record["status"] == "ok"
-
-
-def test_tools_call_still_honours_plan_mode(tmp_path: Path) -> None:
-    service, control_plane = _service(tmp_path, mode="plan")
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
-
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "tools_call",
-                "arguments": {
-                    "name": "schedule",
-                    "arguments": {"action": "create", "prompt": "do a thing"},
-                },
-            },
-        )
-
-    payload = called.json()["result"]["structuredContent"]
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "plan_mode_read_only"
-    assert control_plane.create_calls == 0
-
-
-def test_tools_call_refuses_destructive_meta_and_unknown_names(
-    tmp_path: Path,
-) -> None:
-    service, _control_plane = _service(tmp_path)
-
-    destructive = asyncio.run(service._tools_call("chat_delete", {"chat_id": "c1"}))
-    assert destructive["ok"] is False
-    assert destructive["error"]["code"] == "invalid_request"
-    assert "directly by name" in destructive["error"]["message"]
-
-    # Every name the dispatcher accepts is already auto-approved, so it opens
-    # no hole the provider policy did not already grant.
-    reachable = {
-        name
-        for name in service._tool_names
-        if not service._dispatch_refusal(name)
-    }
-    assert reachable <= set(AUTO_APPROVED_MCP_TOOLS)
-
-    assert asyncio.run(service._tools_call("tools_call", {}))["ok"] is False
-    assert asyncio.run(service._tools_call("", {}))["ok"] is False
-    unknown = asyncio.run(service._tools_call("nope", {}))
-    assert unknown["ok"] is False
-    assert "tools_search" in unknown["error"]["message"]
-
-
-def test_tools_call_reports_bad_arguments_as_invalid_request(tmp_path: Path) -> None:
-    service, _control_plane = _service(tmp_path)
-
-    result = asyncio.run(service._tools_call("chat_send", {"nonsense": 1}))
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "invalid_request"
+    assert listed == service._tool_names
+    assert not listed & {"tools_search", "tools_call"}
+    assert set(service.status()["tools"]) == listed
+    assert service.status()["tool_count"] == len(listed)
 
 
 def test_auto_approved_policy_matches_tool_annotations() -> None:
@@ -2008,8 +1807,8 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     ``_DESTRUCTIVE`` one still raises an approval card.
     """
     source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    # Both the single-line decorators and the multi-line ones (tools_search /
-    # tools_call pass an explicit description=).
+    # Matches both single-line decorators and multi-line ones that pass
+    # further keywords (structured_output=, description=) after annotations.
     declared = re.findall(
         r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source
     )
