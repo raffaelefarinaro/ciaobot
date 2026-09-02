@@ -1204,9 +1204,9 @@ class CiaoControlPlane:
     def schedule_preview(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
         """Validate schedule fields and resolve workspace/project targets.
 
-        When ``chat_id`` is omitted, ``project_id`` defaults to the caller's
-        active project (same as ``chat_create``) so MCP-created schedules land
-        in the chat's workspace+project instead of an unscoped Personal fallback.
+        ``project_id`` defaults to the caller's active project (same as
+        ``chat_create``) so MCP-created schedules land in the chat's
+        workspace+project instead of an unscoped Personal fallback.
 
         An explicit ``workspace`` may only restate the principal's own. Unlike a
         chat turn, a schedule is auto-approved model input that persists a
@@ -1216,6 +1216,9 @@ class CiaoControlPlane:
         workspace's guide, integrations, and filesystem authority, without
         operator approval. Giving a second workspace an automation is operator
         business, done from a chat scoped to it.
+
+        A schedule binds to a project (+ workspace), never to a chat: a
+        ``chat_id`` is refused outright (issue #407).
         """
         # One boundary for explicit and omitted targets alike: ``_workspace``
         # refuses any name other than the principal's own and still validates
@@ -1224,19 +1227,25 @@ class CiaoControlPlane:
 
         chat_ref = values.get("chat_id")
         project_ref = values.get("project_id")
-        web_chat_id: str | None = None
-        project: Any | None = None
 
+        # A schedule binds to a project (+ workspace), never to a chat. A
+        # chat-bound run posts into one conversation forever: runs are invisible
+        # unless the operator watches that chat, and an archived target resumes
+        # a reclaimed provider session and fails silently on every later run
+        # (issue #407). A project run opens a fresh chat each time, which is
+        # also what makes runs visible in the sidebar.
         if chat_ref:
-            chat = self._chat(principal, str(chat_ref))
-            web_chat_id = chat.chat_id
+            raise ControlPlaneError(
+                "chat_binding_unsupported",
+                "Schedules bind to a project, not a chat. Pass project_id "
+                "(each run then opens a fresh chat in it, visible in the "
+                "sidebar) — chat_id bindings fail silently once their target "
+                "chat is archived.",
+            )
 
-        if project_ref:
-            project = self._resolve_project(principal, str(project_ref))
-        elif not web_chat_id:
-            # Inherit the active project when omitted — preferred for vault-aware
-            # automation and keeps the schedule in the same workspace as this chat.
-            project = self._resolve_project(principal, None)
+        # Inherit the active project when omitted — preferred for vault-aware
+        # automation and keeps the schedule in the same workspace as this chat.
+        project = self._resolve_project(principal, project_ref)
 
         web_project_id: str | None = None
         if project is not None:
@@ -1279,7 +1288,7 @@ class CiaoControlPlane:
             interval_minutes=interval_minutes,
             day_of_month=values.get("day_of_month"),
             run_at_date=values.get("run_at_date"),
-            web_chat_id=web_chat_id,
+            web_chat_id=None,
             web_project_id=web_project_id,
             web_project_name=getattr(project, "name", "") if project is not None else "",
             workspace=workspace,
@@ -1357,6 +1366,18 @@ class CiaoControlPlane:
             target = origin
 
         project: Any | None = None
+        if changes.get("chat_id") is not None:
+            # Same stance ``schedule_preview`` draws on create (issue #407): a
+            # schedule binds to a project, never to a chat — a chat-bound run
+            # posts into one conversation forever and fails silently once that
+            # chat is archived.
+            raise ControlPlaneError(
+                "chat_binding_unsupported",
+                "Schedules bind to a project, not a chat. Pass project_id "
+                "(each run then opens a fresh chat in it, visible in the "
+                "sidebar) — chat_id bindings fail silently once their target "
+                "chat is archived.",
+            )
         if changes.get("project_id"):
             # Resolve the reference inside the *destination* workspace, exactly
             # as ``schedule_preview`` does. Going through
@@ -1372,6 +1393,9 @@ class CiaoControlPlane:
             changes["project_id"] = project.project_id
             # Keep workspace aligned with the new target (same as the HTTP API).
             changes.setdefault("workspace", project.workspace)
+            # A legacy chat-bound row re-pointed at a project drops the chat
+            # binding; set on `normalized` below, whose None values survive
+            # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
         if project is not None:
@@ -1380,6 +1404,17 @@ class CiaoControlPlane:
             # project's name behind would let a moved schedule silently re-home
             # onto the wrong project.
             normalized["web_project_name"] = project.name
+            # A legacy chat-bound row re-pointed at a project must drop the
+            # chat binding: keeping both leaves web_chat_id in control of
+            # dispatch-time inheritance (schedule_effective_routing reads
+            # provider/model off the old chat) while prepare_schedule_chat
+            # creates each run in the project — so runs land in fresh chats
+            # with the old chat's engine, and behavior flips again when that
+            # chat later disappears. The workspace-move branch below clears
+            # web_chat_id only when target != origin; supplying a project
+            # target is the same migration regardless of workspace.
+            if entry.web_chat_id:
+                normalized["web_chat_id"] = None
         if target != origin:
             # Reassigning the workspace has to re-point the run target too:
             # dispatch prioritises web_chat_id/web_project_id and never checks
@@ -1389,12 +1424,15 @@ class CiaoControlPlane:
             # workspace's project/chat: a silent cross-workspace write.
             if normalized.get("web_chat_id"):
                 # Same boundary ``schedule_create`` draws: a chat binding cannot
-                # cross workspaces, and it resolves against the caller's own.
+                # cross workspaces — and cannot exist at all on this surface,
+                # which refuses ``chat_id`` outright — so this only fires for a
+                # legacy row that was chat-bound before that stance. Point the
+                # caller at project_id instead of accepting the move.
                 raise ControlPlaneError(
-                    "workspace_mismatch",
-                    "chat_id binds the schedule to a chat in its current workspace; "
-                    "omit it when moving the schedule to another workspace, and pass "
-                    "project_id to choose where its runs land.",
+                    "chat_binding_unsupported",
+                    "This schedule is bound to a chat in its current workspace; "
+                    "chat bindings are no longer supported. Pass project_id to "
+                    "choose where its runs land.",
                 )
             if entry.web_chat_id or entry.web_project_id:
                 normalized["web_chat_id"] = None

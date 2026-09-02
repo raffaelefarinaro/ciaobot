@@ -1272,6 +1272,52 @@ class CiaoConfig:
 
         source = env if env is not None else os.environ
 
+        discovered_workspace = ""
+        if env is None and not source.get("CIAO_WORKSPACE"):
+            # A bare-shell CLI invocation (`ciao health get` from any directory)
+            # has no CIAO_WORKSPACE. Fall back to the workspace the installed
+            # server's LaunchAgent points at before dropping to bootstrap, so
+            # CLI diagnostics report on the install the operator actually has
+            # instead of manufacturing a fresh bootstrap workspace beside it.
+            # Gated on ``env is None``: explicit env dicts (every test, and any
+            # caller constructing a config) must keep their exact semantics.
+            from ciao.macos_service import discover_runtime
+
+            try:
+                discovered = discover_runtime(environ=dict(os.environ))
+            except Exception:  # noqa: BLE001 - plist missing/unreadable
+                discovered = None
+            if discovered and discovered.workspace:
+                discovered_workspace = discovered.workspace
+        if env is None and discovered_workspace:
+            # The discovered workspace's .env is what the running server reads;
+            # a bare-shell invocation must see the same values — auth settings
+            # first: `ciao run` against a stopped install must require the
+            # workspace's password, not fall back to an unauthenticated shell
+            # env. Values are overlaid into the source mapping rather than
+            # loaded into os.environ: a direct env write would leak into the
+            # process after this call (load_dotenv sets keys it has never seen,
+            # and nothing restores them), so a read-only diagnostic changed its
+            # caller's environment. Precedence matches load_dotenv: the process
+            # environment wins over the file, and the discovered workspace is
+            # pinned absolutely so the file's relative CIAO_WORKSPACE=. cannot
+            # rebase onto the shell cwd. This must run before any field below
+            # is parsed from ``source``, or it would see only the bare shell.
+            from dotenv import dotenv_values
+
+            dotenv_path = Path(discovered_workspace) / ".env"
+            if dotenv_path.exists():
+                try:
+                    dotenv_overlay = {
+                        key: value
+                        for key, value in dotenv_values(dotenv_path).items()
+                        if key and value is not None
+                    }
+                except OSError:
+                    dotenv_overlay = {}
+                dotenv_overlay["CIAO_WORKSPACE"] = discovered_workspace
+                source = {**dotenv_overlay, **source}
+
         pwa_allowed_origins = tuple(
             o.strip()
             for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")

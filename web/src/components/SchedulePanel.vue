@@ -116,8 +116,15 @@
               <dt>Next run</dt><dd class="prop-highlight">{{ nextRunLabel(schedule) }}</dd>
             </div>
             <!-- Interval cadence has no expected slot, so the missed-run check
-                 cannot report its health. last_status does instead. -->
-            <div v-if="isIntervalSchedule(schedule)" class="prop-row">
+                 cannot report its health. last_status does instead. A
+                 wall-clock entry shows the row too when its last dispatch
+                 failed: the missed-run check only trips long after the failed
+                 fire (next occurrence + 5 minutes), and without it the failure
+                 sat in the job log with nothing user-visible anywhere. -->
+            <div
+              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped'"
+              class="prop-row"
+            >
               <dt>Status</dt><dd>{{ intervalStatusLabel(schedule) }}</dd>
             </div>
             <div class="prop-row">
@@ -896,7 +903,10 @@ function enabledToggleLabel(s: Schedule): string {
 }
 
 // Interval entries have no expected slot, so the missed-run check cannot speak
-// for them. last_status is the server's health report instead.
+// for them. last_status is the server's health report instead. A wall-clock
+// entry lands here too when its last dispatch failed (the dispatch stamps
+// last_status = "error" on the row), which the missed-run check alone reports
+// far too late to be actionable.
 function intervalStatusLabel(s: Schedule): string {
   if (s.last_status === 'missing-chat') return 'stopped — chat missing'
   if (s.last_status === 'busy') return 'waiting — chat busy'

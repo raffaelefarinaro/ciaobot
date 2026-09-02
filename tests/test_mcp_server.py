@@ -796,59 +796,45 @@ def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Pat
     assert stored.workspace == "work"
 
 
-def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> None:
-    pcm = _work_project_pcm()
-    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
-    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
-    control_plane, _schedules = _schedule_control_plane(tmp_path, pcm)
-    principal = _chat_create_principal(
-        project_id="project-work",
-        workspace="work",
-    )
+def test_schedule_create_rejects_chat_binding(tmp_path: Path) -> None:
+    """A schedule binds to a project, never to a chat (issue #407).
 
+    A chat-bound run posts into one conversation forever — invisible unless the
+    operator watches that chat — and once the chat is archived the dispatch
+    resumes a reclaimed provider session and fails silently on every later run.
+    """
+    control_plane, _schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            _chat_create_principal(project_id="project-work", workspace="work"),
+            prompt="Continue this thread weekly.",
+            daily_time="08:00",
+            timezone="UTC",
+            frequency="weekly",
+            chat_id="chat-fixed",
+        )
+    assert excinfo.value.code == "chat_binding_unsupported"
+    assert _schedules.list_entries() == []
+
+
+def test_schedule_update_rejects_chat_binding(tmp_path: Path) -> None:
+    """Same stance on the update door, where chat_id arrives among many fields."""
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
     result = control_plane.schedule_create(
         principal,
-        prompt="Continue this thread weekly.",
-        daily_time="08:00",
-        timezone="UTC",
+        prompt="Check for new signals.",
+        daily_time="09:00",
         frequency="weekly",
-        chat_id="chat-fixed",
     )
+    schedule_id = result["data"]["schedule_id"]
 
-    assert result["data"]["web_chat_id"] == "chat-fixed"
-    assert result["data"]["web_project_id"] is None
-    assert result["data"]["workspace"] == "work"
-
-
-def test_schedule_create_with_chat_id_records_the_rehome_fallback(
-    tmp_path: Path,
-) -> None:
-    """The MCP creator stamped no fallback, so a deleted chat lost the project.
-
-    `web_project_id` cannot carry this — on an interval entry it means "a new
-    chat per run" and outranks the fixed chat — so the bound chat's own project
-    is recorded separately, and only while that chat still exists. Without it
-    the unattended run re-homes into the workspace's General.
-    """
-    pcm = _work_project_pcm()
-    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
-    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
-    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
-
-    result = control_plane.schedule_create(
-        _chat_create_principal(project_id="project-work", workspace="work"),
-        prompt="Continue this thread weekly.",
-        daily_time="08:00",
-        timezone="UTC",
-        frequency="weekly",
-        chat_id="chat-fixed",
-    )
-
-    # Read the persisted row, not the payload: the stamp lands after `create`
-    # and is only useful if it was written back.
-    stored = schedules._store.get(result["data"]["schedule_id"])
-    assert stored is not None
-    assert stored.fallback_project_id == "project-work"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(principal, schedule_id, chat_id="chat-fixed")
+    assert excinfo.value.code == "chat_binding_unsupported"
+    stored = schedules.list_entries()[0]
+    assert stored.web_chat_id is None
 
 
 def test_mcp_loop_create_and_retarget_keep_the_rehome_fallback_in_step(
@@ -1154,15 +1140,15 @@ def test_interval_schedule_defaults_to_caller_and_stamps_workspace(
         prompt="Check PRs",
         frequency="interval",
         interval_minutes=15,
-        chat_id="chat-work",
     )
 
     data = result["data"]
     assert data["frequency"] == "interval"
     assert data["interval_minutes"] == 15
-    assert data["web_chat_id"] == "chat-work"
+    # The caller's own project is the binding: a schedule never binds a chat.
+    assert data["web_project_id"] == "project-work"
     assert data["workspace"] == "work"
-    # Empty model is what makes each run inherit the target chat's settings.
+    # Empty model is what makes each run inherit the workspace's default.
     assert data["model"] == ""
     # No wall-clock slot, so a next run is still reported (cadence from now).
     assert data["next_run"]
@@ -1177,7 +1163,6 @@ def test_interval_schedule_rejects_a_cadence_below_the_floor(tmp_path: Path) -> 
             prompt="Check PRs",
             frequency="interval",
             interval_minutes=0,
-            chat_id="chat-work",
         )
     assert excinfo.value.code == "invalid_interval"
 
@@ -1186,9 +1171,7 @@ def test_unknown_frequency_is_refused(tmp_path: Path) -> None:
     control_plane, principal = _interval_control_plane(tmp_path)
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        control_plane.schedule_create(
-            principal, prompt="p", frequency="hourly", chat_id="chat-work"
-        )
+        control_plane.schedule_create(principal, prompt="p", frequency="hourly")
     assert excinfo.value.code == "invalid_frequency"
 
 
@@ -1986,3 +1969,36 @@ def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
     )
 
     assert first == second
+
+
+def test_schedule_update_to_a_project_clears_a_legacy_chat_binding(
+    tmp_path: Path,
+) -> None:
+    """A chat-bound legacy row re-pointed at a project drops web_chat_id.
+
+    Keeping both left dispatch inheritance reading provider/model off the old
+    chat (schedule_effective_routing) while prepare_schedule_chat created each
+    run in the project — fresh chats running the old chat's engine, flipping
+    again when that chat disappeared. The workspace-move branch cleared the
+    binding only on an actual move; supplying a project target is the same
+    migration whatever the workspace does.
+    """
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+        web_chat_id="chat-1",
+        web_project_id="project-1", web_project_name="Ciaobot Improvements",
+    )
+
+    updated = control_plane.schedule_update(
+        _chat_create_principal(), entry.schedule_id,
+        project_id="project-2",
+    )
+
+    data = updated["data"]
+    assert data["web_project_id"] == "project-2"
+    assert data["web_chat_id"] is None
+    stored = schedules.list_entries()[0]
+    assert stored.web_project_id == "project-2"
+    assert stored.web_chat_id is None

@@ -261,6 +261,29 @@ describe('SchedulePanel property cards', () => {
     expect(rows.some(r => r.includes('when the chat is free'))).toBe(true)
   })
 
+  it('shows a status row for a wall-clock entry whose last dispatch failed', async () => {
+    // A dispatch failure stamps last_status on the row (issue #407). The
+    // missed-run check only trips at the next occurrence + 5 minutes; without
+    // this row the failure sat in the job log with nothing visible anywhere.
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: 'error',
+    }))
+    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('last run failed'))).toBe(true)
+  })
+
+  it('hides the status row for a healthy wall-clock entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: '',
+    }))
+    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('last run failed'))).toBe(false)
+  })
+
   it('reads the model off the target chat for a chat-bound interval entry', async () => {
     const wrapper = await mountPanel(makeSchedule({
       frequency: 'interval',
