@@ -130,6 +130,7 @@
           @update:view="setHtmlView"
           @compose-comment="onArtifactCompose"
           @open-comment="onArtifactOpenComment"
+          @bridge-ready="onArtifactBridgeReady"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -254,7 +255,7 @@
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
         v-model="composeText"
         :images="commentDraftImages"
-        @cancel="cancelComment"
+        @cancel="artifactDraft ? cancelArtifactComment() : cancelComment()"
         @save="artifactDraft ? saveArtifactComment() : saveComment()"
         @upload="handleDraftImageUpload"
         @remove-image="removeDraftImage"
@@ -315,7 +316,7 @@ import { isCsvPath } from '../lib/csv'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
-import { formatArtifactCommentLocation, type ArtifactHighlight } from '../lib/artifactBridge'
+import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import PaneHeader from './PaneHeader.vue'
@@ -1022,7 +1023,8 @@ const artifactHighlights = computed<ArtifactHighlight[]>(() =>
 )
 
 // Push the durable highlights (plus the open draft) into the frame. Called on
-// comment-list changes and after each frame load; a no-op outside Preview.
+// comment-list changes and on the bridge's ready handshake; a no-op outside
+// Preview.
 function pushArtifactHighlights(): void {
   if (kind.value !== 'html' || htmlView.value !== 'preview') return
   const list = artifactDraftHighlight.value
@@ -1031,10 +1033,21 @@ function pushArtifactHighlights(): void {
   nextTick(() => artifactViewerRef.value?.sendHighlights(list))
 }
 
+// The comment list changing is the only push this watcher can own. It must NOT
+// try to cover frame loads: on mount and on an imageTimestamp bump the message
+// would go out before the new document's bridge exists and would be dropped.
+// Loads are covered by @bridge-ready below.
 watch(
-  () => [commentsForFile.value.map(c => c.id).join(','), htmlView.value, imageTimestamp.value],
+  () => commentsForFile.value.map(c => c.id).join(','),
   () => pushArtifactHighlights(),
 )
+
+// Sole load-time push: the bridge posts `ready` once its DOM is parsed, which
+// covers pinning an artifact that already has comments, toggling Code→Preview,
+// and the post-revision reload.
+function onArtifactBridgeReady(): void {
+  pushArtifactHighlights()
+}
 
 function onArtifactCompose(a: {
   selector: string
@@ -1106,10 +1119,24 @@ function saveArtifactComment(): void {
   artifactDraftHighlight.value = null
 }
 
+// The shared cancel knows nothing about the artifact draft, so cancelling
+// through it alone left the draft <mark> in the frame forever — re-sent by
+// every later push, and inert on click because DRAFT_COMMENT_ID matches no
+// stored comment.
+function cancelArtifactComment(): void {
+  artifactDraft = null
+  artifactDraftHighlight.value = null
+  cancelComment()
+  pushArtifactHighlights()
+}
+
 function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }): void {
   const match = commentsForFile.value.find(c => c.id === p.id)
   if (!match) return
-  comments.cancelComment()
+  // Clicking a stored mark abandons an open draft, so it goes through the
+  // artifact-aware cancel — otherwise the draft mark survives in the frame.
+  if (artifactDraft) cancelArtifactComment()
+  else comments.cancelComment()
   // Anchor the read popover at the clicked mark: build a point-like element
   // whose rect sits where the bridge measured the mark, in viewport coords —
   // comments.anchorFromElement subtracts the container rect itself.

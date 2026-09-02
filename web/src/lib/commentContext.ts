@@ -137,6 +137,10 @@ function formatReferenceSource(c: FileCommentInput): string {
       quote: c.selection,
     })
     if (label) source += ` (element ${label})`
+    // A whole-element anchor on a textless node (an SVG shape, a chart bar)
+    // has no quote for the model to match on, so the selector path is the only
+    // locator left.
+    if (!(c.selection || '').trim()) source += ` [${c.artifactSelector}]`
     return source
   }
   if (c.colIndex != null || (c.colHeader != null && c.colHeader !== '')) {

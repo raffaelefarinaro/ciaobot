@@ -15,7 +15,13 @@ and provides the artifact-side half of selection comments:
   offsets into that element's text — and posts it to the parent window.
 - It re-applies durable comment highlights on request: the parent sends a
   ``ciao:apply-comments`` message after the frame loads or the comment list
-  changes, and the script wraps the anchored text in <mark> elements.
+  changes, and the script wraps the anchored text in <mark> elements. A
+  whole-element anchor outlines the element instead — the node it points at
+  (an SVG shape, a chart bar) may have no text to wrap at all.
+- It posts ``action: 'ready'`` once the DOM is parsed. That is the handshake
+  the parent waits for before its first highlight push: the script itself runs
+  from ``<head>``, so anything pushed earlier would query a tree with no
+  ``<body>`` and silently match nothing.
 
 Trust model: the script is our code, but it shares a document with
 model-authored script, which could forge the same messages. That is
@@ -33,6 +39,9 @@ import re
 _BRIDGE_MARKER = "data-ciao-artifact-bridge"
 
 _HEAD_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
+_BODY_RE = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+_HTML_RE = re.compile(r"<html\b[^>]*>", re.IGNORECASE)
+_DOCTYPE_RE = re.compile(r"<!doctype\b[^>]*>", re.IGNORECASE)
 
 # Plain ES5: the frame is a WKWebView/Chromium webview, but nothing here needs
 # anything newer, and older webviews in the desktop shell are a real audience.
@@ -41,6 +50,11 @@ BRIDGE_SCRIPT = r"""(function () {
   window.__ciaoArtifactBridge = true
 
   var MARK_CLASS = 'ciao-comment-mark'
+  // Whole-element anchors cannot be a <mark> around text: the case they exist
+  // for is a node with no text at all (an SVG shape, a chart bar). They are an
+  // outline on the element itself instead, so they stay visible and clickable.
+  var EL_CLASS = 'ciao-comment-el'
+  var ID_ATTR = 'data-ciao-comment-id'
   var PILL_ID = 'ciao-comment-pill'
   var MAX_QUOTE = 500
   var MAX_SELECTOR = 400
@@ -50,6 +64,7 @@ BRIDGE_SCRIPT = r"""(function () {
   css.textContent =
     'mark.' + MARK_CLASS + '{background:rgba(255,77,109,.28);color:inherit;' +
     'border-radius:2px;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}' +
+    '.' + EL_CLASS + '{outline:2px solid rgba(255,77,109,.85);outline-offset:1px;cursor:pointer}' +
     '#' + PILL_ID + '{position:absolute;z-index:2147483647;background:#ff4d6d;color:#fff;' +
     'font:600 12px/1 system-ui,-apple-system,sans-serif;padding:6px 11px;border-radius:999px;' +
     'border:0;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35)}'
@@ -86,6 +101,11 @@ BRIDGE_SCRIPT = r"""(function () {
       node = node.parentElement
       depth++
     }
+    // Anchor the path at body: an unanchored '>' chain matches the same
+    // tag/index shape anywhere in the document, and a body-level anchor
+    // element (a selection spanning two top-level blocks) would otherwise
+    // produce an empty selector.
+    if (node === document.body) parts.unshift('body')
     return parts.join(' > ')
   }
 
@@ -102,16 +122,27 @@ BRIDGE_SCRIPT = r"""(function () {
     return node.nodeType === 1 ? node : node.parentElement
   }
 
+  function collapse(value) {
+    return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+  }
+
   function buildSelectionPayload(sel, rect) {
     var range = sel.getRangeAt(0)
-    var el = elementOf(range.startContainer)
-    if (!el || el === document.body) return null
-    var quote = clampLen(sel.toString().trim().replace(/\s+/g, ' '), MAX_QUOTE)
+    // The anchor element must contain BOTH endpoints. Anchoring to the start
+    // container's parent breaks any selection that crosses an element
+    // boundary: setEnd with a node outside that element collapses the range
+    // instead of throwing, so the stored end offset is meaningless and
+    // reapplication highlights only the first fragment.
+    var el = elementOf(range.commonAncestorContainer)
+    if (!el) return null
+    var quote = clampLen(collapse(sel.toString()), MAX_QUOTE)
     if (!quote) return null
+    var selector = clampLen(cssPath(el), MAX_SELECTOR)
+    if (!selector) return null
     return {
       type: 'ciao:artifact-comment',
       action: 'compose',
-      selector: clampLen(cssPath(el), MAX_SELECTOR),
+      selector: selector,
       quote: quote,
       startOffset: textOffset(el, range.startContainer, range.startOffset),
       endOffset: textOffset(el, range.endContainer, range.endOffset),
@@ -173,18 +204,25 @@ BRIDGE_SCRIPT = r"""(function () {
   // Alt+Click comments the element itself (for non-text things: a chart node,
   // an SVG shape, a table cell the user cannot easily select).
   document.addEventListener('click', function (e) {
-    var mark = e.target && e.target.closest ? e.target.closest('mark.' + MARK_CLASS) : null
+    var anchor = e.target && e.target.closest
+      ? e.target.closest('mark.' + MARK_CLASS + ', .' + EL_CLASS)
+      : null
     if (e.altKey) {
       var el = elementOf(e.target)
       if (!el || el === document.body) return
+      var selector = clampLen(cssPath(el), MAX_SELECTOR)
+      if (!selector) return
       e.preventDefault()
       e.stopPropagation()
       var rect = el.getBoundingClientRect()
+      // The quote is empty for a textless node — that is the case this path
+      // exists for. Reapplication outlines the element, so an empty quote
+      // still gets a visible, clickable anchor.
       post({
         type: 'ciao:artifact-comment',
         action: 'compose',
-        selector: clampLen(cssPath(el), MAX_SELECTOR),
-        quote: clampLen((el.textContent || '').trim().replace(/\s+/g, ' '), 200),
+        selector: selector,
+        quote: clampLen(collapse(el.textContent), 200),
         startOffset: 0,
         endOffset: el.textContent ? el.textContent.length : 0,
         elementTag: el.tagName.toLowerCase(),
@@ -194,10 +232,10 @@ BRIDGE_SCRIPT = r"""(function () {
       })
       return
     }
-    if (mark) {
-      var id = mark.getAttribute('data-ciao-comment-id')
+    if (anchor) {
+      var id = anchor.getAttribute(ID_ATTR)
       if (!id) return
-      var r = mark.getBoundingClientRect()
+      var r = anchor.getBoundingClientRect()
       post({
         type: 'ciao:artifact-comment',
         action: 'open',
@@ -209,6 +247,23 @@ BRIDGE_SCRIPT = r"""(function () {
   }, true)
 
   // ── Highlight (re)application ───────────────────────────────────────
+  function setClass(el, name, on) {
+    if (el.classList) {
+      if (on) el.classList.add(name)
+      else el.classList.remove(name)
+      return
+    }
+    // SVG elements in old webviews: className is an SVGAnimatedString, so the
+    // attribute is the only writable path.
+    var current = (el.getAttribute('class') || '').split(/\s+/)
+    var kept = []
+    for (var i = 0; i < current.length; i++) {
+      if (current[i] && current[i] !== name) kept.push(current[i])
+    }
+    if (on) kept.push(name)
+    el.setAttribute('class', kept.join(' '))
+  }
+
   function clearMarks() {
     var marks = document.querySelectorAll('mark.' + MARK_CLASS)
     for (var i = 0; i < marks.length; i++) {
@@ -217,6 +272,11 @@ BRIDGE_SCRIPT = r"""(function () {
       if (!parent) continue
       parent.replaceChild(document.createTextNode(m.textContent || ''), m)
       parent.normalize()
+    }
+    var outlined = document.querySelectorAll('.' + EL_CLASS)
+    for (var j = 0; j < outlined.length; j++) {
+      setClass(outlined[j], EL_CLASS, false)
+      outlined[j].removeAttribute(ID_ATTR)
     }
   }
 
@@ -241,7 +301,7 @@ BRIDGE_SCRIPT = r"""(function () {
       if (to <= from) continue
       var mark = document.createElement('mark')
       mark.className = MARK_CLASS
-      mark.setAttribute('data-ciao-comment-id', id)
+      mark.setAttribute(ID_ATTR, id)
       var mid = document.createTextNode(text.slice(from, to))
       mark.appendChild(mid)
       var parent = t.node.parentNode
@@ -252,25 +312,55 @@ BRIDGE_SCRIPT = r"""(function () {
     }
   }
 
+  // Locate the quote in el's raw text content. Quotes are stored
+  // whitespace-collapsed, but textContent keeps the document's newlines and
+  // indentation, so a plain indexOf misses every multi-line selection.
+  function findQuote(text, quote) {
+    var at = text.indexOf(quote)
+    if (at >= 0) return { start: at, end: at + quote.length }
+    var pattern = quote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')
+    var m = null
+    try { m = new RegExp(pattern).exec(text) } catch (e) { m = null }
+    if (!m) return null
+    return { start: m.index, end: m.index + m[0].length }
+  }
+
+  // Prefer the stored offsets, but only when the text still sitting there is
+  // the quoted text — otherwise the document moved under the anchor and the
+  // quote search is the better guess.
+  function resolveSpan(text, c) {
+    var start = typeof c.startOffset === 'number' ? c.startOffset : -1
+    var end = typeof c.endOffset === 'number' ? c.endOffset : -1
+    if (start >= 0 && end > start && start < text.length) {
+      var stop = Math.min(end, text.length)
+      if (collapse(text.slice(start, stop)) === collapse(c.quote)) {
+        return { start: start, end: stop }
+      }
+    }
+    return findQuote(text, c.quote)
+  }
+
   function applyComments(comments) {
     clearMarks()
     if (!comments || !comments.length) return
     for (var i = 0; i < comments.length; i++) {
       var c = comments[i]
-      if (!c || !c.selector || !c.quote) continue
+      if (!c || !c.selector) continue
       var el = null
       try { el = document.querySelector(c.selector) } catch (e) { el = null }
       if (!el) continue
-      var text = el.textContent || ''
-      var start = typeof c.startOffset === 'number' ? c.startOffset : text.indexOf(c.quote)
-      if (typeof start !== 'number' || start < 0) start = text.indexOf(c.quote)
-      if (start < 0) continue
-      var end = typeof c.endOffset === 'number' && c.endOffset > start
-        ? Math.min(c.endOffset, text.length)
-        : Math.min(start + c.quote.length, text.length)
-      if (c.wholeElement) { start = 0; end = text.length }
-      if (end <= start) continue
-      wrapRange(el, start, end, String(c.id))
+      // Whole-element anchors outline the element rather than wrapping text:
+      // the case they exist for (an SVG shape, a chart bar) has no text to
+      // wrap, and an empty quote must still leave something clickable.
+      if (c.wholeElement) {
+        setClass(el, EL_CLASS, true)
+        el.setAttribute(ID_ATTR, String(c.id))
+        continue
+      }
+      if (!c.quote) continue
+      var span = resolveSpan(el.textContent || '', c)
+      if (!span || span.end <= span.start) continue
+      wrapRange(el, span.start, span.end, String(c.id))
     }
   }
 
@@ -280,7 +370,17 @@ BRIDGE_SCRIPT = r"""(function () {
     applyComments(data.comments)
   })
 
-  post({ type: 'ciao:artifact-comment', action: 'ready' })
+  // The bridge is injected into <head>, so the document is still parsing here.
+  // Announcing readiness now would have the parent push its highlights at a
+  // tree with no <body> yet, and every selector would miss. Wait for the DOM.
+  function announceReady() {
+    post({ type: 'ciao:artifact-comment', action: 'ready' })
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', announceReady)
+  } else {
+    announceReady()
+  }
 })()"""
 
 BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>{BRIDGE_SCRIPT}</script>'
@@ -289,15 +389,24 @@ BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>{BRIDGE_SCRIPT}</script>'
 def inject_bridge(html: str) -> str:
     """Return ``html`` with the bridge script injected.
 
-    Inserted right after the opening ``<head>`` tag when one exists so the
-    bridge's style element lands before the artifact paints; otherwise the
-    document is prepended, which is valid for fragments without a head.
+    Preferred spot is right after the opening ``<head>`` tag, so the bridge's
+    style element lands before the artifact paints. Head-less documents fall
+    back to ``<body>``, then ``<html>``, then just after the doctype.
+
+    Never prepend to a document that starts with a doctype: a ``<script>``
+    ahead of the doctype makes the parser ignore it and render the artifact in
+    quirks mode — a different box model, ``line-height``, and percentage
+    heights than the same file got before injection existed. Bare fragments
+    (no doctype, no structural tags) are still prepended, which is what they
+    want and costs nothing.
+
     An artifact that somehow already carries the marker is returned unchanged.
     """
     if _BRIDGE_MARKER in html:
         return html
-    match = _HEAD_RE.search(html)
-    if match:
-        idx = match.end()
-        return html[:idx] + BRIDGE_TAG + html[idx:]
+    for pattern in (_HEAD_RE, _BODY_RE, _HTML_RE, _DOCTYPE_RE):
+        match = pattern.search(html)
+        if match:
+            idx = match.end()
+            return html[:idx] + BRIDGE_TAG + html[idx:]
     return BRIDGE_TAG + html

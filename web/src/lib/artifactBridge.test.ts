@@ -44,7 +44,7 @@ describe('formatArtifactCommentLocation', () => {
   it('falls back to the last selector step, stripped of nth-of-type', () => {
     expect(
       formatArtifactCommentLocation({ selector: 'div:nth-of-type(1) > section:nth-of-type(2)' }),
-    ).toBe('section'),
+    ).toBe('section')
     expect(formatArtifactCommentLocation({ selector: '' })).toBe('')
     expect(formatArtifactCommentLocation({})).toBe('')
   })

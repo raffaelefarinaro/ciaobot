@@ -103,6 +103,36 @@ describe('HtmlArtifactViewer', () => {
     expect(wrapper.emitted('compose-comment')).toBeUndefined()
   })
 
+  it('emits bridge-ready so the parent can push highlights after a frame load', async () => {
+    // The load-time handshake. Without it the parent's only push came from a
+    // watcher that fires before the new document exists, so a reopened
+    // artifact showed none of its stored marks.
+    const wrapper = mountViewer()
+    const frame = wrapper.get('iframe')
+    const fakeWindow = { postMessage: vi.fn() } as unknown as Window
+    Object.defineProperty(frame.element, 'contentWindow', { value: fakeWindow, configurable: true })
+    window.dispatchEvent(new MessageEvent('message', {
+      source: fakeWindow as unknown as MessageEventSource,
+      data: { frame: 'ciao-artifact', type: 'ciao:artifact-comment', action: 'ready' },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('bridge-ready')).toHaveLength(1)
+    expect(wrapper.emitted('compose-comment')).toBeUndefined()
+  })
+
+  it('rejects frame messages while no frame is mounted', async () => {
+    // The guard used to read `frameEl.value !== null`, which is always true
+    // for an unmounted template ref (`undefined`), leaving only
+    // `e.source === undefined` behind it.
+    const wrapper = mountViewer({ view: 'code' })
+    window.dispatchEvent(new MessageEvent('message', {
+      source: undefined,
+      data: { frame: 'ciao-artifact', type: 'ciao:artifact-comment', action: 'ready' },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('bridge-ready')).toBeUndefined()
+  })
+
   it('sendHighlights posts the comment list into the frame', () => {
     const wrapper = mountViewer()
     const postMessage = vi.fn()

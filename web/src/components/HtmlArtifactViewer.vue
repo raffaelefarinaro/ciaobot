@@ -56,6 +56,11 @@ const emit = defineEmits<{
   }): void
   // Click on an existing highlight mark inside the frame.
   (e: 'open-comment', payload: { id: string; frameX: number; frameY: number }): void
+  // The bridge in a freshly loaded frame has parsed the DOM and installed its
+  // message listener. Parents MUST push their highlights from here: a push
+  // sent any earlier (on mount, or right after a reloadToken bump) reaches a
+  // frame that is still loading the previous document, and is simply lost.
+  (e: 'bridge-ready'): void
 }>()
 
 const frameEl = ref<HTMLIFrameElement>()
@@ -66,14 +71,20 @@ const frameSrc = computed(
 
 const sourceLines = computed(() => props.source.split('\n'))
 
+// A template ref is `undefined` before mount and after the frame unmounts in
+// Code view, so this has to be a truthiness check: `!== null` would leave the
+// guard as `e.source === undefined` and stop rejecting anything.
 function isFrameSource(e: MessageEvent): boolean {
-  return frameEl.value !== null && e.source === frameEl.value?.contentWindow
+  const win = frameEl.value?.contentWindow
+  return !!win && e.source === win
 }
 
 function onMessage(e: MessageEvent): void {
   if (!isFrameSource(e)) return
   if (!isArtifactCommentEvent(e.data)) return
-  if (e.data.action === 'compose') {
+  if (e.data.action === 'ready') {
+    emit('bridge-ready')
+  } else if (e.data.action === 'compose') {
     emit('compose-comment', {
       selector: e.data.selector,
       quote: e.data.quote,
@@ -90,7 +101,7 @@ function onMessage(e: MessageEvent): void {
 }
 
 // Push the durable comment list into the frame so the bridge re-draws marks.
-// Called on load and whenever the parent's comment list changes.
+// Called on `bridge-ready` and whenever the parent's comment list changes.
 function sendHighlights(highlights: ArtifactHighlight[]): void {
   const win = frameEl.value?.contentWindow
   if (!win) return

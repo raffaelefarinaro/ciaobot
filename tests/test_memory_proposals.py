@@ -1712,7 +1712,36 @@ def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> No
 
     rows = mp.read_decisions(queue)
 
-    assert [r["seq"] for r in rows] == [0, 1]
+    assert len({r["seq"] for r in rows}) == 2
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[1], "personal")
     # And the same row in two workspaces is two ids.
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")
+
+
+def test_legacy_row_ids_survive_a_new_decision(tmp_path: Path) -> None:
+    """Appending to the current sidecar must not renumber the legacy log.
+
+    ``seq`` used to be the row's position across the concatenated current +
+    legacy sidecars, with the current file read first, so every new decision
+    shifted the ids of all legacy rows.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    legacy = queue.with_suffix(".dismissed.log")
+    legacy.write_text(
+        '{"kind": "memory", "text": "Old one."}\n{"kind": "memory", "text": "Old two."}\n',
+        encoding="utf-8",
+    )
+
+    before = {
+        r["text"]: mp.history_row_id(r, "personal")
+        for r in mp.read_decisions(queue)
+    }
+    assert mp.record_dismissal(queue, text="Brand new.", kind="memory", via="pwa") is True
+    after = {
+        r["text"]: mp.history_row_id(r, "personal")
+        for r in mp.read_decisions(queue)
+    }
+
+    assert before["Old one."] == after["Old one."]
+    assert before["Old two."] == after["Old two."]

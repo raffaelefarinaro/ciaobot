@@ -23,6 +23,17 @@ from ciao.web.security import SecurityHeadersMiddleware
 
 _ARTIFACT = "<!DOCTYPE html><title>t</title><script>document.title='ran'</script>"
 
+# The bridge is spliced in after the doctype, so the artifact is no longer one
+# contiguous substring of the response. Assert on its parts instead.
+_ARTIFACT_HEAD = "<!DOCTYPE html>"
+_ARTIFACT_BODY = "<title>t</title><script>document.title='ran'</script>"
+
+
+def _assert_document_preserved(text: str) -> None:
+    assert text.startswith(_ARTIFACT_HEAD)
+    assert text.endswith(_ARTIFACT_BODY)
+    assert "data-ciao-artifact-bridge" in text
+
 
 @dataclass
 class _FakeConfig:
@@ -60,7 +71,7 @@ def test_serves_html_as_html(workspace: Path) -> None:
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     # The original document is preserved (plus the injected comment bridge).
-    assert _ARTIFACT in resp.text
+    _assert_document_preserved(resp.text)
 
 
 def test_injects_comment_bridge(workspace: Path) -> None:
@@ -78,10 +89,65 @@ def test_bridge_injection_is_idempotent() -> None:
     once = inject_bridge("<html><head></head><body></body></html>")
     assert once.count("data-ciao-artifact-bridge") == 1
     assert inject_bridge(once) == once
-    # A fragment without <head> gets the bridge prepended rather than dropped.
+    # A bare fragment (no doctype, no structural tags) is still prepended
+    # rather than dropped.
     fragment = inject_bridge("<p>hello</p>")
     assert fragment.startswith(BRIDGE_TAG[:40])
     assert "<p>hello</p>" in fragment
+
+
+def test_bridge_never_precedes_the_doctype() -> None:
+    """A <script> ahead of the doctype puts the artifact into quirks mode.
+
+    Different box model, ``line-height``, and percentage heights than the same
+    file rendered before injection existed — a visible regression in every
+    head-less artifact, which is a shape the model writes often.
+    """
+    from ciao.web.artifact_bridge import inject_bridge
+
+    for doc in (
+        "<!DOCTYPE html><html><body><p>x</p></body></html>",
+        "<!doctype html><p>x</p>",
+        "<!DOCTYPE html><title>t</title>",
+    ):
+        out = inject_bridge(doc)
+        assert out.lower().startswith("<!doctype html>"), out[:60]
+        assert out.count("data-ciao-artifact-bridge") == 1
+
+
+def test_bridge_placement_prefers_head_then_body() -> None:
+    from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
+
+    head = inject_bridge("<!DOCTYPE html><html><head><title>t</title></head><body></body></html>")
+    assert head.startswith("<!DOCTYPE html><html><head>" + BRIDGE_TAG)
+
+    body = inject_bridge("<!DOCTYPE html><html><body><p>x</p></body></html>")
+    assert body.startswith("<!DOCTYPE html><html><body>" + BRIDGE_TAG)
+
+
+def test_bridge_defers_its_ready_handshake_to_the_parsed_dom() -> None:
+    """``ready`` is the parent's cue to push highlights.
+
+    The script runs from ``<head>``, so posting it during parse would have the
+    parent query a tree with no ``<body>`` and match nothing.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT
+
+    assert "DOMContentLoaded" in BRIDGE_SCRIPT
+    assert "document.readyState === 'loading'" in BRIDGE_SCRIPT
+
+
+def test_bridge_anchors_whole_elements_without_a_quote() -> None:
+    """Alt+Click exists for nodes with no text (an SVG shape, a chart bar).
+
+    Those anchors are an outline on the element, not a <mark> around text, so
+    the reapplication path must not gate them on a non-empty quote.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT
+
+    assert "ciao-comment-el" in BRIDGE_SCRIPT
+    # The quote gate applies only after the whole-element branch has returned.
+    assert BRIDGE_SCRIPT.index("if (c.wholeElement)") < BRIDGE_SCRIPT.index("if (!c.quote) continue")
 
 
 def test_htm_extension_also_renders(workspace: Path) -> None:
@@ -202,7 +268,7 @@ def test_fuzzy_match_resolves_bare_filename(workspace: Path) -> None:
     client = _make_client(workspace)
     resp = client.get("/api/workspace-html", params={"path": "dashboard.html"})
     assert resp.status_code == 200
-    assert _ARTIFACT in resp.text
+    _assert_document_preserved(resp.text)
 
 
 def test_non_utf8_artifact_still_renders(workspace: Path) -> None:
