@@ -4517,7 +4517,9 @@ function toggleDictation() {
   voiceRecorderRef.value?.toggleRecording()
 }
 
-// Cmd+A mirrors the header archive button (including its confirm dialog).
+// Cmd+Backspace mirrors the header archive button (including its confirm
+// dialog). Fires even while a text field is focused: that is the point of the
+// binding, and the confirm dialog is what makes it safe.
 function archiveActiveChat() {
   if (!chat.value || chat.value.archived) return
   void doArchive()

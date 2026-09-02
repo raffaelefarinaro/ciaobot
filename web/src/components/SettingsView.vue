@@ -78,8 +78,8 @@
               <span>Toggle voice dictation (start / stop)</span>
             </li>
             <li>
-              <kbd v-if="inDesktopApp">&#8984;A</kbd>
-              <kbd v-else>&#8224;A</kbd>
+              <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
+              <kbd v-else>&#8224;&#9003;</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
             <li>
