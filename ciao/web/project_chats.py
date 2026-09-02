@@ -8691,6 +8691,15 @@ class ProjectChatManager:
                 # Interval runs inherit the chat's own model/mode instead.
                 target_chat.model = model
                 target_chat.mode = mode
+                # A rehomed replacement was created without a provider arg, so
+                # create_chat defaulted it to the workspace's default — which
+                # can differ from the engine this dispatch resolved (entry
+                # override or workspace default at schedule_effective_routing
+                # time). Dispatch runs the replacement's provider, and would
+                # then feed it a model chosen for a different engine. Pin all
+                # three so the run uses what the schedule asked for.
+                if getattr(target_chat, "provider", "") != (provider or ""):
+                    target_chat.provider = provider
             _stamp(target_chat)
             self._save()
             return cast(str, web_chat_id)

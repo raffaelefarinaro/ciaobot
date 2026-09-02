@@ -366,3 +366,47 @@ def test_health_stamp_publishes_schedules_changed(tmp_path: Path) -> None:
     assert stored is not None
     assert stored.last_status == "error"
     assert {"type": "schedules_changed"} in published
+
+
+def test_rehomed_wall_clock_replacement_keeps_the_dispatch_provider(
+    tmp_path: Path,
+) -> None:
+    """A wall-clock entry whose chat vanished and whose workspace default
+    provider differs from the dispatch's resolved provider must not have its
+    replacement chat silently defaulted to that workspace engine: dispatch
+    runs the replacement chat's provider, and would feed it a model picked
+    for a different one."""
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+    )
+    # The dispatch resolves a provider that differs from the workspace default
+    # create_chat would otherwise give the replacement.
+    resolved_provider = "opencode"
+    assert pcm._config.default_provider_for_workspace("personal") == "claude"
+
+    del pcm._chats[chat.chat_id]  # target chat gone -> re-home creates a fresh one
+    pcm.start_stream = _stream_stub(
+        [{"type": "result", "text": "done", "is_error": False}]
+    )  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", resolved_provider)
+    )
+
+    replacement = pcm.get_chat(result["chat_id"])
+    assert replacement is not None
+    assert replacement.model == "opus"
+    assert replacement.mode == "auto"
+    assert replacement.provider == "opencode"
