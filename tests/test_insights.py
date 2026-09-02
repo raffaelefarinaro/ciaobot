@@ -1594,3 +1594,99 @@ def test_overflow_log_only_names_the_budget_that_applies(
         )
     assert "CIAO_INSIGHTS_MAX_INPUT_CHARS" not in caplog.text
     assert "larger window" in caplog.text
+
+
+# ── backfill across agent roots, and opencode session ids ────────────────────
+#
+# Backfill slugged one project directory out of `config.workspace_root`. On a
+# multi-workspace install every Claude blob lives under its own agent root, so
+# that directory held none of them: every archive fell through to the text-mode
+# path (or, when discovery could not read an id out of the filename at all, was
+# skipped entirely). The id regex was UUID-only, which made every opencode
+# archive — `ses_<base62>` — permanently unreachable by backfill, even though
+# text mode needs nothing but the markdown.
+
+
+def _rerooted_config(tmp_path: Path):
+    from ciao.config import WorkspaceConfig, reset_reroot_cache
+
+    runtime = tmp_path / "ws" / ".runtime"
+    receipt = runtime / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text('{"status": "migrated"}', encoding="utf-8")
+    reset_reroot_cache()
+
+    config = _config()
+    config.state_path = runtime / "state.json"
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+    config.workspaces = {
+        "work": WorkspaceConfig(name="work", vault_root=str(tmp_path / "vault"))
+    }
+    return config
+
+
+def test_backfill_finds_a_blob_under_a_workspace_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # After the re-rooting `config.logs_root` is <install>/Logs, not the vault's.
+    chats_dir = tmp_path / "ws" / "Logs" / "Chats" / "chat-123" / "claude"
+    chats_dir.mkdir(parents=True)
+    session = "00000000-0000-0000-0000-0000000000aa"
+    archive = chats_dir / f"work-{session}.md"
+    archive.write_text("# Archived chat\n", encoding="utf-8")
+
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    config = _rerooted_config(tmp_path)
+
+    agent_root = config.agent_root("work")
+    assert agent_root != config.workspace_root
+    slug = str(agent_root).replace("/", "-").lstrip("-")
+    project_dir = fake_home / ".claude" / "projects" / f"-{slug}"
+    project_dir.mkdir(parents=True)
+    _write_jsonl(project_dir / f"{session}.jsonl", [
+        {"type": "user", "message": {"content": "hello"}},
+    ])
+
+    seen: list[str] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        seen.append(user_prompt)
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(config, mode="full", concurrency=1)
+    )
+
+    assert result["eligible"] == 1, "the blob is under the work root, not the install root"
+    assert result["success"] == 1
+    assert any("line-oriented JSON" in p or "JSONL" in p for p in seen)
+
+
+def test_backfill_discovers_an_opencode_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-456" / "opencode"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "2026-08-31T00-04-57Z-ses_faae15d4affeoEsvKh19Ro4Tob.md"
+    archive.write_text("# Archived chat\n\nsome text\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(config, mode="both", concurrency=1)
+    )
+
+    assert result["eligible"] == 1, "a ses_ id is a session id too"
+    assert "## Session insights" in archive.read_text(encoding="utf-8")

@@ -1293,6 +1293,17 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 
+# Archive filenames end in the session id, whose shape is the provider's: a
+# UUID from the Claude SDK, `ses_<base62>` from opencode. Matching only the
+# UUID made every opencode archive undiscoverable to backfill — `_discover`
+# reads the id out of the name and skips a file it cannot find one in — so an
+# opencode transcript that missed insights at archive time could never be
+# recovered, even though its text-mode path needs nothing but the markdown.
+SESSION_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|ses_[A-Za-z0-9]+"
+)
+
 
 def _empty_backfill_stats() -> dict[str, int]:
     return {
@@ -1416,9 +1427,10 @@ async def backfill_insights_task(
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing.
 
-    *agent_root* is the per-workspace agent root whose session directory to
-    read; it defaults to ``config.workspace_root`` so callers that supply
-    nothing keep today's behaviour.
+    *agent_root* pins the run to one workspace's agent root. Callers that
+    supply nothing get every agent root in the install searched for each
+    archive's session blob, which is what a multi-workspace install needs: a
+    single root finds no blob for chats that ran anywhere else.
     """
     stats = _empty_backfill_stats()
     # Archives live under the promoted logs root (see main.py:transcript_root),
@@ -1426,10 +1438,22 @@ async def backfill_insights_task(
     # it. `config.logs_root` is the one place that distinction is made.
     base = config.logs_root / "Chats"
 
-    root = agent_root if agent_root is not None else config.workspace_root
-    project_dir = _claude_projects_dir(root)
+    # One project directory per agent root, not one for the install. The Claude
+    # SDK keys its session store by the cwd the session ran in, which for a
+    # workspace chat is that workspace's agent root; looking only under
+    # `workspace_root` found no blob for any of them and silently demoted every
+    # claude archive to the text-mode path (or, at archive time, skipped it
+    # altogether). An explicit `agent_root` still wins, for callers scoping a
+    # run to one workspace.
+    if agent_root is not None:
+        search_roots = [Path(agent_root)]
+    else:
+        search_roots = [root for root, _name in config.agent_root_targets()]
+        if not search_roots:
+            search_roots = [config.workspace_root]
+    project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
 
-    def _discover() -> tuple[list[tuple[Path, str, bool]], int, int]:
+    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int]:
         """Walk the archive tree and decide what needs backfilling.
 
         Runs off the loop: this globs the whole archive directory and reads
@@ -1439,7 +1463,7 @@ async def backfill_insights_task(
         both callers (startup and the Automations button) drive it from the
         event loop, where it would stall every request for its duration.
         """
-        found: list[tuple[Path, str, bool]] = []
+        found: list[tuple[Path, str, Path | None]] = []
         # Sorted for a deterministic order (oldest first / alphabetic).
         # All providers (claude and opencode) — the previous
         # `*/claude/*.md` made opencode transcripts invisible to
@@ -1453,7 +1477,7 @@ async def backfill_insights_task(
             if workspace and md.parent.parent.name != workspace:
                 continue
 
-            match = UUID_RE.search(md.name)
+            match = SESSION_ID_RE.search(md.name)
             session_id = match.group(0) if match else None
             if not session_id:
                 continue
@@ -1462,13 +1486,16 @@ async def backfill_insights_task(
                 done += 1
                 continue
 
-            has_jsonl = (project_dir / f"{session_id}.jsonl").exists()
+            jsonl_root = next(
+                (r for r, d in project_dirs if (d / f"{session_id}.jsonl").exists()),
+                None,
+            )
 
             # Decide if we keep this one based on mode filter
-            if has_jsonl and mode in {"both", "full"}:
-                found.append((md, session_id, True))
-            elif (not has_jsonl) and mode in {"both", "text"}:
-                found.append((md, session_id, False))
+            if jsonl_root is not None and mode in {"both", "full"}:
+                found.append((md, session_id, jsonl_root))
+            elif jsonl_root is None and mode in {"both", "text"}:
+                found.append((md, session_id, None))
         return found, len(archives), done
 
     if not base.exists():
@@ -1508,8 +1535,8 @@ async def backfill_insights_task(
 
     logger.info("Starting backfill for %d archives (dry_run=%s, mode=%s)...", len(todo), dry_run, mode)
     if dry_run:
-        for md, _, hj in todo[:20]:
-            m = "full" if hj else "text"
+        for md, _, jsonl_root in todo[:20]:
+            m = "full" if jsonl_root is not None else "text"
             # Relative to the ARCHIVE root, not the vault: the re-rooting
             # promotes Logs/ out of the vault, so `relative_to(vault_root)`
             # raises ValueError and takes down the dry run from inside a log
@@ -1525,12 +1552,16 @@ async def backfill_insights_task(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def worker(archive_path: Path, session_id: str, has_jsonl: bool) -> str:
+    async def worker(
+        archive_path: Path, session_id: str, jsonl_root: Path | None
+    ) -> str:
         async with sem:
             try:
                 insights_model = model_override or resolve_insights_model(config)
-                if has_jsonl:
-                    filtered = filter_session_jsonl(root, session_id)
+                if jsonl_root is not None:
+                    filtered = filter_session_jsonl(
+                        config.workspace_root, session_id, agent_root=jsonl_root
+                    )
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
                         return "skipped"
@@ -1635,7 +1666,7 @@ async def backfill_insights_task(
                 logger.exception("Failed backfilling insights for %s", archive_path)
                 return "error"
 
-    tasks = [worker(md, sid, hj) for md, sid, hj in todo]
+    tasks = [worker(md, sid, jsonl_root) for md, sid, jsonl_root in todo]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     stats["processed"] = len(results)
     for result in results:

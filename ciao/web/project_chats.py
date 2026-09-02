@@ -3769,13 +3769,19 @@ class ProjectChatManager:
         session through ``DELETE /session/{id}``.
         Provider cleanup is fail-open: the Ciaobot archive remains durable even
         when an external provider is unavailable.
+
+        Both providers store a session under the agent root the chat ran in —
+        the Claude SDK by hashing that path into its projects directory, and
+        opencode because its server is started there. Reclaiming against
+        ``workspace_root`` therefore found nothing for a workspace-scoped chat
+        and leaked every blob and session it was meant to drop.
         """
         raw_ids = (
             session_ids
             if session_ids is not None
             else [*chat.previous_session_ids, chat.session_id]
         )
-        workspace = self._config.workspace_root
+        root = self._agent_root_for_chat(chat.chat_id)
         seen: set[str] = set()
         for sid in raw_ids:
             sid = str(sid or "")
@@ -3784,9 +3790,9 @@ class ProjectChatManager:
             seen.add(sid)
             try:
                 if chat.provider == "claude":
-                    deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
+                    deleted = self._transcripts.delete_sdk_session_blob(root, sid)
                 elif chat.provider == "opencode":
-                    deleted = await OpencodeProvider.delete_thread(workspace, sid)
+                    deleted = await OpencodeProvider.delete_thread(root, sid)
                 else:
                     continue
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
@@ -3913,7 +3919,7 @@ class ProjectChatManager:
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
-        self, chat_id: str, ctx: ChatContext, chat: ChatInfo
+        self, chat_id: str, ctx: ChatContext, chat: ChatInfo, agent_root: Path
     ) -> tuple[int, str | None, Path | None]:
         """Disk half of archiving one chat, safe to run off the event loop.
 
@@ -3921,11 +3927,20 @@ class ProjectChatManager:
         id — read the turn count and the filtered JSONL, then render and write
         the markdown archive. It touches no shared in-memory state and no
         asyncio primitives, which is what lets ``archive_chat`` hand it to a
-        worker thread.
+        worker thread. ``agent_root`` is resolved by the caller on the loop for
+        that reason.
 
         Ordering matters: the turn count has to be taken before
         ``archive_session`` consumes the in-progress transcript, and the
         filtered JSONL before the caller deletes the session blob.
+
+        The Claude SDK writes a chat's session blob under the agent root the
+        chat actually ran in, so that root — not ``workspace_root`` — is what
+        finds it. Resolving it against the install root instead returned None
+        for every workspace-scoped chat, and a None here is indistinguishable
+        from "nothing to extract": ``run_archive_postprocess`` skipped insights,
+        the project-doc fold, the trajectory and memory proposals in silence,
+        with no job run and no log line.
         """
         turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
         filtered_jsonl: str | None = None
@@ -3933,7 +3948,9 @@ class ProjectChatManager:
             from ciao.insights import filter_session_jsonl
             try:
                 filtered_jsonl = filter_session_jsonl(
-                    self._config.workspace_root, chat.session_id
+                    self._config.workspace_root,
+                    chat.session_id,
+                    agent_root=agent_root,
                 )
             except Exception:  # noqa: BLE001 — never fail archive over insights prep
                 logger.exception(
@@ -4002,8 +4019,9 @@ class ProjectChatManager:
         # every streaming turn until it finished, so it runs in a worker
         # thread. Awaited before anything else happens, so the chat_archived
         # event still fires in the same place it always did.
+        agent_root = self._agent_root_for_chat(chat_id)
         turn_count, filtered_jsonl, result = await asyncio.to_thread(
-            self._read_archive_inputs, chat_id, ctx, chat
+            self._read_archive_inputs, chat_id, ctx, chat, agent_root
         )
         # The await above is a suspension point, so the chat may have been
         # deleted while the transcript was being written. Marking a row that is

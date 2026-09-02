@@ -206,3 +206,105 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         transcript_store=transcripts,
         path=runtime / "web_projects.json",
     )
+
+
+# -- archiving reads and reclaims the chat's OWN root -------------------------
+#
+# `_read_archive_inputs` resolved the Claude session blob against
+# `config.workspace_root`, but a workspace chat's blob is keyed by the agent
+# root it ran in. On a re-rooted install that lookup returned None for every
+# workspace-scoped chat, and a None there is indistinguishable from "nothing to
+# extract": `run_archive_postprocess` gates on `outcome.filtered_jsonl`, so
+# insights, the project-doc fold, the trajectory and memory proposals were all
+# skipped in silence — no job run, no log line. Observed live: 26 of 26 Claude
+# archives over two days had no insights section while every opencode archive
+# (which uses the provider-neutral transcript instead) had one.
+
+
+def _rerooted_manager(tmp_path: Path, workspace: str) -> ProjectChatManager:
+    """A manager on a re-rooted install with one registered workspace."""
+    from ciao.config import WorkspaceConfig, reset_reroot_cache
+
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    reset_reroot_cache()
+
+    pcm = _make_manager(tmp_path)
+    pcm._config.workspaces = {
+        workspace: WorkspaceConfig(
+            name=workspace, vault_root=str(tmp_path / workspace / "memory-vault")
+        )
+    }
+    return pcm
+
+
+def _archived_chat(pcm: ProjectChatManager, workspace: str, session: str) -> ChatInfo:
+    project = pcm.create_project("General", workspace)
+    chat = pcm.create_chat(project.project_id, title="t", model="sonnet")
+    chat.session_id = session
+    chat.provider = "claude"
+    return chat
+
+
+def test_archive_inputs_read_the_chats_own_agent_root(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    from ciao.models import ChatContext
+
+    pcm = _rerooted_manager(tmp_path, "work")
+    session = "33333333-3333-3333-3333-333333333333"
+    chat = _archived_chat(pcm, "work", session)
+    agent_root = pcm._agent_root_for_chat(chat.chat_id)
+    assert agent_root != pcm._config.workspace_root
+    _write_session(_projects_dir_for(agent_root), session)
+
+    _, filtered, _ = pcm._read_archive_inputs(
+        chat.chat_id, ChatContext.for_web(chat.chat_id), chat, agent_root
+    )
+    assert filtered, "the chat's own agent root holds the blob"
+
+
+def test_archive_inputs_miss_a_blob_under_the_install_root(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    """The bug's shape: a blob written under the install root is not this
+    chat's, and must not be read as if it were."""
+    from ciao.models import ChatContext
+
+    pcm = _rerooted_manager(tmp_path, "work")
+    session = "44444444-4444-4444-4444-444444444444"
+    chat = _archived_chat(pcm, "work", session)
+    _write_session(_projects_dir_for(pcm._config.workspace_root), session)
+
+    _, filtered, _ = pcm._read_archive_inputs(
+        chat.chat_id,
+        ChatContext.for_web(chat.chat_id),
+        chat,
+        pcm._agent_root_for_chat(chat.chat_id),
+    )
+    assert not filtered
+
+
+def test_reclaim_targets_the_chats_agent_root(
+    tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blob lives under the root the chat ran in, so that is the directory
+    reclaim must hand the SDK. Pointing it at ``workspace_root`` deleted
+    nothing and leaked a session blob per archived workspace chat."""
+    import asyncio
+
+    pcm = _rerooted_manager(tmp_path, "work")
+    session = "55555555-5555-5555-5555-555555555555"
+    chat = _archived_chat(pcm, "work", session)
+
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        pcm._transcripts,
+        "delete_sdk_session_blob",
+        lambda root, sid: (seen.append(Path(root)), True)[1],
+    )
+
+    asyncio.run(pcm._reclaim_provider_sessions_async(chat, [session]))
+    assert seen == [pcm._agent_root_for_chat(chat.chat_id)]
+    assert seen != [pcm._config.workspace_root]
