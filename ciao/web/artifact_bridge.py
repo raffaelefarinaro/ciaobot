@@ -36,7 +36,7 @@ _HEAD_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 
 # Plain ES5: the frame is a WKWebView/Chromium webview, but nothing here needs
 # anything newer, and older webviews in the desktop shell are a real audience.
-BRIDGE_SCRIPT = """(function () {
+BRIDGE_SCRIPT = r"""(function () {
   if (window.__ciaoArtifactBridge) return
   window.__ciaoArtifactBridge = true
 
@@ -106,7 +106,7 @@ BRIDGE_SCRIPT = """(function () {
     var range = sel.getRangeAt(0)
     var el = elementOf(range.startContainer)
     if (!el || el === document.body) return null
-    var quote = clampLen(sel.toString().trim().replace(/\\s+/g, ' '), MAX_QUOTE)
+    var quote = clampLen(sel.toString().trim().replace(/\s+/g, ' '), MAX_QUOTE)
     if (!quote) return null
     return {
       type: 'ciao:artifact-comment',
@@ -184,7 +184,7 @@ BRIDGE_SCRIPT = """(function () {
         type: 'ciao:artifact-comment',
         action: 'compose',
         selector: clampLen(cssPath(el), MAX_SELECTOR),
-        quote: clampLen((el.textContent || '').trim().replace(/\\s+/g, ' '), 200),
+        quote: clampLen((el.textContent || '').trim().replace(/\s+/g, ' '), 200),
         startOffset: 0,
         endOffset: el.textContent ? el.textContent.length : 0,
         elementTag: el.tagName.toLowerCase(),
@@ -283,7 +283,7 @@ BRIDGE_SCRIPT = """(function () {
   post({ type: 'ciao:artifact-comment', action: 'ready' })
 })()"""
 
-BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>\\n{BRIDGE_SCRIPT}\\n</script>'
+BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>{BRIDGE_SCRIPT}</script>'
 
 
 def inject_bridge(html: str) -> str:

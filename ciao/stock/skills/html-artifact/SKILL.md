@@ -23,7 +23,7 @@ Ciaobot's other formats have integrations an artifact silently loses. Check this
 
 | Content | Use | Why not HTML |
 |---|---|---|
-| Prose: reports, plans, specs, notes | `.md` | Wikilinks, backlinks, frontmatter, inline editing, and **comments**. Comments anchor to markdown highlights or text lines, so a rendered artifact cannot be commented on at all. |
+| Prose: reports, plans, specs, notes | `.md` | Wikilinks, backlinks, frontmatter, inline editing, and **comments**. Comments anchor to durable markdown text; artifact comments anchor to a page revision (a selector + quoted text that stops re-finding its spot after the page is rewritten). |
 | Tabular data | `.csv` | Renders as a sortable table with per-cell comments. |
 
 Diagrams have no `.excalidraw` path here: draw them as inline SVG inside the artifact.
@@ -66,7 +66,7 @@ Static SVG diagrams follow the same rules plus the anti-machine-made ones above:
 
 ## Iterating
 
-Editing the file and calling `file_surface` again is enough; the panel reloads the frame when the turn ends. The user can also edit the source directly from the panel's Code view, and every write is snapshotted, so History and Diff work like any other file.
+Editing the file and calling `file_surface` again is enough; the panel reloads the frame when the turn ends. The user can comment on the rendered page (select text, or Alt+Click an element) and the comment rides on the next chat message. After a revision the frame reloads and old comment highlights are re-applied by quoted text where they still match. The user can also edit the source directly from the panel's Code view, and every write is snapshotted, so History and Diff work like any other file.
 
 ## Checklist before surfacing
 

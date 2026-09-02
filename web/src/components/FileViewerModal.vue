@@ -153,6 +153,7 @@
             ></iframe>
             <HtmlArtifactViewer
               v-else-if="store.kind === 'html' && !store.editing"
+              ref="artifactViewerRef"
               :file-path="store.path"
               :reload-token="store.loadToken"
               :view="store.htmlView"
@@ -160,6 +161,8 @@
               :source-loading="store.sourceLoading"
               :source-error="store.sourceError"
               @update:view="store.setHtmlView"
+              @compose-comment="onArtifactCompose"
+              @open-comment="onArtifactOpenComment"
             />
             <template v-else>
             <div v-if="frontmatter" class="fv-meta-card">
@@ -246,7 +249,7 @@
           v-model="composeText"
           :images="commentDraftImages"
           @cancel="cancelComment"
-          @save="saveComment"
+          @save="artifactDraft ? saveArtifactComment() : saveComment()"
           @upload="handleDraftImageUpload"
           @remove-image="removeDraftImage"
         />
@@ -912,6 +915,88 @@ const {
 } = comments
 comments.setApplyHighlights(applyHighlights)
 
+// ── Artifact comments (HTML preview) ─────────────────────────────────
+// Same flow as PinnedFilePanel: the bridge inside the frame posts selection/
+// element anchors, this stages them as pending file comments. The modal's
+// read popover is modal-local (not Teleported), so the frame coords convert
+// through modalEl; the compose popover is Teleported, so it wants viewport.
+const artifactViewerRef = ref<InstanceType<typeof HtmlArtifactViewer> | null>(null)
+
+// Anchor captured with the compose flow; null for non-artifact drafts.
+let artifactDraft: {
+  selector: string
+  startOffset: number
+  endOffset: number
+  elementTag: string | null
+  wholeElement: boolean
+} | null = null
+
+function onArtifactCompose(a: {
+  selector: string
+  quote: string
+  startOffset: number
+  endOffset: number
+  elementTag?: string
+  wholeElement?: boolean
+  frameX: number
+  frameY: number
+}): void {
+  if (commentDraft.value || editingCommentId.value) return
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  draftAnchor.value = frameRect
+    ? { top: frameRect.top + a.frameY + 8, left: frameRect.left + a.frameX }
+    : { top: 120, left: 120 }
+  commentDraft.value = {
+    selection: a.quote,
+    text: '',
+    lines: null,
+    cell: null,
+  }
+  artifactDraft = {
+    selector: a.selector,
+    startOffset: a.startOffset,
+    endOffset: a.endOffset,
+    elementTag: a.elementTag ?? null,
+    wholeElement: a.wholeElement ?? false,
+  }
+  commentDraftImages.value = []
+}
+
+function saveArtifactComment(): void {
+  const draft = commentDraft.value
+  if (!draft || !artifactDraft) return
+  const note = draft.text.trim()
+  if (!note) return
+  projectsStore.addPendingComment({
+    path: cleanPath(store.path),
+    selection: draft.selection,
+    comment: note,
+    artifactSelector: artifactDraft.selector,
+    artifactStartOffset: artifactDraft.startOffset,
+    artifactEndOffset: artifactDraft.endOffset,
+    artifactElementTag: artifactDraft.elementTag,
+    artifactWholeElement: artifactDraft.wholeElement,
+    images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+  })
+  commentDraft.value = null
+  draftAnchor.value = null
+  commentDraftImages.value = []
+  artifactDraft = null
+}
+
+function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }): void {
+  const modal = modalEl.value
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  if (!modal || !frameRect) return
+  const modalRect = modal.getBoundingClientRect()
+  popupAnchor.value = {
+    top: frameRect.top - modalRect.top + p.frameY + 6,
+    left: Math.max(8, frameRect.left - modalRect.left + p.frameX),
+  }
+  activePopupId.value = p.id
+  popupOpenTimestamp = Date.now()
+}
+
 const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 
 // Selecting text and typing (or pasting, or hitting Cmd+D) opens the composer
@@ -1072,6 +1157,7 @@ watch(
   () => {
     comments.selectionAnchor.value = null
     comments.commentDraft.value = null
+    artifactDraft = null
     comments.lastSelectionText = ''
     comments.lastSelectionLines = null
     comments.lastSelectionRange = null
@@ -1083,6 +1169,7 @@ watch(
     if (!open) {
       comments.selectionAnchor.value = null
       comments.commentDraft.value = null
+      artifactDraft = null
       comments.lastSelectionRange = null
       activePopupId.value = null
       detachScrollSync()

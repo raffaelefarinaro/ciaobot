@@ -153,6 +153,13 @@ export const useProjectStore = defineStore('projects', () => {
     lineEnd?: number | null
     colIndex?: number | null
     colHeader?: string | null
+    // HTML artifact anchor (CSS selector + text offsets in the rendered page).
+    // Null for markdown/CSV comments; checked before lineStart.
+    artifactSelector?: string | null
+    artifactStartOffset?: number | null
+    artifactEndOffset?: number | null
+    artifactElementTag?: string | null
+    artifactWholeElement?: boolean
     images?: string[]
   }
   const pendingCommentsByChat = ref<Record<string, PendingComment[]>>({})
@@ -4843,6 +4850,11 @@ export const useProjectStore = defineStore('projects', () => {
     lineEnd?: number | null
     colIndex?: number | null
     colHeader?: string | null
+    artifactSelector?: string | null
+    artifactStartOffset?: number | null
+    artifactEndOffset?: number | null
+    artifactElementTag?: string | null
+    artifactWholeElement?: boolean
     images?: string[]
   }): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
@@ -4857,6 +4869,11 @@ export const useProjectStore = defineStore('projects', () => {
       lineEnd: c.lineEnd ?? c.lineStart ?? null,
       colIndex: c.colIndex ?? null,
       colHeader: c.colHeader ?? null,
+      artifactSelector: c.artifactSelector ?? null,
+      artifactStartOffset: c.artifactStartOffset ?? null,
+      artifactEndOffset: c.artifactEndOffset ?? null,
+      artifactElementTag: c.artifactElementTag ?? null,
+      artifactWholeElement: c.artifactWholeElement ?? false,
       images: c.images,
     }
     if (activeChatId.value) {

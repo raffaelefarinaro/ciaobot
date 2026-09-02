@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import HtmlArtifactViewer from '../HtmlArtifactViewer.vue'
 
@@ -49,5 +49,76 @@ describe('HtmlArtifactViewer', () => {
     const wrapper = mountViewer({ view: 'code', source: '', sourceError: 'Source is too large to show (>2 MB).' })
     expect(wrapper.get('.hav-note-error').text()).toContain('too large')
     expect(wrapper.findAll('.hav-tab')).toHaveLength(2)
+  })
+
+  it('emits compose-comment for a bridge compose message from the frame', async () => {
+    const wrapper = mountViewer()
+    const frame = wrapper.get('iframe')
+    const fakeWindow = { postMessage: vi.fn() } as unknown as Window
+    Object.defineProperty(frame.element, 'contentWindow', { value: fakeWindow, configurable: true })
+    window.dispatchEvent(new MessageEvent('message', {
+      source: fakeWindow as unknown as MessageEventSource,
+      data: {
+        frame: 'ciao-artifact',
+        type: 'ciao:artifact-comment',
+        action: 'compose',
+        selector: 'div:nth-of-type(1) > p:nth-of-type(1)',
+        quote: 'Revenue rose',
+        startOffset: 3,
+        endOffset: 15,
+        elementTag: 'p',
+        x: 12,
+        y: 34,
+      },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('compose-comment')).toEqual([[
+      {
+        selector: 'div:nth-of-type(1) > p:nth-of-type(1)',
+        quote: 'Revenue rose',
+        startOffset: 3,
+        endOffset: 15,
+        elementTag: 'p',
+        wholeElement: undefined,
+        frameX: 12,
+        frameY: 34,
+      },
+    ]])
+  })
+
+  it('ignores bridge messages from other windows or with wrong markers', async () => {
+    const wrapper = mountViewer()
+    const frame = wrapper.get('iframe')
+    const fakeWindow = { postMessage: vi.fn() } as unknown as Window
+    Object.defineProperty(frame.element, 'contentWindow', { value: fakeWindow, configurable: true })
+    window.dispatchEvent(new MessageEvent('message', {
+      source: null,
+      data: { frame: 'ciao-artifact', type: 'ciao:artifact-comment', action: 'compose', selector: 'p', quote: 'x', startOffset: 0, endOffset: 1, x: 0, y: 0 },
+    }))
+    window.dispatchEvent(new MessageEvent('message', {
+      source: fakeWindow as unknown as MessageEventSource,
+      data: { frame: 'ciao-artifact', type: 'other', action: 'compose' },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('compose-comment')).toBeUndefined()
+  })
+
+  it('sendHighlights posts the comment list into the frame', () => {
+    const wrapper = mountViewer()
+    const postMessage = vi.fn()
+    const frame = wrapper.get('iframe')
+    Object.defineProperty(frame.element, 'contentWindow', {
+      value: { postMessage } as unknown as Window,
+      configurable: true,
+    })
+    wrapper.vm.sendHighlights([{ id: 'c1', selector: 'h1', quote: 'hi' }])
+    expect(postMessage).toHaveBeenCalledWith(
+      {
+        frame: 'ciao-artifact',
+        type: 'ciao:apply-comments',
+        comments: [{ id: 'c1', selector: 'h1', quote: 'hi' }],
+      },
+      '*',
+    )
   })
 })
