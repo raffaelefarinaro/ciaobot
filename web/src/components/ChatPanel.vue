@@ -3930,6 +3930,22 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
+// Cmd/Ctrl+Enter offered by ChatLayout when the chord lands outside the
+// composer. Attaching an image or a comment leaves focus on the control that
+// closed, not the textarea, so the next press of the same chord -- the one that
+// means "now send it" -- never reached handleKeydown, and a message that
+// carried only attachments could not be sent from the keyboard at all. The
+// caller has already screened out text fields, but the comment popovers'
+// own Save/Cancel buttons are not text fields either -- while one is
+// focused there, this must still decline so the button's own Enter
+// activation runs instead of sending the unrelated composer draft.
+function handleSendShortcut(): boolean {
+  if (chat.value.archived || !canSend.value) return false
+  if (commentDraft.value || editingChatCommentId.value) return false
+  send()
+  return true
+}
+
 function handleInputFocus() {
   refreshComposerPickers()
   if (window.innerWidth < 768 && messagesEl.value) {
@@ -4508,7 +4524,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut })
 </script>
 
 <style scoped>
