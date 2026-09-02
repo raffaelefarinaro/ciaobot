@@ -694,6 +694,40 @@ def setup_workspace(
             "workspace name must use letters, numbers, dashes, or underscores"
         )
     root = Path(workspace).expanduser().resolve()
+    # Guard before any mutation: do not create/append to an arbitrary
+    # existing notes folder when the live LaunchAgent would be hijacked.
+    # The later `_write_launchd_plist` guard is defense-in-depth; this one
+    # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
+    if not confirm_repoint:
+        allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not allow_env:
+            has_env_override = bool(
+                os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
+            )
+            _early_launch = (
+                Path(launch_agents_dir)
+                if launch_agents_dir is not None
+                else default_launch_agents_dir()
+            )
+            real_dir = Path.home() / "Library" / "LaunchAgents"
+            try:
+                is_real = _early_launch.expanduser().resolve() == real_dir.expanduser().resolve()
+            except OSError:
+                is_real = _early_launch.expanduser() == real_dir
+            if is_real and not has_env_override:
+                existing = _plist_workspace(_early_launch)
+                if existing is not None and existing != root:
+                    raise RuntimeError(
+                        f"Refusing to repoint live LaunchAgent from {existing} to {root}: "
+                        f"the real {_early_launch / 'com.ciao.server.plist'} already points elsewhere. "
+                        "Pass confirm_repoint=True (or --yes via CLI) or set "
+                        "CIAO_ALLOW_LAUNCH_AGENT_REPOINT=1 to allow, or pass "
+                        "launch_agents_dir to isolate."
+                    )
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     setup_selected_vault = vault_root is not None
