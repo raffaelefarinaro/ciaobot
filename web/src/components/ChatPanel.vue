@@ -3893,10 +3893,13 @@ function handleKeydown(e: KeyboardEvent) {
 // closed, not the textarea, so the next press of the same chord -- the one that
 // means "now send it" -- never reached handleKeydown, and a message that
 // carried only attachments could not be sent from the keyboard at all. The
-// caller has already screened out text fields, so the comment popover's own
-// Cmd+Enter (save) still wins while it is open. Returning true means "eaten".
+// caller has already screened out text fields, but the comment popovers'
+// own Save/Cancel buttons are not text fields either -- while one is
+// focused there, this must still decline so the button's own Enter
+// activation runs instead of sending the unrelated composer draft.
 function handleSendShortcut(): boolean {
   if (chat.value.archived || !canSend.value) return false
+  if (commentDraft.value || editingChatCommentId.value) return false
   send()
   return true
 }

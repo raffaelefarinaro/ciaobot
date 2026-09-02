@@ -1023,6 +1023,76 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  // PinnedFilePanel renders its own comment popover outside ChatPanel, and that
+  // popover's Save/Cancel buttons are not text fields -- isTypingTarget alone
+  // would miss focus sitting on one of them. Without this, Cmd+Enter there
+  // would send the unrelated chat draft and swallow the button's own Enter
+  // activation instead of saving the file comment.
+  it('defers to an open comment popover in the pinned file panel', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    store.pinFile('chat-1', 'src/pinned-file.ts')
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const BusyPinnedFilePanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      setup(_, { expose }) {
+        expose({ isBusyAuthoring: true })
+        return () => h('div')
+      },
+    })
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: BusyPinnedFilePanelStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(handleSendShortcut).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
   it('leaves the sidebar alone when the shortcut fires inside a text field', async () => {
     // Option+S is how you type ß, so stealing it mid-composition would break
     // text entry for the sake of a view toggle.

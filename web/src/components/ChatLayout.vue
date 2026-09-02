@@ -138,7 +138,7 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <PinnedFilePanel :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
@@ -298,6 +298,7 @@ const fileViewer = useFileViewerStore()
 // Cmd+A and the home arrow keys silently dead in the far more common
 // no-pinned-file layout.
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
+const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
@@ -968,11 +969,18 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // The composer's own keydown covers the focused case; this covers the press
   // straight after attaching an image or a comment, when focus sits on the
   // control that just closed rather than the textarea. Text fields keep the
-  // chord -- the composer and the comment popovers each handle it themselves --
-  // and shortcutsActive already excludes the file viewer and the dialogs, so
-  // nothing sends from behind them.
+  // chord -- the composer and the comment popovers each handle it themselves
+  // while focus is in their textarea -- and shortcutsActive already excludes
+  // the file viewer and the dialogs, so nothing sends from behind them.
+  //
+  // A comment popover's own Save/Cancel buttons are not text fields, so
+  // isTypingTarget alone would miss focus sitting there: this would send the
+  // unrelated chat draft and swallow the button's own Enter activation.
+  // PinnedFilePanel's popover lives outside ChatPanel, so it needs its own
+  // check; ChatPanel's own popovers are guarded inside handleSendShortcut.
   if (mod && !alt && e.key === 'Enter') {
     if (isTypingTarget(e.target) || e.defaultPrevented || !store.activeChat) return
+    if (pinnedFilePanelRef.value?.isBusyAuthoring) return
     if (chatPanelRef.value?.handleSendShortcut?.()) e.preventDefault()
     return
   }

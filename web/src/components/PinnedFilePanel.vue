@@ -1140,6 +1140,12 @@ watch(() => props.filePath, () => {
   editError.value = ''
   deferredReload.value = false
 })
+
+// ChatLayout's global Cmd/Ctrl+Enter send shortcut checks this before acting:
+// while a text edit or comment draft is open here, focus can sit on this
+// panel's own Save/Add-comment button rather than a textarea, so the global
+// handler would otherwise send the unrelated chat composer draft instead.
+defineExpose({ isBusyAuthoring })
 </script>
 
 <style scoped>
