@@ -263,6 +263,19 @@ def _validate_requires_items(node_id: str, requires: Any) -> None:
         if isinstance(item, str):
             continue
         if isinstance(item, dict) and isinstance(item.get("path"), str):
+            contains = item.get("contains")
+            if contains is not None:
+                # Compiled here so a bad pattern fails with the other
+                # `requires` errors instead of raising `re.error` out of
+                # `_check_requires` — which runs only after the node's full
+                # `claude -p` run has already succeeded.
+                try:
+                    re.compile(str(contains))
+                except re.error as exc:
+                    raise ValueError(
+                        f"subagent node '{node_id}' payload['requires'] item "
+                        f"'contains' is not a valid regex: {exc}"
+                    ) from exc
             continue
         raise ValueError(
             f"subagent node '{node_id}' payload['requires'] items must be str "

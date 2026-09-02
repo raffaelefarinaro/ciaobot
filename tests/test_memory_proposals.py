@@ -1853,3 +1853,44 @@ def test_a_real_promotion_still_dedupes(tmp_path: Path) -> None:
 
     assert mp.was_promoted(vault, "Operator accepted.") is True
     assert "Operator accepted." in mp._promoted_texts(queue)
+
+
+def test_reconciled_update_does_not_stack_a_second_learned_stamp(tmp_path: Path) -> None:
+    """A merged entry carries exactly one stamp, whatever the model echoed.
+
+    The model is told to keep every still-true part of the old entry, and the
+    numbered list it reads carries that entry's learned-at stamp, so a
+    compliant merge often echoes it back. Stamping on top produced
+    `... [old] [new]`, and `_LEARNED_STAMP_RE` is `$`-anchored, so stripping
+    such an entry never yields the fact's own text again — the duplicate guard
+    stopped recognising it and the fact was appended again on the next pass.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Insights model is deepseek-flash. [2026-01-01]"],
+    )
+    text = "Insights model is sonnet since the Ollama quota 429s."
+    proposal = mp.MemoryProposal(target="memory", text=text, source_section="Decisions")
+    decisions = {
+        mp._decision_key("memory", text): {
+            "action": "update",
+            "index": 1,
+            # The model echoes the old entry's stamp back, as instructed.
+            "text": "Insights model is sonnet (moved off deepseek-flash). [2026-01-01]",
+        }
+    }
+
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=vault, region_decisions=decisions
+    )
+
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    merged = next(e for e in entries if "moved off deepseek-flash" in e)
+    # Exactly one stamp, and stripping it recovers the fact itself — which is
+    # what the duplicate guard compares on the next archive pass.
+    assert len(re.findall(r"\[\d{4}-\d{2}-\d{2}\]", merged)) == 1, merged
+    assert strip_learned_stamp(merged) == "Insights model is sonnet (moved off deepseek-flash)."

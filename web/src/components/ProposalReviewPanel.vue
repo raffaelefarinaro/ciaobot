@@ -660,6 +660,15 @@ onMounted(() => {
   // is the one moment it has nothing left to tell you.
   void store.ensureHistoryLoaded(projectStore.activeWorkspace)
 })
+
+// Re-scope the ledger when the workspace changes. `ProposalHistoryList` has
+// its own watcher, but it is `v-if`-ed out while the Queue tab is showing, so
+// switching workspace from there left the History badge reporting the previous
+// workspace's total until the tab was opened or a queue mutation refetched.
+watch(
+  () => projectStore.activeWorkspace,
+  ws => { void store.ensureHistoryLoaded(ws) },
+)
 </script>
 
 <template>

@@ -104,10 +104,19 @@ BRIDGE_SCRIPT = r"""(function () {
   // Not resilient to structural rewrites of the artifact — the quoted text is
   // the durable part of the anchor for the model; the selector only has to
   // re-find the highlight until the next revision reloads the frame.
+  // Length-bounded by whole segments. A deep tree with long tag names
+  // (`figcaption:nth-of-type(12) > ` is 29 chars) overruns MAX_SELECTOR well
+  // inside the 16-level walk, and clamping the joined string cut a segment in
+  // half: `document.querySelector` then either threw or matched some other
+  // element, so the comment was stored with a permanently unresolvable anchor
+  // and no error anywhere. Dropping outer ancestors instead keeps the selector
+  // valid — less specific, which the quote check in `resolveSpan` covers.
   function cssPath(el) {
     var parts = []
+    var length = 0
     var node = el
     var depth = 0
+    var anchored = false
     while (node && node.nodeType === 1 && node !== document.body && depth < 16) {
       var tag = node.tagName.toLowerCase()
       var index = 1
@@ -116,7 +125,11 @@ BRIDGE_SCRIPT = r"""(function () {
         if (sib.tagName === node.tagName) index++
         sib = sib.previousElementSibling
       }
-      parts.unshift(tag + ':nth-of-type(' + index + ')')
+      var segment = tag + ':nth-of-type(' + index + ')'
+      var cost = segment.length + (parts.length ? 3 : 0)
+      if (length + cost > MAX_SELECTOR) break
+      parts.unshift(segment)
+      length += cost
       node = node.parentElement
       depth++
     }
@@ -124,8 +137,11 @@ BRIDGE_SCRIPT = r"""(function () {
     // tag/index shape anywhere in the document, and a body-level anchor
     // element (a selection spanning two top-level blocks) would otherwise
     // produce an empty selector.
-    if (node === document.body) parts.unshift('body')
-    return parts.join(' > ')
+    if (node === document.body && length + (parts.length ? 7 : 4) <= MAX_SELECTOR) {
+      parts.unshift('body')
+      anchored = true
+    }
+    return anchored || parts.length ? parts.join(' > ') : ''
   }
 
   // Character offset of (node, offset) within element's full text content.
@@ -389,7 +405,16 @@ BRIDGE_SCRIPT = r"""(function () {
     var end = typeof c.endOffset === 'number' ? c.endOffset : -1
     if (start >= 0 && end > start && start < text.length) {
       var stop = Math.min(end, text.length)
-      if (collapse(text.slice(start, stop)) === collapse(c.quote)) {
+      var here = collapse(text.slice(start, stop))
+      var quote = collapse(c.quote)
+      // A selection longer than MAX_QUOTE is stored quote-truncated while the
+      // offsets still span the whole thing, so the equality below can never
+      // hold for it and it fell through to `findQuote` — which matches the
+      // 500-char prefix and highlighted under half of what the user picked.
+      // A quote sitting exactly at the cap is the truncated case; accept the
+      // offsets when the stored prefix is still what is there.
+      var truncated = quote.length >= MAX_QUOTE
+      if (here === quote || (truncated && here.indexOf(quote) === 0)) {
         return { start: start, end: stop }
       }
     }

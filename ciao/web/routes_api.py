@@ -7818,6 +7818,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                         "destination": signal["destination"],
                         "candidates": signal["candidates"],
                         "justified": signal["justified"],
+                        # Whether the bullet outlived its cause. Dropping this
+                        # field made a stale row render identically to a
+                        # genuine "needs a decision" one in the PWA, which is
+                        # exactly what `_rehome_lookup` computes it to prevent.
+                        "stale": bool(signal.get("stale")),
                         "reason": signal["reason"],
                     }
                 rows.append(row)

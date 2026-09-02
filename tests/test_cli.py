@@ -1505,3 +1505,57 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
     assert config.pwa_auth_required is True
+
+
+def test_config_discovery_survives_an_exported_empty_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exported-but-empty CIAO_WORKSPACE must not beat the discovered pin.
+
+    Discovery is entered for an empty value as well as an unset one (a bare
+    `export CIAO_WORKSPACE=` in a shell profile), but the process environment
+    wins the overlay merge, so the empty string overrode the pin set inside it.
+    That produced exactly the hybrid the pinning exists to prevent: the
+    installed workspace's auth and provider settings applied to a freshly
+    manufactured bootstrap root, because `bootstrap_mode` still saw no
+    workspace.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    workspace = tmp_path / "workspace"
+    _per_root_workspace(workspace)
+    env_path = workspace / ".env"
+    env_path.write_text(
+        (env_path.read_text(encoding="utf-8")).replace(
+            "PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token"
+        ),
+        encoding="utf-8",
+    )
+    agents = tmp_path / "LaunchAgents"
+    _write_installed_launch_agent(agents, workspace)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    for name in (
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT",
+        "CIAO_BOOTSTRAP_WORKSPACE",
+        "PWA_AUTH_TOKEN",
+        "PWA_AUTH_REQUIRED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # The whole point: present in the environment, but empty.
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env()
+    finally:
+        reset_reroot_cache()
+
+    # The discovered install wins, so the .env and the root agree.
+    assert config.workspace_root == workspace.resolve()
+    assert config.pwa_auth_token == "ws-secret-token"

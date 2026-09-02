@@ -1442,3 +1442,38 @@ def test_history_does_not_leak_the_internal_sidecar_field(tmp_path: Path) -> Non
 
     assert "log" not in rows[0]
     assert "seq" not in rows[0]
+
+
+def test_a_stale_rehome_row_says_so_to_the_client(tmp_path: Path) -> None:
+    """A bullet that outlived its cause reaches the PWA marked `stale`.
+
+    `_rehome_lookup` computes `stale` for exactly this case — a `[rehome]`
+    bullet naming a note that no longer produces a live signal — so the UI can
+    offer to clear the litter instead of asking the operator to decide it. The
+    row builder copied the signal field by field and dropped `stale`, so the
+    stale branch in the client was dead code and such a row rendered as a
+    genuine "no destination, needs a decision" question.
+    """
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    # Deliberately no note on disk: nothing backs this bullet any more.
+    _write_queue(config, "personal", (
+        "## curation pass\n\n"
+        "- [rehome] Re-home `personal/People/Ghost.md` to `work/People/Ghost.md`? "
+        "Uncertain.  _(from: vault-rehome)_\n"
+    ))
+    client = _client(config)
+
+    row = _accept_kind_row(client, "rehome")
+
+    assert row["rehome"]["stale"] is True, row["rehome"]
+    assert row["rehome"]["candidates"] == []
+
+
+def test_a_live_rehome_row_is_not_marked_stale(tmp_path: Path) -> None:
+    """The companion guard: a real question must not read as litter."""
+    _config, _client_, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+
+    assert row["rehome"]["stale"] is False, row["rehome"]

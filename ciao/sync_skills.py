@@ -445,10 +445,10 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
 def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     """Ensure packaged commands live in canonical ``commands/``.
 
-    Fresh installs seed from ``ciao.stock/commands``. Older workspaces that
-    still have stock copies only under ``.claude/commands/`` are migrated
-    into ``commands/`` so they become editable and covered by weekly-review
-    hygiene checks.
+    Fresh installs seed from ``ciao.stock/commands``. Older workspaces whose
+    canonical copy is missing reach the same state through that plain seed
+    path, so ``.claude/commands/`` is never consulted: the mirror there is
+    rebuilt from ``commands/`` afterwards like any other.
 
     A seeded copy carries a sibling ``*.ciao-stock-command`` marker whose
     content is the sha256 hex digest of the exact bytes last written. On
@@ -468,7 +468,6 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
 
     commands_dir = workspace / "commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    claude_commands = workspace / ".claude" / "commands"
 
     try:
         stock_commands = resources.files("ciao.stock").joinpath("commands")

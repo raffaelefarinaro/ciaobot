@@ -1317,6 +1317,16 @@ class CiaoConfig:
                     dotenv_overlay = {}
                 dotenv_overlay["CIAO_WORKSPACE"] = discovered_workspace
                 source = {**dotenv_overlay, **source}
+                # Pinned again after the merge, not only in the overlay: discovery is
+                # entered for an *empty* CIAO_WORKSPACE as well as an unset one
+                # (`export CIAO_WORKSPACE=` in a shell profile), and the
+                # process environment wins the merge, so the empty string beat
+                # the pin. The result was the hybrid this pinning exists to
+                # prevent — the installed workspace's auth and provider
+                # settings applied to a freshly manufactured bootstrap root,
+                # because `bootstrap_mode` below still saw no workspace.
+                if not str(source.get("CIAO_WORKSPACE", "")).strip():
+                    source["CIAO_WORKSPACE"] = discovered_workspace
 
         pwa_allowed_origins = tuple(
             o.strip()

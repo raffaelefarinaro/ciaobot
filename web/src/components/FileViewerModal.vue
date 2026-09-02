@@ -984,6 +984,10 @@ function onArtifactCompose(a: {
   frameY: number
 }): void {
   if (commentDraft.value || editingCommentId.value) return
+  // Close any read popover first, as the pinned panel already does: without
+  // this, clicking an existing highlight and then selecting other text in the
+  // frame floated the read and compose popovers over it at the same time.
+  closePopupComment()
   const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
   draftAnchor.value = frameRect
     ? { top: frameRect.top + a.frameY + 8, left: frameRect.left + a.frameX }

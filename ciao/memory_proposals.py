@@ -462,7 +462,17 @@ def _promote_to_region(
             ):
                 old = entries[index - 1]
                 updated = list(entries)
-                updated[index - 1] = f"{merged} [{date.today().isoformat()}]"
+                # The model is told to keep every still-true part of the old
+                # entry, and the numbered list it reads carries that entry's
+                # learned-at stamp, so a compliant merge often echoes it back.
+                # Stamping on top of it produced `... [2026-01-01] [2026-09-02]`,
+                # and `_LEARNED_STAMP_RE` is `$`-anchored, so stripping such an
+                # entry never yields the fact's own text again — the duplicate
+                # guard above stops recognising it and the fact gets appended a
+                # second time on the next archive pass.
+                updated[index - 1] = (
+                    f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
+                )
                 _log_consolidation(vault_root, region, old)
                 write_region(guide_path, region, updated)
                 logger.info(
@@ -1046,8 +1056,17 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(entry, dict) or key not in entry:
+            if not isinstance(entry, dict):
                 continue
+            if key not in entry:
+                # The oldest sidecar shape records neither timestamp; it is a
+                # dismissal, exactly as `read_decisions` and the append-time
+                # dedupe in `_dismissed_texts` already treat it. Requiring the
+                # key made those rows invisible here, so re-filing a fact an
+                # ancient install had rejected was reported as "already in the
+                # queue" when no queue row existed.
+                if key != "dismissed_at" or "promoted_at" in entry:
+                    continue
             if entry.get("history_only"):
                 # Ledger-only row; it decided nothing, so it must not report
                 # the fact as promoted or dismissed.

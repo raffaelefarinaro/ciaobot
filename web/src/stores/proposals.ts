@@ -336,7 +336,12 @@ export const useProposalsStore = defineStore('proposals', () => {
     // page that came back no longer has nothing left to give, so stop asking.
     // Without it a server that got `at_max` wrong left "show more" refetching
     // the same page on every click, forever.
-    if (historyRows.value.length <= before) historyAtMax.value = true
+    //
+    // Only on a fetch that actually succeeded: a failed request leaves
+    // `historyRows` at its previous length, which is indistinguishable from
+    // "nothing more to give" — and latching `at_max` on a transient 500 hid
+    // "show more" permanently, with the footer claiming the cap was reached.
+    if (!historyError.value && historyRows.value.length <= before) historyAtMax.value = true
   }
 
   async function ensureHistoryLoaded(workspace?: string): Promise<void> {

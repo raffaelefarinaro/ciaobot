@@ -701,3 +701,28 @@ def test_initial_ctx_available_to_gate() -> None:
     # (verified by a follow-up check that ctx['g'] is set)
     ctx = run(dag, [], job="unit", label="init-ctx-2", initial_ctx={"seed": 7})
     assert ctx["g"].ok is True
+
+
+def test_subagent_requires_rejects_an_invalid_contains_regex() -> None:
+    """A bad `contains` pattern fails validation, not the post-run check.
+
+    `_check_requires` runs only after the node's full `claude -p` run has
+    already succeeded, so an uncompilable pattern used to surface as a bare
+    `re.error` ("unbalanced parenthesis") after minutes of model work instead
+    of alongside the other `requires` shape errors.
+    """
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "requires": [{"path": "/tmp/x.md", "contains": "("}],
+            },
+        )
+    ]
+
+    with pytest.raises(ValueError, match="not a valid regex"):
+        run(dag, [], job="unit", label="subagent-requires-bad-regex")
