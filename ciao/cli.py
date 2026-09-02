@@ -2794,6 +2794,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     from ciao.memory_proposals import (
         find_proposal_matches,
         record_dismissal,
+        record_promotion,
         remove_proposal_by_substring,
     )
 
@@ -2865,7 +2866,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # Preserve what was decided, not just that something was: append-time
     # dedupe consults this history, so without it the next curator pass that
     # re-reads the same transcript re-files the fact the user just rejected.
-    record_dismissal(path, text=removed_text, kind=kind)
+    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
+    # under `dismissed_at` used to make `was_promoted()` false for anything
+    # the agent filed itself, and hid it from the review page's History tab
+    # as an accepted row.
+    if args.promoted:
+        record_promotion(path, text=removed_text, kind=kind, via="agent")
+    else:
+        record_dismissal(path, text=removed_text, kind=kind, via="agent")
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
     # a .runtime beside the shell. Precedence: explicit --runtime-root, then

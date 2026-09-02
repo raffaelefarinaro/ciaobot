@@ -702,6 +702,25 @@ def apply_proposals(
     remaining: list[MemoryProposal] = []
     applied: list[str] = []
 
+    def _record_auto(*, text: str, kind: str, destination: str, outcome: str) -> None:
+        # Best-effort: a decision-history write must never fail the apply it
+        # is only recording. Silent skip when there is no vault to log to
+        # (region-only callers, e.g. accept_region_fact, pass no vault_root).
+        if vault_root is None:
+            return
+        try:
+            record_promotion(
+                vault_root / _PROPOSALS_RELATIVE,
+                text=text,
+                kind=kind,
+                via="auto",
+                source=learning_source,
+                destination=destination,
+                outcome=outcome,
+            )
+        except Exception:  # noqa: BLE001
+            logger.info("memory apply: could not record auto decision for %r", text[:80])
+
     for proposal in proposals:
         try:
             if proposal.target in ("memory", "profile"):
@@ -722,20 +741,46 @@ def apply_proposals(
                 )
                 if outcome == "written":
                     applied.append(promotable or proposal.text)
-                elif outcome != "duplicate":
+                    _record_auto(
+                        text=promotable or proposal.text,
+                        kind=proposal.target,
+                        destination=f"ciao:{resolve_region(proposal.target)}",
+                        outcome="written",
+                    )
+                elif outcome == "duplicate":
+                    _record_auto(
+                        text=promotable or proposal.text,
+                        kind=proposal.target,
+                        destination=f"ciao:{resolve_region(proposal.target)}",
+                        outcome="duplicate",
+                    )
+                else:
                     # Failed writes and event-shaped text both stay queued:
                     # the first for a retry, the second for a curator to
-                    # rephrase into a standing rule.
+                    # rephrase into a standing rule. Neither is a decision
+                    # yet, so neither is recorded.
                     remaining.append(proposal)
             elif proposal.target == "people" and vault_root is not None:
                 name = proposal.payload or _safe_name(proposal.text.split("-")[0])
                 if write_people_note(vault_root, name, proposal.text):
                     applied.append(proposal.text)
+                    _record_auto(
+                        text=proposal.text,
+                        kind=proposal.target,
+                        destination=f"{_PEOPLE_DIR}/{_safe_name(name)}.md",
+                        outcome="written",
+                    )
                 else:
                     remaining.append(proposal)
             elif proposal.target == "learnings" and vault_root is not None:
                 if append_learning(vault_root, proposal.text, source=learning_source):
                     applied.append(proposal.text)
+                    _record_auto(
+                        text=proposal.text,
+                        kind=proposal.target,
+                        destination=_LEARNINGS_RELATIVE,
+                        outcome="written",
+                    )
                 else:
                     remaining.append(proposal)
             else:
@@ -1003,6 +1048,10 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 continue
             if not isinstance(entry, dict) or key not in entry:
                 continue
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not report
+                # the fact as promoted or dismissed.
+                continue
             if _one_line(str(entry.get("text", ""))) == wanted:
                 return True
     return False
@@ -1122,7 +1171,17 @@ def dismissed_log_path(proposals_path: Path) -> Path:
     return proposals_path.with_suffix(_DISMISSED_LOG_SUFFIX)
 
 
-def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+def record_dismissal(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str = "",
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
 
     ``append_proposals`` dedupes against bullets still in the queue file, so
@@ -1136,11 +1195,39 @@ def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool
     curator dedupes against the live queue and this sidecar, never against
     the promoted destination, so a promotion must record the text too or the
     same fact comes back the next time the transcript is re-read.
+
+    The extra fields (``via``, ``source``, ``destination``, ``outcome``,
+    ``proposal_id``) turn this dedupe sidecar into the decision history the
+    review page's History tab reads; they are optional and omitted when
+    blank so the on-disk shape stays backward compatible with the readers
+    below, which only ever look at the ``*_at`` key and ``text``.
     """
-    return _record_decision(proposals_path, text=text, kind=kind, key="dismissed_at")
+    return _record_decision(
+        proposals_path,
+        text=text,
+        kind=kind,
+        key="dismissed_at",
+        via=via,
+        source=source,
+        destination=destination,
+        outcome=outcome,
+        proposal_id=proposal_id,
+    )
 
 
-def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+def record_promotion(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str = "",
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+    once: bool = False,
+    history_only: bool = False,
+) -> bool:
     """Record an accepted proposal in the same decision history.
 
     Same sidecar and the same reason as :func:`record_dismissal`: the dedupe
@@ -1150,23 +1237,105 @@ def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool
     Mirrors the CLI's promote-then-dismiss flow, which records the text for
     every removal regardless of the outcome action.
     """
-    return _record_decision(proposals_path, text=text, kind=kind, key="promoted_at")
+    return _record_decision(
+        proposals_path,
+        text=text,
+        kind=kind,
+        key="promoted_at",
+        via=via,
+        source=source,
+        destination=destination,
+        outcome=outcome,
+        proposal_id=proposal_id,
+        once=once,
+        history_only=history_only,
+    )
 
 
-def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) -> bool:
+def _record_decision(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str,
+    key: str,
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+    once: bool = False,
+    history_only: bool = False,
+) -> bool:
     cleaned = text.strip()
     if not cleaned:
         return False
     log_path = dismissed_log_path(proposals_path)
+    if once and _has_decision(proposals_path, key=key, text=cleaned, outcome=outcome):
+        # Idempotent paths only. A decision the operator makes is a fresh event
+        # every time, but the archive-time pipeline re-derives the same
+        # "already applied, skipped" verdict on every pass over the same
+        # transcript, and appending a row per pass grew the history without
+        # recording anything new.
+        return False
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {
+    entry: dict[str, Any] = {
         key: datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "text": cleaned,
     }
+    # Omit blanks rather than writing empty strings: keeps legacy-shaped
+    # entries (just the ``*_at`` key, ``kind``, ``text``) indistinguishable
+    # from ones written before these fields existed.
+    if via:
+        entry["via"] = via
+    if source:
+        entry["source"] = source
+    if destination:
+        entry["destination"] = destination
+    if outcome:
+        entry["outcome"] = outcome
+    if proposal_id:
+        entry["proposal_id"] = proposal_id
+    if history_only:
+        # Ledger-only row: it records that a pass ran and decided nothing new,
+        # so the dedupe readers must not treat it as a decision. Without this
+        # the row makes ``was_promoted`` true and ``append_proposals`` refuses
+        # the fact forever, so a reverted in-session edit could never be
+        # re-queued. ``_has_decision`` still sees it, which is what keeps
+        # ``once=True`` idempotent.
+        entry["history_only"] = True
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
+
+
+def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) -> bool:
+    """Whether this exact decision (action, text, outcome) is already recorded.
+
+    Used only by ``once=True`` writers; matching on the outcome as well keeps a
+    later real promotion of a fact recordable after an earlier "skipped,
+    already known" row for the same text.
+    """
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or key not in entry:
+                continue
+            if str(entry.get("text", "")).strip() != text:
+                continue
+            if str(entry.get("outcome", "")) == outcome:
+                return True
+    return False
 
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
@@ -1198,10 +1367,111 @@ def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
                 continue
             if not isinstance(entry, dict) or (keys and not any(key in entry for key in keys)):
                 continue
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not dedupe.
+                continue
             text = _one_line(str(entry.get("text", "")))
             if text:
                 out.add(text)
     return out
+
+
+def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
+    """Stable id for one decision-history row, derived from its content.
+
+    Unlike the live queue's :func:`ciao.proposal_tracking.stable_proposal_id`,
+    this cannot key off a path/line: auto-apply only has a vault root, the CLI
+    only has an optional workspace name, and legacy sidecar rows have neither.
+
+    Timestamps are second-precision, so content alone is not unique: the same
+    fact accepted in two workspaces within one second, or two undated legacy
+    rows with identical text, hashed identically — and the History list keys
+    its ``<li>`` on this id, so a collision dropped a row on patch. The
+    ``workspace`` and the row's position in its sidecar (``log`` + ``seq``,
+    both assigned by :func:`read_decisions`) disambiguate. They are stable
+    across reads because each sidecar is append-only and ``seq`` counts within
+    one sidecar — a shared counter would renumber every legacy row each time a
+    decision landed in the current one.
+    """
+    import hashlib
+
+    basis = "|".join(
+        (
+            str(entry.get("ts", "")),
+            str(entry.get("action", "")),
+            str(entry.get("kind", "")),
+            str(entry.get("text", "")),
+            workspace,
+            str(entry.get("log", "")),
+            str(entry.get("seq", "")),
+        )
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
+    """Every recorded decision for one workspace's proposal queue, newest last.
+
+    Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
+    text-only rows into one shape: ``{ts, action, via, kind, text, source,
+    destination, outcome, proposal_id, log, seq}``. This is the read side of the
+    decision history the review page's History tab renders; :func:`record_dismissal`
+    and :func:`record_promotion` are the write side.
+
+    ``seq`` is the row's position *within its own* append-only sidecar, and
+    ``log`` names that sidecar. Together they let :func:`history_row_id` tell
+    apart two rows whose content is byte-identical; both are dropped before the
+    row reaches the API payload. Counting per sidecar rather than across the
+    concatenation matters: a shared counter offsets every legacy row by the
+    current sidecar's length, so each new decision changed the id of every
+    legacy row — the exact instability ``seq`` exists to prevent.
+    """
+    rows: list[dict[str, Any]] = []
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        seq = 0
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = _one_line(str(entry.get("text", "")))
+            if not text:
+                continue
+            if "promoted_at" in entry:
+                ts, action = str(entry["promoted_at"]), "accepted"
+            elif "dismissed_at" in entry:
+                ts, action = str(entry["dismissed_at"]), "dismissed"
+            else:
+                # Oldest sidecar shape: no timestamp, no action recorded.
+                # Treat as a dismissal (append-time dedupe already did) but
+                # never fabricate a time.
+                ts, action = "", "dismissed"
+            rows.append(
+                {
+                    "ts": ts,
+                    "action": action,
+                    "via": str(entry.get("via", "")),
+                    "kind": str(entry.get("kind", "")),
+                    "text": text,
+                    "source": str(entry.get("source", "")),
+                    "destination": str(entry.get("destination", "")),
+                    "outcome": str(entry.get("outcome", "")),
+                    "proposal_id": str(entry.get("proposal_id", "")),
+                    "log": suffix,
+                    "seq": seq,
+                }
+            )
+            seq += 1
+    return rows
 
 
 _STUB_HEADER = (
@@ -1543,6 +1813,27 @@ def proposals_from_archive(
                         _p.text[:80],
                         archive_path.name,
                     )
+                    try:
+                        record_promotion(
+                            workspace_vault_root / _PROPOSALS_RELATIVE,
+                            text=_p.text,
+                            kind=_p.target,
+                            via="auto",
+                            source=archive_path.stem,
+                            outcome="suppressed",
+                            # Re-processing the same archive re-derives this
+                            # same verdict; record it once, not once per pass.
+                            once=True,
+                            # The fact was applied in-session, not promoted
+                            # through the queue. Keep the row out of the dedupe
+                            # readers so a later revert can be re-queued.
+                            history_only=True,
+                        )
+                    except Exception:  # noqa: BLE001 — recording must not break the pipeline
+                        logger.info(
+                            "memory proposals: could not record suppression for %r",
+                            _p.text[:80],
+                        )
                     continue
                 filtered.append(_p)
             if suppressed:

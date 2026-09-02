@@ -4418,8 +4418,23 @@ async def workspace_html(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
-    return FileResponse(
-        resolved,
+    # The bridge script is what makes the rendered page commentable: it watches
+    # selections inside the sandboxed frame and posts anchors to the panel via
+    # postMessage — the only channel an opaque-origin frame has. Inline script
+    # is already permitted ('unsafe-inline' is load-bearing for artifacts), and
+    # a fragment without <head> still gets the bridge prepended. Injecting
+    # model-authored text is not a concern: we append our own markup, never
+    # user content.
+    from ciao.web.artifact_bridge import inject_bridge
+
+    # Decode leniently rather than with the default strict codec: a workspace
+    # can hold a cp1252/latin-1 HTML export, and a strict decode raises inside
+    # the handler for a file that used to stream fine as a FileResponse. A
+    # replacement char in one artifact beats a 500 for the whole page.
+    source = resolved.read_bytes().decode("utf-8", errors="replace")
+
+    return Response(
+        content=inject_bridge(source),
         media_type="text/html; charset=utf-8",
         headers={
             "Content-Security-Policy": _ARTIFACT_CSP,
@@ -7909,6 +7924,87 @@ async def list_proposals(request: Request) -> JSONResponse:
     return JSONResponse({"rows": rows})
 
 
+_HISTORY_DEFAULT_LIMIT = 200
+_HISTORY_MAX_LIMIT = 1000
+
+
+async def proposals_history(request: Request) -> JSONResponse:
+    """Every recorded proposal decision across workspaces, newest first.
+
+    Reads the same per-workspace decision sidecar :func:`record_dismissal`
+    and :func:`record_promotion` write (``Memory-Proposals.dismissed.jsonl``),
+    which now carries ``via`` (who decided: the operator through the PWA, the
+    curation agent, or the archive-time auto-promoter), a ``destination``, and
+    an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
+    the read side of the review page's History tab: what was accepted or
+    dismissed, by whom, and what the overnight pipeline added or skipped on
+    its own.
+    """
+    from ciao.memory_proposals import history_row_id, read_decisions
+
+    config = request.app.state.config
+    workspace_filter = request.query_params.get("workspace", "").strip()
+    action_filter = request.query_params.get("action", "").strip()
+    if action_filter and action_filter not in {"accepted", "dismissed"}:
+        return JSONResponse(
+            {"error": "action must be accepted|dismissed"}, status_code=400
+        )
+    try:
+        requested = int(request.query_params.get("limit", _HISTORY_DEFAULT_LIMIT))
+    except ValueError:
+        return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+    requested = max(1, requested)
+    limit = min(requested, _HISTORY_MAX_LIMIT)
+
+    rows: list[dict[str, Any]] = []
+    # Two registered names can resolve to one vault root (a ``vault_root: "."``
+    # entry, or the legacy entity layout), and then they share a sidecar. Read
+    # each sidecar once, under the first name that claims it, or every decision
+    # in it shows up twice and ``total`` double-counts.
+    seen: set[str] = set()
+    for workspace in config.workspace_names():
+        if workspace_filter and workspace != workspace_filter:
+            continue
+        queue = _proposals_file(config, workspace)
+        try:
+            key = str(queue.resolve())
+        except OSError:
+            key = str(queue)
+        if key in seen:
+            continue
+        seen.add(key)
+        for entry in read_decisions(queue):
+            if action_filter and entry["action"] != action_filter:
+                continue
+            row = dict(entry)
+            row["workspace"] = workspace
+            row["id"] = history_row_id(entry, workspace)
+            # Read-side disambiguators for the id only; not part of the contract.
+            row.pop("seq", None)
+            row.pop("log", None)
+            rows.append(row)
+
+    # Newest first; undated legacy rows (empty ts) sort last within that order.
+    rows.sort(key=lambda r: r["ts"], reverse=True)
+    total = len(rows)
+    # ``limit`` is the clamped value actually served, so ``truncated`` stays
+    # honest about rows existing beyond the page. ``at_max`` is what tells the
+    # client to stop asking: past the cap a wider limit returns the same page,
+    # and a "show more" button wired to ``truncated`` alone stayed visible and
+    # did nothing forever. It keys off the served limit reaching the cap, not
+    # ``requested > limit`` — a request for exactly the cap is already at it,
+    # and reporting False there bought one pointless full-page refetch.
+    return JSONResponse(
+        {
+            "rows": rows[:limit],
+            "total": total,
+            "truncated": total > limit,
+            "limit": limit,
+            "at_max": limit >= _HISTORY_MAX_LIMIT,
+        }
+    )
+
+
 def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Map ids to removable file contexts, or return an error.
 
@@ -7953,6 +8049,7 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         # a failed write must not leave phantom dismissals in the tally.
         swept_kinds: list[str] = []
         swept_texts: list[str] = []
+        swept_sources: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
@@ -7965,17 +8062,27 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 changed = True
                 swept_kinds.append(bullet.kind)
                 swept_texts.append(bullet.text)
+                swept_sources.append(bullet.source)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
             from ciao.memory_proposals import record_dismissal
 
-            for swept_kind, swept_text in zip(swept_kinds, swept_texts):
+            for swept_kind, swept_text, swept_source in zip(
+                swept_kinds, swept_texts, swept_sources
+            ):
                 # Expiry is a decision too: without the text in the dedupe
                 # history, a curator pass that re-reads the same transcript
                 # re-files the fact the operator just let expire.
-                record_dismissal(queue, text=swept_text, kind=swept_kind)
+                record_dismissal(
+                    queue,
+                    text=swept_text,
+                    kind=swept_kind,
+                    via="pwa",
+                    source=swept_source,
+                    outcome="swept",
+                )
             for kind in swept_kinds:
                 if proposal_outcomes.is_extraction_kind(kind):
                     proposal_outcomes.record(
@@ -8020,6 +8127,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
     ]
     results_moves: list[dict[str, Any]] = []
     moved_ids: set[str] = set()
+    moved_destinations: dict[str, str] = {}
     for ctx in move_rows:
         row = ctx["row"]
         target, target_error = _rehome_target(row, requested_workspace)
@@ -8037,6 +8145,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
             })
             continue
         moved_ids.add(row["id"])
+        moved_destinations[row["id"]] = str(outcome.get("destination", ""))
         results_moves.append({
             "id": row["id"], "action": "move_file", "dismissed": True,
             "destination": outcome.get("destination", ""),
@@ -8072,6 +8181,20 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
         if not outcome.get("ok"):
             entry["error"] = outcome["error"]
+        elif ctx["workspace"]:
+            from ciao.memory_proposals import record_dismissal
+
+            # The file is already unlinked; a sidecar write failure must not
+            # fail a dismiss that happened.
+            try:
+                record_dismissal(
+                    _proposals_file(config, ctx["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                )
+            except OSError:
+                logger.info(
+                    "proposals: could not record skill dismissal for %s", row["id"]
+                )
         results.append(entry)
 
     # Group by file so each affected file is rewritten exactly once.
@@ -8149,13 +8272,30 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 from ciao.memory_proposals import record_dismissal
 
                 record_dismissal(
-                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                    queue,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
+                    via="pwa",
+                    source=str(row.get("source") or ""),
+                    proposal_id=pid,
                 )
             elif action == "accept":
                 from ciao.memory_proposals import record_promotion
 
+                accept_here = proposal_kinds.accept_for(row["kind"])
+                if accept_here.action == "move_file":
+                    row_outcome = {"destination": moved_destinations.get(pid, "")}
+                else:
+                    row_outcome = promoted.get(pid, {})
                 record_promotion(
-                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                    queue,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
+                    via="pwa",
+                    source=str(row.get("source") or ""),
+                    destination=_decision_destination(accept_here.action, row, row_outcome),
+                    outcome="duplicate" if row_outcome.get("duplicate") else "written",
+                    proposal_id=pid,
                 )
             if not proposal_outcomes.is_extraction_kind(row["kind"]):
                 # Not recorded: this ledger measures the MEMORY extraction
@@ -8382,6 +8522,24 @@ async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "destination": doc_raw}
 
 
+def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict[str, Any]) -> str:
+    """Where an accepted row's fact landed, for the decision history's benefit.
+
+    Mirrors the per-branch destination each accept helper already knows, so
+    the history ledger and the response payload agree without a second
+    source of truth. Rehome rows: nothing is written here (the move is
+    performed above the queue-file grouping), so ``outcome`` carries the
+    move's own ``destination``.
+    """
+    if accept_action == "edit_region":
+        region = outcome.get("region") or row.get("region") or row.get("kind", "")
+        return f"ciao:{region}" if region else ""
+    if accept_action == "move_file":
+        return str(outcome.get("destination", ""))
+    # fold_doc, write_people_note, append_learnings all set "destination".
+    return str(outcome.get("destination", ""))
+
+
 async def proposal_action(request: Request) -> JSONResponse:
     """Accept or dismiss exactly one proposal by its stable id.
 
@@ -8425,8 +8583,25 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
-        # Not recorded: this ledger measures the MEMORY extraction pipeline;
-        # skill proposals come from the separate skill-evolution pipeline.
+        # Not recorded in the outcomes tally: that ledger measures the MEMORY
+        # extraction pipeline, and skill proposals come from the separate
+        # skill-evolution pipeline. It IS recorded in the decision history,
+        # so the review page's History tab shows it was resolved.
+        # Guarded like the batch path: ``workspace_vault_root("")`` falls back
+        # to the default root, so a row with a blank workspace would file its
+        # decision into the wrong workspace's sidecar. And the file is already
+        # gone by now — a recording failure must not turn a completed dismiss
+        # into a 500, or the client's retry 404s on work that succeeded.
+        if row["workspace"]:
+            from ciao.memory_proposals import record_dismissal
+
+            try:
+                record_dismissal(
+                    _proposals_file(config, row["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=pid,
+                )
+            except OSError:
+                logger.info("proposals: could not record skill dismissal for %s", pid)
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
@@ -8542,7 +8717,14 @@ async def proposal_action(request: Request) -> JSONResponse:
             from ciao.memory_proposals import record_promotion
 
             record_promotion(
-                queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                queue,
+                text=str(row.get("text") or ""),
+                kind=str(row.get("kind") or ""),
+                via="pwa",
+                source=str(row.get("source") or ""),
+                destination=_decision_destination(accept.action, row, promoted),
+                outcome="duplicate" if promoted.get("duplicate") else "written",
+                proposal_id=pid,
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":
@@ -8552,7 +8734,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         from ciao.memory_proposals import record_dismissal
 
         record_dismissal(
-            queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+            queue,
+            text=str(row.get("text") or ""),
+            kind=str(row.get("kind") or ""),
+            via="pwa",
+            source=str(row.get("source") or ""),
+            proposal_id=pid,
         )
     if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
         proposal_outcomes.record(

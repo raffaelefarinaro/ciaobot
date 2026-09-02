@@ -1157,3 +1157,41 @@ export interface ProposalDismissOlderResponse {
   ok: boolean
   removed: number
 }
+
+// ── Proposal history (decision ledger) ───────────────────────────────────
+
+/** Who made the decision: through the app, the curation agent, or on its own. */
+export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
+
+/**
+ * One decided proposal from `GET /api/proposals/history`. Read side of the
+ * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
+ * in `ciao/memory_proposals.py`. `outcome` qualifies `action`: an "accepted"
+ * row with `outcome: "duplicate"` or `"suppressed"` was recognized as already
+ * known rather than freshly written, and `"swept"` marks an expiry dismissal.
+ * Legacy sidecar rows predate `ts`/`via` and surface with both blank.
+ */
+export interface ProposalHistoryRow {
+  id: string
+  ts: string
+  action: 'accepted' | 'dismissed'
+  via: ProposalHistoryVia
+  kind: string
+  text: string
+  source: string
+  workspace: string
+  destination: string
+  outcome: string
+  proposal_id: string
+}
+
+export interface ProposalHistoryResponse {
+  rows: ProposalHistoryRow[]
+  total: number
+  truncated: boolean
+  /** Page size the server actually served, after clamping to its cap. */
+  limit?: number
+  /** The request asked for more than the cap, so a wider limit returns the
+   * same page. Paging must stop on this, not on `truncated`. */
+  at_max?: boolean
+}

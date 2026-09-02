@@ -25,6 +25,7 @@ from ciao.web.routes_api import (
     list_proposals,
     proposal_action,
     proposals_batch,
+    proposals_history,
 )
 
 
@@ -64,6 +65,7 @@ def _client(config: CiaoConfig) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/history", proposals_history, methods=["GET"]),
             Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
             Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
             Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
@@ -475,6 +477,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 
     expected = {
         "/api/proposals",
+        "/api/proposals/history",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/{action}",
@@ -1205,3 +1208,237 @@ def test_accept_reports_a_duplicate_rather_than_claiming_a_write(tmp_path: Path)
     resp = client.post(f"/api/proposals/{again['id']}/accept")
     assert resp.status_code == 200
     assert resp.json()["result"]["duplicate"] is True
+
+
+# -- Decision history paging and identity -------------------------------------
+
+
+def _seed_history(config: CiaoConfig, workspace: str, entries: list[dict]) -> None:
+    """Write decision rows straight into a workspace's sidecar."""
+    from ciao.memory_proposals import dismissed_log_path
+
+    queue = config.workspace_vault_root(workspace) / "Workspace" / "Memory-Proposals.md"
+    log = dismissed_log_path(queue)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
+        encoding="utf-8",
+    )
+
+
+def test_history_row_ids_are_unique_across_workspaces(tmp_path: Path) -> None:
+    """The same fact decided in two workspaces in the same second.
+
+    Timestamps are second-precision and the id used to hash only
+    ts|action|kind|text, so these two rows collided. The History list keys its
+    <li> on the id, so a collision made Vue drop one row on patch.
+    """
+    config = _config(tmp_path)
+    row = {"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "Same fact."}
+    for ws in ("personal", "work"):
+        _seed_history(config, ws, [row])
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert len(rows) == 2
+    assert len({r["id"] for r in rows}) == 2
+    assert {r["workspace"] for r in rows} == {"personal", "work"}
+
+
+def test_history_row_ids_are_unique_for_identical_undated_rows(tmp_path: Path) -> None:
+    """Two legacy rows with no timestamp and the same text are still two rows."""
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"kind": "memory", "text": "Legacy fact."}, {"kind": "memory", "text": "Legacy fact."}],
+    )
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert len(rows) == 2
+    assert len({r["id"] for r in rows}) == 2
+
+
+def test_history_row_ids_are_stable_across_reads(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."},
+            {"dismissed_at": "2026-09-01T11:00:00+00:00", "kind": "memory", "text": "Two."},
+        ],
+    )
+    client = _client(config)
+
+    first = client.get("/api/proposals/history").json()["rows"]
+    second = client.get("/api/proposals/history").json()["rows"]
+
+    assert [r["id"] for r in first] == [r["id"] for r in second]
+
+
+def test_history_does_not_leak_the_internal_sequence_field(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [{"kind": "memory", "text": "One."}])
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "seq" not in rows[0]
+
+
+def test_history_reports_at_max_when_the_limit_is_clamped(tmp_path: Path) -> None:
+    """Past the cap a wider limit returns the same page, and the client has to
+    know that: a "show more" button wired to `truncated` alone stayed visible
+    and did nothing forever.
+    """
+    from ciao.web import routes_api as api_module
+
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {"promoted_at": f"2026-09-01T10:00:{i:02d}+00:00", "kind": "memory", "text": f"Fact {i}."}
+            for i in range(6)
+        ],
+    )
+    client = _client(config)
+
+    monkeyed = api_module._HISTORY_MAX_LIMIT
+    api_module._HISTORY_MAX_LIMIT = 4
+    try:
+        data = client.get("/api/proposals/history", params={"limit": 200}).json()
+    finally:
+        api_module._HISTORY_MAX_LIMIT = monkeyed
+
+    assert len(data["rows"]) == 4
+    assert data["limit"] == 4
+    assert data["total"] == 6
+    # There ARE more rows...
+    assert data["truncated"] is True
+    # ...but asking for more will not return them.
+    assert data["at_max"] is True
+
+
+def test_history_does_not_report_at_max_below_the_cap(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {"promoted_at": f"2026-09-01T10:00:{i:02d}+00:00", "kind": "memory", "text": f"Fact {i}."}
+            for i in range(6)
+        ],
+    )
+
+    data = _client(config).get("/api/proposals/history", params={"limit": 2}).json()
+
+    assert data["truncated"] is True
+    assert data["at_max"] is False
+    assert data["limit"] == 2
+
+
+def test_history_workspace_filter_pages_within_that_workspace(tmp_path: Path) -> None:
+    """A quiet workspace's decisions must not fall outside a global page.
+
+    The client used to fetch the newest N rows across every workspace and
+    filter them client-side, so on a busy install a quiet workspace's History
+    tab read "No decisions yet." with a full ledger.
+    """
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "work",
+        [
+            {"promoted_at": f"2026-09-02T10:00:{i:02d}+00:00", "kind": "memory", "text": f"Busy {i}."}
+            for i in range(30)
+        ],
+    )
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-01-01T09:00:00+00:00", "kind": "memory", "text": "Quiet fact."}],
+    )
+
+    data = _client(config).get(
+        "/api/proposals/history", params={"workspace": "personal", "limit": 5}
+    ).json()
+
+    assert [r["text"] for r in data["rows"]] == ["Quiet fact."]
+    assert data["total"] == 1
+    assert data["truncated"] is False
+
+
+def test_history_reports_at_max_for_a_request_of_exactly_the_cap(tmp_path: Path) -> None:
+    """A request for the cap is already at it.
+
+    `at_max` was `requested > limit`, so asking for exactly the cap came back
+    False alongside `truncated: True` — the client saw "more available, keep
+    asking" and burned one full-page refetch before the flag finally tripped.
+    """
+    from ciao.web import routes_api as api_module
+
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {"promoted_at": f"2026-09-01T10:00:{i:02d}+00:00", "kind": "memory", "text": f"Fact {i}."}
+            for i in range(6)
+        ],
+    )
+    client = _client(config)
+
+    monkeyed = api_module._HISTORY_MAX_LIMIT
+    api_module._HISTORY_MAX_LIMIT = 4
+    try:
+        data = client.get("/api/proposals/history", params={"limit": 4}).json()
+    finally:
+        api_module._HISTORY_MAX_LIMIT = monkeyed
+
+    assert data["limit"] == 4
+    assert data["truncated"] is True
+    assert data["at_max"] is True
+
+
+def test_history_reads_a_shared_sidecar_once(tmp_path: Path) -> None:
+    """Two registered names can resolve to one vault root, hence one sidecar.
+
+    The loop trusted one-sidecar-per-name, so both names read the same file and
+    every decision in it appeared twice with `total` double-counted.
+    """
+    vault = tmp_path / "memory-vault"
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=vault,
+        workspaces={
+            # Both point at the same root, as a `vault_root: "."` entry or the
+            # legacy entity layout does.
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/shared"),
+            "alias": WorkspaceConfig(name="alias", vault_root="memory-vault/shared"),
+        },
+    )
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+
+    data = _client(config).get("/api/proposals/history").json()
+
+    assert data["total"] == 1
+    assert [r["text"] for r in data["rows"]] == ["One."]
+
+
+def test_history_does_not_leak_the_internal_sidecar_field(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [{"kind": "memory", "text": "One."}])
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "log" not in rows[0]
+    assert "seq" not in rows[0]

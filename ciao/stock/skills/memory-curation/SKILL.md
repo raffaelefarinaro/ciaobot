@@ -28,7 +28,7 @@ Start from the recent archived chats: prefer their existing session-insights sec
 - `[learnings]` files into `Workspace/Learnings.md` (see pass 4).
 - `[review]` has no destination yet — decide what it is first.
 
-File a fact into its destination first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> --promoted` (the flag records a promotion; a plain dismissal means you decided against the fact — the reverse order can lose it). Dismiss already-covered facts without `--promoted`. Never remove a bullet by editing the file.
+File a fact into its destination first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> --promoted` (the flag records a promotion; a plain dismissal means you decided against the fact — the reverse order can lose it). Dismiss already-covered facts without `--promoted`. Never remove a bullet by editing the file. Every decision this command makes is recorded in the review page's History tab, so a promoted fact shows there as accepted by the agent, not silently dismissed.
 
 Pass the text via `--text-file`, not as an argument: a proposal is arbitrary user prose, and one containing `$(...)`, backticks or quotes would be run or mangled by the shell on its way to the command. A positional substring is still accepted for a value you have read and know is plain.
 
