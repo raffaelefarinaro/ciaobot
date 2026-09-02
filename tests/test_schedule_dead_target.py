@@ -291,3 +291,78 @@ def test_successful_dispatch_does_not_stamp_last_status(tmp_path: Path) -> None:
     # A completed run records its own health ("ok"), which is what clears a
     # stale error stamp from an earlier failed run.
     assert stored.last_status == "ok"
+
+
+def test_skipped_dispatch_stamps_last_status_on_the_row(tmp_path: Path) -> None:
+    """A wall-clock run stopped for a permission request or question is
+    classified "skipped", and unlike an interval run there is no later
+    write-back: the row must carry it or the SchedulePanel's "last run needs
+    you" branch can never appear."""
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+    )
+    pcm.start_stream = _stream_stub(
+        [
+            {"type": "permission_request"},
+            {"type": "result", "text": "Waiting for approval", "is_error": False},
+        ]
+    )  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
+    )
+
+    assert result["status"] == "skipped"
+    stored = store.get(entry.schedule_id)
+    assert stored is not None
+    assert stored.last_status == "skipped"
+
+
+def test_health_stamp_publishes_schedules_changed(tmp_path: Path) -> None:
+    """An open sidebar or Automations page refetches only on the
+    schedules_changed event; the health write must publish it or the new
+    status stays invisible until an unrelated reload."""
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+    )
+    pcm.start_stream = _stream_stub([{"type": "error"}])  # type: ignore[method-assign]
+
+    published: list[dict] = []
+    original_publish = pcm.events.publish
+    pcm.events.publish = lambda event: published.append(event)  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
+        )
+    finally:
+        pcm.events.publish = original_publish  # type: ignore[method-assign]
+
+    stored = store.get(entry.schedule_id)
+    assert stored is not None
+    assert stored.last_status == "error"
+    assert {"type": "schedules_changed"} in published

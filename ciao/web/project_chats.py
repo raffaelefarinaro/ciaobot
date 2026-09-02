@@ -8987,13 +8987,21 @@ class ProjectChatManager:
         # the row first: the run streamed for minutes and the user may have
         # edited or retargeted it meanwhile — only the health field is ours to
         # write.
-        if _sched_schedule_id and _sched_status in {"error", "ok"}:
+        if _sched_schedule_id and _sched_status in {"error", "ok", "skipped"}:
             store = getattr(self, "schedule_store", None)
             if store is not None:
                 latest = store.get(_sched_schedule_id)
                 if latest is not None and latest.last_status != _sched_status:
                     latest.last_status = _sched_status
                     store.replace(latest)
+                    # An open sidebar or Automations page only refetches on the
+                    # schedules_changed event; without publishing it the newly
+                    # stamped health (a failure that needs attention, or a
+                    # skipped run waiting on the user) stays invisible until an
+                    # unrelated refetch or reload.
+                    from ciao.schedules import publish_automations_changed
+
+                    publish_automations_changed(self)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",

@@ -1455,3 +1455,53 @@ def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
 
     assert os.environ.get("CIAO_WORKSPACE") is None
     assert os.environ.get("PWA_AUTH_TOKEN") != "t"
+
+
+def test_config_discovery_applies_the_workspace_auth_before_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare-shell `ciao run` against a stopped install must adopt the
+    workspace .env's auth settings, not the bare shell's absence of them.
+
+    Discovery used to apply its overlay after PWA_AUTH_TOKEN and
+    PWA_AUTH_REQUIRED were parsed, so the started server ignored the
+    workspace's configured password and booted unauthenticated.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    workspace = tmp_path / "workspace"
+    _per_root_workspace(workspace)
+    # A distinctive token in the .env, as a configured install has.
+    env_path = workspace / ".env"
+    env_path.write_text(
+        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token")
+        + "PWA_AUTH_REQUIRED=true\n",
+        encoding="utf-8",
+    )
+    agents = tmp_path / "LaunchAgents"
+    _write_installed_launch_agent(agents, workspace)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    for name in (
+        "CIAO_WORKSPACE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT",
+        "CIAO_BOOTSTRAP_WORKSPACE",
+        "PWA_AUTH_TOKEN",
+        "PWA_AUTH_REQUIRED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env()
+    finally:
+        reset_reroot_cache()
+
+    assert config.workspace_root == workspace.resolve()
+    assert config.pwa_auth_token == "ws-secret-token"
+    assert config.pwa_auth_required is True
