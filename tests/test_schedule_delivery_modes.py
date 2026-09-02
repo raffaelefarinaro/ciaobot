@@ -71,6 +71,24 @@ def test_quota_retry_is_recorded_as_skipped_not_error() -> None:
     assert error is None
 
 
+def test_unsettled_subagents_are_recorded_as_skipped_not_ok() -> None:
+    """A parent turn that finished while its background subagents did not
+    settle is an unfinished run: recording "ok" would clear a previous error
+    stamp and brand the schedule healthy while its synthesis never ran."""
+    from ciao.web.project_chats import _schedule_dispatch_status
+
+    status, error = _schedule_dispatch_status(
+        ScheduleRunOutcome(
+            completed=True,
+            is_error=False,
+            subagents_pending=True,
+        )
+    )
+
+    assert status == "skipped"
+    assert error is None
+
+
 def test_manual_policy_stays_visible_after_clean_success() -> None:
     outcome = ScheduleRunOutcome(completed=True, is_error=False)
     assert _should_auto_archive_schedule_run(_entry(archive="manual"), outcome) is False

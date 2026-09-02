@@ -1189,12 +1189,18 @@ def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | N
 
     A pending retry means the provider deferred the work, such as after a
     quota rejection. It remains unclean and visible, but is not an app error.
+    Unsettled background subagents (or a run that ended on an interim message
+    with no synthesis turn) mean the work is not done yet either — not a
+    failure to report as such, but not a healthy run either: recording "ok"
+    would clear a previous error while the follow-up never completed.
     """
     if outcome.retry_pending:
         return "skipped", None
     if outcome.stream_error or outcome.is_error:
         return "error", (outcome.final_text or "stream error")[:1000]
     if outcome.permission_requested or outcome.question_requested:
+        return "skipped", None
+    if outcome.subagents_pending:
         return "skipped", None
     return "ok", None
 
