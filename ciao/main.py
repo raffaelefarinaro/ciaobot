@@ -526,6 +526,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # through its event bus (see job_runs.set_publisher).
     pcm.attach_job_runs_publisher()
 
+    # Dispatch failures stamp last_status on the stored schedule row so the
+    # Automations sidebar flags them for attention instead of leaving an
+    # endless string of invisible `stream error` job records (issue #407).
+    # The manager cannot hold a store reference in its constructor without
+    # reshuffling init order, so it is attached right after both exist.
+    pcm.schedule_store = schedule_store
+
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
         result = await pcm.dispatch_schedule(

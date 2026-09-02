@@ -486,7 +486,9 @@ export interface Schedule {
   interval_minutes: number
   // Outcome of the most recent interval run. Interval entries have no expected
   // wall-clock slot, so `missed` is always false for them and this is what
-  // reports their health instead. Empty on wall-clock schedules.
+  // reports their health instead. A wall-clock entry carries it too when its
+  // last dispatch failed ('error'): the missed-run check alone reports that
+  // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
   // retry) — see project_chats._schedule_dispatch_status.

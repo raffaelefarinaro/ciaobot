@@ -1782,9 +1782,10 @@ class CiaoMcpService:
                 "create"  — create a validated schedule. Show the user a concise
                     draft and get confirmation before creating it, unless they
                     already explicitly asked you to apply it — call "preview"
-                    first. The draft must include next_run, the target workspace,
-                    and the target project (or chat). Ask if they want a different
-                    workspace/project when that isn't obvious from the request.
+                    first. The draft must include next_run, the target
+                    workspace, and the target project. Ask if they want a
+                    different workspace/project when that isn't obvious from
+                    the request.
                 "update"  — update an existing schedule through validated fields.
                     Field semantics match "create". System schedules (scope=system)
                     only accept enabled/workspace changes — everything else raises
@@ -1819,28 +1820,24 @@ class CiaoMcpService:
                     "interval"; default "weekly". Use "interval" for sub-day
                     recurrence ("every 30 minutes") — see interval_minutes.
                 interval_minutes: interval only — whole minutes between runs,
-                    minimum 1, default 10. Combine with chat_id for a cadence
-                    that keeps one conversation going (each run inherits that
-                    chat's model and mode; the schedule's own model/provider are
-                    ignored), or with project_id for a fresh chat per run. Give
-                    the prompt a short fixed no-change response for a no-op run,
-                    so repeated runs stay cheap and scannable. A run that comes
-                    due while the target chat is still streaming is skipped and
-                    retried on the next tick, not queued; intervals missed while
-                    the server was down are not replayed.
+                    minimum 1, default 10. Combine with project_id for a fresh
+                    chat per run. Give the prompt a short fixed no-change
+                    response for a no-op run, so repeated runs stay cheap and
+                    scannable. A run that comes due while its previous run is
+                    still streaming is skipped and retried on the next tick,
+                    not queued; intervals missed while the server was down are
+                    not replayed.
                 days_of_week: weekly only — lowercase "mon".."sun".
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
                 project_id: Project id or case-insensitive name — creates a
-                    fresh chat in that project per run. When omitted (and
-                    chat_id is also omitted), defaults to this chat's project
-                    and stamps that project's workspace. Preferred for
-                    vault-aware automation.
-                chat_id: Posts into one existing chat instead. Use only when
-                    conversation continuity across runs matters; resolve it
-                    via chats_list first (chat titles aren't unique, unlike
-                    project names, so there's no name lookup for this one).
-                    When set, project_id is not auto-inherited.
+                    fresh chat in that project per run. When omitted, defaults
+                    to this chat's project and stamps that project's workspace.
+                    Preferred for vault-aware automation. Schedules bind to a
+                    project and workspace, never to a chat: a chat-bound run
+                    posts into one conversation forever (invisible unless you
+                    watch that chat) and fails silently once the chat is
+                    archived. There is no chat_id parameter.
                 model: Empty inherits the target workspace's default model at
                     dispatch time; override only when necessary.
                 provider: Empty inherits the target workspace's default
@@ -1870,6 +1867,20 @@ class CiaoMcpService:
                 key: value for key, value in locals().items()
                 if key not in {"self", "action", "schedule_id"}
             }
+            # Refuse chat bindings at the tool surface, before the control
+            # plane, so the caller learns the stance even on an update payload
+            # where the control plane would only see chat_id among many fields.
+            # The parameter stays in the signature (pydantic silently drops
+            # undeclared arguments, which would hide the refusal) but is
+            # documented as not existing.
+            if supplied.get("chat_id") is not None:
+                raise ControlPlaneError(
+                    "chat_binding_unsupported",
+                    "Schedules bind to a project, not a chat. Pass project_id "
+                    "(each run then opens a fresh chat in it, visible in the "
+                    "sidebar) — chat_id bindings fail silently once their target "
+                    "chat is archived.",
+                )
             if action in {"preview", "create"}:
                 values = {
                     key: _SCHEDULE_CREATE_DEFAULTS.get(key, value) if value is None else value

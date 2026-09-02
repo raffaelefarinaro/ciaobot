@@ -1351,6 +1351,11 @@ class ProjectChatManager:
         # Bound by main.py so a wake dropped by the restart drain can mark its
         # runs for replay on the next start instead of vanishing.
         self._background_runner: Any = None
+        # Bound by main.py right after both objects exist. dispatch_schedule
+        # stamps a failed run's last_status on the stored row so the Automations
+        # sidebar flags it for attention (issue #407) — without a store there is
+        # nowhere durable to write, and tests build managers without one.
+        self.schedule_store: Any = None
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
@@ -8616,14 +8621,17 @@ class ProjectChatManager:
         (web_project_id path). For fixed-chat schedules (web_chat_id),
         the existing chat's provider is honoured.
 
-        A fixed-chat *interval* entry is handled differently in two ways. It
-        never has its model/mode overwritten — each run uses whatever the user
-        configured on the chat, which is the defining property the merged
-        `interval` cadence inherited from loops. And a missing or archived
-        target does not end the run: the archived transcript is forked, or a
-        fresh chat is opened in the entry's project, and ``entry.web_chat_id``
-        is re-pointed at it. Only when no project resolves either does this
-        return None, which the caller turns into "disable the entry".
+        A fixed-chat entry is handled differently in two ways. It never has its
+        model/mode overwritten — each run uses whatever the user configured on
+        the chat, which is the defining property the merged `interval` cadence
+        inherited from loops. And a missing or archived target does not end the
+        run, whatever the cadence: the archived transcript is forked
+        (``chat_continue`` semantics), or a fresh chat is opened in the entry's
+        project, and ``entry.web_chat_id`` is re-pointed at it. Dispatching into
+        the archived chat itself would resume a reclaimed provider session and
+        fail instantly with a silent ``stream error`` on every future run (see
+        issue #407). Only when no project resolves either does this return
+        None, which the caller turns into "disable the entry".
         """
         from datetime import UTC, datetime
 
@@ -8669,8 +8677,7 @@ class ProjectChatManager:
             return chat.chat_id
         elif web_chat_id:
             target_chat = self._chats.get(web_chat_id)
-            interval = getattr(entry, "frequency", "") == "interval"
-            if interval and (target_chat is None or target_chat.archived):
+            if target_chat is None or target_chat.archived:
                 replacement = self._rehome_interval_chat(entry, prompt)
                 if replacement is None:
                     return None
@@ -8679,6 +8686,7 @@ class ProjectChatManager:
             if target_chat is None:
                 logger.warning("Schedule target chat %s not found, skipping", web_chat_id)
                 return None
+            interval = getattr(entry, "frequency", "") == "interval"
             if not interval:
                 # Interval runs inherit the chat's own model/mode instead.
                 target_chat.model = model
@@ -8727,11 +8735,16 @@ class ProjectChatManager:
         return existing is not None and not existing.background
 
     def _rehome_interval_chat(self, entry, prompt: str) -> ChatInfo | None:
-        """Point a fixed-chat interval entry at a usable chat, or None.
+        """Point a chat-bound entry at a usable chat, or None.
 
         An archived target is forked so the run keeps the conversation it was
         following; a deleted one is replaced with a fresh chat in the entry's
         project. Mutates ``entry.web_chat_id``; the caller persists the entry.
+
+        Despite the name this serves every cadence, not just interval: a
+        wall-clock entry bound to a chat hits the same dead target after the
+        chat is archived, and dispatching into it fails with an unobservable
+        ``stream error`` on every later run (issue #407).
         """
         chat_id = getattr(entry, "web_chat_id", "") or ""
         chat = self._chats.get(chat_id)
@@ -8962,6 +8975,24 @@ class ProjectChatManager:
         # retry) is not an error, but it is not a completed run either -- report
         # it as such rather than flattening it to "ok".
         result["status"] = "error" if _sched_status == "error" else _sched_status
+        # A failed run is stamped on the stored row, not just in the job log:
+        # without this a wall-clock entry failing every run (an archived target
+        # resuming a dead provider session, say) produced an endless string of
+        # invisible `stream error` records and nothing the operator could see
+        # anywhere (issue #407). The stamp makes the PWA sidebar flag the
+        # automation for attention on the next schedules refetch. A completed
+        # run clears it again, so a one-off failure does not brand the entry
+        # unhealthy forever — interval entries get this for free from
+        # _run_interval's write-back; wall-clock entries get it here. Re-read
+        # the row first: the run streamed for minutes and the user may have
+        # edited or retargeted it meanwhile — only the health field is ours to
+        # write.
+        if _sched_schedule_id and _sched_status in {"error", "ok"}:
+            store = getattr(self, "schedule_store", None)
+            latest = store.get(_sched_schedule_id) if store is not None else None
+            if latest is not None and latest.last_status != _sched_status:
+                latest.last_status = _sched_status
+                store.replace(latest)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
