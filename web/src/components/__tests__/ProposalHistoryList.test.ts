@@ -52,7 +52,7 @@ describe('ProposalHistoryList', () => {
     const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200')
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
     expect(wrapper.text()).toContain('Remember the thing')
     wrapper.unmount()
   })
@@ -186,8 +186,114 @@ describe('ProposalHistoryList', () => {
     await more.trigger('click')
     await flushPromises()
 
-    expect(apiGet).toHaveBeenLastCalledWith('/api/proposals/history?limit=400')
+    expect(apiGet).toHaveBeenLastCalledWith('/api/proposals/history?limit=400&workspace=personal')
     expect(wrapper.find('.ph-more').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('hides "show more" once the server caps the page, rather than looping', async () => {
+    // The server clamps the limit before deciding truncation, so past the cap
+    // it keeps reporting more rows while returning the same page. Wired to
+    // `truncated` alone the button stayed and each click changed nothing.
+    apiGet.mockResolvedValue({
+      rows: [historyRow()], total: 1500, truncated: true, limit: 1000, at_max: true,
+    })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-more').exists()).toBe(false)
+    expect(wrapper.find('.ph-capped').text()).toContain('newest 1000 of 1500')
+    wrapper.unmount()
+  })
+
+  it('re-fetches scoped to the workspace when the active workspace changes', async () => {
+    // The server pages the newest N rows per scope: re-filtering a page fetched
+    // for another workspace can leave a full ledger looking empty.
+    apiGet.mockResolvedValue({ rows: [historyRow()], total: 1, truncated: false })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenLastCalledWith('/api/proposals/history?limit=200&workspace=work')
+    wrapper.unmount()
+  })
+
+  it('says the filters hide the rows, and offers to clear them', async () => {
+    // The kind chips and the search box are shared with the queue tab, whose
+    // "clear filter" control is on that tab, so arriving here with either set
+    // read as an empty ledger with no way out.
+    apiGet.mockResolvedValue({ rows: [historyRow()], total: 1, truncated: false })
+    const store = useProposalsStore()
+    store.search = 'nothing matches this'
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No decisions match the current filters')
+    expect(wrapper.text()).not.toContain('No decisions yet')
+
+    await wrapper.find('.ph-clear-filter').trigger('click')
+    await flushPromises()
+
+    expect(store.search).toBe('')
+    expect(wrapper.findAll('.ph-row')).toHaveLength(1)
+    // And with nothing filtering, the reset control is gone.
+    expect(wrapper.find('.ph-clear-filter').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('offers the reset even when a filter only hides some rows', async () => {
+    apiGet.mockResolvedValue({
+      rows: [historyRow(), historyRow({ id: 'h2', action: 'dismissed' })],
+      total: 2,
+      truncated: false,
+    })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-clear-filter').exists()).toBe(false)
+
+    useProposalsStore().historyActionFilter = 'dismissed'
+    await flushPromises()
+
+    expect(wrapper.findAll('.ph-row')).toHaveLength(1)
+    expect(wrapper.find('.ph-clear-filter').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps one "Earlier" group when an unparseable timestamp splits the run', async () => {
+    // The server sorts by the raw timestamp string, so a corrupt legacy `ts`
+    // lands among the dated rows; appending only while the key repeats then
+    // produced several interleaved "Earlier" sections.
+    apiGet.mockResolvedValue({
+      rows: [
+        historyRow({ id: 'a', ts: '2026-09-01T10:00:00+00:00' }),
+        historyRow({ id: 'bad', ts: 'not-a-date' }),
+        historyRow({ id: 'b', ts: '2026-09-01T09:00:00+00:00' }),
+        historyRow({ id: 'legacy', ts: '' }),
+      ],
+      total: 4,
+      truncated: false,
+    })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.ph-group-label').map(el => el.text())
+    expect(labels.filter(l => l === 'Earlier')).toHaveLength(1)
+    expect(wrapper.findAll('.ph-row')).toHaveLength(4)
+    wrapper.unmount()
+  })
+
+  it('reports a history load failure without borrowing the queue error slot', async () => {
+    apiGet.mockRejectedValue(new Error('history is unreachable'))
+    const store = useProposalsStore()
+    store.error = 'an unread accept failure'
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-error').text()).toContain('history is unreachable')
+    expect(store.error).toBe('an unread accept failure')
     wrapper.unmount()
   })
 })

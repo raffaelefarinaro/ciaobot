@@ -272,4 +272,76 @@ describe('proposal history', () => {
 
     expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
   })
+
+  it('does not invalidate history on a plain queue reload', async () => {
+    // It used to flip the flag on every `fetch`, so each tab switch
+    // re-downloaded the whole ledger even when nothing had changed.
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+
+    const store = useProposalsStore()
+    store.historyLoaded = true
+    await store.fetch({ force: true })
+
+    expect(store.historyLoaded).toBe(true)
+  })
+
+  it('stops paging once the server caps the page', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 1500, truncated: true, limit: 1000, at_max: true,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory({ limit: 1200 })
+
+    expect(store.historyTruncated).toBe(true)
+    expect(store.historyAtMax).toBe(true)
+    expect(store.historyCanLoadMore).toBe(false)
+    // The limit tracks what the server served, not what was asked for.
+    expect(store.historyLimit).toBe(1000)
+
+    vi.mocked(api.get).mockClear()
+    await store.loadMoreHistory()
+    expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it('keeps paging while the server is still below its cap', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory()
+
+    expect(store.historyCanLoadMore).toBe(true)
+    await store.loadMoreHistory()
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=400')
+  })
+
+  it('scopes the history request to a workspace and refetches when it changes', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [historyRow()], total: 1, truncated: false } as never)
+
+    const store = useProposalsStore()
+    await store.ensureHistoryLoaded('personal')
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=200&workspace=personal')
+
+    // Same workspace, already loaded: no second request.
+    vi.mocked(api.get).mockClear()
+    await store.ensureHistoryLoaded('personal')
+    expect(api.get).not.toHaveBeenCalled()
+
+    // A different workspace is a different page on the server.
+    await store.ensureHistoryLoaded('work')
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=200&workspace=work')
+  })
+
+  it('keeps a history failure out of the queue error slot', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('history is unreachable'))
+
+    const store = useProposalsStore()
+    store.error = 'an unread accept failure'
+    await store.fetchHistory()
+
+    expect(store.historyError).toBe('history is unreachable')
+    expect(store.error).toBe('an unread accept failure')
+  })
 })

@@ -1221,6 +1221,7 @@ def record_promotion(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    once: bool = False,
 ) -> bool:
     """Record an accepted proposal in the same decision history.
 
@@ -1241,6 +1242,7 @@ def record_promotion(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        once=once,
     )
 
 
@@ -1255,11 +1257,19 @@ def _record_decision(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    once: bool = False,
 ) -> bool:
     cleaned = text.strip()
     if not cleaned:
         return False
     log_path = dismissed_log_path(proposals_path)
+    if once and _has_decision(proposals_path, key=key, text=cleaned, outcome=outcome):
+        # Idempotent paths only. A decision the operator makes is a fresh event
+        # every time, but the archive-time pipeline re-derives the same
+        # "already applied, skipped" verdict on every pass over the same
+        # transcript, and appending a row per pass grew the history without
+        # recording anything new.
+        return False
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry: dict[str, Any] = {
         key: datetime.now(UTC).isoformat(timespec="seconds"),
@@ -1282,6 +1292,35 @@ def _record_decision(
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
+
+
+def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) -> bool:
+    """Whether this exact decision (action, text, outcome) is already recorded.
+
+    Used only by ``once=True`` writers; matching on the outcome as well keeps a
+    later real promotion of a fact recordable after an earlier "skipped,
+    already known" row for the same text.
+    """
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or key not in entry:
+                continue
+            if str(entry.get("text", "")).strip() != text:
+                continue
+            if str(entry.get("outcome", "")) == outcome:
+                return True
+    return False
 
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
@@ -1319,14 +1358,20 @@ def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     return out
 
 
-def history_row_id(entry: dict[str, Any]) -> str:
+def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
     """Stable id for one decision-history row, derived from its content.
 
     Unlike the live queue's :func:`ciao.proposal_tracking.stable_proposal_id`,
-    this cannot key off a workspace/path/line: auto-apply only has a vault
-    root, the CLI only has an optional workspace name, and legacy sidecar
-    rows have neither. Hashing the fields every row actually carries keeps
-    the id stable across repeated reads without requiring any of them.
+    this cannot key off a path/line: auto-apply only has a vault root, the CLI
+    only has an optional workspace name, and legacy sidecar rows have neither.
+
+    Timestamps are second-precision, so content alone is not unique: the same
+    fact accepted in two workspaces within one second, or two undated legacy
+    rows with identical text, hashed identically — and the History list keys
+    its ``<li>`` on this id, so a collision dropped a row on patch. The
+    ``workspace`` and the row's position in its sidecar (``seq``, assigned by
+    :func:`read_decisions`) disambiguate; both are stable across reads because
+    the sidecar is append-only.
     """
     import hashlib
 
@@ -1336,6 +1381,8 @@ def history_row_id(entry: dict[str, Any]) -> str:
             str(entry.get("action", "")),
             str(entry.get("kind", "")),
             str(entry.get("text", "")),
+            workspace,
+            str(entry.get("seq", "")),
         )
     )
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
@@ -1346,9 +1393,13 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id}``. This is the read side of the
+    destination, outcome, proposal_id, seq}``. This is the read side of the
     decision history the review page's History tab renders; :func:`record_dismissal`
     and :func:`record_promotion` are the write side.
+
+    ``seq`` is the row's position in this workspace's append-only sidecar. It
+    exists so :func:`history_row_id` can tell apart two rows whose content is
+    byte-identical, and is dropped before the row reaches the API payload.
     """
     rows: list[dict[str, Any]] = []
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
@@ -1389,6 +1440,7 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "destination": str(entry.get("destination", "")),
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
+                    "seq": len(rows),
                 }
             )
     return rows
@@ -1741,6 +1793,9 @@ def proposals_from_archive(
                             via="auto",
                             source=archive_path.stem,
                             outcome="suppressed",
+                            # Re-processing the same archive re-derives this
+                            # same verdict; record it once, not once per pass.
+                            once=True,
                         )
                     except Exception:  # noqa: BLE001 — recording must not break the pipeline
                         logger.info(

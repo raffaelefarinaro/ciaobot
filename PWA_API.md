@@ -680,7 +680,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # what the archive-time auto-promoter wrote or skipped ("outcome":
 # "suppressed"/"duplicate") overnight, and what the nightly curation agent
 # resolved via the CLI ("via": "agent"). Optional query params: workspace,
-# limit (default 200, max 1000), action (accepted|dismissed).
+# limit (default 200, max 1000), action (accepted|dismissed). The reply carries
+# {rows, total, truncated, limit, at_max}: `limit` is the clamped page size
+# actually served and `at_max` says the request asked for more than the cap, so
+# a wider limit would return the same page - a client paging with "show more"
+# must stop on `at_max` rather than on `truncated`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 ```
 

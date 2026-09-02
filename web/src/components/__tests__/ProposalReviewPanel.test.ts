@@ -689,10 +689,26 @@ describe('Queue / History tabs', () => {
     await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
     await flushPromises()
 
-    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200')
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
     expect(wrapper.find('.pr-row').exists()).toBe(false)
     expect(wrapper.text()).toContain('Remember the thing')
     expect(wrapper.text()).toContain('Accepted')
+    wrapper.unmount()
+  })
+
+  it('shows no History count until the ledger has actually loaded', async () => {
+    // History is fetched on the tab switch, so a count rendered before that
+    // read "History 0" on a ledger with hundreds of rows.
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
+
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
     wrapper.unmount()
   })
 })

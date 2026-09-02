@@ -1648,3 +1648,71 @@ def test_a_covered_verdict_with_no_vault_appends_rather_than_dropping(tmp_path):
     )
     assert outcome == "written"
     assert "Prefers spaces over tabs." in _entries(guide, "memory")
+
+
+# -- Decision recording is append-only, except where it must be idempotent ----
+
+
+def test_record_promotion_once_does_not_append_a_duplicate(tmp_path: Path) -> None:
+    """The archive-time suppression verdict is re-derived on every pass.
+
+    ``_is_already_applied`` recognises the same applied fact each time the same
+    archive is re-processed, and recording per pass grew the decision history
+    without recording anything new.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    assert mp.record_promotion(
+        queue, text="A known fact.", kind="memory", via="auto",
+        source="chat-1", outcome="suppressed", once=True,
+    ) is True
+    assert mp.record_promotion(
+        queue, text="A known fact.", kind="memory", via="auto",
+        source="chat-1", outcome="suppressed", once=True,
+    ) is False
+
+    rows = mp.read_decisions(queue)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "suppressed"
+
+
+def test_record_promotion_once_still_records_a_different_outcome(tmp_path: Path) -> None:
+    """A real promotion of a fact previously logged as "already known" is news."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    mp.record_promotion(
+        queue, text="A fact.", kind="memory", via="auto", outcome="suppressed", once=True,
+    )
+    assert mp.record_promotion(
+        queue, text="A fact.", kind="memory", via="pwa", once=True,
+    ) is True
+
+    assert [r["outcome"] for r in mp.read_decisions(queue)] == ["suppressed", ""]
+
+
+def test_record_promotion_defaults_to_appending(tmp_path: Path) -> None:
+    """Operator decisions are fresh events every time; only ``once`` dedupes."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    for _ in range(2):
+        assert mp.record_promotion(queue, text="A fact.", kind="memory", via="pwa") is True
+
+    assert len(mp.read_decisions(queue)) == 2
+
+
+def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> None:
+    """Two byte-identical rows must still get distinct history ids."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    log = mp.dismissed_log_path(queue)
+    log.write_text('{"kind": "memory", "text": "Same."}\n' * 2, encoding="utf-8")
+
+    rows = mp.read_decisions(queue)
+
+    assert [r["seq"] for r in rows] == [0, 1]
+    assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[1], "personal")
+    # And the same row in two workspaces is two ids.
+    assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")

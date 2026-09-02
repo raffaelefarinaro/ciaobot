@@ -59,7 +59,29 @@ def test_serves_html_as_html(workspace: Path) -> None:
     resp = client.get("/api/workspace-html", params={"path": "Workspace/dashboard.html"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
-    assert resp.text == _ARTIFACT
+    # The original document is preserved (plus the injected comment bridge).
+    assert _ARTIFACT in resp.text
+
+
+def test_injects_comment_bridge(workspace: Path) -> None:
+    # The bridge script is what makes the preview commentable: it watches
+    # selections inside the sandboxed frame and posts anchors to the panel.
+    client = _make_client(workspace)
+    resp = client.get("/api/workspace-html", params={"path": "Workspace/dashboard.html"})
+    assert "data-ciao-artifact-bridge" in resp.text
+    assert "ciao:artifact-comment" in resp.text
+
+
+def test_bridge_injection_is_idempotent() -> None:
+    from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
+
+    once = inject_bridge("<html><head></head><body></body></html>")
+    assert once.count("data-ciao-artifact-bridge") == 1
+    assert inject_bridge(once) == once
+    # A fragment without <head> gets the bridge prepended rather than dropped.
+    fragment = inject_bridge("<p>hello</p>")
+    assert fragment.startswith(BRIDGE_TAG[:40])
+    assert "<p>hello</p>" in fragment
 
 
 def test_htm_extension_also_renders(workspace: Path) -> None:
@@ -180,4 +202,25 @@ def test_fuzzy_match_resolves_bare_filename(workspace: Path) -> None:
     client = _make_client(workspace)
     resp = client.get("/api/workspace-html", params={"path": "dashboard.html"})
     assert resp.status_code == 200
-    assert resp.text == _ARTIFACT
+    assert _ARTIFACT in resp.text
+
+
+def test_non_utf8_artifact_still_renders(workspace: Path) -> None:
+    """A cp1252 HTML export streamed fine as a FileResponse.
+
+    Injecting the comment bridge means decoding the file in the handler, and a
+    strict decode turned one stray byte into a 500 for the whole preview.
+    """
+    (workspace / "Workspace" / "legacy-cp1252.html").write_bytes(
+        "<html><body><p>caf\u00e9 \u2014 r\u00e9sum\u00e9</p></body></html>".encode("cp1252")
+    )
+    client = _make_client(workspace)
+
+    resp = client.get(
+        "/api/workspace-html", params={"path": "Workspace/legacy-cp1252.html"}
+    )
+
+    assert resp.status_code == 200
+    assert "<p>caf" in resp.text
+    # The bridge is still injected into the salvaged document.
+    assert "data-ciao-artifact-bridge" in resp.text

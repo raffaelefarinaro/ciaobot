@@ -187,7 +187,7 @@ function panelId(key: string): string {
 
 function switchTab(key: 'queue' | 'history') {
   store.view = key
-  if (key === 'history') void store.ensureHistoryLoaded()
+  if (key === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
 }
 
 // Roving tabindex, mirroring ProjectView's project-tabs pattern: the bar is a
@@ -213,7 +213,12 @@ function onReviewTabKeydown(event: KeyboardEvent): void {
   target.focus()
 }
 
-const historyCount = computed(() => store.visibleHistory(projectStore.activeWorkspace).length)
+// Only meaningful once the history has actually loaded: history is fetched on
+// the tab switch, so a count rendered before that read "History 0" on a ledger
+// with hundreds of rows - the opposite of what a badge is for.
+const historyCount = computed(() =>
+  store.historyLoaded ? store.visibleHistory(projectStore.activeWorkspace).length : null,
+)
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -659,7 +664,7 @@ onMounted(() => {
           @keydown="onReviewTabKeydown"
         >
           {{ tab.label }}
-          <span v-if="tab.key === 'history'" class="pr-tab-count">{{ historyCount }}</span>
+          <span v-if="tab.key === 'history' && historyCount !== null" class="pr-tab-count">{{ historyCount }}</span>
         </button>
       </div>
       <p v-if="store.view === 'queue'" class="pr-summary">

@@ -56,21 +56,40 @@ export const useProposalsStore = defineStore('proposals', () => {
   const search = ref('')
   const selected = ref<Set<string>>(new Set())
 
-  // Queue vs. decision history. Lives here, not in the panel, for the same
-  // reason the filters do: the sidebar and the panel both need to know which
-  // sub-view is showing.
+  // Queue vs. decision history. Lives here rather than in the panel because
+  // the panel's tab bar sets it while `fetch` reads it, to refresh a history
+  // tab that is already open after a queue mutation.
   const view = ref<'queue' | 'history'>('queue')
   const historyRows = ref<ProposalHistoryRow[]>([])
   const historyLoading = ref(false)
   const historyLoaded = ref(false)
   const historyTruncated = ref(false)
+  /** The server refused to widen the page further; "show more" would no-op. */
+  const historyAtMax = ref(false)
+  /** How many decisions exist in scope, which can exceed the served page. */
+  const historyTotal = ref(0)
+  /** History failures get their own slot: `error` belongs to the queue, and
+   * clearing it here wiped an accept failure the operator had not read yet. */
+  const historyError = ref('')
   const historyActionFilter = ref<'all' | 'accepted' | 'dismissed'>('all')
   const historyActorFilter = ref<'all' | 'pwa' | 'agent' | 'auto'>('all')
   /** How many history rows to ask the server for; grows on "show more". */
   const historyLimit = ref(200)
+  /** Which workspace the loaded history covers, so a switch refetches. The
+   * server pages the newest N rows, so filtering a global page client-side
+   * starved a quiet workspace on a busy install: its decisions fell outside
+   * the window and its History tab read "No decisions yet." */
+  const historyWorkspace = ref<string | null>(null)
   let historyFetchPromise: Promise<void> | null = null
   /** Ticket for the newest in-flight history request; older responses are dropped. */
   let historySeq = 0
+
+  /** Mark the loaded history stale. Called after a mutation, not on every
+   * queue load: a plain tab switch re-fetched the whole ledger for nothing. */
+  function invalidateHistory() {
+    historyLoaded.value = false
+    if (view.value === 'history') void fetchHistory({ force: true })
+  }
 
   /** Rows belonging to one workspace.
    *
@@ -148,12 +167,6 @@ export const useProposalsStore = defineStore('proposals', () => {
         rows.value = data.rows ?? []
         loaded.value = true
         pruneSelected()
-        // A queue mutation can change what belongs in history (a fresh
-        // accept/dismiss), so the next load of the History tab must not
-        // serve a stale snapshot. Cheap when the tab is not open: this only
-        // flips a flag; a live History tab also re-fetches immediately.
-        historyLoaded.value = false
-        if (view.value === 'history') void fetchHistory({ force: true })
       } catch (e) {
         if (seq !== fetchSeq) return
         error.value = e instanceof Error ? e.message : 'Could not load proposals'
@@ -193,6 +206,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`)
       await fetch({ force: true })
+      invalidateHistory()
       return { ok: true }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Action failed'
@@ -213,6 +227,7 @@ export const useProposalsStore = defineStore('proposals', () => {
         action, ids, ...(workspace ? { workspace } : {}),
       })
       await fetch({ force: true })
+      invalidateHistory()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
     } finally {
@@ -229,6 +244,7 @@ export const useProposalsStore = defineStore('proposals', () => {
         `/api/proposals/dismiss-older-than?date=${encodeURIComponent(date)}`,
       )
       await fetch({ force: true })
+      invalidateHistory()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Dismiss failed'
     } finally {
@@ -242,24 +258,39 @@ export const useProposalsStore = defineStore('proposals', () => {
    * (see `fetch` above) forces a fresh one so it is never handed a
    * pre-mutation snapshot.
    */
-  async function fetchHistory(opts?: { force?: boolean; limit?: number }): Promise<void> {
+  async function fetchHistory(
+    opts?: { force?: boolean; limit?: number; workspace?: string },
+  ): Promise<void> {
     if (opts?.limit) historyLimit.value = opts.limit
+    if (opts?.workspace !== undefined) historyWorkspace.value = opts.workspace
     if (historyFetchPromise && !opts?.force) return historyFetchPromise
     const seq = ++historySeq
+    const requested = historyLimit.value
+    const workspace = historyWorkspace.value ?? ''
     const request = (async () => {
       historyLoading.value = true
-      error.value = ''
+      historyError.value = ''
       try {
+        const query = new URLSearchParams({ limit: String(requested) })
+        // Scope server-side: the response is the newest N rows, so filtering a
+        // global page down to one workspace can leave nothing to show.
+        if (workspace) query.set('workspace', workspace)
         const data = await api.get<ProposalHistoryResponse>(
-          `/api/proposals/history?limit=${historyLimit.value}`,
+          `/api/proposals/history?${query.toString()}`,
         )
         if (seq !== historySeq) return
         historyRows.value = data.rows ?? []
+        historyTotal.value = data.total ?? historyRows.value.length
         historyTruncated.value = Boolean(data.truncated)
+        // Older servers send neither field; inferring from the page size keeps
+        // "show more" from looping against them too.
+        historyAtMax.value = data.at_max ?? (data.limit !== undefined && data.limit < requested)
+        // Track the page the server actually served, not what we asked for.
+        if (data.limit) historyLimit.value = data.limit
         historyLoaded.value = true
       } catch (e) {
         if (seq !== historySeq) return
-        error.value = e instanceof Error ? e.message : 'Could not load proposal history'
+        historyError.value = e instanceof Error ? e.message : 'Could not load proposal history'
       } finally {
         if (seq === historySeq) historyLoading.value = false
       }
@@ -272,14 +303,22 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
+  /** Whether a wider page would actually return anything new. */
+  const historyCanLoadMore = computed(() => historyTruncated.value && !historyAtMax.value)
+
   /** Ask the server for more history rows and refresh with the wider limit. */
   async function loadMoreHistory(): Promise<void> {
+    if (!historyCanLoadMore.value) return
     await fetchHistory({ force: true, limit: historyLimit.value + 200 })
   }
 
-  async function ensureHistoryLoaded(): Promise<void> {
-    if (historyLoaded.value) return
-    await fetchHistory()
+  async function ensureHistoryLoaded(workspace?: string): Promise<void> {
+    const scope = workspace ?? historyWorkspace.value ?? ''
+    // A workspace switch invalidates the loaded page as surely as a mutation:
+    // the server scoped it to the previous workspace.
+    if (historyLoaded.value && historyWorkspace.value === scope) return
+    const changed = historyWorkspace.value !== scope
+    await fetchHistory({ workspace: scope, force: changed })
   }
 
   /** History rows in scope for one workspace, same rule as `scopedRows`. */
@@ -301,23 +340,13 @@ export const useProposalsStore = defineStore('proposals', () => {
     )
   }
 
-  /** Kind tallies for the History tab's sidebar chips, over the workspace scope. */
-  function historyKindCounts(workspace: string): { kind: string; count: number }[] {
-    const tally = new Map<string, number>()
-    for (const row of scopedHistory(workspace)) {
-      tally.set(row.kind, (tally.get(row.kind) ?? 0) + 1)
-    }
-    return [...tally.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([kind, count]) => ({ kind, count }))
-  }
-
   return {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, fetch, ensureLoaded, act, batch, dismissOlderThan,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,
+    historyAtMax, historyTotal, historyCanLoadMore, historyError, historyWorkspace,
     historyActionFilter, historyActorFilter,
-    fetchHistory, ensureHistoryLoaded, loadMoreHistory, scopedHistory, visibleHistory, historyKindCounts,
+    fetchHistory, ensureHistoryLoaded, loadMoreHistory, invalidateHistory, scopedHistory, visibleHistory,
   }
 })

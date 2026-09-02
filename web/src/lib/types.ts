@@ -1189,4 +1189,9 @@ export interface ProposalHistoryResponse {
   rows: ProposalHistoryRow[]
   total: number
   truncated: boolean
+  /** Page size the server actually served, after clamping to its cap. */
+  limit?: number
+  /** The request asked for more than the cap, so a wider limit returns the
+   * same page. Paging must stop on this, not on `truncated`. */
+  at_max?: boolean
 }

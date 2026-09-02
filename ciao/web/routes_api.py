@@ -4427,8 +4427,14 @@ async def workspace_html(request: Request) -> Response:
     # user content.
     from ciao.web.artifact_bridge import inject_bridge
 
+    # Decode leniently rather than with the default strict codec: a workspace
+    # can hold a cp1252/latin-1 HTML export, and a strict decode raises inside
+    # the handler for a file that used to stream fine as a FileResponse. A
+    # replacement char in one artifact beats a 500 for the whole page.
+    source = resolved.read_bytes().decode("utf-8", errors="replace")
+
     return Response(
-        content=inject_bridge(resolved.read_text(encoding="utf-8")),
+        content=inject_bridge(source),
         media_type="text/html; charset=utf-8",
         headers={
             "Content-Security-Policy": _ARTIFACT_CSP,
@@ -7944,10 +7950,11 @@ async def proposals_history(request: Request) -> JSONResponse:
             {"error": "action must be accepted|dismissed"}, status_code=400
         )
     try:
-        limit = int(request.query_params.get("limit", _HISTORY_DEFAULT_LIMIT))
+        requested = int(request.query_params.get("limit", _HISTORY_DEFAULT_LIMIT))
     except ValueError:
         return JSONResponse({"error": "limit must be an integer"}, status_code=400)
-    limit = max(1, min(limit, _HISTORY_MAX_LIMIT))
+    requested = max(1, requested)
+    limit = min(requested, _HISTORY_MAX_LIMIT)
 
     rows: list[dict[str, Any]] = []
     for workspace in config.workspace_names():
@@ -7959,14 +7966,28 @@ async def proposals_history(request: Request) -> JSONResponse:
                 continue
             row = dict(entry)
             row["workspace"] = workspace
-            row["id"] = history_row_id(entry)
+            row["id"] = history_row_id(entry, workspace)
+            # Read-side disambiguator for the id only; not part of the contract.
+            row.pop("seq", None)
             rows.append(row)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
     rows.sort(key=lambda r: r["ts"], reverse=True)
     total = len(rows)
-    truncated = total > limit
-    return JSONResponse({"rows": rows[:limit], "total": total, "truncated": truncated})
+    # ``limit`` is the clamped value actually served, so ``truncated`` stays
+    # honest about rows existing beyond the page. ``at_max`` is what tells the
+    # client to stop asking: past the cap a wider limit returns the same page,
+    # and a "show more" button wired to ``truncated`` alone stayed visible and
+    # did nothing forever.
+    return JSONResponse(
+        {
+            "rows": rows[:limit],
+            "total": total,
+            "truncated": total > limit,
+            "limit": limit,
+            "at_max": requested > limit,
+        }
+    )
 
 
 def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
@@ -8148,10 +8169,17 @@ async def proposals_batch(request: Request) -> JSONResponse:
         elif ctx["workspace"]:
             from ciao.memory_proposals import record_dismissal
 
-            record_dismissal(
-                _proposals_file(config, ctx["workspace"]),
-                text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
-            )
+            # The file is already unlinked; a sidecar write failure must not
+            # fail a dismiss that happened.
+            try:
+                record_dismissal(
+                    _proposals_file(config, ctx["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                )
+            except OSError:
+                logger.info(
+                    "proposals: could not record skill dismissal for %s", row["id"]
+                )
         results.append(entry)
 
     # Group by file so each affected file is rewritten exactly once.
@@ -8544,12 +8572,21 @@ async def proposal_action(request: Request) -> JSONResponse:
         # extraction pipeline, and skill proposals come from the separate
         # skill-evolution pipeline. It IS recorded in the decision history,
         # so the review page's History tab shows it was resolved.
-        from ciao.memory_proposals import record_dismissal
+        # Guarded like the batch path: ``workspace_vault_root("")`` falls back
+        # to the default root, so a row with a blank workspace would file its
+        # decision into the wrong workspace's sidecar. And the file is already
+        # gone by now — a recording failure must not turn a completed dismiss
+        # into a 500, or the client's retry 404s on work that succeeded.
+        if row["workspace"]:
+            from ciao.memory_proposals import record_dismissal
 
-        record_dismissal(
-            _proposals_file(config, row["workspace"]),
-            text=row["text"], kind="skill", via="pwa", proposal_id=pid,
-        )
+            try:
+                record_dismissal(
+                    _proposals_file(config, row["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=pid,
+                )
+            except OSError:
+                logger.info("proposals: could not record skill dismissal for %s", pid)
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}

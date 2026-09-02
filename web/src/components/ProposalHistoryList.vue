@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import type { ProposalHistoryRow } from '../lib/types'
@@ -10,7 +10,13 @@ const store = useProposalsStore()
 const projectStore = useProjectStore()
 
 onMounted(() => {
-  void store.ensureHistoryLoaded()
+  void store.ensureHistoryLoaded(projectStore.activeWorkspace)
+})
+
+// The server scopes the page to one workspace, so a switch needs a new request
+// rather than a re-filter of rows that no longer cover the active workspace.
+watch(() => projectStore.activeWorkspace, ws => {
+  void store.ensureHistoryLoaded(ws)
 })
 
 const ACTION_FILTERS: { key: 'all' | 'accepted' | 'dismissed'; label: string }[] = [
@@ -57,10 +63,8 @@ function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
 }
 
-/** Groups rows into day buckets without re-sorting: the API and the store
- * both hand back newest-first, undated legacy rows last, so a run of equal
- * keys is always contiguous.
- */
+/** The bucket a row belongs to. Undated legacy rows, and rows whose `ts` does
+ * not parse, share one "earlier" bucket. */
 function dayKey(ts: string): string {
   if (!ts) return 'earlier'
   const d = new Date(ts)
@@ -77,16 +81,37 @@ function dayLabel(ts: string): string {
   return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
+/** Day buckets in first-seen order. Keyed into a map rather than appended
+ * while a key repeats: the server sorts by the raw timestamp string, so a
+ * single unparseable legacy `ts` is not contiguous with the other undated
+ * rows and produced several interleaved "Earlier" sections.
+ */
 const groups = computed(() => {
-  const out: { key: string; label: string; rows: ProposalHistoryRow[] }[] = []
+  const byKey = new Map<string, { key: string; label: string; rows: ProposalHistoryRow[] }>()
   for (const row of filteredRows.value) {
     const key = dayKey(row.ts)
-    const last = out[out.length - 1]
-    if (last && last.key === key) last.rows.push(row)
-    else out.push({ key, label: dayLabel(row.ts), rows: [row] })
+    const group = byKey.get(key)
+    if (group) group.rows.push(row)
+    else byKey.set(key, { key, label: dayLabel(row.ts), rows: [row] })
   }
-  return out
+  return [...byKey.values()]
 })
+
+/** Whether anything is narrowing the list. The kind chips and the search box
+ * are shared with the queue tab, whose "clear filter" control is on that tab,
+ * so without a reset here a filter set over there silently emptied this list. */
+const filtersActive = computed(
+  () => store.kindFilter !== 'all'
+    || Boolean(store.search)
+    || store.historyActionFilter !== 'all'
+    || store.historyActorFilter !== 'all',
+)
+
+/** Distinguishes "nothing recorded" from "nothing matches the filters". */
+const filtersHideEverything = computed(
+  () => !filteredRows.value.length
+    && store.scopedHistory(projectStore.activeWorkspace).length > 0,
+)
 </script>
 
 <template>
@@ -117,10 +142,19 @@ const groups = computed(() => {
           :class="{ active: store.historyActorFilter === f.key }"
           @click="store.historyActorFilter = f.key"
         >{{ f.label }}</button>
+        <button
+          v-if="filtersActive"
+          type="button"
+          class="ph-clear-filter"
+          @click="store.resetFilters()"
+        >clear filters</button>
       </div>
     </div>
 
+    <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
+
     <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
+    <p v-else-if="filtersHideEverything" class="ph-empty">No decisions match the current filters.</p>
     <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 
     <template v-else>
@@ -148,12 +182,15 @@ const groups = computed(() => {
       </section>
 
       <button
-        v-if="store.historyTruncated"
+        v-if="store.historyCanLoadMore"
         type="button"
         class="btn-small btn-chip ph-more"
         :disabled="store.historyLoading"
         @click="store.loadMoreHistory()"
       >{{ store.historyLoading ? 'loading…' : 'show more' }}</button>
+      <p v-else-if="store.historyAtMax && store.historyTruncated" class="ph-capped">
+        Showing the newest {{ store.historyLimit }} of {{ store.historyTotal }} decisions.
+      </p>
     </template>
   </div>
 </template>
@@ -279,5 +316,30 @@ const groups = computed(() => {
 
 .ph-more {
   align-self: flex-start;
+}
+
+.ph-capped {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+
+.ph-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+/* Same affordance as the queue tab's "clear filter", which is on the other
+   tab: the kind chips and search are shared, so the reset has to be reachable
+   from whichever tab the filter is hiding rows on. */
+.ph-clear-filter {
+  margin-left: var(--space-2);
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  cursor: pointer;
 }
 </style>
