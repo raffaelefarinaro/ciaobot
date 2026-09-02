@@ -5524,7 +5524,10 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
             model=model,
         ) as handle:
             result = await backfill_insights_task(
-                config, mode="both", model_override=model,
+                config,
+                mode="both",
+                model_override=model,
+                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
             )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
@@ -5541,7 +5544,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
 
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
-    state = request.app.state.state_store
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
@@ -5551,9 +5553,11 @@ async def create_schedule(request: Request) -> JSONResponse:
     # Persist only explicit overrides. Empty model/provider values mean
     # "inherit the selected workspace" and are resolved afresh at dispatch
     # time, so changing a workspace default also changes future runs.
-    ctx = ChatContext(chat_id=0)
     model = (body.get("model") or "").strip()
-    mode = state.get_mode(ctx)
+    # Left unset on purpose. The form offers no permission-mode choice, so
+    # capturing one here froze whatever the Telegram context happened to be on
+    # into the entry; mode inherits at dispatch like model and provider do.
+    mode = ""
 
     frequency = body.get("frequency", "weekly")
     if frequency not in FREQUENCIES:

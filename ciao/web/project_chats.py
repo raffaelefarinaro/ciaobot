@@ -4828,6 +4828,23 @@ class ProjectChatManager:
             )
         return primary
 
+    def chat_workspaces(self) -> dict[str, str]:
+        """Every known chat id mapped to its project's workspace.
+
+        Archives live under one shared ``Logs/Chats/<chat-id>/`` tree — the
+        re-rooting promotes Logs out of the vault but does not split it per
+        workspace — so an archive's path says which CHAT wrote it and nothing
+        about where that chat ran. Anything filtering archives by workspace has
+        to come back through the registry, which is here and not in
+        ``ciao.insights``; the backfill scanner compared the chat-id path
+        segment to a workspace name directly, which can never match, so a
+        workspace-scoped run silently found nothing.
+        """
+        return {
+            chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""
+            for chat_id, chat in self._chats.items()
+        }
+
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
         web_chat_id = getattr(entry, "web_chat_id", None)

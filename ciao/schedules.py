@@ -591,7 +591,16 @@ class ScheduleEntry:
     # means "inherit the target chat's provider (existing web_chat_id) or use
     # the resolver's default (new web_project_id chat)".
     provider: str = ""
-    mode: BridgeMode = "auto"
+    # "" means "inherit", exactly as an empty `model`/`provider` does: the
+    # permission mode is resolved from the operator's own per-provider pin
+    # (Settings -> Providers) on every dispatch. A hardcoded "auto" here was
+    # not a default, it was an override — truthy, so it won every dispatch and
+    # the inheritance fallback below it could never fire. A routine on a
+    # provider pinned to `bypass` still stamped its chat `auto`, and a reply
+    # to that chat then ran under different permission rules than the run it
+    # was answering (which `unattended` forces to bypass) — which on opencode
+    # rotates the session, because a session's rules are fixed at creation.
+    mode: str = ""
     timezone_name: str = DEFAULT_TIMEZONE
     last_triggered_on: str = ""
     # Full ISO timestamp of the most recent dispatch through any path

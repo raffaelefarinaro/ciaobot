@@ -31,7 +31,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1420,12 +1420,18 @@ async def backfill_insights_task(
     workspace: str = "",
     model_override: str = "",
     agent_root: Path | None = None,
+    chat_workspaces: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
     """Scan archived transcripts and return counts for the completed run.
 
     *model_override* runs this pass with an explicit model instead of the
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing.
+
+    *chat_workspaces* maps chat id to workspace, and is required to scope a
+    run with *workspace*: an archive's path names the chat that wrote it, not
+    the workspace it ran in, so the mapping has to come from the chat registry.
+    A *workspace* given without one filters nothing and says so.
 
     *agent_root* pins the run to one workspace's agent root. Callers that
     supply nothing get every agent root in the install searched for each
@@ -1453,6 +1459,15 @@ async def backfill_insights_task(
             search_roots = [config.workspace_root]
     project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
 
+    by_chat = dict(chat_workspaces or {})
+    if workspace and not by_chat:
+        logger.warning(
+            "Backfill asked for workspace %r without a chat->workspace map; "
+            "scanning every archive instead",
+            workspace,
+        )
+        workspace = ""
+
     def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int]:
         """Walk the archive tree and decide what needs backfilling.
 
@@ -1474,7 +1489,7 @@ async def backfill_insights_task(
             # Cheap filters first. _has_insights_section reads the whole file,
             # so a workspace-scoped run must not pay for every archive in the
             # vault before discarding it.
-            if workspace and md.parent.parent.name != workspace:
+            if workspace and by_chat.get(md.parent.parent.name, "") != workspace:
                 continue
 
             match = SESSION_ID_RE.search(md.name)

@@ -1690,3 +1690,73 @@ def test_backfill_discovers_an_opencode_archive(
 
     assert result["eligible"] == 1, "a ses_ id is a session id too"
     assert "## Session insights" in archive.read_text(encoding="utf-8")
+
+
+def test_backfill_workspace_filter_uses_the_chat_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Archives sit under a shared `Logs/Chats/<chat-id>/` tree, so the path
+    segment is a chat id and comparing it to a workspace name never matches —
+    a workspace-scoped run found nothing at all."""
+    chats = tmp_path / "vault" / "Logs" / "Chats"
+    for chat_id in ("chat-work1", "chat-home1"):
+        d = chats / chat_id / "opencode"
+        d.mkdir(parents=True)
+        (d / f"2026-08-31T00-00-00Z-ses_{chat_id.replace('-', '')}.md").write_text(
+            "# Archived chat\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            workspace="work",
+            chat_workspaces={"chat-work1": "work", "chat-home1": "personal"},
+        )
+    )
+
+    assert result["eligible"] == 1
+    assert "## Session insights" in next(
+        (chats / "chat-work1" / "opencode").glob("*.md")
+    ).read_text(encoding="utf-8")
+    assert "## Session insights" not in next(
+        (chats / "chat-home1" / "opencode").glob("*.md")
+    ).read_text(encoding="utf-8")
+
+
+def test_backfill_refuses_to_silently_scope_without_a_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A workspace with no mapping cannot filter; scan everything and say so
+    rather than reporting a clean run over zero archives."""
+    d = tmp_path / "vault" / "Logs" / "Chats" / "chat-a" / "opencode"
+    d.mkdir(parents=True)
+    (d / "2026-08-31T00-00-00Z-ses_aaa.md").write_text("# c\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config, mode="both", concurrency=1, workspace="work"
+        )
+    )
+    assert result["eligible"] == 1
