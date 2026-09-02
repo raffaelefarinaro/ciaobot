@@ -72,6 +72,23 @@ def test_injects_comment_bridge(workspace: Path) -> None:
     assert "ciao:artifact-comment" in resp.text
 
 
+def test_bridge_tag_is_syntactically_valid_javascript() -> None:
+    """The injected <script> must actually parse.
+
+    ``BRIDGE_TAG`` was built with ``\\n`` in a non-raw f-string, so it shipped
+    a literal backslash where a newline belonged. A stray ``\\`` at statement
+    position is a JS SyntaxError, and the whole bridge silently never
+    initialized — while a substring assertion on the script body still passed.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT, BRIDGE_TAG
+
+    body = BRIDGE_TAG.partition(">")[2].rpartition("</script>")[0]
+    assert body == f"\n{BRIDGE_SCRIPT}\n"
+    # `\s` inside the regexes in BRIDGE_SCRIPT is legitimate; a backslash
+    # anywhere in the glue around it is not.
+    assert "\\" not in body.replace(BRIDGE_SCRIPT, "")
+
+
 def test_bridge_injection_is_idempotent() -> None:
     from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
 

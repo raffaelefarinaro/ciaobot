@@ -7957,18 +7957,31 @@ async def proposals_history(request: Request) -> JSONResponse:
     limit = min(requested, _HISTORY_MAX_LIMIT)
 
     rows: list[dict[str, Any]] = []
+    # Two registered names can resolve to one vault root (a ``vault_root: "."``
+    # entry, or the legacy entity layout), and then they share a sidecar. Read
+    # each sidecar once, under the first name that claims it, or every decision
+    # in it shows up twice and ``total`` double-counts.
+    seen: set[str] = set()
     for workspace in config.workspace_names():
         if workspace_filter and workspace != workspace_filter:
             continue
         queue = _proposals_file(config, workspace)
+        try:
+            key = str(queue.resolve())
+        except OSError:
+            key = str(queue)
+        if key in seen:
+            continue
+        seen.add(key)
         for entry in read_decisions(queue):
             if action_filter and entry["action"] != action_filter:
                 continue
             row = dict(entry)
             row["workspace"] = workspace
             row["id"] = history_row_id(entry, workspace)
-            # Read-side disambiguator for the id only; not part of the contract.
+            # Read-side disambiguators for the id only; not part of the contract.
             row.pop("seq", None)
+            row.pop("log", None)
             rows.append(row)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
@@ -7978,14 +7991,16 @@ async def proposals_history(request: Request) -> JSONResponse:
     # honest about rows existing beyond the page. ``at_max`` is what tells the
     # client to stop asking: past the cap a wider limit returns the same page,
     # and a "show more" button wired to ``truncated`` alone stayed visible and
-    # did nothing forever.
+    # did nothing forever. It keys off the served limit reaching the cap, not
+    # ``requested > limit`` — a request for exactly the cap is already at it,
+    # and reporting False there bought one pointless full-page refetch.
     return JSONResponse(
         {
             "rows": rows[:limit],
             "total": total,
             "truncated": total > limit,
             "limit": limit,
-            "at_max": requested > limit,
+            "at_max": limit >= _HISTORY_MAX_LIMIT,
         }
     )
 

@@ -152,8 +152,11 @@ describe('ProposalReviewPanel', () => {
       action: 'accept',
       ids: ['a', 'b', 'c'],
     })
-    // The store re-fetches after the batch to reflect the server's list.
-    expect(apiGet).toHaveBeenCalledTimes(2)
+    // The store re-fetches the queue after the batch to reflect the server's
+    // list. Counted per endpoint: the panel also prefetches and refreshes the
+    // decision ledger for the History tab's badge.
+    const queueCalls = apiGet.mock.calls.filter(([path]) => path === '/api/proposals')
+    expect(queueCalls).toHaveLength(2)
     wrapper.unmount()
   })
 
@@ -677,7 +680,6 @@ describe('Queue / History tabs', () => {
     expect(tabs[0]!.attributes('aria-selected')).toBe('true')
     expect(wrapper.find('.pr-row').exists()).toBe(true)
     expect(apiGet).toHaveBeenCalledWith('/api/proposals')
-    expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
     wrapper.unmount()
   })
 
@@ -696,19 +698,30 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
-  it('shows no History count until the ledger has actually loaded', async () => {
-    // History is fetched on the tab switch, so a count rendered before that
-    // read "History 0" on a ledger with hundreds of rows.
+  it('prefetches the ledger so the History count is there before the first open', async () => {
+    // The count used to wait for the tab switch, so the badge appeared only
+    // after the one moment it had something to tell you.
     mockProposalApi()
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
+    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
+    wrapper.unmount()
+  })
 
-    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+  it('renders no History count while the ledger is still unloaded', async () => {
+    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
+    // opposite of what a badge is for.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
     wrapper.unmount()
   })
 })

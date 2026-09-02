@@ -154,6 +154,10 @@ const filtersHideEverything = computed(
     <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
 
     <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
+    <!-- A failed fetch shows the error alone. Falling through to the empty
+         states printed "No decisions yet." under the error, which claims an
+         empty ledger when the ledger merely could not be read. -->
+    <template v-else-if="store.historyError && !store.historyLoaded" />
     <p v-else-if="filtersHideEverything" class="ph-empty">No decisions match the current filters.</p>
     <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 

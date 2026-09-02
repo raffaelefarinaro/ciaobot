@@ -283,7 +283,7 @@ BRIDGE_SCRIPT = """(function () {
   post({ type: 'ciao:artifact-comment', action: 'ready' })
 })()"""
 
-BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>\\n{BRIDGE_SCRIPT}\\n</script>'
+BRIDGE_TAG = f"<script {_BRIDGE_MARKER}>\n{BRIDGE_SCRIPT}\n</script>"
 
 
 def inject_bridge(html: str) -> str:

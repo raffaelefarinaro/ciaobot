@@ -85,10 +85,17 @@ export const useProposalsStore = defineStore('proposals', () => {
   let historySeq = 0
 
   /** Mark the loaded history stale. Called after a mutation, not on every
-   * queue load: a plain tab switch re-fetched the whole ledger for nothing. */
+   * queue load: a plain tab switch re-fetched the whole ledger for nothing.
+   *
+   * Refetches whenever something is already displaying the ledger - the
+   * History tab, or the Queue tab's count badge, which renders only once
+   * history has loaded. Clearing `historyLoaded` without refetching made that
+   * badge disappear on every accept/dismiss and stay gone until the tab was
+   * reopened. */
   function invalidateHistory() {
+    const wasLoaded = historyLoaded.value
     historyLoaded.value = false
-    if (view.value === 'history') void fetchHistory({ force: true })
+    if (view.value === 'history' || wasLoaded) void fetchHistory({ force: true })
   }
 
   /** Rows belonging to one workspace.
@@ -282,9 +289,11 @@ export const useProposalsStore = defineStore('proposals', () => {
         historyRows.value = data.rows ?? []
         historyTotal.value = data.total ?? historyRows.value.length
         historyTruncated.value = Boolean(data.truncated)
-        // Older servers send neither field; inferring from the page size keeps
-        // "show more" from looping against them too.
-        historyAtMax.value = data.at_max ?? (data.limit !== undefined && data.limit < requested)
+        // The endpoint always sends this. The old `data.limit < requested`
+        // fallback could not fire — the server reports the limit it served,
+        // not the one it refused — so termination now rests on the row-count
+        // backstop in `loadMoreHistory`, which needs no cooperation at all.
+        historyAtMax.value = Boolean(data.at_max)
         // Track the page the server actually served, not what we asked for.
         if (data.limit) historyLimit.value = data.limit
         historyLoaded.value = true
@@ -309,7 +318,13 @@ export const useProposalsStore = defineStore('proposals', () => {
   /** Ask the server for more history rows and refresh with the wider limit. */
   async function loadMoreHistory(): Promise<void> {
     if (!historyCanLoadMore.value) return
+    const before = historyRows.value.length
     await fetchHistory({ force: true, limit: historyLimit.value + 200 })
+    // Termination backstop, independent of what the server reports: a wider
+    // page that came back no longer has nothing left to give, so stop asking.
+    // Without it a server that got `at_max` wrong left "show more" refetching
+    // the same page on every click, forever.
+    if (historyRows.value.length <= before) historyAtMax.value = true
   }
 
   async function ensureHistoryLoaded(workspace?: string): Promise<void> {

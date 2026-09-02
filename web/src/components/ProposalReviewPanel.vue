@@ -213,9 +213,10 @@ function onReviewTabKeydown(event: KeyboardEvent): void {
   target.focus()
 }
 
-// Only meaningful once the history has actually loaded: history is fetched on
-// the tab switch, so a count rendered before that read "History 0" on a ledger
-// with hundreds of rows - the opposite of what a badge is for.
+// Null until the ledger has loaded, and the badge is hidden while it is: a
+// count rendered before the fetch read "History 0" on a ledger with hundreds
+// of rows - the opposite of what a badge is for. `onMounted` prefetches, so
+// the wait is the first request, not the first tab switch.
 const historyCount = computed(() =>
   store.historyLoaded ? store.visibleHistory(projectStore.activeWorkspace).length : null,
 )
@@ -640,6 +641,10 @@ function dismissOlder() {
 onMounted(() => {
   pruneProposalChatLinks()
   void store.fetch().then(pruneProposalChatLinks)
+  // Prefetch the ledger for the tab badge. Loading it only on the tab switch
+  // meant the badge never appeared until the tab had been opened once, which
+  // is the one moment it has nothing left to tell you.
+  void store.ensureHistoryLoaded(projectStore.activeWorkspace)
 })
 </script>
 

@@ -296,4 +296,17 @@ describe('ProposalHistoryList', () => {
     expect(store.error).toBe('an unread accept failure')
     wrapper.unmount()
   })
+
+  it('does not claim the ledger is empty when the fetch failed', async () => {
+    // The error and "No decisions yet." rendered together, which reads as a
+    // confirmed-empty ledger rather than one that could not be read.
+    apiGet.mockRejectedValue(new Error('history is unreachable'))
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-error').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('No decisions yet.')
+    expect(wrapper.text()).not.toContain('No decisions match')
+    wrapper.unmount()
+  })
 })
