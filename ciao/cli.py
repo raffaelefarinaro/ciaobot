@@ -185,7 +185,39 @@ def _write_launchd_plist(
     port: int,
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
+    confirm_repoint: bool = False,
 ) -> Path:
+    if not confirm_repoint:
+        allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not allow_env:
+            # Only guard the real per-user dir. Shadow dirs (tests, explicit
+            # launch_agents_dir overrides, CIAO_LAUNCH_AGENTS_DIR) are not live.
+            has_env_override = bool(
+                os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
+            )
+            real_dir = Path.home() / "Library" / "LaunchAgents"
+            try:
+                is_real = launch_agents_dir.expanduser().resolve() == real_dir.expanduser().resolve()
+            except OSError:
+                is_real = launch_agents_dir.expanduser() == real_dir
+            if is_real and not has_env_override:
+                existing = _plist_workspace(launch_agents_dir)
+                try:
+                    requested = Path(workspace).expanduser().resolve()
+                except OSError:
+                    requested = Path(workspace).expanduser()
+                if existing is not None and existing != requested:
+                    raise RuntimeError(
+                        f"Refusing to repoint live LaunchAgent from {existing} to {requested}: "
+                        f"the real {launch_agents_dir / plist_name} already points elsewhere. "
+                        "Pass confirm_repoint=True (or --yes via CLI) or set "
+                        "CIAO_ALLOW_LAUNCH_AGENT_REPOINT=1 to allow, or pass "
+                        "launch_agents_dir to isolate."
+                    )
     plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_text(
@@ -652,6 +684,7 @@ def setup_workspace(
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
+    confirm_repoint: bool = False,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1007,6 +1040,7 @@ def setup_workspace(
         port=port,
         path=os.environ.get("PATH", ""),
         plist_name="com.ciao.server.plist",
+        confirm_repoint=confirm_repoint,
     ))
     # Existing installs may still carry the launcher bundle and its agent from
     # a previous version; remove them rather than leaving orphans behind.
@@ -1100,17 +1134,22 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
     except OSError:
         had_token = False
-    written = setup_workspace(
-        args.workspace,
-        auth_token=args.auth_token,
-        auth_required=auth_required,
-        push_contact=args.push_contact,
-        workspace_name=args.workspace_name,
-        python_path=args.python,
-        port=args.port,
-        launch_agents_dir=args.launch_agents_dir,
-        app_dir=args.app_dir,
-    )
+    try:
+        written = setup_workspace(
+            args.workspace,
+            auth_token=args.auth_token,
+            auth_required=auth_required,
+            push_contact=args.push_contact,
+            workspace_name=args.workspace_name,
+            python_path=args.python,
+            port=args.port,
+            launch_agents_dir=args.launch_agents_dir,
+            app_dir=args.app_dir,
+            confirm_repoint=args.yes,
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     for path in written:
         print(path)
     if auth_required and not args.auth_token and not had_token:

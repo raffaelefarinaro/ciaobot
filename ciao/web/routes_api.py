@@ -6569,23 +6569,26 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
     # responsive and never reaches out to GitHub.
-    written = await asyncio.to_thread(
-        functools.partial(
-            setup_workspace,
-            workspace,
-            auth_token=password,
-            auth_required=True,
-            push_contact=push_contact,
-            vault_root=str(body.get("vault_root", "")).strip() or None,
-            vault_mode=vault_mode,
-            workspace_name=workspace_name,
-            default_provider=default_provider,
-            python_path=str(body.get("python", "")).strip() or None,
-            port=port,
-            launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-            app_dir=str(body.get("app_dir", "")).strip() or None,
+    try:
+        written = await asyncio.to_thread(
+            functools.partial(
+                setup_workspace,
+                workspace,
+                auth_token=password,
+                auth_required=True,
+                push_contact=push_contact,
+                vault_root=str(body.get("vault_root", "")).strip() or None,
+                vault_mode=vault_mode,
+                workspace_name=workspace_name,
+                default_provider=default_provider,
+                python_path=str(body.get("python", "")).strip() or None,
+                port=port,
+                launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
+                app_dir=str(body.get("app_dir", "")).strip() or None,
+            )
         )
-    )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
     # and nothing else tells the fresh process where setup landed — without
