@@ -5524,7 +5524,10 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
             model=model,
         ) as handle:
             result = await backfill_insights_task(
-                config, mode="both", model_override=model,
+                config,
+                mode="both",
+                model_override=model,
+                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
             )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
@@ -5541,7 +5544,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
 
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
-    state = request.app.state.state_store
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
@@ -5551,9 +5553,11 @@ async def create_schedule(request: Request) -> JSONResponse:
     # Persist only explicit overrides. Empty model/provider values mean
     # "inherit the selected workspace" and are resolved afresh at dispatch
     # time, so changing a workspace default also changes future runs.
-    ctx = ChatContext(chat_id=0)
     model = (body.get("model") or "").strip()
-    mode = state.get_mode(ctx)
+    # Left unset on purpose. The form offers no permission-mode choice, so
+    # capturing one here froze whatever the Telegram context happened to be on
+    # into the entry; mode inherits at dispatch like model and provider do.
+    mode = ""
 
     frequency = body.get("frequency", "weekly")
     if frequency not in FREQUENCIES:
@@ -5885,13 +5889,14 @@ async def create_loop(request: Request) -> JSONResponse:
 
     project_id = getattr(chat, "project_id", "") or ""
     project = pcm.get_project(project_id) if project_id else None
-    state = request.app.state.state_store
     entry = sm.create(
         daily_time_utc="",
         prompt=prompt,
-        # Empty model/mode is what makes each run inherit the target chat.
+        # Empty model/mode is what makes each run inherit the target chat, as
+        # the comment always said — it used to freeze the Telegram context's
+        # mode into the entry instead, which is a different surface's state.
         model="",
-        mode=state.get_mode(ChatContext(chat_id=0)),
+        mode="",
         chat_id=0,
         frequency=INTERVAL_FREQUENCY,
         interval_minutes=interval_minutes,

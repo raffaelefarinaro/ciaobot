@@ -205,7 +205,10 @@ def test_archive_inputs_include_opencode_transcripts(tmp_path: Path, monkeypatch
     )
 
     turn_count, filtered_jsonl, result = manager._read_archive_inputs(
-        chat_id, ChatContext.for_web(chat_id), chat
+        chat_id,
+        ChatContext.for_web(chat_id),
+        chat,
+        manager._agent_root_for_chat(chat_id),
     )
 
     assert turn_count == 1

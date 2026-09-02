@@ -563,9 +563,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
-        ctx = ChatContext(chat_id=0)
-        mode = entry.mode or state.get_mode(ctx)
+        # The mode default is the operator's pin for the provider this run
+        # actually resolves to (Settings -> Providers -> permission mode), so a
+        # routine obeys the same setting a hand-opened chat on that provider
+        # does. It used to fall back to the Telegram context's mode, which is a
+        # different surface's state and belongs to no workspace.
         provider, model, _workspace = pcm.schedule_effective_routing(entry)
+        mode = entry.mode or config.default_mode_for_provider(provider)
         return ("claude", model, mode, provider)
 
     from ciao.node_state import NodeStateManager
