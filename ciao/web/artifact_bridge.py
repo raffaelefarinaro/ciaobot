@@ -144,6 +144,38 @@ BRIDGE_SCRIPT = r"""(function () {
     return anchored || parts.length ? parts.join(' > ') : ''
   }
 
+  // A path that provably resolves back to the element it describes, else the
+  // nearest ancestor whose path does, else ''.
+  //
+  // cssPath is length-bounded, and once it drops outer ancestors the remaining
+  // '>' chain matches the same tag/index shape ANYWHERE in the document. For a
+  // text comment that was survivable — applyComments re-finds the quote inside
+  // whatever it matched. For a whole-element anchor it was not: that branch
+  // never calls resolveSpan, so the outline landed on the first element in
+  // document order with the same inner shape, which in any repeated structure
+  // (cards, table rows) is a DIFFERENT element, and the comment opened from
+  // somewhere the user never clicked with nothing to detect it.
+  //
+  // Walking up trades precision for correctness: an ancestor's path is shorter,
+  // so it fits whole and identifies one element. The quote still pins a text
+  // comment inside it, and an element outline covers the right region instead
+  // of the wrong element.
+  function verifiedPath(el) {
+    var node = el
+    var hops = 0
+    while (node && node.nodeType === 1 && node !== document.body && hops < 6) {
+      var path = cssPath(node)
+      if (path) {
+        var found = null
+        try { found = document.querySelector(path) } catch (err) { found = null }
+        if (found === node) return path
+      }
+      node = node.parentElement
+      hops++
+    }
+    return ''
+  }
+
   // Character offset of (node, offset) within element's full text content.
   function textOffset(el, node, offset) {
     var r = document.createRange()
@@ -172,7 +204,7 @@ BRIDGE_SCRIPT = r"""(function () {
     if (!el) return null
     var quote = clampLen(collapse(sel.toString()), MAX_QUOTE)
     if (!quote) return null
-    var selector = clampLen(cssPath(el), MAX_SELECTOR)
+    var selector = verifiedPath(el)
     if (!selector) return null
     return {
       type: 'ciao:artifact-comment',
@@ -254,7 +286,7 @@ BRIDGE_SCRIPT = r"""(function () {
     if (e.altKey) {
       var el = elementOf(e.target)
       if (!el || el === document.body) return
-      var selector = clampLen(cssPath(el), MAX_SELECTOR)
+      var selector = verifiedPath(el)
       if (!selector) return
       e.preventDefault()
       e.stopPropagation()

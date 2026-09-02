@@ -80,7 +80,7 @@ export const useProposalsStore = defineStore('proposals', () => {
    * starved a quiet workspace on a busy install: its decisions fell outside
    * the window and its History tab read "No decisions yet." */
   const historyWorkspace = ref<string | null>(null)
-  let historyFetchPromise: Promise<void> | null = null
+  let historyFetchPromise: Promise<boolean> | null = null
   /** Ticket for the newest in-flight history request; older responses are dropped. */
   let historySeq = 0
 
@@ -267,7 +267,7 @@ export const useProposalsStore = defineStore('proposals', () => {
    */
   async function fetchHistory(
     opts?: { force?: boolean; limit?: number; workspace?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (opts?.limit) historyLimit.value = opts.limit
     if (opts?.workspace !== undefined) historyWorkspace.value = opts.workspace
     if (historyFetchPromise && !opts?.force) return historyFetchPromise
@@ -285,7 +285,7 @@ export const useProposalsStore = defineStore('proposals', () => {
         const data = await api.get<ProposalHistoryResponse>(
           `/api/proposals/history?${query.toString()}`,
         )
-        if (seq !== historySeq) return
+        if (seq !== historySeq) return false
         historyRows.value = data.rows ?? []
         historyTotal.value = data.total ?? historyRows.value.length
         historyTruncated.value = Boolean(data.truncated)
@@ -297,16 +297,18 @@ export const useProposalsStore = defineStore('proposals', () => {
         // Track the page the server actually served, not what we asked for.
         if (data.limit) historyLimit.value = data.limit
         historyLoaded.value = true
+        return true
       } catch (e) {
-        if (seq !== historySeq) return
+        if (seq !== historySeq) return false
         historyError.value = e instanceof Error ? e.message : 'Could not load proposal history'
+        return false
       } finally {
         if (seq === historySeq) historyLoading.value = false
       }
     })()
     historyFetchPromise = request
     try {
-      await request
+      return await request
     } finally {
       if (historyFetchPromise === request) historyFetchPromise = null
     }
@@ -331,17 +333,21 @@ export const useProposalsStore = defineStore('proposals', () => {
   async function loadMoreHistory(): Promise<void> {
     if (!historyCanLoadMore.value) return
     const before = historyRows.value.length
-    await fetchHistory({ force: true, limit: historyLimit.value + 200 })
+    const applied = await fetchHistory({ force: true, limit: historyLimit.value + 200 })
     // Termination backstop, independent of what the server reports: a wider
     // page that came back no longer has nothing left to give, so stop asking.
     // Without it a server that got `at_max` wrong left "show more" refetching
     // the same page on every click, forever.
     //
-    // Only on a fetch that actually succeeded: a failed request leaves
-    // `historyRows` at its previous length, which is indistinguishable from
-    // "nothing more to give" — and latching `at_max` on a transient 500 hid
-    // "show more" permanently, with the footer claiming the cap was reached.
-    if (!historyError.value && historyRows.value.length <= before) historyAtMax.value = true
+    // Only when THIS request is the one that applied. Two ways it is not, and
+    // both leave `historyRows` at its previous length — indistinguishable from
+    // "nothing more to give": it failed (a transient 500 hid "show more"
+    // permanently, with the footer claiming the cap was reached), or a newer
+    // request superseded it, which `fetchHistory` reports by bailing on the
+    // seq check before touching any state. The second is reachable in normal
+    // use: a queue mutation forces a refresh while "show more" is in flight,
+    // and it also clears `historyError`, so testing the error alone missed it.
+    if (applied && historyRows.value.length <= before) historyAtMax.value = true
   }
 
   async function ensureHistoryLoaded(workspace?: string): Promise<void> {

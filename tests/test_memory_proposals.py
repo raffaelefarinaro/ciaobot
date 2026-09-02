@@ -1894,3 +1894,50 @@ def test_reconciled_update_does_not_stack_a_second_learned_stamp(tmp_path: Path)
     # what the duplicate guard compares on the next archive pass.
     assert len(re.findall(r"\[\d{4}-\d{2}-\d{2}\]", merged)) == 1, merged
     assert strip_learned_stamp(merged) == "Insights model is sonnet (moved off deepseek-flash)."
+
+
+def test_an_already_double_stamped_entry_is_still_recognised_as_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    """Rows an older build corrupted must heal, not stay permanently duplicable.
+
+    The reconcile bug wrote `fact [old] [new]` into the region. Because the
+    stamp pattern is `$`-anchored, stripping one still left a stamp attached,
+    so the text never compared equal to the fact again and the duplicate guard
+    let the same fact be appended on every later archive pass. Those rows are
+    already on disk in real installs, so the strip has to heal them.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+
+    corrupted = "Insights model is sonnet. [2026-01-01] [2026-09-02]"
+    assert strip_learned_stamp(corrupted) == "Insights model is sonnet."
+
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=[corrupted])
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Insights model is sonnet.",
+        source_section="Decisions",
+    )
+
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path / "vault"
+    )
+
+    entries, _diags = mt.read_region(guide, "memory")
+    # Recognised as already remembered: not appended a second time.
+    assert len(entries) == 1, entries
+    assert not remaining
+
+
+def test_the_learned_date_still_reads_the_most_recent_stamp() -> None:
+    """Stripping all stamps must not change how aging measures one.
+
+    `find_aging_state` searches for a single trailing stamp to decide how old a
+    fact is; the last one is the most recent promotion, which is what it should
+    measure from.
+    """
+    from ciao import memory_audit as ma
+
+    match = ma._LEARNED_STAMP_RE.search("fact [2026-01-01] [2026-09-02]")
+    assert match is not None
+    assert match.group(1) == "2026-09-02"

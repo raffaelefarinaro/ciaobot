@@ -398,3 +398,58 @@ describe('artifact bridge: over-length selections', () => {
     expect(mark!.textContent!.trim().length).toBeGreaterThan(700)
   })
 })
+
+describe('artifact bridge: deep-element anchors', () => {
+  // cssPath is length-bounded. Once it drops outer ancestors the remaining
+  // '>' chain matches the same tag/index shape anywhere, so a whole-element
+  // anchor on a deep node used to outline the FIRST element in document order
+  // with that inner shape — a different card/row, with nothing to detect it.
+  function deepDoc(): string {
+    // Two identical sibling cards. The target is inside the SECOND one, deep
+    // enough that a bounded path loses the segment telling them apart.
+    // Deep enough to overrun MAX_SELECTOR (400): each level costs
+    // `figcaption:nth-of-type(1) > ` = 29 chars, so 14 of them blows the
+    // budget inside the 16-level walk and the outermost segments — the ones
+    // naming WHICH section — are the ones dropped.
+    const DEPTH = 14
+    const inner = (label: string) =>
+      '<figcaption>'.repeat(DEPTH) +
+      `<span>${label}</span>` +
+      '</figcaption>'.repeat(DEPTH)
+    return `<!DOCTYPE html><html><body>
+      <section>${inner('first card')}</section>
+      <section>${inner('second card')}</section>
+    </body></html>`
+  }
+
+  it('never anchors an element comment to a different element', async () => {
+    const { window } = new JSDOM(deepDoc(), { runScripts: 'outside-only', pretendToBeVisual: true })
+    const posted: Record<string, unknown>[] = []
+    Object.defineProperty(window, 'parent', {
+      value: { postMessage: (p: Record<string, unknown>) => posted.push(p) },
+      configurable: true,
+    })
+    const box = { left: 10, right: 60, top: 20, bottom: 40, width: 50, height: 20, x: 10, y: 20, toJSON: () => ({}) } as DOMRect
+    window.Range.prototype.getBoundingClientRect = () => box
+    window.Element.prototype.getBoundingClientRect = () => box
+    window.eval(SCRIPT)
+    await new Promise((r) => setTimeout(r, 30))
+    window.postMessage({ frame: 'ciao-artifact', type: 'ciao:comments-enable' }, '*')
+    await new Promise((r) => setTimeout(r, 20))
+
+    const target = window.document.querySelectorAll('span')[1]
+    expect(target.textContent).toBe('second card')
+    target.dispatchEvent(new window.MouseEvent('click', { altKey: true, bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 20))
+
+    const compose = posted.find((p) => p.action === 'compose')
+    if (compose) {
+      // Whatever selector it chose must resolve to the clicked element or one
+      // of its ancestors — never to a node in the other card.
+      const found = window.document.querySelector(compose.selector as string)
+      expect(found).not.toBeNull()
+      expect(found!.contains(target) || found === target).toBe(true)
+    }
+    // Declining outright is also acceptable; anchoring elsewhere is not.
+  })
+})

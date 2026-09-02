@@ -344,6 +344,40 @@ describe('proposal history', () => {
     expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=400')
   })
 
+  it('does not latch the page cap when a newer request supersedes "show more"', async () => {
+    // `fetchHistory` bails on its seq check before touching any state when a
+    // newer request has started, so the superseded one leaves `historyRows` at
+    // its previous length — indistinguishable from "nothing more to give". It
+    // also clears `historyError`, so testing the error alone missed this and
+    // "show more" was hidden permanently while more rows still existed.
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+    const store = useProposalsStore()
+    await store.fetchHistory()
+    expect(store.historyCanLoadMore).toBe(true)
+
+    // "Show more" is in flight, and never resolves before the newer one does.
+    let release: (v: unknown) => void = () => {}
+    vi.mocked(api.get).mockImplementationOnce(
+      () => new Promise((r) => { release = r }) as never,
+    )
+    const slow = store.loadMoreHistory()
+
+    // A queue mutation forces a fresh history read, which wins.
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+    await store.fetchHistory({ force: true })
+
+    release({ rows: [historyRow()], total: 500, truncated: true, limit: 400, at_max: false })
+    await slow
+
+    expect(store.historyError).toBe('')
+    expect(store.historyAtMax).toBe(false)
+    expect(store.historyCanLoadMore).toBe(true)
+  })
+
   it('scopes the history request to a workspace and refetches when it changes', async () => {
     vi.mocked(api.get).mockResolvedValue({ rows: [historyRow()], total: 1, truncated: false } as never)
 
