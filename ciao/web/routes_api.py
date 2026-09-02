@@ -5402,12 +5402,13 @@ def _enrich_schedule(
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
-        # An interval entry whose chat was archived or deleted is still
-        # dispatchable while its project resolves — the run continues in a
-        # replacement chat — so do not mark it unavailable and send the user to
-        # re-pick a target they do not need to change.
+        # A chat-bound entry whose chat was archived or deleted is still
+        # dispatchable on any cadence while its project resolves — the run
+        # continues in a replacement chat (fork or fresh, prepare_schedule_chat
+        # re-homes every cadence now) — so do not mark it unavailable and send
+        # the user to re-pick a target they do not need to change.
         entry_dict["context_available"] = chat is not None or (
-            is_interval(entry) and pcm.resolve_automation_project(entry) is not None
+            pcm.resolve_automation_project(entry) is not None
         )
     else:
         entry_dict["context_label"] = ""

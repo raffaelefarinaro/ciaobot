@@ -2170,3 +2170,36 @@ def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
     )
 
     assert first == second
+
+
+def test_schedule_update_to_a_project_clears_a_legacy_chat_binding(
+    tmp_path: Path,
+) -> None:
+    """A chat-bound legacy row re-pointed at a project drops web_chat_id.
+
+    Keeping both left dispatch inheritance reading provider/model off the old
+    chat (schedule_effective_routing) while prepare_schedule_chat created each
+    run in the project — fresh chats running the old chat's engine, flipping
+    again when that chat disappeared. The workspace-move branch cleared the
+    binding only on an actual move; supplying a project target is the same
+    migration whatever the workspace does.
+    """
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    entry = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        chat_id=0, workspace="personal",
+        web_chat_id="chat-1",
+        web_project_id="project-1", web_project_name="Ciaobot Improvements",
+    )
+
+    updated = control_plane.schedule_update(
+        _chat_create_principal(), entry.schedule_id,
+        project_id="project-2",
+    )
+
+    data = updated["data"]
+    assert data["web_project_id"] == "project-2"
+    assert data["web_chat_id"] is None
+    stored = schedules.list_entries()[0]
+    assert stored.web_project_id == "project-2"
+    assert stored.web_chat_id is None

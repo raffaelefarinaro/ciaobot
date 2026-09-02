@@ -1393,6 +1393,9 @@ class CiaoControlPlane:
             changes["project_id"] = project.project_id
             # Keep workspace aligned with the new target (same as the HTTP API).
             changes.setdefault("workspace", project.workspace)
+            # A legacy chat-bound row re-pointed at a project drops the chat
+            # binding; set on `normalized` below, whose None values survive
+            # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
         if project is not None:
@@ -1401,6 +1404,17 @@ class CiaoControlPlane:
             # project's name behind would let a moved schedule silently re-home
             # onto the wrong project.
             normalized["web_project_name"] = project.name
+            # A legacy chat-bound row re-pointed at a project must drop the
+            # chat binding: keeping both leaves web_chat_id in control of
+            # dispatch-time inheritance (schedule_effective_routing reads
+            # provider/model off the old chat) while prepare_schedule_chat
+            # creates each run in the project — so runs land in fresh chats
+            # with the old chat's engine, and behavior flips again when that
+            # chat later disappears. The workspace-move branch below clears
+            # web_chat_id only when target != origin; supplying a project
+            # target is the same migration regardless of workspace.
+            if entry.web_chat_id:
+                normalized["web_chat_id"] = None
         if target != origin:
             # Reassigning the workspace has to re-point the run target too:
             # dispatch prioritises web_chat_id/web_project_id and never checks
