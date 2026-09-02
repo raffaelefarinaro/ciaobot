@@ -475,6 +475,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 
     expected = {
         "/api/proposals",
+        "/api/proposals/history",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/{action}",

@@ -629,3 +629,70 @@ describe('workspace scoping', () => {
     wrapper.unmount()
   })
 })
+
+
+describe('Queue / History tabs', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function mockProposalApi() {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+            },
+          ],
+          total: 1,
+          truncated: false,
+        })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+  }
+
+  it('defaults to the Queue tab', async () => {
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs).toHaveLength(2)
+    expect(tabs[0]!.text()).toBe('Queue')
+    expect(tabs[1]!.text()).toContain('History')
+    expect(tabs[0]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals')
+    expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+    wrapper.unmount()
+  })
+
+  it('switching to History fetches and renders the decision ledger', async () => {
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200')
+    expect(wrapper.find('.pr-row').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Remember the thing')
+    expect(wrapper.text()).toContain('Accepted')
+    wrapper.unmount()
+  })
+})

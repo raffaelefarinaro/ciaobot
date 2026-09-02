@@ -1,0 +1,283 @@
+<script setup lang="ts">
+import { computed, onMounted } from 'vue'
+import { useProposalsStore } from '../stores/proposals'
+import { useProjectStore } from '../stores/projects'
+import type { ProposalHistoryRow } from '../lib/types'
+import { kindLabel } from '../lib/proposalKinds'
+import { formatTime } from '../lib/time'
+
+const store = useProposalsStore()
+const projectStore = useProjectStore()
+
+onMounted(() => {
+  void store.ensureHistoryLoaded()
+})
+
+const ACTION_FILTERS: { key: 'all' | 'accepted' | 'dismissed'; label: string }[] = [
+  { key: 'all', label: 'all' },
+  { key: 'accepted', label: 'accepted' },
+  { key: 'dismissed', label: 'dismissed' },
+]
+
+const ACTOR_FILTERS: { key: 'all' | 'pwa' | 'agent' | 'auto'; label: string }[] = [
+  { key: 'all', label: 'anyone' },
+  { key: 'pwa', label: 'you' },
+  { key: 'agent', label: 'agent' },
+  { key: 'auto', label: 'automatic' },
+]
+
+const filteredRows = computed(() => store.visibleHistory(projectStore.activeWorkspace))
+
+/** Who decided, in the same words the row's actor badge uses. */
+function actorLabel(via: string): string {
+  if (via === 'pwa') return 'you'
+  if (via === 'agent') return 'agent'
+  if (via === 'auto') return 'automatic'
+  return 'unknown'
+}
+
+/** Status badge class + text. `outcome` overrides a plain accept/dismiss
+ * label when the row was not a fresh write: already-known facts the
+ * archive-time auto-promoter recognized, and rows an expiry sweep dropped.
+ */
+function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
+  if (row.action === 'accepted') {
+    if (row.outcome === 'duplicate' || row.outcome === 'suppressed') {
+      return { cls: 'badge--muted', text: 'Skipped · already known' }
+    }
+    return { cls: 'badge--success', text: 'Accepted' }
+  }
+  if (row.outcome === 'swept') {
+    return { cls: 'badge--muted', text: 'Dismissed · expired' }
+  }
+  return { cls: 'badge--muted', text: 'Dismissed' }
+}
+
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+/** Groups rows into day buckets without re-sorting: the API and the store
+ * both hand back newest-first, undated legacy rows last, so a run of equal
+ * keys is always contiguous.
+ */
+function dayKey(ts: string): string {
+  if (!ts) return 'earlier'
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? 'earlier' : d.toDateString()
+}
+
+function dayLabel(ts: string): string {
+  if (!ts) return 'Earlier'
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return 'Earlier'
+  const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000)
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+const groups = computed(() => {
+  const out: { key: string; label: string; rows: ProposalHistoryRow[] }[] = []
+  for (const row of filteredRows.value) {
+    const key = dayKey(row.ts)
+    const last = out[out.length - 1]
+    if (last && last.key === key) last.rows.push(row)
+    else out.push({ key, label: dayLabel(row.ts), rows: [row] })
+  }
+  return out
+})
+</script>
+
+<template>
+  <div class="ph-list">
+    <p class="ph-hint">
+      Decisions already made: what you accepted or dismissed, what the nightly
+      agent filed, and what archiving added — or recognized as already known —
+      on its own.
+    </p>
+
+    <div class="ph-filters">
+      <div class="ph-chip-row">
+        <button
+          v-for="f in ACTION_FILTERS"
+          :key="f.key"
+          type="button"
+          class="btn-small btn-chip"
+          :class="{ active: store.historyActionFilter === f.key }"
+          @click="store.historyActionFilter = f.key"
+        >{{ f.label }}</button>
+      </div>
+      <div class="ph-chip-row">
+        <button
+          v-for="f in ACTOR_FILTERS"
+          :key="f.key"
+          type="button"
+          class="btn-small btn-chip"
+          :class="{ active: store.historyActorFilter === f.key }"
+          @click="store.historyActorFilter = f.key"
+        >{{ f.label }}</button>
+      </div>
+    </div>
+
+    <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
+    <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
+
+    <template v-else>
+      <section v-for="group in groups" :key="group.key" class="ph-group">
+        <header class="ph-group-head">
+          <span class="ph-group-label">{{ group.label }}</span>
+          <span class="ph-group-count">{{ group.rows.length }}</span>
+        </header>
+        <ul class="ph-rows">
+          <li v-for="row in group.rows" :key="row.id" class="ph-row">
+            <div class="ph-row-top">
+              <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
+              <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
+              <span class="ph-actor">{{ actorLabel(row.via) }}</span>
+              <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
+            </div>
+            <p class="ph-text">{{ row.text }}</p>
+            <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+            <details v-if="row.source" class="ph-source">
+              <summary>details</summary>
+              <p>from {{ row.source }}</p>
+            </details>
+          </li>
+        </ul>
+      </section>
+
+      <button
+        v-if="store.historyTruncated"
+        type="button"
+        class="btn-small btn-chip ph-more"
+        :disabled="store.historyLoading"
+        @click="store.loadMoreHistory()"
+      >{{ store.historyLoading ? 'loading…' : 'show more' }}</button>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.ph-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ph-hint {
+  color: var(--fg2);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.ph-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ph-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ph-empty {
+  color: var(--fg2);
+  font-size: 0.9rem;
+  padding: var(--space-4) 0;
+}
+
+.ph-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ph-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--fg2);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ph-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ph-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.ph-row-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ph-kind {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--fg2);
+}
+
+.ph-actor {
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+
+.ph-time {
+  margin-left: auto;
+  color: var(--fg2);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-text {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.ph-destination {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.8rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.ph-source {
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+.ph-source summary {
+  cursor: pointer;
+}
+.ph-source p {
+  margin: 0.2rem 0 0;
+}
+
+.ph-more {
+  align-self: flex-start;
+}
+</style>

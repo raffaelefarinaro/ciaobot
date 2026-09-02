@@ -6,6 +6,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalRow } from '../lib/types'
 import { descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
+import ProposalHistoryList from './ProposalHistoryList.vue'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -164,6 +165,55 @@ const selected = computed({
  * and this list cannot disagree about what is in scope.
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
+
+// -- Queue / History tabs ---------------------------------------------------
+//
+// The two sub-views share this panel (and its workspace/kind/search filter
+// state in the store) rather than living on separate routes: switching is a
+// glance, not a navigation, and the sidebar's scope picker must not reset.
+const REVIEW_TABS = [
+  { key: 'queue' as const, label: 'Queue' },
+  { key: 'history' as const, label: 'History' },
+]
+const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+
+function tabId(key: string): string {
+  return `pr-tab-${key}`
+}
+
+function panelId(key: string): string {
+  return `pr-panel-${key}`
+}
+
+function switchTab(key: 'queue' | 'history') {
+  store.view = key
+  if (key === 'history') void store.ensureHistoryLoaded()
+}
+
+// Roving tabindex, mirroring ProjectView's project-tabs pattern: the bar is a
+// single Tab stop and Left/Right/Home/End move (and switch) between the two.
+function onReviewTabKeydown(event: KeyboardEvent): void {
+  if (!TAB_KEYS.includes(event.key)) return
+  const current = event.currentTarget as HTMLElement | null
+  const bar = current?.parentElement
+  if (!current || !bar) return
+  const tabs = Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'))
+  const index = tabs.indexOf(current)
+  if (index < 0) return
+  event.preventDefault()
+  let next = index
+  if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
+  else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
+  else if (event.key === 'Home') next = 0
+  else next = tabs.length - 1
+  const target = tabs[next]
+  const key = target?.dataset.tab as 'queue' | 'history' | undefined
+  if (!key) return
+  switchTab(key)
+  target.focus()
+}
+
+const historyCount = computed(() => store.visibleHistory(projectStore.activeWorkspace).length)
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -591,7 +641,28 @@ onMounted(() => {
 <template>
   <div class="proposal-review">
     <header class="pr-head">
-      <p class="pr-summary">
+      <!-- A tablist, not a nav landmark: this switches sub-views in place. -->
+      <div class="pr-tabs" role="tablist" aria-label="Proposal review">
+        <button
+          v-for="tab in REVIEW_TABS"
+          :key="tab.key"
+          :id="tabId(tab.key)"
+          type="button"
+          class="pr-tab"
+          :class="{ active: store.view === tab.key }"
+          role="tab"
+          :aria-selected="store.view === tab.key"
+          :aria-controls="panelId(tab.key)"
+          :tabindex="store.view === tab.key ? 0 : -1"
+          :data-tab="tab.key"
+          @click="switchTab(tab.key)"
+          @keydown="onReviewTabKeydown"
+        >
+          {{ tab.label }}
+          <span v-if="tab.key === 'history'" class="pr-tab-count">{{ historyCount }}</span>
+        </button>
+      </div>
+      <p v-if="store.view === 'queue'" class="pr-summary">
         <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
         <button
           v-if="store.kindFilter !== 'all' || store.search"
@@ -602,6 +673,14 @@ onMounted(() => {
       </p>
     </header>
 
+    <ProposalHistoryList
+      v-if="store.view === 'history'"
+      :id="panelId('history')"
+      role="tabpanel"
+      :aria-labelledby="tabId('history')"
+    />
+
+    <div v-else :id="panelId('queue')" role="tabpanel" :aria-labelledby="tabId('queue')">
     <p class="pr-hint">
       This is a fallback queue, not a list of every new fact: confident facts are
       applied when a chat is archived. Daily Memory curation retries addressable
@@ -792,6 +871,7 @@ onMounted(() => {
       </label>
       <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
     </footer>
+    </div>
   </div>
 </template>
 
@@ -850,27 +930,49 @@ onMounted(() => {
   padding: var(--space-4) 0;
 }
 
-/* Segmented kind filter, matching the memory view's Graph/List control. */
-.pr-seg {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
+/* Queue / History tablist, matching ProjectView's project-tabs underline
+   style so switching sub-views reads the same way across the app. */
+.pr-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-2);
+  overflow-x: auto;
 }
 
-.pr-seg button {
+.pr-tab {
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
   border: 0;
+  border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--fg2);
-  padding: 0.25rem 0.7rem;
-  font-size: 0.8rem;
   cursor: pointer;
+  font: 600 var(--text-sm) var(--font);
+  white-space: nowrap;
 }
-
-.pr-seg button.active {
-  background: var(--bg3);
+.pr-tab:hover { color: var(--fg); background: var(--bg3); }
+.pr-tab.active {
+  border-bottom-color: var(--accent);
   color: var(--fg);
 }
+.pr-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.pr-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--text-xs) + var(--space-2));
+  min-height: calc(var(--text-xs) + var(--space-1));
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.pr-tab.active .pr-tab-count { color: var(--fg); }
 
 /* The batch bar appears only with a selection, so it never occupies space while
    reading. It is sticky, so it must be OPAQUE and above the rows: it used to

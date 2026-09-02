@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
 import { useProposalsStore } from './proposals'
-import type { ProposalRow, ProposalsResponse } from '../lib/types'
+import type { ProposalHistoryRow, ProposalRow, ProposalsResponse } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -166,5 +166,110 @@ describe('post-mutation refresh', () => {
 
     expect(api.get).toHaveBeenCalledTimes(1)
     expect(store.rows.map(r => r.id)).toEqual(['p1'])
+  })
+})
+
+
+function historyRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
+  return {
+    id: 'h1',
+    ts: '2026-09-01T10:00:00+00:00',
+    action: 'accepted',
+    via: 'pwa',
+    kind: 'memory',
+    text: 'Remember the thing',
+    source: '',
+    workspace: 'personal',
+    destination: 'ciao:memory',
+    outcome: 'written',
+    proposal_id: 'p1',
+    ...overrides,
+  }
+}
+
+describe('proposal history', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  it('loads history rows and exposes truncation', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()],
+      total: 1,
+      truncated: true,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory()
+
+    expect(api.get).toHaveBeenCalledWith('/api/proposals/history?limit=200')
+    expect(store.historyRows).toHaveLength(1)
+    expect(store.historyLoaded).toBe(true)
+    expect(store.historyTruncated).toBe(true)
+  })
+
+  it('drops a stale history response that lands after a forced refetch', async () => {
+    let releaseFirst!: (value: unknown) => void
+    const stale = new Promise((r) => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(stale as never)
+      .mockResolvedValueOnce({ rows: [historyRow({ id: 'h2' })], total: 1, truncated: false } as never)
+
+    const store = useProposalsStore()
+    const first = store.fetchHistory()
+    const second = store.fetchHistory({ force: true })
+
+    releaseFirst({ rows: [historyRow({ id: 'h1' })], total: 1, truncated: false })
+    await first
+    await second
+
+    expect(store.historyRows.map(r => r.id)).toEqual(['h2'])
+  })
+
+  it('filters visibleHistory by workspace scope, kind, action, actor, and search', () => {
+    const store = useProposalsStore()
+    store.historyRows = [
+      historyRow({ id: 'p-mem', workspace: 'personal' }),
+      historyRow({ id: 'p-dismiss', workspace: 'personal', action: 'dismissed', via: 'agent', outcome: '' }),
+      historyRow({ id: 'w-auto', workspace: 'work', via: 'auto', kind: 'learnings', text: 'Ship weekly' }),
+      historyRow({ id: 'global', workspace: '', text: 'Applies everywhere' }),
+    ]
+
+    expect(store.visibleHistory('personal').map(r => r.id)).toEqual(['p-mem', 'p-dismiss', 'global'])
+
+    store.historyActionFilter = 'dismissed'
+    expect(store.visibleHistory('personal').map(r => r.id)).toEqual(['p-dismiss'])
+    store.historyActionFilter = 'all'
+
+    store.historyActorFilter = 'auto'
+    expect(store.visibleHistory('work').map(r => r.id)).toEqual(['w-auto'])
+    store.historyActorFilter = 'all'
+
+    store.search = 'weekly'
+    expect(store.visibleHistory('work').map(r => r.id)).toEqual(['w-auto'])
+  })
+
+  it('invalidates history after a queue mutation only while the History tab is open', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
+    store.historyLoaded = true
+
+    // Queue tab: mutation invalidates the flag but does not fetch history.
+    await store.act('p1', 'dismiss')
+    expect(store.historyLoaded).toBe(false)
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+
+    // History tab open: the same mutation also re-fetches it.
+    store.view = 'history'
+    store.historyLoaded = true
+    await store.act('p2', 'dismiss')
+    await Promise.resolve()
+
+    expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
   })
 })

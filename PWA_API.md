@@ -628,9 +628,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 
 **Proposal queue**
 
-Routes: `GET /api/proposals`, `POST /api/proposals/{id}/{action}` (action is
-`accept` or `dismiss`), `POST /api/proposals/batch`,
-`POST /api/proposals/dismiss-older-than`.
+Routes: `GET /api/proposals`, `GET /api/proposals/history`,
+`POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
+`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
@@ -672,6 +672,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
 # A July proposal about a forgotten chat is not worth promoting.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/dismiss-older-than?date=2026-08-01"
+
+# Decision history across workspaces, newest first: what was accepted or
+# dismissed, by whom (`via`: pwa | agent | auto), and where it landed
+# (`destination`). Reads the same per-workspace sidecar the accept/dismiss
+# routes above write to (Memory-Proposals.dismissed.jsonl), so it also shows
+# what the archive-time auto-promoter wrote or skipped ("outcome":
+# "suppressed"/"duplicate") overnight, and what the nightly curation agent
+# resolved via the CLI ("via": "agent"). Optional query params: workspace,
+# limit (default 200, max 1000), action (accepted|dismissed).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 ```
 
 
@@ -740,7 +750,8 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - Self-contained audio and video may use `data:` URLs. Network media and `blob:` URLs remain blocked, so artifacts do not need relative asset paths or access to workspace APIs.
 - `script-src 'unsafe-inline'` is load-bearing: an artifact inlines its own script, so removing it breaks every artifact rather than hardening anything. Containment is `sandbox allow-scripts` without `allow-same-origin` (opaque origin: no session cookie, no `localStorage`, no parent access) plus `connect-src 'none'` and a `data:`-only `img-src`. An artifact cannot reach `/api/*` despite being same-host.
 - `X-Frame-Options` must stay explicit: `SecurityHeadersMiddleware` sets `DENY` via `setdefault`, so an unconditional assignment there would break the frame. `tests/test_workspace_html.py` guards this.
-- Client: `HtmlArtifactViewer.vue` (shared by `PinnedFilePanel` and `FileViewerModal`) frames it with `sandbox="allow-scripts"`, matching the CSP directive — the effective sandbox is the intersection of attribute and header. Source for Code view is a separate lazy fetch, because `error` blanks the viewer body and an oversized-source failure must not hide a page that renders. Artifacts are not commentable (comment anchors need markdown highlights or text lines).
+- Client: `HtmlArtifactViewer.vue` (shared by `PinnedFilePanel` and `FileViewerModal`) frames it with `sandbox="allow-scripts"`, matching the CSP directive — the effective sandbox is the intersection of attribute and header. Source for Code view is a separate lazy fetch, because `error` blanks the viewer body and an oversized-source failure must not hide a page that renders.
+- **Comments**: the response body carries an injected bridge script (`ciao/web/artifact_bridge.py`, inserted after `<head>` when present). Inside the frame it floats a Comment pill on text selection, supports Alt+Click to comment on a whole element, and sends the anchor — CSS selector plus character offsets into the element's text, plus the verbatim quote — to the panel over `postMessage`, the only channel an opaque-origin frame has. `HtmlArtifactViewer` relays those to `PinnedFilePanel`/`FileViewerModal`, which stage them as the same pending file comments as the markdown viewer (chips above the composer, `<user-comment-reference>` blocks with an `(element <tag>)` locator instead of line numbers). The panel also pushes the durable comment list back into the frame so past comments re-draw as `<mark>` highlights after each revision reload. Frame messages are untrusted (model-authored script could forge them); the worst case is a note in the user's own composer, reviewed before sending. The selector is not migration-proof across artifact revisions — the quote is the durable anchor the model reads.
 - Manual checks live in `tests/fixtures/html_artifacts/` (inline script runs, external requests blocked, API/session unreachable). Header tests pass on a blank frame, so those fixtures are the real verification.
 
 **File snapshots, history, diff, edit-in-place**
