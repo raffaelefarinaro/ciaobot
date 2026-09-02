@@ -195,16 +195,15 @@ def _write_launchd_plist(
         )
         if not allow_env:
             # Only guard the real per-user dir. Shadow dirs (tests, explicit
-            # launch_agents_dir overrides, CIAO_LAUNCH_AGENTS_DIR) are not live.
-            has_env_override = bool(
-                os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
-            )
+            # launch_agents_dir overrides) are not live — the resolved-path
+            # comparison already distinguishes them, so an env override alone
+            # must not bypass protection when the target is still the real dir.
             real_dir = Path.home() / "Library" / "LaunchAgents"
             try:
                 is_real = launch_agents_dir.expanduser().resolve() == real_dir.expanduser().resolve()
             except OSError:
                 is_real = launch_agents_dir.expanduser() == real_dir
-            if is_real and not has_env_override:
+            if is_real:
                 existing = _plist_workspace(launch_agents_dir)
                 try:
                     requested = Path(workspace).expanduser().resolve()
@@ -705,9 +704,6 @@ def setup_workspace(
             "yes",
         )
         if not allow_env:
-            has_env_override = bool(
-                os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
-            )
             _early_launch = (
                 Path(launch_agents_dir)
                 if launch_agents_dir is not None
@@ -718,7 +714,7 @@ def setup_workspace(
                 is_real = _early_launch.expanduser().resolve() == real_dir.expanduser().resolve()
             except OSError:
                 is_real = _early_launch.expanduser() == real_dir
-            if is_real and not has_env_override:
+            if is_real:
                 existing = _plist_workspace(_early_launch)
                 if existing is not None and existing != root:
                     raise RuntimeError(
