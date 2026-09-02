@@ -411,9 +411,16 @@ BRIDGE_SCRIPT = r"""(function () {
       // offsets still span the whole thing, so the equality below can never
       // hold for it and it fell through to `findQuote` — which matches the
       // 500-char prefix and highlighted under half of what the user picked.
-      // A quote sitting exactly at the cap is the truncated case; accept the
-      // offsets when the stored prefix is still what is there.
-      var truncated = quote.length >= MAX_QUOTE
+      // A quote sitting at the cap is the truncated case; accept the offsets
+      // when the stored prefix is still what is there.
+      //
+      // Measured on the STORED quote, before collapse(): the cap slice can
+      // land on a space and collapse() trims, so a truncated 500-char quote
+      // comes back 499 here and this test missed it — with roughly one space
+      // per five or six characters of prose, about one long selection in six
+      // still highlighted only its stored prefix.
+      var stored = typeof c.quote === 'string' ? c.quote : ''
+      var truncated = stored.length >= MAX_QUOTE
       if (here === quote || (truncated && here.indexOf(quote) === 0)) {
         return { start: start, end: stop }
       }

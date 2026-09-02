@@ -351,3 +351,50 @@ describe('artifact bridge: selection anchoring', () => {
     expect(payload.selector).toBe('body > svg:nth-of-type(1) > rect:nth-of-type(1)')
   })
 })
+
+describe('artifact bridge: over-length selections', () => {
+  // A selection longer than MAX_QUOTE (500) is stored quote-truncated while
+  // the offsets still span the whole thing, so the stored prefix must be
+  // recognised as truncated and the offsets trusted. The "is it truncated?"
+  // test used to run on the COLLAPSED quote, and collapse() trims — so when
+  // the 500-char slice happened to end on a space the quote came back 499,
+  // the check said "not truncated", and the highlight covered only the
+  // stored prefix instead of the user's full selection.
+  const WORD = 'aaaa '            // 5 chars, so every index 5n+4 is a space
+  const FULL = WORD.repeat(160)   // 800 chars; index 499 is a space
+  const STORED = FULL.slice(0, 500)
+
+  it('places the space exactly at the cap boundary', () => {
+    // Guards the fixture itself: if this stops holding the test below proves
+    // nothing, because the off-by-one only bites when the slice ends on space.
+    expect(FULL.length).toBe(800)
+    expect(STORED.length).toBe(500)
+    expect(STORED.endsWith(' ')).toBe(true)
+    expect(STORED.trim().length).toBe(499)
+  })
+
+  it('highlights the whole selection, not just the stored 500-char prefix', async () => {
+    const h = boot()
+    await h.tick()
+    const p = h.doc.createElement('p')
+    p.id = 'long'
+    p.textContent = FULL
+    h.doc.body.appendChild(p)
+
+    await h.apply([
+      {
+        id: 'long1',
+        selector: '#long',
+        quote: STORED,
+        startOffset: 0,
+        endOffset: FULL.length,
+      },
+    ])
+
+    const mark = h.doc.querySelector('mark.ciao-comment-mark')
+    expect(mark).not.toBeNull()
+    // The offsets were trusted, so the mark spans the entire selection.
+    // Before the fix this was ~500.
+    expect(mark!.textContent!.trim().length).toBeGreaterThan(700)
+  })
+})

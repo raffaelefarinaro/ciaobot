@@ -2,10 +2,32 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
+from ciao import config as ciao_config
 from ciao import job_runs as jr
 from ciao import proposal_outcomes as po
 from ciao import transcripts
 from types import SimpleNamespace
+
+
+@pytest.fixture(autouse=True)
+def _reset_exported_dotenv() -> None:
+    """Undo any workspace ``.env`` a test exported into ``os.environ``.
+
+    ``CiaoConfig.from_env()`` applies the workspace's ``.env`` through
+    ``load_dotenv``, which is deliberate — provider subprocesses read
+    ``${NAME}`` credentials out of the environment they inherit. But it sets
+    keys the process has never seen and nothing restores them, and
+    ``monkeypatch`` cannot undo a key it never saw set, so one test's fixture
+    workspace leaked into every test after it.
+
+    That is not merely untidy. A ``.env`` sets ``CIAO_RUNTIME_ROOT=.runtime``,
+    which is relative; leaked into a later test whose ``CIAO_WORKSPACE`` is
+    unset, it resolved against the cwd and sent that test's outcome log into
+    the repository checkout's own ``.runtime`` instead of its ``tmp_path``.
+    """
+    ciao_config.reset_exported_dotenv()
+    yield
+    ciao_config.reset_exported_dotenv()
 
 
 @pytest.fixture(autouse=True)
