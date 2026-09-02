@@ -29,11 +29,13 @@ from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from collections.abc import Sequence
-from typing import Any, Callable, Coroutine, Protocol
+from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
 from ciao.models import BridgeMode
+
+_BRIDGE_MODES = frozenset({"normal", "plan", "auto", "bypass"})
 
 DEFAULT_TIMEZONE = "Europe/Zurich"
 logger = logging.getLogger(__name__)
@@ -1050,6 +1052,20 @@ class ScheduleStore:
         return payload
 
 
+def entry_mode(entry: "ScheduleEntry") -> BridgeMode:
+    """The entry's own permission mode, narrowed for the no-resolver path.
+
+    ``ScheduleEntry.mode`` is a plain ``str`` because "" means "inherit", which
+    is not a ``BridgeMode``. Resolution normally happens in the manager's
+    ``resolve_target`` callback, which consults the operator's per-provider pin;
+    this is only the fallback for a manager constructed without one (tests, and
+    any standalone driver), where there is no config to consult and ``auto`` is
+    the safe read of "unset".
+    """
+    mode = getattr(entry, "mode", "")
+    return cast(BridgeMode, mode) if mode in _BRIDGE_MODES else "auto"
+
+
 class _DispatchToWeb(Protocol):
     """Callback that dispatches a schedule entry through the web pipeline.
 
@@ -1325,7 +1341,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry.mode, entry.provider)
+            else ("claude", entry.model, entry_mode(entry), entry.provider)
         )
         # The binding as it stood *before* prepare_chat, which is what
         # `_run_interval` needs to tell a re-home apart from a user edit.
@@ -1458,7 +1474,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry.mode, entry.provider)
+            else ("claude", entry.model, entry_mode(entry), entry.provider)
         )
         # Prepare the chat synchronously so we can return its ID immediately.
         # Pass it through to dispatch so it doesn't create a second chat.
@@ -1533,7 +1549,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry.mode, entry.provider)
+                else ("claude", entry.model, entry_mode(entry), entry.provider)
             )
             # Prepare the chat synchronously (like dispatch_now) so
             # last_run_chat_id is durable in the same write as
@@ -1622,7 +1638,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry.mode, entry.provider)
+                else ("claude", entry.model, entry_mode(entry), entry.provider)
             )
             logger.info(
                 "Schedule %s: catch-up fire (latest missed %s, now %s)",
