@@ -120,6 +120,28 @@ describe('HtmlArtifactViewer', () => {
     expect(wrapper.emitted('compose-comment')).toBeUndefined()
   })
 
+  it('unlocks the in-frame compose half on ready', async () => {
+    // The bridge keeps its pill inert until a parent speaks. Relying on the
+    // highlight push to double as that signal would leave compose dead
+    // wherever the parent skips the push (outside Preview, non-artifact
+    // files), so the viewer says it explicitly.
+    const wrapper = mountViewer()
+    const frame = wrapper.get('iframe')
+    const postMessage = vi.fn()
+    const fakeWindow = { postMessage } as unknown as Window
+    Object.defineProperty(frame.element, 'contentWindow', { value: fakeWindow, configurable: true })
+    window.dispatchEvent(new MessageEvent('message', {
+      source: fakeWindow as unknown as MessageEventSource,
+      data: { frame: 'ciao-artifact', type: 'ciao:artifact-comment', action: 'ready' },
+    }))
+    await wrapper.vm.$nextTick()
+
+    expect(postMessage).toHaveBeenCalledWith(
+      { frame: 'ciao-artifact', type: 'ciao:comments-enable' },
+      '*',
+    )
+  })
+
   it('rejects frame messages while no frame is mounted', async () => {
     // The guard used to read `frameEl.value !== null`, which is always true
     // for an unmounted template ref (`undefined`), leaving only

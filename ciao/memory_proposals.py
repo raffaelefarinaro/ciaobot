@@ -1048,6 +1048,10 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 continue
             if not isinstance(entry, dict) or key not in entry:
                 continue
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not report
+                # the fact as promoted or dismissed.
+                continue
             if _one_line(str(entry.get("text", ""))) == wanted:
                 return True
     return False
@@ -1222,6 +1226,7 @@ def record_promotion(
     outcome: str = "",
     proposal_id: str = "",
     once: bool = False,
+    history_only: bool = False,
 ) -> bool:
     """Record an accepted proposal in the same decision history.
 
@@ -1243,6 +1248,7 @@ def record_promotion(
         outcome=outcome,
         proposal_id=proposal_id,
         once=once,
+        history_only=history_only,
     )
 
 
@@ -1258,6 +1264,7 @@ def _record_decision(
     outcome: str = "",
     proposal_id: str = "",
     once: bool = False,
+    history_only: bool = False,
 ) -> bool:
     cleaned = text.strip()
     if not cleaned:
@@ -1289,6 +1296,14 @@ def _record_decision(
         entry["outcome"] = outcome
     if proposal_id:
         entry["proposal_id"] = proposal_id
+    if history_only:
+        # Ledger-only row: it records that a pass ran and decided nothing new,
+        # so the dedupe readers must not treat it as a decision. Without this
+        # the row makes ``was_promoted`` true and ``append_proposals`` refuses
+        # the fact forever, so a reverted in-session edit could never be
+        # re-queued. ``_has_decision`` still sees it, which is what keeps
+        # ``once=True`` idempotent.
+        entry["history_only"] = True
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
@@ -1301,11 +1316,12 @@ _SIDECAR_CACHE: dict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = 
 def _sidecar_entries(path: Path) -> list[dict[str, Any]]:
     """Parsed JSON-object lines of one decision sidecar, newest last.
 
-    Cached on ``(mtime_ns, size, inode)``: the suppression path calls this once
-    per proposal while archiving, so a long-lived ledger was otherwise re-read
-    and re-parsed O(proposals x history) times in a single pass. Sidecars are
-    append-only (and any rewrite lands on a new inode), so stat identity is a
-    sound key. Callers must treat the returned entries as read-only.
+    Cached on ``(mtime_ns, size, inode)``: the suppression path calls
+    :func:`_has_decision` once per proposal while archiving, so a long-lived
+    ledger was otherwise re-read and re-parsed O(proposals x history) times in
+    a single pass. Sidecars are append-only (and any rewrite lands on a new
+    inode), so stat identity is a sound key. Callers must treat the returned
+    entries as read-only.
     """
     try:
         stat = path.stat()
@@ -1380,6 +1396,9 @@ def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
         for entry in _sidecar_entries(path):
             if keys and not any(key in entry for key in keys):
                 continue
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not dedupe.
+                continue
             text = _one_line(str(entry.get("text", "")))
             if text:
                 out.add(text)
@@ -1397,10 +1416,11 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
     fact accepted in two workspaces within one second, or two undated legacy
     rows with identical text, hashed identically — and the History list keys
     its ``<li>`` on this id, so a collision dropped a row on patch. The
-    ``workspace`` and the row's sidecar-scoped position (``seq``, assigned by
-    :func:`read_decisions`) disambiguate. Both are stable across reads: each
-    sidecar is append-only and ``seq`` is counted per file, so appending a new
-    decision cannot renumber rows in the legacy log.
+    ``workspace`` and the row's position in its sidecar (``log`` + ``seq``,
+    both assigned by :func:`read_decisions`) disambiguate. They are stable
+    across reads because each sidecar is append-only and ``seq`` counts within
+    one sidecar — a shared counter would renumber every legacy row each time a
+    decision landed in the current one.
     """
     import hashlib
 
@@ -1411,6 +1431,7 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
             str(entry.get("kind", "")),
             str(entry.get("text", "")),
             workspace,
+            str(entry.get("log", "")),
             str(entry.get("seq", "")),
         )
     )
@@ -1422,20 +1443,22 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, seq}``. This is the read side of the
+    destination, outcome, proposal_id, log, seq}``. This is the read side of the
     decision history the review page's History tab renders; :func:`record_dismissal`
     and :func:`record_promotion` are the write side.
 
-    ``seq`` identifies the row's sidecar and its position within it
-    (``"<suffix>:<index>"``). It exists so :func:`history_row_id` can tell
-    apart two rows whose content is byte-identical, and is dropped before the
-    row reaches the API payload. It is scoped per file on purpose: a position
-    counted across the concatenated current + legacy sidecars shifted every
-    legacy row's id each time a new decision was appended to the current one.
+    ``seq`` is the row's position *within its own* append-only sidecar, and
+    ``log`` names that sidecar. Together they let :func:`history_row_id` tell
+    apart two rows whose content is byte-identical; both are dropped before the
+    row reaches the API payload. Counting per sidecar rather than across the
+    concatenation matters: a shared counter offsets every legacy row by the
+    current sidecar's length, so each new decision changed the id of every
+    legacy row — the exact instability ``seq`` exists to prevent.
     """
     rows: list[dict[str, Any]] = []
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
-        for index, entry in enumerate(_sidecar_entries(proposals_path.with_suffix(suffix))):
+        seq = 0
+        for entry in _sidecar_entries(proposals_path.with_suffix(suffix)):
             text = _one_line(str(entry.get("text", "")))
             if not text:
                 continue
@@ -1459,9 +1482,11 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "destination": str(entry.get("destination", "")),
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
-                    "seq": f"{suffix}:{index}",
+                    "log": suffix,
+                    "seq": seq,
                 }
             )
+            seq += 1
     return rows
 
 
@@ -1815,6 +1840,10 @@ def proposals_from_archive(
                             # Re-processing the same archive re-derives this
                             # same verdict; record it once, not once per pass.
                             once=True,
+                            # The fact was applied in-session, not promoted
+                            # through the queue. Keep the row out of the dedupe
+                            # readers so a later revert can be re-queued.
+                            history_only=True,
                         )
                     except Exception:  # noqa: BLE001 — recording must not break the pipeline
                         logger.info(

@@ -100,12 +100,9 @@ const groups = computed(() => {
 /** Whether anything is narrowing the list. The kind chips and the search box
  * are shared with the queue tab, whose "clear filter" control is on that tab,
  * so without a reset here a filter set over there silently emptied this list. */
-const filtersActive = computed(
-  () => store.kindFilter !== 'all'
-    || Boolean(store.search)
-    || store.historyActionFilter !== 'all'
-    || store.historyActorFilter !== 'all',
-)
+// Shared with the panel's tab badge, which must not report a filtered count
+// as the ledger total.
+const filtersActive = computed(() => store.historyFiltersActive)
 
 /** Distinguishes "nothing recorded" from "nothing matches the filters". */
 const filtersHideEverything = computed(
@@ -154,43 +151,49 @@ const filtersHideEverything = computed(
     <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
 
     <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
+    <!-- A failed fetch shows the error alone. Falling through to the empty
+         states printed "No decisions yet." under the error, which claims an
+         empty ledger when the ledger merely could not be read. -->
+    <template v-else-if="store.historyError && !store.historyLoaded" />
+    <!-- Filters only see the decisions fetched so far, so while more pages
+         exist "no matches" would be a claim this list cannot make. -->
+    <p v-else-if="filtersHideEverything" class="ph-empty">
+      No decisions match the current filters<template v-if="store.historyCanLoadMore"> in the
+      decisions loaded so far</template>.
+    </p>
+    <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 
     <template v-else>
-      <p v-if="filtersHideEverything" class="ph-empty">
-        No decisions match the current filters<template v-if="store.historyCanLoadMore"> on the
-        decisions loaded so far</template>.
-      </p>
-      <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
+      <section v-for="group in groups" :key="group.key" class="ph-group">
+        <header class="ph-group-head">
+          <span class="ph-group-label">{{ group.label }}</span>
+          <span class="ph-group-count">{{ group.rows.length }}</span>
+        </header>
+        <ul class="ph-rows">
+          <li v-for="row in group.rows" :key="row.id" class="ph-row">
+            <div class="ph-row-top">
+              <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
+              <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
+              <span class="ph-actor">{{ actorLabel(row.via) }}</span>
+              <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
+            </div>
+            <p class="ph-text">{{ row.text }}</p>
+            <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+            <details v-if="row.source" class="ph-source">
+              <summary>details</summary>
+              <p>from {{ row.source }}</p>
+            </details>
+          </li>
+        </ul>
+      </section>
+    </template>
 
-      <template v-else>
-        <section v-for="group in groups" :key="group.key" class="ph-group">
-          <header class="ph-group-head">
-            <span class="ph-group-label">{{ group.label }}</span>
-            <span class="ph-group-count">{{ group.rows.length }}</span>
-          </header>
-          <ul class="ph-rows">
-            <li v-for="row in group.rows" :key="row.id" class="ph-row">
-              <div class="ph-row-top">
-                <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
-                <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
-                <span class="ph-actor">{{ actorLabel(row.via) }}</span>
-                <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
-              </div>
-              <p class="ph-text">{{ row.text }}</p>
-              <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
-              <details v-if="row.source" class="ph-source">
-                <summary>details</summary>
-                <p>from {{ row.source }}</p>
-              </details>
-            </li>
-          </ul>
-        </section>
-      </template>
-
-      <!-- Pagination sits outside the rows branch on purpose: filters apply to
-           the loaded page only, so a filter matching nothing here can still have
-           matches in older decisions. Hiding "show more" alongside the rows made
-           those unreachable and the empty message a lie. -->
+    <!-- Pagination sits outside the empty-state chain above. The filters are
+         client-side over the page we hold, so a filter matching only rows
+         older than the page has to stay able to reach them: nesting this in
+         the `v-else` printed "No decisions match" with no way to load the
+         rows that do. -->
+    <template v-if="store.historyLoaded && !store.historyError">
       <button
         v-if="store.historyCanLoadMore"
         type="button"
@@ -351,5 +354,21 @@ const filtersHideEverything = computed(
   color: var(--accent);
   font-size: 0.78rem;
   cursor: pointer;
+}
+
+/* Touch: the link is only glyph-height, well under the 44px minimum. Grow the
+   hit area with padding and pull the extra back with a matching negative
+   margin, so the control stays visually inline where it sits next to the
+   "no matches" text. Same trick as the chat message actions. Desktop keeps
+   the tight inline link. */
+@media (pointer: coarse) {
+  .ph-clear-filter {
+    --ph-clear-visual: 1.1rem;
+    --ph-clear-pad: calc((var(--touch, 44px) - var(--ph-clear-visual)) / 2);
+    display: inline-block;
+    padding: var(--ph-clear-pad);
+    margin: calc(-1 * var(--ph-clear-pad));
+    margin-left: calc(var(--space-2) - var(--ph-clear-pad));
+  }
 }
 </style>

@@ -83,6 +83,43 @@ def test_injects_comment_bridge(workspace: Path) -> None:
     assert "ciao:artifact-comment" in resp.text
 
 
+def test_bridge_tag_is_syntactically_valid_javascript() -> None:
+    """The injected <script> must actually parse.
+
+    ``BRIDGE_TAG`` was built with ``\\n`` in a non-raw f-string, so it shipped
+    a literal backslash where a newline belonged. A stray ``\\`` at statement
+    position is a JS SyntaxError, and the whole bridge silently never
+    initialized — while a substring assertion on the script body still passed.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT, BRIDGE_TAG
+
+    body = BRIDGE_TAG.partition(">")[2].rpartition("</script>")[0]
+    assert body == f"\n{BRIDGE_SCRIPT}\n"
+    # `\s` inside the regexes in BRIDGE_SCRIPT is legitimate; a backslash
+    # anywhere in the glue around it is not.
+    assert "\\" not in body.replace(BRIDGE_SCRIPT, "")
+
+
+def test_compose_affordances_are_gated_on_a_parent_handshake() -> None:
+    """No Comment pill until the parent says it is listening.
+
+    The PWA half of selection comments does not exist yet, so an ungated pill
+    posts `ciao:artifact-comment` into the void — a control that looks like a
+    feature and does nothing. `ciao:comments-enable`, or any
+    `ciao:apply-comments` (which proves a parent is on the line), turns it on.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT
+
+    # The flag starts false and both compose entry points check it.
+    assert "var enabled = false" in BRIDGE_SCRIPT
+    assert BRIDGE_SCRIPT.count("if (!enabled) return") == 2
+    # Both handshakes flip it, and highlight application still implies it.
+    assert "'ciao:comments-enable'" in BRIDGE_SCRIPT
+    assert "'ciao:comments-disable'" in BRIDGE_SCRIPT
+    # `ready` is still announced unconditionally, so a parent knows to enable.
+    assert "action: 'ready'" in BRIDGE_SCRIPT
+
+
 def test_bridge_injection_is_idempotent() -> None:
     from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
 

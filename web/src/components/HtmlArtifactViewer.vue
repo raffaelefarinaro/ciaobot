@@ -83,6 +83,9 @@ function onMessage(e: MessageEvent): void {
   if (!isFrameSource(e)) return
   if (!isArtifactCommentEvent(e.data)) return
   if (e.data.action === 'ready') {
+    // Unlock compose for this document before telling the parent, so the pill
+    // works even if the parent has no highlights to push.
+    enableComments()
     emit('bridge-ready')
   } else if (e.data.action === 'compose') {
     emit('compose-comment', {
@@ -100,21 +103,34 @@ function onMessage(e: MessageEvent): void {
   }
 }
 
+function postToFrame(message: Record<string, unknown>): void {
+  const win = frameEl.value?.contentWindow
+  if (!win) return
+  win.postMessage({ frame: 'ciao-artifact', ...message }, '*')
+}
+
 // Push the durable comment list into the frame so the bridge re-draws marks.
 // Called on `bridge-ready` and whenever the parent's comment list changes.
 function sendHighlights(highlights: ArtifactHighlight[]): void {
-  const win = frameEl.value?.contentWindow
-  if (!win) return
-  win.postMessage(
-    { frame: 'ciao-artifact', type: 'ciao:apply-comments', comments: highlights },
-    '*',
-  )
+  postToFrame({ type: 'ciao:apply-comments', comments: highlights })
+}
+
+// The bridge keeps its Comment pill and Alt+Click inert until a parent proves
+// it is listening, so that an artifact served to something that cannot receive
+// the anchors does not float a pill that does nothing.
+//
+// `ciao:apply-comments` also flips that flag, but relying on it would tie
+// compose to the highlight push, which the parents skip outside Preview and
+// for non-artifact files — and compose would be silently dead. Say it
+// explicitly instead.
+function enableComments(): void {
+  postToFrame({ type: 'ciao:comments-enable' })
 }
 
 onMounted(() => window.addEventListener('message', onMessage))
 onBeforeUnmount(() => window.removeEventListener('message', onMessage))
 
-defineExpose({ sendHighlights, frameEl })
+defineExpose({ sendHighlights, enableComments, frameEl })
 </script>
 
 <template>

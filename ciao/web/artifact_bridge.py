@@ -27,6 +27,13 @@ and provides the artifact-side half of selection comments:
   from ``<head>``, so anything pushed earlier would query a tree with no
   ``<body>`` and silently match nothing.
 
+Handshake: the compose half (the pill and Alt+Click) is inert until the parent
+posts ``ciao:comments-enable`` or any ``ciao:apply-comments``. A Comment pill
+whose messages nothing receives is worse than no pill — it reads as a working
+feature — so the bridge stays quiet until a parent has proved it is listening.
+Highlight re-application is unaffected: it only ever acts on comments the
+parent itself sent.
+
 Trust model: the script is our code, but it shares a document with
 model-authored script, which could forge the same messages. That is
 acceptable — the worst case is a pending comment appearing in the composer,
@@ -165,6 +172,10 @@ BRIDGE_SCRIPT = r"""(function () {
   }
 
   // ── Comment pill ────────────────────────────────────────────────────
+  // Compose stays off until a parent proves it is listening (see Handshake
+  // above). Either message flips it, so an integrated parent needs no extra
+  // call — ``ciao:apply-comments`` already proves someone is on the line.
+  var enabled = false
   var pill = null
   var pillTimer = null
 
@@ -204,6 +215,7 @@ BRIDGE_SCRIPT = r"""(function () {
   }
 
   document.addEventListener('selectionchange', function () {
+    if (!enabled) return
     if (pillTimer) clearTimeout(pillTimer)
     pillTimer = setTimeout(function () {
       pillTimer = null
@@ -219,6 +231,7 @@ BRIDGE_SCRIPT = r"""(function () {
   // Alt+Click comments the element itself (for non-text things: a chart node,
   // an SVG shape, a table cell the user cannot easily select).
   document.addEventListener('click', function (e) {
+    if (!enabled) return
     var anchor = e.target && e.target.closest
       ? e.target.closest('mark.' + MARK_CLASS + ', .' + EL_CLASS)
       : null
@@ -414,7 +427,11 @@ BRIDGE_SCRIPT = r"""(function () {
 
   window.addEventListener('message', function (e) {
     var data = e.data
-    if (!data || data.frame !== 'ciao-artifact' || data.type !== 'ciao:apply-comments') return
+    if (!data || data.frame !== 'ciao-artifact') return
+    if (data.type === 'ciao:comments-enable') { enabled = true; return }
+    if (data.type === 'ciao:comments-disable') { enabled = false; removePill(); return }
+    if (data.type !== 'ciao:apply-comments') return
+    enabled = true
     applyComments(data.comments)
   })
 
@@ -431,7 +448,10 @@ BRIDGE_SCRIPT = r"""(function () {
   }
 })()"""
 
-BRIDGE_TAG = f'<script {_BRIDGE_MARKER}>{BRIDGE_SCRIPT}</script>'
+# Real newlines around the script (a plain f-string, so ``\n`` is a newline and
+# not a literal backslash): without them a trailing ``//`` line comment in the
+# script would swallow the closing tag.
+BRIDGE_TAG = f"<script {_BRIDGE_MARKER}>\n{BRIDGE_SCRIPT}\n</script>"
 
 
 def inject_bridge(html: str) -> str:

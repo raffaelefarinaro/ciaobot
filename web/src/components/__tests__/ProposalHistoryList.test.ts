@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import ProposalHistoryList from '../ProposalHistoryList.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
@@ -206,7 +207,7 @@ describe('ProposalHistoryList', () => {
     wrapper.unmount()
   })
 
-  it('keeps "show more" reachable when the filters empty the loaded page', async () => {
+  it('loads older pages when a filter matches nothing on the page held', async () => {
     // Filters apply to the loaded page only, so a filter that matches nothing
     // here can still match older decisions. Rendering the pagination inside
     // the rows branch hid it exactly when it was needed, and the empty message
@@ -220,7 +221,7 @@ describe('ProposalHistoryList', () => {
     expect(wrapper.findAll('.ph-row')).toHaveLength(0)
     expect(wrapper.find('.ph-more').exists()).toBe(true)
     // And the message says the verdict is only about what has been loaded.
-    expect(wrapper.text()).toContain('decisions loaded so far')
+    expect(wrapper.text()).toContain('in the decisions loaded so far')
 
     apiGet.mockResolvedValue({
       rows: [historyRow(), historyRow({ id: 'h2', text: 'only in an older page' })],
@@ -322,6 +323,40 @@ describe('ProposalHistoryList', () => {
 
     expect(wrapper.find('.ph-error').text()).toContain('history is unreachable')
     expect(store.error).toBe('an unread accept failure')
+    wrapper.unmount()
+  })
+
+  it('keeps "show more" reachable when the filters hide the whole page', async () => {
+    // The filters are client-side over the page we hold. Nesting pagination in
+    // the rows' `v-else` printed "No decisions match the current filters."
+    // with no way to load the older rows that do match.
+    apiGet.mockResolvedValue({
+      rows: [historyRow({ kind: 'memory' })], total: 500, truncated: true, limit: 200, at_max: false,
+    })
+    const store = useProposalsStore()
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    store.kindFilter = 'skill'
+    await nextTick()
+
+    // No trailing period: while more pages exist the sentence continues with
+    // the "in the decisions loaded so far" qualifier.
+    expect(wrapper.text()).toContain('No decisions match the current filters')
+    expect(wrapper.find('.ph-more').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not claim the ledger is empty when the fetch failed', async () => {
+    // The error and "No decisions yet." rendered together, which reads as a
+    // confirmed-empty ledger rather than one that could not be read.
+    apiGet.mockRejectedValue(new Error('history is unreachable'))
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-error').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('No decisions yet.')
+    expect(wrapper.text()).not.toContain('No decisions match')
     wrapper.unmount()
   })
 })

@@ -152,8 +152,11 @@ describe('ProposalReviewPanel', () => {
       action: 'accept',
       ids: ['a', 'b', 'c'],
     })
-    // The store re-fetches after the batch to reflect the server's list.
-    expect(apiGet).toHaveBeenCalledTimes(2)
+    // The store re-fetches the queue after the batch to reflect the server's
+    // list. Counted per endpoint: the panel also prefetches and refreshes the
+    // decision ledger for the History tab's badge.
+    const queueCalls = apiGet.mock.calls.filter(([path]) => path === '/api/proposals')
+    expect(queueCalls).toHaveLength(2)
     wrapper.unmount()
   })
 
@@ -677,7 +680,6 @@ describe('Queue / History tabs', () => {
     expect(tabs[0]!.attributes('aria-selected')).toBe('true')
     expect(wrapper.find('.pr-row').exists()).toBe(true)
     expect(apiGet).toHaveBeenCalledWith('/api/proposals')
-    expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
     wrapper.unmount()
   })
 
@@ -696,66 +698,84 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
-  it('shows a direct accept in History without needing a reload', async () => {
-    // The single-row accept posts directly rather than through `store.act()`,
-    // so it has to invalidate History itself. Without that,
-    // `ensureHistoryLoaded` returned early on the way back to an
-    // already-loaded History tab and the accept was simply missing.
-    let historyCalls = 0
-    apiGet.mockImplementation((url: string) => {
-      if (url.startsWith('/api/proposals/history')) {
-        historyCalls += 1
-        return Promise.resolve({
-          rows: historyCalls === 1 ? [] : [{
-            id: 'h9', ts: '2026-09-02T10:00:00+00:00', action: 'accepted', via: 'pwa',
-            kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
-            destination: 'ciao:memory', outcome: 'written', proposal_id: 'row-1',
-          }],
-          total: historyCalls === 1 ? 0 : 1,
-          truncated: false,
-        })
-      }
-      return Promise.resolve({ rows: historyCalls ? [] : [row()] })
-    })
-    apiPost.mockResolvedValue({})
-
-    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-    await flushPromises()
-
-    // Load History once, so `historyLoaded` is true.
-    const tabs = () => wrapper.findAll('[role="tab"]')
-    await tabs()[1]!.trigger('click')
-    await flushPromises()
-    expect(historyCalls).toBe(1)
-
-    // Back to the Queue and accept the row through the direct path.
-    await tabs()[0]!.trigger('click')
-    await flushPromises()
-    await wrapper.find('.btn-primary').trigger('click')
-    await flushPromises()
-    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept')
-
-    await tabs()[1]!.trigger('click')
-    await flushPromises()
-
-    expect(historyCalls).toBe(2)
-    expect(wrapper.text()).toContain('Remember the thing')
-    wrapper.unmount()
-  })
-
-  it('shows no History count until the ledger has actually loaded', async () => {
-    // History is fetched on the tab switch, so a count rendered before that
-    // read "History 0" on a ledger with hundreds of rows.
+  it('prefetches the ledger so the History count is there before the first open', async () => {
+    // The count used to wait for the tab switch, so the badge appeared only
+    // after the one moment it had something to tell you.
     mockProposalApi()
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
+    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
+    wrapper.unmount()
+  })
 
-    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+  it('reports the scoped total in the badge, not the page size', async () => {
+    // The page is capped, so a workspace with more decisions than the limit
+    // showed the limit itself as though it were the whole ledger.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+            },
+          ],
+          total: 500,
+          truncated: true,
+          limit: 200,
+          at_max: false,
+        })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.find('.pr-tab-count').text()).toBe('500')
+
+    // Under a filter the visible count is the honest number.
+    useProposalsStore().kindFilter = 'skill'
+    await nextTick()
+    expect(wrapper.find('.pr-tab-count').text()).toBe('0')
+    wrapper.unmount()
+  })
+
+  it('refreshes history after a direct per-row accept', async () => {
+    // The primary accept button posts directly and calls `store.fetch`, which
+    // deliberately leaves history alone. With the ledger prefetched on mount,
+    // switching to History reused the cached page and the badge stayed stale.
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const historyCalls = () =>
+      apiGet.mock.calls.filter(([p]) => String(p).startsWith('/api/proposals/history')).length
+    const before = historyCalls()
+
+    apiPost.mockResolvedValue({} as never)
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith(expect.stringContaining('/accept'))
+    expect(historyCalls()).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+
+  it('renders no History count while the ledger is still unloaded', async () => {
+    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
+    // opposite of what a badge is for.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
     wrapper.unmount()
   })
 })

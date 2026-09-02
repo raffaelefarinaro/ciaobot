@@ -50,6 +50,7 @@ interface Harness {
   doc: Document
   posted: Posted[]
   apply: (comments: unknown[]) => Promise<void>
+  enable: () => Promise<void>
   tick: (ms?: number) => Promise<void>
 }
 
@@ -77,6 +78,12 @@ function boot(): Harness {
     doc: window.document,
     posted,
     tick,
+    // The compose half is inert until a parent proves it is listening, which
+    // is what HtmlArtifactViewer does on the ready handshake.
+    enable: async () => {
+      window.postMessage({ frame: 'ciao-artifact', type: 'ciao:comments-enable' }, '*')
+      await tick(20)
+    },
     apply: async (comments: unknown[]) => {
       window.postMessage({ frame: 'ciao-artifact', type: 'ciao:apply-comments', comments }, '*')
       await tick(20)
@@ -96,6 +103,50 @@ describe('artifact bridge: ready handshake', () => {
     await h.tick()
 
     expect(h.posted.filter((p) => p.action === 'ready')).toHaveLength(1)
+  })
+})
+
+describe('artifact bridge: compose handshake', () => {
+  it('floats no pill until a parent proves it is listening', async () => {
+    // An artifact served to something that cannot receive the anchors must not
+    // show a Comment pill: it reads as a working feature and does nothing.
+    const h = boot()
+    await h.tick()
+
+    const ps = h.doc.querySelectorAll('.card p')
+    const range = h.doc.createRange()
+    range.selectNodeContents(ps[0])
+    const sel = h.window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+
+    expect(h.doc.getElementById('ciao-comment-pill')).toBeNull()
+
+    await h.enable()
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+
+    expect(h.doc.getElementById('ciao-comment-pill')).not.toBeNull()
+  })
+
+  it('accepts a highlight push as proof on its own', async () => {
+    // An integrated parent that pushes highlights needs no extra call.
+    const h = boot()
+    await h.tick()
+    await h.apply([])
+
+    const ps = h.doc.querySelectorAll('.card p')
+    const range = h.doc.createRange()
+    range.selectNodeContents(ps[0])
+    const sel = h.window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+
+    expect(h.doc.getElementById('ciao-comment-pill')).not.toBeNull()
   })
 })
 
@@ -216,6 +267,7 @@ describe('artifact bridge: selection anchoring', () => {
     // throwing), so only the first fragment could be re-highlighted.
     const h = boot()
     await h.tick()
+    await h.enable()
 
     const ps = h.doc.querySelectorAll('.card p')
     const range = h.doc.createRange()
@@ -264,6 +316,7 @@ describe('artifact bridge: selection anchoring', () => {
     // rather than a measured height.
     const h = boot()
     await h.tick()
+    await h.enable()
     const ps = h.doc.querySelectorAll('.card p')
     const range = h.doc.createRange()
     range.selectNodeContents(ps[0])
@@ -283,6 +336,7 @@ describe('artifact bridge: selection anchoring', () => {
   it('posts a whole-element anchor on Alt+Click, textless nodes included', async () => {
     const h = boot()
     await h.tick()
+    await h.enable()
     h.posted.length = 0
 
     const rect = h.doc.querySelector('rect') as Element

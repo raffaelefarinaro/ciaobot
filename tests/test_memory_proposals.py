@@ -1712,36 +1712,144 @@ def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> No
 
     rows = mp.read_decisions(queue)
 
-    assert len({r["seq"] for r in rows}) == 2
+    assert [r["seq"] for r in rows] == [0, 1]
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[1], "personal")
     # And the same row in two workspaces is two ids.
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")
 
 
-def test_legacy_row_ids_survive_a_new_decision(tmp_path: Path) -> None:
-    """Appending to the current sidecar must not renumber the legacy log.
+def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> None:
+    """Archiving asks "already decided?" once per proposal.
 
-    ``seq`` used to be the row's position across the concatenated current +
-    legacy sidecars, with the current file read first, so every new decision
-    shifted the ids of all legacy rows.
+    Each call used to re-read and re-parse the whole sidecar, so one archive
+    pass over a long-lived ledger was O(proposals x history). The cache is
+    keyed on stat identity, so its correctness rests on noticing an append.
     """
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True)
-    legacy = queue.with_suffix(".dismissed.log")
-    legacy.write_text(
-        '{"kind": "memory", "text": "Old one."}\n{"kind": "memory", "text": "Old two."}\n',
-        encoding="utf-8",
+    assert mp.record_dismissal(queue, text="First.", kind="memory", via="pwa") is True
+    sidecar = str(mp.dismissed_log_path(queue))
+
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        reads.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with unittest.mock.patch.object(Path, "read_text", counting_read_text):
+        # Repeated questions about an unchanged sidecar read it once.
+        for _ in range(5):
+            mp._has_decision(queue, key="dismissed_at", text="First.", outcome="")
+        assert reads.count(sidecar) == 1, reads
+
+    # An append must be seen: a stale cache would silently re-file or
+    # re-suppress proposals.
+    assert mp.record_dismissal(queue, text="Second.", kind="memory", via="pwa") is True
+    assert mp._has_decision(queue, key="dismissed_at", text="Second.", outcome="") is True
+    assert {r["text"] for r in mp.read_decisions(queue)} == {"First.", "Second."}
+
+
+def test_legacy_row_ids_survive_a_new_decision(tmp_path: Path) -> None:
+    """A decision in the current sidecar must not renumber the legacy one.
+
+    ``seq`` used to count across the concatenation of ``.dismissed.jsonl`` then
+    ``.dismissed.log``, so every append to the former shifted every legacy
+    row's ``seq`` — and with it the ``history_row_id`` the History list keys
+    its ``<li>`` on. That is the exact instability ``seq`` exists to prevent.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.with_suffix(".dismissed.log").write_text(
+        '{"kind": "memory", "text": "Legacy fact."}\n', encoding="utf-8"
     )
 
-    before = {
-        r["text"]: mp.history_row_id(r, "personal")
-        for r in mp.read_decisions(queue)
-    }
-    assert mp.record_dismissal(queue, text="Brand new.", kind="memory", via="pwa") is True
-    after = {
-        r["text"]: mp.history_row_id(r, "personal")
-        for r in mp.read_decisions(queue)
-    }
+    legacy_before = next(r for r in mp.read_decisions(queue) if r["text"] == "Legacy fact.")
+    id_before = mp.history_row_id(legacy_before, "personal")
 
-    assert before["Old one."] == after["Old one."]
-    assert before["Old two."] == after["Old two."]
+    assert mp.record_promotion(queue, text="A new fact.", kind="memory", via="pwa") is True
+
+    legacy_after = next(r for r in mp.read_decisions(queue) if r["text"] == "Legacy fact.")
+    assert mp.history_row_id(legacy_after, "personal") == id_before
+
+
+def test_rows_in_different_sidecars_get_distinct_ids(tmp_path: Path) -> None:
+    """Identical text at position 0 of each sidecar must not collide."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.with_suffix(".dismissed.jsonl").write_text(
+        '{"kind": "memory", "text": "Same."}\n', encoding="utf-8"
+    )
+    queue.with_suffix(".dismissed.log").write_text(
+        '{"kind": "memory", "text": "Same."}\n', encoding="utf-8"
+    )
+
+    rows = mp.read_decisions(queue)
+
+    assert [r["seq"] for r in rows] == [0, 0]
+    assert len({mp.history_row_id(r, "personal") for r in rows}) == 2
+
+
+def test_suppressed_row_shows_in_history_without_blocking_a_refile(tmp_path: Path) -> None:
+    """The archive-time "already applied" row is ledger-only.
+
+    It is written under ``promoted_at`` so the History tab can show it, but
+    nobody promoted the fact through the queue. Letting the dedupe readers see
+    it made ``was_promoted`` true and ``append_proposals`` refuse the fact
+    forever, so a reverted in-session edit could never be re-queued.
+    """
+    vault = tmp_path / "vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+
+    assert (
+        mp.record_promotion(
+            queue,
+            text="Already applied fact.",
+            kind="memory",
+            via="auto",
+            outcome="suppressed",
+            once=True,
+            history_only=True,
+        )
+        is True
+    )
+
+    # Visible in the ledger the History tab reads...
+    rows = mp.read_decisions(queue)
+    assert [(r["action"], r["outcome"]) for r in rows] == [("accepted", "suppressed")]
+
+    # ...but invisible to every dedupe reader.
+    assert mp.was_promoted(vault, "Already applied fact.") is False
+    assert mp.was_dismissed(vault, "Already applied fact.") is False
+    assert "Already applied fact." not in mp._dismissed_texts(queue)
+    assert "Already applied fact." not in mp._promoted_texts(queue)
+
+    # And `once=True` still suppresses the duplicate row on a second pass.
+    assert (
+        mp.record_promotion(
+            queue,
+            text="Already applied fact.",
+            kind="memory",
+            via="auto",
+            outcome="suppressed",
+            once=True,
+            history_only=True,
+        )
+        is False
+    )
+    assert len(mp.read_decisions(queue)) == 1
+
+
+def test_a_real_promotion_still_dedupes(tmp_path: Path) -> None:
+    """The ledger-only flag must not weaken the normal promotion record."""
+    vault = tmp_path / "vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+
+    assert mp.record_promotion(queue, text="Operator accepted.", kind="memory", via="pwa") is True
+
+    assert mp.was_promoted(vault, "Operator accepted.") is True
+    assert "Operator accepted." in mp._promoted_texts(queue)

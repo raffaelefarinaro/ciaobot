@@ -251,22 +251,49 @@ describe('proposal history', () => {
     expect(store.visibleHistory('work').map(r => r.id)).toEqual(['w-auto'])
   })
 
-  it('invalidates history after a queue mutation only while the History tab is open', async () => {
+  it('does not fetch history after a mutation while nothing is displaying it', async () => {
     vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
     vi.mocked(api.post).mockResolvedValue({} as never)
 
     const store = useProposalsStore()
     await store.fetch()
+    store.historyLoaded = false
+
+    await store.act('p1', 'dismiss')
+    await Promise.resolve()
+
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+  })
+
+  it('refreshes a loaded ledger after a mutation even from the Queue tab', async () => {
+    // The Queue tab's count badge renders off the loaded ledger, so dropping
+    // `historyLoaded` without refetching made the badge vanish on every
+    // accept/dismiss and stay gone until the History tab was reopened.
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
+    store.view = 'queue'
     store.historyLoaded = true
 
-    // Queue tab: mutation invalidates the flag but does not fetch history.
     await store.act('p1', 'dismiss')
-    expect(store.historyLoaded).toBe(false)
-    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+    await Promise.resolve()
+    await Promise.resolve()
 
-    // History tab open: the same mutation also re-fetches it.
+    expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+    expect(store.historyLoaded).toBe(true)
+  })
+
+  it('invalidates and re-fetches history after a mutation on the History tab', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
     store.view = 'history'
     store.historyLoaded = true
+
     await store.act('p2', 'dismiss')
     await Promise.resolve()
 

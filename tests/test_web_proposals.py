@@ -1368,3 +1368,77 @@ def test_history_workspace_filter_pages_within_that_workspace(tmp_path: Path) ->
     assert [r["text"] for r in data["rows"]] == ["Quiet fact."]
     assert data["total"] == 1
     assert data["truncated"] is False
+
+
+def test_history_reports_at_max_for_a_request_of_exactly_the_cap(tmp_path: Path) -> None:
+    """A request for the cap is already at it.
+
+    `at_max` was `requested > limit`, so asking for exactly the cap came back
+    False alongside `truncated: True` — the client saw "more available, keep
+    asking" and burned one full-page refetch before the flag finally tripped.
+    """
+    from ciao.web import routes_api as api_module
+
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {"promoted_at": f"2026-09-01T10:00:{i:02d}+00:00", "kind": "memory", "text": f"Fact {i}."}
+            for i in range(6)
+        ],
+    )
+    client = _client(config)
+
+    monkeyed = api_module._HISTORY_MAX_LIMIT
+    api_module._HISTORY_MAX_LIMIT = 4
+    try:
+        data = client.get("/api/proposals/history", params={"limit": 4}).json()
+    finally:
+        api_module._HISTORY_MAX_LIMIT = monkeyed
+
+    assert data["limit"] == 4
+    assert data["truncated"] is True
+    assert data["at_max"] is True
+
+
+def test_history_reads_a_shared_sidecar_once(tmp_path: Path) -> None:
+    """Two registered names can resolve to one vault root, hence one sidecar.
+
+    The loop trusted one-sidecar-per-name, so both names read the same file and
+    every decision in it appeared twice with `total` double-counted.
+    """
+    vault = tmp_path / "memory-vault"
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=vault,
+        workspaces={
+            # Both point at the same root, as a `vault_root: "."` entry or the
+            # legacy entity layout does.
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/shared"),
+            "alias": WorkspaceConfig(name="alias", vault_root="memory-vault/shared"),
+        },
+    )
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+
+    data = _client(config).get("/api/proposals/history").json()
+
+    assert data["total"] == 1
+    assert [r["text"] for r in data["rows"]] == ["One."]
+
+
+def test_history_does_not_leak_the_internal_sidecar_field(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [{"kind": "memory", "text": "One."}])
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "log" not in rows[0]
+    assert "seq" not in rows[0]

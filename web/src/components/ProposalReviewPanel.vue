@@ -213,12 +213,22 @@ function onReviewTabKeydown(event: KeyboardEvent): void {
   target.focus()
 }
 
-// Only meaningful once the history has actually loaded: history is fetched on
-// the tab switch, so a count rendered before that read "History 0" on a ledger
-// with hundreds of rows - the opposite of what a badge is for.
-const historyCount = computed(() =>
-  store.historyLoaded ? store.visibleHistory(projectStore.activeWorkspace).length : null,
-)
+// Null until the ledger has loaded, and the badge is hidden while it is: a
+// count rendered before the fetch read "History 0" on a ledger with hundreds
+// of rows - the opposite of what a badge is for. `onMounted` prefetches, so
+// the wait is the first request, not the first tab switch.
+//
+// Unfiltered it reports the server's scoped total rather than the rows we
+// happen to hold: the page is capped, so a workspace with more decisions than
+// the limit showed the limit itself (200) as though that were the whole
+// ledger. Under a filter the visible count is the honest number.
+const historyCount = computed(() => {
+  if (!store.historyLoaded) return null
+  if (store.historyFiltersActive) {
+    return store.visibleHistory(projectStore.activeWorkspace).length
+  }
+  return store.historyTotal
+})
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -377,10 +387,10 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     await api.post(`/api/proposals/${row.id}/accept${query}`)
     await store.fetch()
-    // This path posts directly instead of going through `store.act()`, so it
-    // has to invalidate History itself. Without it an accept made here stayed
-    // missing from an already-loaded History tab (ensureHistoryLoaded returns
-    // early while historyLoaded is true) until a workspace change or reload.
+    // `store.fetch` deliberately leaves history alone, so this direct post -
+    // the only mutation that does not go through `store.act` - has to say so
+    // itself. Without it the accepted decision and the tab badge stayed stale
+    // until the next mutation or workspace switch.
     store.invalidateHistory()
     return
   } catch (e) {
@@ -645,6 +655,10 @@ function dismissOlder() {
 onMounted(() => {
   pruneProposalChatLinks()
   void store.fetch().then(pruneProposalChatLinks)
+  // Prefetch the ledger for the tab badge. Loading it only on the tab switch
+  // meant the badge never appeared until the tab had been opened once, which
+  // is the one moment it has nothing left to tell you.
+  void store.ensureHistoryLoaded(projectStore.activeWorkspace)
 })
 </script>
 
