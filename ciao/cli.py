@@ -1149,14 +1149,18 @@ def _setup_command(args: argparse.Namespace) -> int:
             return 1
         existing = _plist_workspace(Path(args.launch_agents_dir))
         if existing is not None and existing != root:
-            print(
-                f"Error: Ciaobot is already set up with workspace {existing}.\n"
-                f"Running setup here would move it to {root}.\nRe-run from the "
-                "existing workspace, pass --workspace, or add --yes to confirm "
-                "the move.",
-                file=sys.stderr,
-            )
-            return 1
+            allow_env = os.environ.get(
+                "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
+            ).strip().lower() in ("1", "true", "yes")
+            if not allow_env:
+                print(
+                    f"Error: Ciaobot is already set up with workspace {existing}.\n"
+                    f"Running setup here would move it to {root}.\nRe-run from the "
+                    "existing workspace, pass --workspace, or add --yes to confirm "
+                    "the move.",
+                    file=sys.stderr,
+                )
+                return 1
 
     auth_required = not args.no_auth
     env_path = root / ".env"
