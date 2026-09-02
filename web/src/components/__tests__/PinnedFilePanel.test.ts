@@ -16,6 +16,9 @@ function fileFetchCount(): number {
 
 describe('PinnedFilePanel', () => {
   beforeEach(() => {
+    // The store rehydrates pending comments from localStorage on init, so a
+    // fresh pinia alone does not isolate tests that stage one.
+    localStorage.clear()
     setActivePinia(createPinia())
   })
 
@@ -23,7 +26,7 @@ describe('PinnedFilePanel', () => {
     vi.unstubAllGlobals()
   })
 
-  async function mountPanel(options: { attach?: boolean } = {}): Promise<VueWrapper> {
+  async function mountPanel(options: { attach?: boolean; filePath?: string } = {}): Promise<VueWrapper> {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.startsWith('/api/workspace-file')) {
@@ -49,7 +52,7 @@ describe('PinnedFilePanel', () => {
 
     const { default: PinnedFilePanel } = await import('../PinnedFilePanel.vue')
     const wrapper = mount(PinnedFilePanel, {
-      props: { filePath: '/vault/note.md' },
+      props: { filePath: options.filePath ?? '/vault/note.md' },
       // Selection APIs only work on nodes that are in the document, so the
       // comment test needs a real attachment point.
       ...(options.attach ? { attachTo: document.body } : {}),
@@ -161,6 +164,111 @@ describe('PinnedFilePanel', () => {
     // Not editing: the panel returns to the read-only preview after reload.
     expect(wrapper.find('textarea.pfp-edit-textarea').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="Edit"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // ── Artifact comments ─────────────────────────────────────────────
+  // The frame is an opaque origin, so the panel's whole side of this feature
+  // is the postMessage relay: it must push highlights when the bridge says it
+  // is ready (nothing else can reach a freshly loaded frame) and must not
+  // leave an abandoned draft mark behind.
+  async function mountArtifactPanel() {
+    const wrapper = await mountPanel({ filePath: '/vault/dashboard.html' })
+    const { default: HtmlArtifactViewer } = await import('../HtmlArtifactViewer.vue')
+    // The viewer is an async component: give the resolved chunk a chance to
+    // render before querying for the frame.
+    for (let i = 0; i < 4; i++) {
+      await flushPromises()
+      await nextTick()
+    }
+    const viewer = wrapper.findComponent(HtmlArtifactViewer)
+    expect(viewer.exists()).toBe(true)
+    const postMessage = vi.fn()
+    Object.defineProperty(viewer.get('iframe').element, 'contentWindow', {
+      value: { postMessage } as unknown as Window,
+      configurable: true,
+    })
+    return { wrapper, viewer, postMessage }
+  }
+
+  /** Comments from the most recent apply-comments push into the frame. */
+  function lastPush(postMessage: ReturnType<typeof vi.fn>): unknown[] | null {
+    const calls = postMessage.mock.calls.filter(
+      c => (c[0] as { type?: string })?.type === 'ciao:apply-comments',
+    )
+    if (!calls.length) return null
+    return (calls[calls.length - 1][0] as { comments: unknown[] }).comments
+  }
+
+  it('pushes stored artifact highlights when the bridge reports ready', async () => {
+    const { wrapper, viewer, postMessage } = await mountArtifactPanel()
+
+    // Before the handshake nothing has reached the frame: a push here would
+    // hit a document that is still loading and be dropped.
+    expect(lastPush(postMessage)).toBeNull()
+
+    useProjectStore().addPendingComment({
+      path: '/vault/dashboard.html',
+      selection: 'Revenue rose',
+      comment: 'check this',
+      artifactSelector: 'body > h2:nth-of-type(1)',
+      artifactStartOffset: 0,
+      artifactEndOffset: 12,
+      artifactElementTag: 'h2',
+    })
+    await nextTick()
+    await nextTick()
+    const beforeReady = postMessage.mock.calls.length
+
+    viewer.vm.$emit('bridge-ready')
+    await nextTick()
+    await nextTick()
+
+    // The handshake itself must produce a push, not just the list watcher:
+    // on a real load the list has not changed, so `ready` is the only cue.
+    expect(postMessage.mock.calls.length).toBeGreaterThan(beforeReady)
+    expect(lastPush(postMessage)).toEqual([
+      {
+        id: expect.any(String),
+        selector: 'body > h2:nth-of-type(1)',
+        quote: 'Revenue rose',
+        startOffset: 0,
+        endOffset: 12,
+        wholeElement: false,
+      },
+    ])
+    wrapper.unmount()
+  })
+
+  it('drops the draft highlight when an artifact comment is cancelled', async () => {
+    const { wrapper, viewer, postMessage } = await mountArtifactPanel()
+    viewer.vm.$emit('bridge-ready')
+    await nextTick()
+    await nextTick()
+
+    viewer.vm.$emit('compose-comment', {
+      selector: 'body > h2:nth-of-type(1)',
+      quote: 'Revenue rose',
+      startOffset: 0,
+      endOffset: 12,
+      elementTag: 'h2',
+      frameX: 10,
+      frameY: 20,
+    })
+    await nextTick()
+    await nextTick()
+    expect(lastPush(postMessage)).toHaveLength(1)
+
+    const cancel = document.querySelector('.compose .compose-btn:not(.primary)') as HTMLButtonElement
+    expect(cancel).not.toBeNull()
+    cancel.click()
+    await nextTick()
+    await nextTick()
+
+    // The abandoned draft mark used to survive here and be re-sent forever,
+    // inert on click because its id matches no stored comment.
+    expect(lastPush(postMessage)).toEqual([])
+    expect(useProjectStore().pendingComments).toHaveLength(0)
     wrapper.unmount()
   })
 

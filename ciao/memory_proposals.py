@@ -1309,6 +1309,57 @@ def _record_decision(
     return True
 
 
+# Parsed sidecar lines, keyed by path and invalidated on stat identity.
+_SIDECAR_CACHE: dict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = {}
+
+
+def _sidecar_entries(path: Path) -> list[dict[str, Any]]:
+    """Parsed JSON-object lines of one decision sidecar, newest last.
+
+    Cached on ``(mtime_ns, size, inode)``: the suppression path calls
+    :func:`_has_decision` once per proposal while archiving, so a long-lived
+    ledger was otherwise re-read and re-parsed O(proposals x history) times in
+    a single pass. Sidecars are append-only (and any rewrite lands on a new
+    inode), so stat identity is a sound key. Callers must treat the returned
+    entries as read-only.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        _SIDECAR_CACHE.pop(path, None)
+        return []
+    stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    cached = _SIDECAR_CACHE.get(path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        _SIDECAR_CACHE.pop(path, None)
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    _SIDECAR_CACHE[path] = (stamp, entries)
+    return entries
+
+
+def _sidecar_paths(proposals_path: Path) -> tuple[Path, ...]:
+    """Current plus legacy sidecar paths for one proposal queue, current first."""
+    return tuple(
+        proposals_path.with_suffix(suffix)
+        for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES)
+    )
+
+
 def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) -> bool:
     """Whether this exact decision (action, text, outcome) is already recorded.
 
@@ -1316,20 +1367,9 @@ def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) ->
     later real promotion of a fact recordable after an earlier "skipped,
     already known" row for the same text.
     """
-    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
-        try:
-            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict) or key not in entry:
+    for path in _sidecar_paths(proposals_path):
+        for entry in _sidecar_entries(path):
+            if key not in entry:
                 continue
             if str(entry.get("text", "")).strip() != text:
                 continue
@@ -1352,20 +1392,9 @@ def _promoted_texts(proposals_path: Path) -> set[str]:
 
 def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     out: set[str] = set()
-    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
-        try:
-            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict) or (keys and not any(key in entry for key in keys)):
+    for path in _sidecar_paths(proposals_path):
+        for entry in _sidecar_entries(path):
+            if keys and not any(key in entry for key in keys):
                 continue
             if entry.get("history_only"):
                 # Ledger-only row; it decided nothing, so it must not dedupe.
@@ -1428,21 +1457,8 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
-        try:
-            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
-        except OSError:
-            continue
         seq = 0
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict):
-                continue
+        for entry in _sidecar_entries(proposals_path.with_suffix(suffix)):
             text = _one_line(str(entry.get("text", "")))
             if not text:
                 continue

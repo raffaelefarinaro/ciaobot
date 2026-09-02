@@ -5,7 +5,8 @@
 // into two very large components.
 //
 // The frame loads /api/workspace-html, which serves the file as text/html
-// under an artifact CSP. Two things must stay in sync with that endpoint:
+// under an artifact CSP with a small comment bridge script injected. Two
+// things must stay in sync with that endpoint:
 //
 //   1. The `sandbox` attribute below must match the CSP's `sandbox` directive.
 //      The effective sandbox is the intersection of the two, so adding a
@@ -15,10 +16,20 @@
 //      or this page. With it, model-authored script would run with the user's
 //      full session.
 //
+// Comments: the bridge script inside the frame watches text selections (and
+// Alt+Click for whole elements) and posts anchors over postMessage — the only
+// channel an opaque-origin frame has. This component turns those into the
+// same pending file comments the markdown viewer produces, so they stage as
+// chips above the composer and ride along on the next message. It also
+// re-sends durable highlights into the frame so past comments show as marks.
+// Frame messages are untrusted (artifact script could forge them); the worst
+// case is a note in the user's own composer, which they review before send.
+//
 // Source is a separate, lazy fetch owned by the parent: an artifact that is
 // too large to read as text still renders fine, so a source failure must not
 // replace the frame with an error string.
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { isArtifactCommentEvent, type ArtifactHighlight } from '../lib/artifactBridge'
 
 const props = defineProps<{
   filePath: string
@@ -29,13 +40,97 @@ const props = defineProps<{
   sourceError?: string
 }>()
 
-const emit = defineEmits<{ (e: 'update:view', view: 'preview' | 'code'): void }>()
+const emit = defineEmits<{
+  (e: 'update:view', view: 'preview' | 'code'): void
+  // Selection/element comment captured in the frame: the parent panel opens
+  // its compose popover at (x, y) and saves through the shared comment path.
+  (e: 'compose-comment', anchor: {
+    selector: string
+    quote: string
+    startOffset: number
+    endOffset: number
+    elementTag?: string
+    wholeElement?: boolean
+    frameX: number
+    frameY: number
+  }): void
+  // Click on an existing highlight mark inside the frame.
+  (e: 'open-comment', payload: { id: string; frameX: number; frameY: number }): void
+  // The bridge in a freshly loaded frame has parsed the DOM and installed its
+  // message listener. Parents MUST push their highlights from here: a push
+  // sent any earlier (on mount, or right after a reloadToken bump) reaches a
+  // frame that is still loading the previous document, and is simply lost.
+  (e: 'bridge-ready'): void
+}>()
+
+const frameEl = ref<HTMLIFrameElement>()
 
 const frameSrc = computed(
   () => `/api/workspace-html?path=${encodeURIComponent(props.filePath)}&t=${props.reloadToken}`,
 )
 
 const sourceLines = computed(() => props.source.split('\n'))
+
+// A template ref is `undefined` before mount and after the frame unmounts in
+// Code view, so this has to be a truthiness check: `!== null` would leave the
+// guard as `e.source === undefined` and stop rejecting anything.
+function isFrameSource(e: MessageEvent): boolean {
+  const win = frameEl.value?.contentWindow
+  return !!win && e.source === win
+}
+
+function onMessage(e: MessageEvent): void {
+  if (!isFrameSource(e)) return
+  if (!isArtifactCommentEvent(e.data)) return
+  if (e.data.action === 'ready') {
+    // Unlock compose for this document before telling the parent, so the pill
+    // works even if the parent has no highlights to push.
+    enableComments()
+    emit('bridge-ready')
+  } else if (e.data.action === 'compose') {
+    emit('compose-comment', {
+      selector: e.data.selector,
+      quote: e.data.quote,
+      startOffset: e.data.startOffset,
+      endOffset: e.data.endOffset,
+      elementTag: e.data.elementTag,
+      wholeElement: e.data.wholeElement,
+      frameX: e.data.x,
+      frameY: e.data.y,
+    })
+  } else if (e.data.action === 'open') {
+    emit('open-comment', { id: e.data.id, frameX: e.data.x, frameY: e.data.y })
+  }
+}
+
+function postToFrame(message: Record<string, unknown>): void {
+  const win = frameEl.value?.contentWindow
+  if (!win) return
+  win.postMessage({ frame: 'ciao-artifact', ...message }, '*')
+}
+
+// Push the durable comment list into the frame so the bridge re-draws marks.
+// Called on `bridge-ready` and whenever the parent's comment list changes.
+function sendHighlights(highlights: ArtifactHighlight[]): void {
+  postToFrame({ type: 'ciao:apply-comments', comments: highlights })
+}
+
+// The bridge keeps its Comment pill and Alt+Click inert until a parent proves
+// it is listening, so that an artifact served to something that cannot receive
+// the anchors does not float a pill that does nothing.
+//
+// `ciao:apply-comments` also flips that flag, but relying on it would tie
+// compose to the highlight push, which the parents skip outside Preview and
+// for non-artifact files — and compose would be silently dead. Say it
+// explicitly instead.
+function enableComments(): void {
+  postToFrame({ type: 'ciao:comments-enable' })
+}
+
+onMounted(() => window.addEventListener('message', onMessage))
+onBeforeUnmount(() => window.removeEventListener('message', onMessage))
+
+defineExpose({ sendHighlights, enableComments, frameEl })
 </script>
 
 <template>
@@ -61,6 +156,7 @@ const sourceLines = computed(() => props.source.split('\n'))
          artifact's script running (timers, listeners) behind the Code view. -->
     <iframe
       v-if="view === 'preview'"
+      ref="frameEl"
       class="hav-frame"
       :src="frameSrc"
       :title="`Artifact preview: ${filePath}`"

@@ -1718,6 +1718,38 @@ def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> No
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")
 
 
+def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> None:
+    """Archiving asks "already decided?" once per proposal.
+
+    Each call used to re-read and re-parse the whole sidecar, so one archive
+    pass over a long-lived ledger was O(proposals x history). The cache is
+    keyed on stat identity, so its correctness rests on noticing an append.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    assert mp.record_dismissal(queue, text="First.", kind="memory", via="pwa") is True
+    sidecar = str(mp.dismissed_log_path(queue))
+
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        reads.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with unittest.mock.patch.object(Path, "read_text", counting_read_text):
+        # Repeated questions about an unchanged sidecar read it once.
+        for _ in range(5):
+            mp._has_decision(queue, key="dismissed_at", text="First.", outcome="")
+        assert reads.count(sidecar) == 1, reads
+
+    # An append must be seen: a stale cache would silently re-file or
+    # re-suppress proposals.
+    assert mp.record_dismissal(queue, text="Second.", kind="memory", via="pwa") is True
+    assert mp._has_decision(queue, key="dismissed_at", text="Second.", outcome="") is True
+    assert {r["text"] for r in mp.read_decisions(queue)} == {"First.", "Second."}
+
+
 def test_legacy_row_ids_survive_a_new_decision(tmp_path: Path) -> None:
     """A decision in the current sidecar must not renumber the legacy one.
 

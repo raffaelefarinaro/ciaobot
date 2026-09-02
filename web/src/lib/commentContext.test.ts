@@ -32,6 +32,60 @@ describe('comment context formatting', () => {
     expect(out).toContain('<reference-source>a.md</reference-source>')
   })
 
+  it('uses an element locator for an HTML artifact comment', () => {
+    const out = formatFileComments([{
+      path: 'Workspace/dashboard.html',
+      selection: 'Revenue rose',
+      comment: 'check this number',
+      artifactSelector: 'div:nth-of-type(1) > h2:nth-of-type(1)',
+      artifactStartOffset: 0,
+      artifactEndOffset: 12,
+      artifactElementTag: 'h2',
+    }])
+    expect(out).toContain('<reference-source>Workspace/dashboard.html (element h2)</reference-source>')
+    expect(out).toContain('<quoted-text>Revenue rose</quoted-text>')
+  })
+
+  it('falls back to the selector tail when an artifact comment has no element tag', () => {
+    const out = formatFileComments([{
+      path: 'w/p.html',
+      selection: 'x',
+      comment: 'c',
+      artifactSelector: 'section:nth-of-type(2)',
+      artifactStartOffset: 0,
+      artifactEndOffset: 1,
+    }])
+    expect(out).toContain('<reference-source>w/p.html (element section)</reference-source>')
+  })
+
+  it('carries the selector when a whole-element anchor has no text to quote', () => {
+    // Alt+Click on an SVG shape or a chart bar: textContent is empty, so the
+    // quote cannot locate anything and the selector is the only locator left.
+    const out = formatFileComments([{
+      path: 'w/chart.html',
+      selection: '',
+      comment: 'this bar looks wrong',
+      artifactSelector: 'body > svg:nth-of-type(1) > rect:nth-of-type(3)',
+      artifactElementTag: 'rect',
+      artifactWholeElement: true,
+    }])
+    expect(out).toContain(
+      '<reference-source>w/chart.html (element rect) '
+      + '[body > svg:nth-of-type(1) > rect:nth-of-type(3)]</reference-source>',
+    )
+  })
+
+  it('omits the selector when the artifact anchor already has a quote', () => {
+    const out = formatFileComments([{
+      path: 'w/p.html',
+      selection: 'Revenue rose',
+      comment: 'c',
+      artifactSelector: 'body > h2:nth-of-type(1)',
+      artifactElementTag: 'h2',
+    }])
+    expect(out).toContain('<reference-source>w/p.html (element h2)</reference-source>')
+  })
+
   it('formats a chat comment without a source anchor', () => {
     const out = formatChatComments([{ selection: 'the answer is 4', comment: 'is that right?' }])
 

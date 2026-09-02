@@ -155,7 +155,12 @@ const filtersHideEverything = computed(
          states printed "No decisions yet." under the error, which claims an
          empty ledger when the ledger merely could not be read. -->
     <template v-else-if="store.historyError && !store.historyLoaded" />
-    <p v-else-if="filtersHideEverything" class="ph-empty">No decisions match the current filters.</p>
+    <!-- Filters only see the decisions fetched so far, so while more pages
+         exist "no matches" would be a claim this list cannot make. -->
+    <p v-else-if="filtersHideEverything" class="ph-empty">
+      No decisions match the current filters<template v-if="store.historyCanLoadMore"> in the
+      decisions loaded so far</template>.
+    </p>
     <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 
     <template v-else>

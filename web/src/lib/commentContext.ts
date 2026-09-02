@@ -1,4 +1,5 @@
 import { excelColLetter } from './csv'
+import { formatArtifactCommentLocation } from './artifactBridge'
 
 // Formatting for "comment" context — text a user selects (in a chat reply or a
 // document preview) plus the note they attach — that rides along with their
@@ -31,6 +32,15 @@ export interface FileCommentInput {
   colIndex?: number | null
   /** CSV column header label (preferred over "Column N" in the locator). */
   colHeader?: string | null
+  /**
+   * HTML artifact anchor: CSS selector + text offsets inside the rendered
+   * page. When set, source uses an element locator instead of line numbers.
+   */
+  artifactSelector?: string | null
+  artifactStartOffset?: number | null
+  artifactEndOffset?: number | null
+  artifactElementTag?: string | null
+  artifactWholeElement?: boolean
   images?: string[]
 }
 
@@ -97,7 +107,17 @@ export function formatCommentLocation(c: {
   lineEnd?: number | null
   colIndex?: number | null
   colHeader?: string | null
+  artifactSelector?: string | null
+  artifactElementTag?: string | null
+  selection?: string | null
 }): string {
+  if (c.artifactSelector) {
+    return formatArtifactCommentLocation({
+      elementTag: c.artifactElementTag,
+      selector: c.artifactSelector,
+      quote: c.selection,
+    })
+  }
   if (c.colIndex != null || (c.colHeader != null && c.colHeader !== '')) {
     const header = (c.colHeader || '').trim() || `Column ${(c.colIndex ?? 0) + 1}`
     if (c.lineStart) return `R${c.lineStart} · ${header}`
@@ -110,6 +130,19 @@ export function formatCommentLocation(c: {
 
 function formatReferenceSource(c: FileCommentInput): string {
   let source = c.path
+  if (c.artifactSelector) {
+    const label = formatArtifactCommentLocation({
+      elementTag: c.artifactElementTag,
+      selector: c.artifactSelector,
+      quote: c.selection,
+    })
+    if (label) source += ` (element ${label})`
+    // A whole-element anchor on a textless node (an SVG shape, a chart bar)
+    // has no quote for the model to match on, so the selector path is the only
+    // locator left.
+    if (!(c.selection || '').trim()) source += ` [${c.artifactSelector}]`
+    return source
+  }
   if (c.colIndex != null || (c.colHeader != null && c.colHeader !== '')) {
     const header = (c.colHeader || '').trim() || `Column ${(c.colIndex ?? 0) + 1}`
     const letter = excelColLetter(c.colIndex ?? 0)
