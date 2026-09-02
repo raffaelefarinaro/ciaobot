@@ -377,6 +377,11 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     await api.post(`/api/proposals/${row.id}/accept${query}`)
     await store.fetch()
+    // This path posts directly instead of going through `store.act()`, so it
+    // has to invalidate History itself. Without it an accept made here stayed
+    // missing from an already-loaded History tab (ensureHistoryLoaded returns
+    // early while historyLoaded is true) until a workspace change or reload.
+    store.invalidateHistory()
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

@@ -206,6 +206,34 @@ describe('ProposalHistoryList', () => {
     wrapper.unmount()
   })
 
+  it('keeps "show more" reachable when the filters empty the loaded page', async () => {
+    // Filters apply to the loaded page only, so a filter that matches nothing
+    // here can still match older decisions. Rendering the pagination inside
+    // the rows branch hid it exactly when it was needed, and the empty message
+    // claimed there were no matches at all.
+    apiGet.mockResolvedValue({ rows: [historyRow()], total: 500, truncated: true })
+    const store = useProposalsStore()
+    store.search = 'only in an older page'
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.findAll('.ph-row')).toHaveLength(0)
+    expect(wrapper.find('.ph-more').exists()).toBe(true)
+    // And the message says the verdict is only about what has been loaded.
+    expect(wrapper.text()).toContain('decisions loaded so far')
+
+    apiGet.mockResolvedValue({
+      rows: [historyRow(), historyRow({ id: 'h2', text: 'only in an older page' })],
+      total: 500,
+      truncated: false,
+    })
+    await wrapper.find('.ph-more').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.ph-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('re-fetches scoped to the workspace when the active workspace changes', async () => {
     // The server pages the newest N rows per scope: re-filtering a page fetched
     // for another workspace can leave a full ledger looking empty.

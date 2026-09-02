@@ -696,6 +696,53 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
+  it('shows a direct accept in History without needing a reload', async () => {
+    // The single-row accept posts directly rather than through `store.act()`,
+    // so it has to invalidate History itself. Without that,
+    // `ensureHistoryLoaded` returned early on the way back to an
+    // already-loaded History tab and the accept was simply missing.
+    let historyCalls = 0
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        historyCalls += 1
+        return Promise.resolve({
+          rows: historyCalls === 1 ? [] : [{
+            id: 'h9', ts: '2026-09-02T10:00:00+00:00', action: 'accepted', via: 'pwa',
+            kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+            destination: 'ciao:memory', outcome: 'written', proposal_id: 'row-1',
+          }],
+          total: historyCalls === 1 ? 0 : 1,
+          truncated: false,
+        })
+      }
+      return Promise.resolve({ rows: historyCalls ? [] : [row()] })
+    })
+    apiPost.mockResolvedValue({})
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    // Load History once, so `historyLoaded` is true.
+    const tabs = () => wrapper.findAll('[role="tab"]')
+    await tabs()[1]!.trigger('click')
+    await flushPromises()
+    expect(historyCalls).toBe(1)
+
+    // Back to the Queue and accept the row through the direct path.
+    await tabs()[0]!.trigger('click')
+    await flushPromises()
+    await wrapper.find('.btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept')
+
+    await tabs()[1]!.trigger('click')
+    await flushPromises()
+
+    expect(historyCalls).toBe(2)
+    expect(wrapper.text()).toContain('Remember the thing')
+    wrapper.unmount()
+  })
+
   it('shows no History count until the ledger has actually loaded', async () => {
     // History is fetched on the tab switch, so a count rendered before that
     // read "History 0" on a ledger with hundreds of rows.

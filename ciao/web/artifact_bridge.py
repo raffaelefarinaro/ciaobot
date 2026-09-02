@@ -18,6 +18,10 @@ and provides the artifact-side half of selection comments:
   changes, and the script wraps the anchored text in <mark> elements. A
   whole-element anchor outlines the element instead — the node it points at
   (an SVG shape, a chart bar) may have no text to wrap at all.
+- A click on a highlight is consumed (the highlight can sit inside a link or
+  a button, whose default action would otherwise fire too) and opens one
+  comment. Several comments can share one whole element, so an anchor holds a
+  list of ids and repeated clicks walk it.
 - It posts ``action: 'ready'`` once the DOM is parsed. That is the handshake
   the parent waits for before its first highlight push: the script itself runs
   from ``<head>``, so anything pushed earlier would query a tree with no
@@ -54,7 +58,11 @@ BRIDGE_SCRIPT = r"""(function () {
   // for is a node with no text at all (an SVG shape, a chart bar). They are an
   // outline on the element itself instead, so they stay visible and clickable.
   var EL_CLASS = 'ciao-comment-el'
+  // Space-separated: several comments can anchor to the same whole element,
+  // and storing only the last one left the earlier ones unclickable.
   var ID_ATTR = 'data-ciao-comment-id'
+  // Which id the next click on this anchor should open (see nextId).
+  var CURSOR_ATTR = 'data-ciao-comment-cursor'
   var PILL_ID = 'ciao-comment-pill'
   var MAX_QUOTE = 500
   var MAX_SELECTOR = 400
@@ -65,8 +73,12 @@ BRIDGE_SCRIPT = r"""(function () {
     'mark.' + MARK_CLASS + '{background:rgba(255,77,109,.28);color:inherit;' +
     'border-radius:2px;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}' +
     '.' + EL_CLASS + '{outline:2px solid rgba(255,77,109,.85);outline-offset:1px;cursor:pointer}' +
+    // 44px min box, not the 24px the padding alone gave: on a touch device the
+    // pill is how a selection becomes a comment (AGENTS.md touch-target rule).
     '#' + PILL_ID + '{position:absolute;z-index:2147483647;background:#ff4d6d;color:#fff;' +
-    'font:600 12px/1 system-ui,-apple-system,sans-serif;padding:6px 11px;border-radius:999px;' +
+    'font:600 13px/1 system-ui,-apple-system,sans-serif;box-sizing:border-box;' +
+    'min-height:44px;min-width:44px;padding:0 18px;border-radius:999px;' +
+    'display:inline-flex;align-items:center;justify-content:center;' +
     'border:0;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35)}'
   ;(document.head || document.documentElement).appendChild(css)
 
@@ -181,8 +193,11 @@ BRIDGE_SCRIPT = r"""(function () {
     document.body.appendChild(pill)
     var x = window.scrollX + rect.right + 8
     var y = window.scrollY + rect.bottom + 6
-    if (x + 110 > window.scrollX + document.documentElement.clientWidth) {
-      x = window.scrollX + rect.left
+    // Measure rather than assume a width: the pill carries a 44px minimum box
+    // for touch, so a hard-coded guess would clamp at the wrong point.
+    var pillWidth = pill.offsetWidth || 100
+    if (x + pillWidth > window.scrollX + document.documentElement.clientWidth) {
+      x = Math.max(window.scrollX, window.scrollX + rect.left)
     }
     pill.style.left = x + 'px'
     pill.style.top = y + 'px'
@@ -233,8 +248,13 @@ BRIDGE_SCRIPT = r"""(function () {
       return
     }
     if (anchor) {
-      var id = anchor.getAttribute(ID_ATTR)
+      var id = nextId(anchor)
       if (!id) return
+      // Consume it. A highlight can sit inside a link or a button, and letting
+      // the click through would navigate the frame (or mutate the artifact)
+      // out from under the comment the user was opening.
+      e.preventDefault()
+      e.stopPropagation()
       var r = anchor.getBoundingClientRect()
       post({
         type: 'ciao:artifact-comment',
@@ -245,6 +265,28 @@ BRIDGE_SCRIPT = r"""(function () {
       })
     }
   }, true)
+
+  // Which comment a click on this anchor opens. An anchor usually holds one
+  // id, but several whole-element comments can share one element, so the ids
+  // are a list and repeated clicks walk it — otherwise every comment but the
+  // last would have no clickable anchor at all.
+  function nextId(anchor) {
+    var ids = idsOf(anchor)
+    if (!ids.length) return ''
+    var cursor = parseInt(anchor.getAttribute(CURSOR_ATTR) || '0', 10)
+    if (!(cursor >= 0) || cursor >= ids.length) cursor = 0
+    anchor.setAttribute(CURSOR_ATTR, String((cursor + 1) % ids.length))
+    return ids[cursor]
+  }
+
+  function idsOf(el) {
+    var raw = (el.getAttribute(ID_ATTR) || '').split(/\s+/)
+    var out = []
+    for (var i = 0; i < raw.length; i++) {
+      if (raw[i]) out.push(raw[i])
+    }
+    return out
+  }
 
   // ── Highlight (re)application ───────────────────────────────────────
   function setClass(el, name, on) {
@@ -277,6 +319,7 @@ BRIDGE_SCRIPT = r"""(function () {
     for (var j = 0; j < outlined.length; j++) {
       setClass(outlined[j], EL_CLASS, false)
       outlined[j].removeAttribute(ID_ATTR)
+      outlined[j].removeAttribute(CURSOR_ATTR)
     }
   }
 
@@ -354,7 +397,12 @@ BRIDGE_SCRIPT = r"""(function () {
       // wrap, and an empty quote must still leave something clickable.
       if (c.wholeElement) {
         setClass(el, EL_CLASS, true)
-        el.setAttribute(ID_ATTR, String(c.id))
+        // Append: two comments can anchor to the same element, and replacing
+        // the attribute left the first one with nothing to click.
+        var have = idsOf(el)
+        have.push(String(c.id))
+        el.setAttribute(ID_ATTR, have.join(' '))
+        el.removeAttribute(CURSOR_ATTR)
         continue
       }
       if (!c.quote) continue

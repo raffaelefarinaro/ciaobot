@@ -38,6 +38,7 @@ const DOC = `<!DOCTYPE html><html><head></head><body>
     <h2>Revenue
        rose sharply</h2>
     <p>First part</p><p>Second part</p>
+    <p><a href="https://example.com/gone">Linked label</a></p>
   </div>
   <svg width="100" height="100"><rect x="1" y="1" width="10" height="10"></rect></svg>
 </body></html>`
@@ -157,6 +158,46 @@ describe('artifact bridge: highlight reapplication', () => {
     expect(h.doc.querySelector('rect')?.hasAttribute('data-ciao-comment-id')).toBe(false)
   })
 
+  it('keeps every id when two comments share one element', async () => {
+    // Overwriting the attribute per comment left the earlier comment with no
+    // clickable anchor at all.
+    const selector = 'body > svg:nth-of-type(1) > rect:nth-of-type(1)'
+    await h.apply([
+      { id: 'c1', selector, quote: '', wholeElement: true },
+      { id: 'c2', selector, quote: '', wholeElement: true },
+    ])
+
+    const rect = h.doc.querySelector('rect') as Element
+    expect(rect.getAttribute('data-ciao-comment-id')).toBe('c1 c2')
+
+    // Repeated clicks walk the list, so both comments are reachable.
+    h.posted.length = 0
+    rect.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }))
+    rect.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }))
+    rect.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }))
+    expect(h.posted.filter((p) => p.action === 'open').map((p) => p.id)).toEqual(['c1', 'c2', 'c1'])
+  })
+
+  it('consumes a click on a highlight instead of letting the link fire', async () => {
+    // A highlight can sit inside a link or a button; letting the default
+    // action through would navigate the frame out from under the comment.
+    await h.apply([
+      {
+        id: 'c1',
+        selector: 'body > div:nth-of-type(1) > p:nth-of-type(3) > a:nth-of-type(1)',
+        quote: 'Linked label',
+      },
+    ])
+    const mark = h.doc.querySelector('mark.ciao-comment-mark') as Element
+    expect(mark).not.toBeNull()
+
+    const click = new h.window.MouseEvent('click', { bubbles: true, cancelable: true })
+    mark.dispatchEvent(click)
+
+    expect(click.defaultPrevented).toBe(true)
+    expect(h.posted.some((p) => p.action === 'open' && p.id === 'c1')).toBe(true)
+  })
+
   it('ignores messages that are not the apply-comments protocol', async () => {
     await h.apply([{ id: 'c1', selector: 'body > div:nth-of-type(1) > h2:nth-of-type(1)', quote: 'Revenue rose sharply' }])
     h.window.postMessage({ frame: 'other', type: 'ciao:apply-comments', comments: [] }, '*')
@@ -214,6 +255,29 @@ describe('artifact bridge: selection anchoring', () => {
       },
     ])
     expect(h.doc.querySelectorAll('mark.ciao-comment-mark')).toHaveLength(2)
+  })
+
+  it('gives the Comment pill a 44px touch box', async () => {
+    // On touch the pill is how a selection becomes a comment, and 13px text
+    // plus padding alone made it ~24px tall (AGENTS.md touch-target rule).
+    // jsdom has no layout, so this asserts the rule reaches the element
+    // rather than a measured height.
+    const h = boot()
+    await h.tick()
+    const ps = h.doc.querySelectorAll('.card p')
+    const range = h.doc.createRange()
+    range.selectNodeContents(ps[0])
+    const sel = h.window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+
+    const pill = h.doc.getElementById('ciao-comment-pill')
+    expect(pill).not.toBeNull()
+    const style = h.window.getComputedStyle(pill as Element)
+    expect(style.minHeight).toBe('44px')
+    expect(style.minWidth).toBe('44px')
   })
 
   it('posts a whole-element anchor on Alt+Click, textless nodes included', async () => {

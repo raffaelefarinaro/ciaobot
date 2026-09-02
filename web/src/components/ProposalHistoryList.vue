@@ -154,33 +154,43 @@ const filtersHideEverything = computed(
     <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
 
     <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
-    <p v-else-if="filtersHideEverything" class="ph-empty">No decisions match the current filters.</p>
-    <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 
     <template v-else>
-      <section v-for="group in groups" :key="group.key" class="ph-group">
-        <header class="ph-group-head">
-          <span class="ph-group-label">{{ group.label }}</span>
-          <span class="ph-group-count">{{ group.rows.length }}</span>
-        </header>
-        <ul class="ph-rows">
-          <li v-for="row in group.rows" :key="row.id" class="ph-row">
-            <div class="ph-row-top">
-              <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
-              <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
-              <span class="ph-actor">{{ actorLabel(row.via) }}</span>
-              <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
-            </div>
-            <p class="ph-text">{{ row.text }}</p>
-            <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
-            <details v-if="row.source" class="ph-source">
-              <summary>details</summary>
-              <p>from {{ row.source }}</p>
-            </details>
-          </li>
-        </ul>
-      </section>
+      <p v-if="filtersHideEverything" class="ph-empty">
+        No decisions match the current filters<template v-if="store.historyCanLoadMore"> on the
+        decisions loaded so far</template>.
+      </p>
+      <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
 
+      <template v-else>
+        <section v-for="group in groups" :key="group.key" class="ph-group">
+          <header class="ph-group-head">
+            <span class="ph-group-label">{{ group.label }}</span>
+            <span class="ph-group-count">{{ group.rows.length }}</span>
+          </header>
+          <ul class="ph-rows">
+            <li v-for="row in group.rows" :key="row.id" class="ph-row">
+              <div class="ph-row-top">
+                <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
+                <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
+                <span class="ph-actor">{{ actorLabel(row.via) }}</span>
+                <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
+              </div>
+              <p class="ph-text">{{ row.text }}</p>
+              <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+              <details v-if="row.source" class="ph-source">
+                <summary>details</summary>
+                <p>from {{ row.source }}</p>
+              </details>
+            </li>
+          </ul>
+        </section>
+      </template>
+
+      <!-- Pagination sits outside the rows branch on purpose: filters apply to
+           the loaded page only, so a filter matching nothing here can still have
+           matches in older decisions. Hiding "show more" alongside the rows made
+           those unreachable and the empty message a lie. -->
       <button
         v-if="store.historyCanLoadMore"
         type="button"
