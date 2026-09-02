@@ -964,6 +964,19 @@ function onShortcutKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
 
+  // Cmd/Ctrl+Enter sends the composer draft from anywhere in the chat view.
+  // The composer's own keydown covers the focused case; this covers the press
+  // straight after attaching an image or a comment, when focus sits on the
+  // control that just closed rather than the textarea. Text fields keep the
+  // chord -- the composer and the comment popovers each handle it themselves --
+  // and shortcutsActive already excludes the file viewer and the dialogs, so
+  // nothing sends from behind them.
+  if (mod && !alt && e.key === 'Enter') {
+    if (isTypingTarget(e.target) || e.defaultPrevented || !store.activeChat) return
+    if (chatPanelRef.value?.handleSendShortcut?.()) e.preventDefault()
+    return
+  }
+
   // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
   // choose the workspace the new chat should live in; Enter creates it in the
   // active workspace's General project.
