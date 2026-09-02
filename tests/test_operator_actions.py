@@ -284,36 +284,6 @@ def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
     assert "vault-location:personal" not in ids
 
 
-def test_unrehomed_people_gated_on_two_workspaces(tmp_path: Path) -> None:
-    # With a single workspace there is no move to offer, so it must be silent.
-    runtime = _runtime(tmp_path)
-    single = DetectionContext(
-        config=_FakeConfig(tmp_path, workspaces=("personal",)),
-        runtime_dir=runtime,
-    )
-    _starred(tmp_path)
-    assert [a.id for a in detect_actions(single)] == []
-
-    # Two workspaces, no receipt yet: the tile fires.
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
-    context = DetectionContext(config=config, runtime_dir=runtime)
-    actions = [a for a in detect_actions(context) if a.id == "vault-unrehomed-people"]
-    assert len(actions) == 1
-    # Nothing ever ran a survey, so the fallback must not promise one: with
-    # `survey_vault_people` gone the only thing on offer is the dry-run preview.
-    detail = actions[0].detail
-    assert "survey" not in detail.lower()
-    assert "none have been re-homed yet" in detail
-
-    # A migrated receipt clears it.
-    (runtime / "migration").mkdir(parents=True, exist_ok=True)
-    (runtime / "migration" / "vault-rehome.json").write_text(
-        json.dumps({"status": "migrated", "moves": []}), encoding="utf-8"
-    )
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-unrehomed-people" not in ids
-
-
 def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
@@ -557,22 +527,10 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     (runtime / "migration" / "vault-vocabulary.json").write_text(
         json.dumps({"renamed": [], "unresolved": {"log": ["x.md"]}}), encoding="utf-8"
     )
-    (runtime / "migration" / "vault-rehome.json").write_text(
-        json.dumps({
-            "status": "migrated",
-            "moves": [{"from": "a"}],
-            "needs_judgement": [{"path": "b"}],
-            "proposals": [{"path": "c"}],
-        }),
-        encoding="utf-8",
-    )
     queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text(
-        "\n".join(f"- [memory] Pending {i}." for i in range(REVIEW_QUEUE_DEPTH))
-        # The re-home tile counts the QUEUE, not the receipt, so a queue with no
-        # `[rehome]` row would clear it however many the receipt recorded.
-        + "\n- [rehome] Re-home `personal/People/J.md` to `work/...`?",
+        "\n".join(f"- [memory] Pending {i}." for i in range(REVIEW_QUEUE_DEPTH)),
         encoding="utf-8",
     )
     now = datetime(2026, 1, 20, 0, 0, tzinfo=UTC)
@@ -701,111 +659,20 @@ def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
 
 
 
-# -- the two queue tiles the operator saw on screen --------------------------
+# -- the queue tile the operator saw on screen -------------------------------
 
 
-def _rehome_receipt(tmp_path: Path, payload: dict) -> None:
-    import json
-
-    path = _runtime(tmp_path) / "migration" / "vault-rehome.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _rehome_actions(tmp_path: Path) -> list:
-    from ciao.operator_actions import _detect_unrehomed_people
-
-    # Two workspaces: with one, there is nowhere to re-home TO and the detector
-    # is silent by design (the single-workspace false positive fixed in P3).
-    return _detect_unrehomed_people(
-        _context(tmp_path, config=_FakeConfig(tmp_path, workspaces=("personal", "work")))
-    )
-
-
-def test_a_legacy_receipt_with_no_status_clears_the_tile(tmp_path: Path) -> None:
-    """`vault_rehome` only started writing `status` when its survey mode landed.
-
-    Every receipt written before that records a COMPLETED re-home with no status,
-    and reading those as unfinished made this a permanent false positive on
-    exactly the installs that had done the work. Seen on the reference install:
-    87 moves and 165 link rewrites recorded, no status, tile firing a day later.
-    """
-    _rehome_receipt(tmp_path, {"moves": [1] * 87, "needs_judgement": [], "proposals": []})
-
-    assert _rehome_actions(tmp_path) == []
-
-
-def test_an_applied_receipt_still_surfaces_what_needs_a_decision(tmp_path: Path) -> None:
-    """Treating "no status" as done must not hide outstanding judgement calls.
-
-    15, not 16: this fixture has no queue file, so the receipt's own
-    `needs_judgement` is the only count available. It used to read 16 because the
-    line added `proposals` on top — a record of the queue entries written FOR
-    those same judgement cases, so the sum double-counted them.
-    """
-    _rehome_receipt(
-        tmp_path, {"moves": [1] * 87, "needs_judgement": [1] * 15, "proposals": [1]}
-    )
-
-    actions = _rehome_actions(tmp_path)
-
-    assert len(actions) == 1
-    detail = actions[0].detail
-    assert "87" in detail and "15" in detail
-    assert "16" not in detail
-    # The prose must read as prose, never as a dumped container.
-    assert "{" not in detail and "[" not in detail
-
-
-def test_the_tile_never_renders_a_container_into_its_prose(tmp_path: Path) -> None:
-    """It read keys this receipt has never had, and one that is a LIST, so it
-    said "0 to move" while 87 were recorded as moved and then printed a list of
-    dicts on screen. Every count on the tile goes through `_count`."""
-    _rehome_receipt(
-        tmp_path,
-        {
-            "status": "migrated",
-            "moves": [{"path": "a"}] * 3,
-            "needs_judgement": [{"bucket": "needs_judgement", "path": "b"}] * 15,
-            "proposals": [],
-        },
-    )
-
-    detail = _rehome_actions(tmp_path)[0].detail
-
-    assert "bucket" not in detail and "{" not in detail and "[" not in detail
-    assert "3 person note(s) were re-homed" in detail
-    assert "15 still need a decision" in detail
-
-
-def test_a_detail_string_never_renders_a_container() -> None:
-    """The tile read keys this receipt has never had, and one that is a LIST.
-
-    So it told the operator "the survey recorded 0 to move" while 87 notes were
-    recorded as moved, and then interpolated a list of dicts straight into the
-    prose on screen.
-    """
-    from ciao.operator_actions import _count
-
-    assert _count([{"bucket": "needs_judgement"}] * 15) == 15
-    assert _count(15) == 15
-    assert _count(None) == 0
-    assert _count("nonsense") == 0
-    assert _count(True) == 0, "a bool is not a count"
-
-
-def test_both_queue_tiles_point_at_the_panel_that_has_the_buttons() -> None:
-    """They offered "Review in chat" alone, so the operator was asked to work
+def test_the_queue_tile_points_at_the_panel_that_has_the_buttons() -> None:
+    """It offered "Review in chat" alone, so the operator was asked to work
     through 109 items in prose while the per-row accept/dismiss, the destination
     picker and the batch operations sat one route away."""
     import inspect
 
     from ciao import operator_actions as oa
 
-    for detector in (oa._detect_unrehomed_people, oa._detect_review_queue):
-        source = inspect.getsource(detector)
-        assert 'view_route="/proposals"' in source, detector.__name__
-        assert "view_label=" in source, detector.__name__
+    source = inspect.getsource(oa._detect_review_queue)
+    assert 'view_route="/proposals"' in source
+    assert "view_label=" in source
 
 
 # -- the mandatory re-rooting gate -------------------------------------------
@@ -1121,109 +988,3 @@ def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
     assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
 
 
-def test_the_rehome_tile_quotes_the_queue_it_opens(tmp_path: Path) -> None:
-    """One thing, one number.
-
-    The old line summed the receipt's `needs_judgement` and `proposals` — which
-    are not disjoint, since `proposals` records the entries written FOR those
-    judgement cases — and both are frozen at migration time. On the reference
-    install that gave four numbers for one thing: 16 on the tile, 15 in the
-    receipt, 14 rows in the queue the tile's own button opens, and 12 live
-    candidates.
-    """
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
-    receipt = tmp_path / ".runtime" / "migration" / "vault-rehome.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(
-        json.dumps({
-            "status": "migrated",
-            "moves": [{"from": f"personal/People/P{i}.md"} for i in range(87)],
-            "needs_judgement": [{"path": f"personal/People/J{i}.md"} for i in range(15)],
-            "proposals": [{"path": "personal/Workspace/Memory-Proposals.md"}],
-        }),
-        encoding="utf-8",
-    )
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True, exist_ok=True)
-    queue.write_text(
-        "# Proposals\n\n"
-        + "".join(f"- [rehome] Re-home `personal/People/J{i}.md` to `work/...`?\n" for i in range(14))
-        + "- [memory] Something else entirely\n",
-        encoding="utf-8",
-    )
-
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "unrehomed-people"]
-
-    assert len(actions) == 1
-    assert "87 person note(s) were re-homed" in actions[0].detail
-    assert "14 still need a decision" in actions[0].detail
-    assert "16" not in actions[0].detail
-    assert "15 still" not in actions[0].detail
-
-
-def test_the_rehome_tile_falls_back_to_the_receipt_without_a_queue(tmp_path: Path) -> None:
-    """No queue file to count means the receipt is the only thing that knows."""
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
-    receipt = tmp_path / ".runtime" / "migration" / "vault-rehome.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(
-        json.dumps({
-            "status": "migrated",
-            "moves": [],
-            "needs_judgement": [{"path": "personal/People/J.md"}],
-            "proposals": [{"path": "x"}],
-        }),
-        encoding="utf-8",
-    )
-
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "unrehomed-people"]
-
-    assert "1 still need a decision" in actions[0].detail
-
-
-def test_an_emptied_queue_clears_the_rehome_tile(tmp_path: Path) -> None:
-    """Dismissing every row must clear it, which a frozen receipt never could."""
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
-    receipt = tmp_path / ".runtime" / "migration" / "vault-rehome.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(
-        json.dumps({
-            "status": "migrated",
-            "moves": [{"from": "a"}],
-            "needs_judgement": [{"path": "b"}, {"path": "c"}],
-            "proposals": [{"path": "d"}],
-        }),
-        encoding="utf-8",
-    )
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True, exist_ok=True)
-    queue.write_text("# Proposals\n\nAll reviewed.\n", encoding="utf-8")
-
-    assert "unrehomed-people" not in {a.kind for a in detect_actions(_context(tmp_path, config=config))}
-
-
-def test_a_partial_receipt_does_not_clear_the_rehome_tile(tmp_path: Path) -> None:
-    """A half-finished re-home must not hide the tile as well as a finished one.
-
-    A run that left failures used to write a `migrated` receipt, so the tile went
-    quiet while references were still inconsistent. The receipt now says
-    `partial`, and the tile reports only COMPLETED work as done — a legacy
-    receipt with no status still counts as complete, so installs that finished
-    before the field existed are not turned back into false positives.
-    """
-    _rehome_receipt(
-        tmp_path,
-        {
-            "moves": [1] * 3,
-            "needs_judgement": [],
-            "proposals": [],
-            "status": "partial",
-            "failed": [{"path": "personal/People/Mo.md", "error": "Permission denied"}],
-        },
-    )
-
-    actions = _rehome_actions(tmp_path)
-
-    assert len(actions) == 1, "a partial re-home reported as done"
