@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import ProposalHistoryList from '../ProposalHistoryList.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
@@ -294,6 +295,25 @@ describe('ProposalHistoryList', () => {
 
     expect(wrapper.find('.ph-error').text()).toContain('history is unreachable')
     expect(store.error).toBe('an unread accept failure')
+    wrapper.unmount()
+  })
+
+  it('keeps "show more" reachable when the filters hide the whole page', async () => {
+    // The filters are client-side over the page we hold. Nesting pagination in
+    // the rows' `v-else` printed "No decisions match the current filters."
+    // with no way to load the older rows that do match.
+    apiGet.mockResolvedValue({
+      rows: [historyRow({ kind: 'memory' })], total: 500, truncated: true, limit: 200, at_max: false,
+    })
+    const store = useProposalsStore()
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    store.kindFilter = 'skill'
+    await nextTick()
+
+    expect(wrapper.text()).toContain('No decisions match the current filters.')
+    expect(wrapper.find('.ph-more').exists()).toBe(true)
     wrapper.unmount()
   })
 

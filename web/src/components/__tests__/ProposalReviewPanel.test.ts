@@ -711,6 +711,60 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
+  it('reports the scoped total in the badge, not the page size', async () => {
+    // The page is capped, so a workspace with more decisions than the limit
+    // showed the limit itself as though it were the whole ledger.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+            },
+          ],
+          total: 500,
+          truncated: true,
+          limit: 200,
+          at_max: false,
+        })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').text()).toBe('500')
+
+    // Under a filter the visible count is the honest number.
+    useProposalsStore().kindFilter = 'skill'
+    await nextTick()
+    expect(wrapper.find('.pr-tab-count').text()).toBe('0')
+    wrapper.unmount()
+  })
+
+  it('refreshes history after a direct per-row accept', async () => {
+    // The primary accept button posts directly and calls `store.fetch`, which
+    // deliberately leaves history alone. With the ledger prefetched on mount,
+    // switching to History reused the cached page and the badge stayed stale.
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const historyCalls = () =>
+      apiGet.mock.calls.filter(([p]) => String(p).startsWith('/api/proposals/history')).length
+    const before = historyCalls()
+
+    apiPost.mockResolvedValue({} as never)
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith(expect.stringContaining('/accept'))
+    expect(historyCalls()).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+
   it('renders no History count while the ledger is still unloaded', async () => {
     // Null, not zero: "History 0" on a ledger with hundreds of rows is the
     // opposite of what a badge is for.

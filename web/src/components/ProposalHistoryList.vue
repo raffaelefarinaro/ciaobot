@@ -100,12 +100,9 @@ const groups = computed(() => {
 /** Whether anything is narrowing the list. The kind chips and the search box
  * are shared with the queue tab, whose "clear filter" control is on that tab,
  * so without a reset here a filter set over there silently emptied this list. */
-const filtersActive = computed(
-  () => store.kindFilter !== 'all'
-    || Boolean(store.search)
-    || store.historyActionFilter !== 'all'
-    || store.historyActorFilter !== 'all',
-)
+// Shared with the panel's tab badge, which must not report a filtered count
+// as the ledger total.
+const filtersActive = computed(() => store.historyFiltersActive)
 
 /** Distinguishes "nothing recorded" from "nothing matches the filters". */
 const filtersHideEverything = computed(
@@ -184,7 +181,14 @@ const filtersHideEverything = computed(
           </li>
         </ul>
       </section>
+    </template>
 
+    <!-- Pagination sits outside the empty-state chain above. The filters are
+         client-side over the page we hold, so a filter matching only rows
+         older than the page has to stay able to reach them: nesting this in
+         the `v-else` printed "No decisions match" with no way to load the
+         rows that do. -->
+    <template v-if="store.historyLoaded && !store.historyError">
       <button
         v-if="store.historyCanLoadMore"
         type="button"
@@ -345,5 +349,21 @@ const filtersHideEverything = computed(
   color: var(--accent);
   font-size: 0.78rem;
   cursor: pointer;
+}
+
+/* Touch: the link is only glyph-height, well under the 44px minimum. Grow the
+   hit area with padding and pull the extra back with a matching negative
+   margin, so the control stays visually inline where it sits next to the
+   "no matches" text. Same trick as the chat message actions. Desktop keeps
+   the tight inline link. */
+@media (pointer: coarse) {
+  .ph-clear-filter {
+    --ph-clear-visual: 1.1rem;
+    --ph-clear-pad: calc((var(--touch, 44px) - var(--ph-clear-visual)) / 2);
+    display: inline-block;
+    padding: var(--ph-clear-pad);
+    margin: calc(-1 * var(--ph-clear-pad));
+    margin-left: calc(var(--space-2) - var(--ph-clear-pad));
+  }
 }
 </style>

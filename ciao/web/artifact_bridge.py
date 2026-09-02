@@ -9,13 +9,21 @@ This module holds the small script injected into every artifact response by
 ``workspace_html`` (see ``inject_bridge``). The script runs inside the frame
 and provides the artifact-side half of selection comments:
 
-- It watches ``selectionchange`` and floats a Comment pill near the selection.
+- It watches ``selectionchange`` and floats a Comment pill near the selection,
+  but only once the parent has said it is listening (see the handshake below).
 - Clicking the pill (or Alt-clicking any element to comment on the element
   rather than its text) builds an anchor — a CSS selector path plus character
   offsets into that element's text — and posts it to the parent window.
 - It re-applies durable comment highlights on request: the parent sends a
   ``ciao:apply-comments`` message after the frame loads or the comment list
   changes, and the script wraps the anchored text in <mark> elements.
+
+Handshake: the compose half is inert until the parent posts
+``ciao:comments-enable`` (or any ``ciao:apply-comments``, which proves the same
+thing). The PWA side of selection comments does not exist yet, and shipping a
+Comment pill whose messages nothing receives is worse than shipping no pill —
+it reads as a working feature. Highlight re-application is unaffected: it only
+ever acts on comments the parent itself sent.
 
 Trust model: the script is our code, but it shares a document with
 model-authored script, which could forge the same messages. That is
@@ -122,6 +130,12 @@ BRIDGE_SCRIPT = """(function () {
   }
 
   // ── Comment pill ────────────────────────────────────────────────────
+  // The compose affordances stay inert until the parent says it is listening.
+  // The PWA half does not exist yet, and a Comment pill that posts into the
+  // void is worse than no pill: it looks like a feature and does nothing.
+  // Either handshake message enables them, so an integrated parent needs no
+  // extra call — `ciao:apply-comments` already proves someone is on the line.
+  var enabled = false
   var pill = null
   var pillTimer = null
 
@@ -158,6 +172,7 @@ BRIDGE_SCRIPT = """(function () {
   }
 
   document.addEventListener('selectionchange', function () {
+    if (!enabled) return
     if (pillTimer) clearTimeout(pillTimer)
     pillTimer = setTimeout(function () {
       pillTimer = null
@@ -173,6 +188,7 @@ BRIDGE_SCRIPT = """(function () {
   // Alt+Click comments the element itself (for non-text things: a chart node,
   // an SVG shape, a table cell the user cannot easily select).
   document.addEventListener('click', function (e) {
+    if (!enabled) return
     var mark = e.target && e.target.closest ? e.target.closest('mark.' + MARK_CLASS) : null
     if (e.altKey) {
       var el = elementOf(e.target)
@@ -276,7 +292,11 @@ BRIDGE_SCRIPT = """(function () {
 
   window.addEventListener('message', function (e) {
     var data = e.data
-    if (!data || data.frame !== 'ciao-artifact' || data.type !== 'ciao:apply-comments') return
+    if (!data || data.frame !== 'ciao-artifact') return
+    if (data.type === 'ciao:comments-enable') { enabled = true; return }
+    if (data.type === 'ciao:comments-disable') { enabled = false; removePill(); return }
+    if (data.type !== 'ciao:apply-comments') return
+    enabled = true
     applyComments(data.comments)
   })
 

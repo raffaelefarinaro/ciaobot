@@ -89,6 +89,26 @@ def test_bridge_tag_is_syntactically_valid_javascript() -> None:
     assert "\\" not in body.replace(BRIDGE_SCRIPT, "")
 
 
+def test_compose_affordances_are_gated_on_a_parent_handshake() -> None:
+    """No Comment pill until the parent says it is listening.
+
+    The PWA half of selection comments does not exist yet, so an ungated pill
+    posts `ciao:artifact-comment` into the void — a control that looks like a
+    feature and does nothing. `ciao:comments-enable`, or any
+    `ciao:apply-comments` (which proves a parent is on the line), turns it on.
+    """
+    from ciao.web.artifact_bridge import BRIDGE_SCRIPT
+
+    # The flag starts false and both compose entry points check it.
+    assert "var enabled = false" in BRIDGE_SCRIPT
+    assert BRIDGE_SCRIPT.count("if (!enabled) return") == 2
+    # Both handshakes flip it, and highlight application still implies it.
+    assert "'ciao:comments-enable'" in BRIDGE_SCRIPT
+    assert "'ciao:comments-disable'" in BRIDGE_SCRIPT
+    # `ready` is still announced unconditionally, so a parent knows to enable.
+    assert "action: 'ready'" in BRIDGE_SCRIPT
+
+
 def test_bridge_injection_is_idempotent() -> None:
     from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
 

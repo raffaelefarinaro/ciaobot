@@ -315,6 +315,18 @@ export const useProposalsStore = defineStore('proposals', () => {
   /** Whether a wider page would actually return anything new. */
   const historyCanLoadMore = computed(() => historyTruncated.value && !historyAtMax.value)
 
+  /** Whether any client-side filter is narrowing the ledger.
+   *
+   * Lives here because both the list (which offers the reset) and the panel's
+   * tab badge (which must not report a filtered count as the total) need the
+   * same answer. */
+  const historyFiltersActive = computed(
+    () => kindFilter.value !== 'all'
+      || Boolean(search.value)
+      || historyActionFilter.value !== 'all'
+      || historyActorFilter.value !== 'all',
+  )
+
   /** Ask the server for more history rows and refresh with the wider limit. */
   async function loadMoreHistory(): Promise<void> {
     if (!historyCanLoadMore.value) return
@@ -360,7 +372,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,
-    historyAtMax, historyTotal, historyCanLoadMore, historyError, historyWorkspace,
+    historyAtMax, historyTotal, historyCanLoadMore, historyFiltersActive, historyError, historyWorkspace,
     historyActionFilter, historyActorFilter,
     fetchHistory, ensureHistoryLoaded, loadMoreHistory, invalidateHistory, scopedHistory, visibleHistory,
   }
