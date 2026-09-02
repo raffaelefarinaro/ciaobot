@@ -8989,10 +8989,11 @@ class ProjectChatManager:
         # write.
         if _sched_schedule_id and _sched_status in {"error", "ok"}:
             store = getattr(self, "schedule_store", None)
-            latest = store.get(_sched_schedule_id) if store is not None else None
-            if latest is not None and latest.last_status != _sched_status:
-                latest.last_status = _sched_status
-                store.replace(latest)
+            if store is not None:
+                latest = store.get(_sched_schedule_id)
+                if latest is not None and latest.last_status != _sched_status:
+                    latest.last_status = _sched_status
+                    store.replace(latest)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
