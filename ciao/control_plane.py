@@ -1281,7 +1281,12 @@ class CiaoControlPlane:
             created_at=now,
             model=str(values.get("model") or ""),
             provider=str(values.get("provider") or ""),
-            mode=str(values.get("mode") or "auto"),  # type: ignore[arg-type]
+            # "" means inherit, exactly as an empty model/provider does: the
+            # permission mode is resolved from the operator's per-provider pin
+            # at dispatch. The MCP schedule tool exposes no `mode` at all, so
+            # the old "auto" default was an unconditional override that made the
+            # dispatcher's inheritance dead for every model-created routine.
+            mode=str(values.get("mode") or ""),
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
             days_of_week=list(values.get("days_of_week") or []),
             frequency=frequency,
@@ -1604,7 +1609,7 @@ class CiaoControlPlane:
             # Empty model/mode is what makes each run inherit the target chat's
             # own settings, which is how loops always behaved.
             model="",
-            mode="auto",
+            mode="",
             chat_id=0,
             frequency=INTERVAL_FREQUENCY,
             interval_minutes=minutes,

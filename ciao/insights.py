@@ -1299,10 +1299,7 @@ UUID_RE = re.compile(
 # reads the id out of the name and skips a file it cannot find one in — so an
 # opencode transcript that missed insights at archive time could never be
 # recovered, even though its text-mode path needs nothing but the markdown.
-SESSION_ID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|ses_[A-Za-z0-9]+"
-)
+SESSION_ID_RE = re.compile(rf"{UUID_RE.pattern}|ses_[A-Za-z0-9]+")
 
 
 def _empty_backfill_stats() -> dict[str, int]:
@@ -1455,8 +1452,12 @@ async def backfill_insights_task(
         search_roots = [Path(agent_root)]
     else:
         search_roots = [root for root, _name in config.agent_root_targets()]
-        if not search_roots:
-            search_roots = [config.workspace_root]
+        # The install root is not one of those targets after the re-rooting,
+        # but a blob written before the migration is still keyed by it — so
+        # keep it as a last candidate rather than demoting those archives to
+        # the text-mode path that this function previously handled in full.
+        if config.workspace_root not in search_roots:
+            search_roots.append(config.workspace_root)
     project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
 
     by_chat = dict(chat_workspaces or {})

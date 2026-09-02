@@ -5889,13 +5889,14 @@ async def create_loop(request: Request) -> JSONResponse:
 
     project_id = getattr(chat, "project_id", "") or ""
     project = pcm.get_project(project_id) if project_id else None
-    state = request.app.state.state_store
     entry = sm.create(
         daily_time_utc="",
         prompt=prompt,
-        # Empty model/mode is what makes each run inherit the target chat.
+        # Empty model/mode is what makes each run inherit the target chat, as
+        # the comment always said — it used to freeze the Telegram context's
+        # mode into the entry instead, which is a different surface's state.
         model="",
-        mode=state.get_mode(ChatContext(chat_id=0)),
+        mode="",
         chat_id=0,
         frequency=INTERVAL_FREQUENCY,
         interval_minutes=interval_minutes,

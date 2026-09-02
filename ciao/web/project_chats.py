@@ -3762,6 +3762,8 @@ class ProjectChatManager:
         self,
         chat: ChatInfo,
         session_ids: list[str] | None = None,
+        *,
+        agent_root: Path | None = None,
     ) -> None:
         """Drop provider-side session blobs/threads for abandoned chats.
 
@@ -3775,13 +3777,24 @@ class ProjectChatManager:
         opencode because its server is started there. Reclaiming against
         ``workspace_root`` therefore found nothing for a workspace-scoped chat
         and leaked every blob and session it was meant to drop.
+
+        ``agent_root`` is that root, and a caller that has already dropped the
+        chat from the registry MUST pass it: ``_agent_root_for_chat`` resolves
+        through ``self._chats``, so on the delete path (which pops the row
+        before scheduling this cleanup) it would silently fall back to the
+        PRIMARY workspace's root and reclaim nothing — the same leak, now
+        reported as a success.
         """
         raw_ids = (
             session_ids
             if session_ids is not None
             else [*chat.previous_session_ids, chat.session_id]
         )
-        root = self._agent_root_for_chat(chat.chat_id)
+        root = (
+            agent_root
+            if agent_root is not None
+            else self._agent_root_for_chat(chat.chat_id)
+        )
         seen: set[str] = set()
         for sid in raw_ids:
             sid = str(sid or "")
@@ -3829,8 +3842,14 @@ class ProjectChatManager:
         chat: ChatInfo,
         provider: ProviderService | None,
         session_ids: list[str] | None = None,
+        *,
+        agent_root: Path | None = None,
     ) -> None:
-        """Disconnect then reclaim provider storage for sync lifecycle calls."""
+        """Disconnect then reclaim provider storage for sync lifecycle calls.
+
+        ``agent_root`` is forwarded to the reclaim; see its docstring for why a
+        caller that has already unregistered the chat has to resolve it first.
+        """
 
         if provider is None and not any(
             str(session_id or "")
@@ -3844,11 +3863,18 @@ class ProjectChatManager:
 
         async def cleanup() -> None:
             await self._disconnect_provider(chat.chat_id, provider)
-            await self._reclaim_provider_sessions_async(chat, session_ids)
+            await self._reclaim_provider_sessions_async(
+                chat, session_ids, agent_root=agent_root
+            )
 
         asyncio.ensure_future(cleanup())
 
     def delete_chat(self, chat_id: str) -> bool:
+        # Resolved before the row leaves the registry: the cleanup below runs
+        # after the pop (and asynchronously), and `_agent_root_for_chat` reads
+        # `self._chats`, so resolving it there lands on the primary workspace's
+        # root and leaves this chat's blob or opencode session behind.
+        agent_root = self._agent_root_for_chat(chat_id)
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
@@ -3860,7 +3886,7 @@ class ProjectChatManager:
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
         provider = self._providers.pop(chat_id, None)
-        self._schedule_provider_cleanup(chat, provider)
+        self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)

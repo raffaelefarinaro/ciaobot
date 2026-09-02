@@ -308,3 +308,40 @@ def test_reclaim_targets_the_chats_agent_root(
     asyncio.run(pcm._reclaim_provider_sessions_async(chat, [session]))
     assert seen == [pcm._agent_root_for_chat(chat.chat_id)]
     assert seen != [pcm._config.workspace_root]
+
+
+def test_delete_reclaims_against_the_chats_root_not_the_primary(
+    tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``delete_chat`` pops the row before scheduling the reclaim.
+
+    ``_agent_root_for_chat`` resolves through ``self._chats``, so resolving it
+    inside the (async) cleanup found no chat, fell back to ``primary_workspace``
+    and reclaimed the wrong root — leaving the deleted chat's blob on disk while
+    reporting success. The root has to be captured before the pop.
+    """
+    import asyncio
+
+    pcm = _rerooted_manager(tmp_path, "work")
+    pcm._config.workspaces["personal"] = pcm._config.workspaces["work"].__class__(
+        name="personal", vault_root=str(tmp_path / "personal" / "memory-vault")
+    )
+    session = "66666666-6666-6666-6666-666666666666"
+    chat = _archived_chat(pcm, "work", session)
+    expected = pcm._agent_root_for_chat(chat.chat_id)
+
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        pcm._transcripts,
+        "delete_sdk_session_blob",
+        lambda root, sid: (seen.append(Path(root)), True)[1],
+    )
+
+    async def run() -> None:
+        assert pcm.delete_chat(chat.chat_id) is True
+        # Let the fire-and-forget cleanup task run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert seen == [expected]
