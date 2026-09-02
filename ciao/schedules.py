@@ -684,6 +684,9 @@ class ScheduleStore:
         # schedules (and every existing test) keeps working: without it, a
         # per-workspace definition degrades to the single legacy entry.
         self._workspace_names = workspace_names
+        # Packaged stock definitions, cached after the first successful read.
+        # See _load_system_definitions for why this is not re-read per tick.
+        self._system_definitions: list[dict] | None = None
         self._lock = threading.RLock()
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
@@ -937,16 +940,47 @@ class ScheduleStore:
         return state.get(legacy_id, {})
 
     def _load_system_definitions(self) -> list[dict]:
+        """The packaged system-routine definitions, read once per process.
+
+        Cached deliberately, not for speed. ``_system_entries`` derives the
+        system rows on every ``list_entries`` call, and ``tick`` calls
+        ``list_entries`` every pass, so this used to read the packaged file off
+        disk on every tick. Package data is read-only and immutable for the life
+        of an installed version, so there is nothing to re-read — but the
+        install swap replaces the bundle *underneath* the running process, and a
+        read landing in that window failed and returned no definitions at all.
+        Every system routine then vanished from that tick, and a daily routine
+        is matched on ``%H:%M``, so one whose minute fell in the window was
+        silently skipped rather than delayed. Holding the first good read means
+        a bundle swap cannot take the routines away from a live process.
+
+        A missing file is NOT logged as an error. It is expected and
+        self-healing during an install swap (issue #416): the replacement
+        bundle contains the file and the next process start reads it. Malformed
+        packaged JSON is a real defect and keeps its traceback.
+        """
+        if self._system_definitions is not None:
+            return self._system_definitions
         try:
             raw = resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8")
             data = json.loads(raw)
-        except (FileNotFoundError, json.JSONDecodeError, ModuleNotFoundError):
-            logger.exception("Failed to load stock system schedules")
+        except (FileNotFoundError, ModuleNotFoundError) as exc:
+            # No cache to fall back on, so this read yields nothing either way;
+            # say so without a traceback that reads as a failed start.
+            logger.warning(
+                "Stock system schedules unavailable (%s); "
+                "skipping system routines until the next start", exc,
+            )
             return []
-        return [
+        except json.JSONDecodeError:
+            logger.exception("Failed to parse stock system schedules")
+            return []
+        definitions = [
             item for item in data.get("schedules", [])
             if isinstance(item, dict) and item.get("scope") == "system"
         ]
+        self._system_definitions = definitions
+        return definitions
 
     def _normalized_overlay(self, overlay: dict) -> dict:
         """Drop a persisted workspace that no longer names a registered one.
