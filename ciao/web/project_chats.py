@@ -5901,10 +5901,13 @@ class ProjectChatManager:
         if runner is None:
             return {}
         try:
-            return runner.active_counts()
+            # ``_background_runner`` is typed Any (wired after construction),
+            # so the annotation is what keeps this a dict[str, int].
+            counts: dict[str, int] = runner.active_counts()
         except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
             logger.exception("Background run counts unavailable")
             return {}
+        return counts
 
     def announce_background_runs(self, chat_id: str) -> None:
         """Publish this chat's live background-run count to connected clients.
