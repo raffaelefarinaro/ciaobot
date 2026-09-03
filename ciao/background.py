@@ -611,22 +611,34 @@ class BackgroundRunner:
         could read and write every other workspace's files, ``personal``
         included.
 
-        Falls back to the install root when the workspace is unnamed, does
-        not resolve to one folder, or has no directory yet. That is the
-        pre-re-rooting layout, where ``agent_root`` returns the install root
-        for every workspace anyway.
+        The install root is used only where it is the honest answer: a runner
+        built without a resolver, and a run with no owning workspace at all.
+        Both are the pre-re-rooting layout, where ``agent_root`` returns the
+        install root for every workspace anyway.
+
+        Anything else fails closed. A name that resolves to no folder, or to
+        a folder that is not there, is a stale or renamed workspace — and
+        answering the install root for it would silently widen both the cwd
+        and the containment boundary back to the whole install, which is the
+        cross-workspace escape this method exists to close. Refusing is also
+        the better tool result: the run could not have found its files under
+        the wrong root anyway.
         """
         if not workspace or self._agent_root is None:
             return self._workspace_root
         try:
             root = Path(self._agent_root(workspace))
-        except ValueError:
-            # An unusable workspace name names no root (stale reference, or a
-            # renamed workspace). The install root is the safe answer, not a
-            # crash inside a tool call.
-            logger.debug("Background run workspace %r names no agent root", workspace)
-            return self._workspace_root
-        return root if root.is_dir() else self._workspace_root
+        except ValueError as exc:
+            raise BackgroundRunError(
+                "workspace_unavailable",
+                f"Workspace '{workspace}' names no agent root.",
+            ) from exc
+        if not root.is_dir():
+            raise BackgroundRunError(
+                "workspace_unavailable",
+                f"Workspace '{workspace}' has no directory at {root}.",
+            )
+        return root
 
     async def start_run(
         self,

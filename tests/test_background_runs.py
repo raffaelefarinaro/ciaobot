@@ -286,8 +286,13 @@ async def test_run_cannot_reach_another_workspace(tmp_path: Path) -> None:
     assert excinfo.value.code == "cwd_forbidden"
 
 
-def test_workspace_root_falls_back_to_the_install_root(tmp_path: Path) -> None:
-    """Unnamed, unresolvable, and not-yet-created workspaces keep the old root."""
+def test_workspace_root_falls_back_only_where_that_is_honest(tmp_path: Path) -> None:
+    """The install root is for the pre-re-rooting layout, not for a bad name.
+
+    Answering the install root for a stale or renamed workspace would widen
+    the containment boundary back to the whole install — the cross-workspace
+    escape ``root_for`` exists to close — so those fail closed instead.
+    """
 
     def resolver(name: str) -> Path:
         if name == "missing":
@@ -296,7 +301,9 @@ def test_workspace_root_falls_back_to_the_install_root(tmp_path: Path) -> None:
 
     runner = _rerooted_runner(tmp_path)
     assert runner.root_for("work") == tmp_path / "work"
-    # No resolver at all: the pre-re-rooting construction.
+    # No resolver at all, and no owning workspace: both genuinely mean the
+    # install root, because that is where a pre-re-rooting install keeps
+    # every workspace's assets.
     assert _runner(tmp_path).root_for("work") == tmp_path
 
     scoped = BackgroundRunner(
@@ -306,8 +313,26 @@ def test_workspace_root_falls_back_to_the_install_root(tmp_path: Path) -> None:
         record_job_runs=False,
     )
     assert scoped.root_for("") == tmp_path
-    assert scoped.root_for("bad/name") == tmp_path
-    assert scoped.root_for("missing") == tmp_path
+    for unusable in ("bad/name", "missing"):
+        with pytest.raises(BackgroundRunError) as excinfo:
+            scoped.root_for(unusable)
+        assert excinfo.value.code == "workspace_unavailable"
+
+
+async def test_run_is_refused_when_its_workspace_directory_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A renamed or deleted workspace refuses the run instead of re-rooting it."""
+    runner = _rerooted_runner(tmp_path)
+    (tmp_path / "work").rename(tmp_path / "work-renamed")
+
+    with pytest.raises(BackgroundRunError) as excinfo:
+        await runner.start_run(
+            parent_chat_id="chat-1",
+            workspace="work",
+            cmd=["/bin/sh", "-c", "true"],
+        )
+    assert excinfo.value.code == "workspace_unavailable"
 
 
 # ── runner ────────────────────────────────────────────────────────────────

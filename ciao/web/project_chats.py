@@ -6208,7 +6208,13 @@ class ProjectChatManager:
         died before producing a report, so anything the run was supposed to do
         with the results (write the log, commit) did not happen. Used by
         :meth:`dispatch_schedule` to keep such a run visible instead of
-        auto-archiving a stub (the 2026-08-30 daily-log failure).
+        auto-archiving a stub (the 2026-08-30 daily-log failure), and by the
+        turn-done branch to hold the result announce back until the synthesis
+        nudge produces the real reply.
+
+        The patterns are deliberately broad ("waiting on ..."), so a caller
+        that suppresses anything on the strength of this must be certain
+        something else will fire in its place.
         """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if not flat:
@@ -6983,14 +6989,20 @@ class ProjectChatManager:
                 # instead of leaving the chat stuck on "I'll compile once the
                 # agents report back".
                 chat_for_watcher = self._chats.get(chat_id)
-                subagent_watcher_started = False
+                # True only when a synthesis nudge can actually re-announce
+                # this chat's result later. Holding the announce back is safe
+                # ONLY then: the nudge's reply carries the real push. The
+                # opencode watcher has no nudge path at all, so gating on the
+                # watcher alone dropped the push, the unread badge and the
+                # archive proposal outright for any opencode reply that merely
+                # said "waiting on ...".
+                nudge_can_reannounce = False
                 if (
                     chat_for_watcher is not None
                     and chat_for_watcher.session_id
                     and capabilities_for(chat_for_watcher.provider).background_subagents
                 ):
                     self._start_subagent_watcher(chat_id, project_id)
-                    subagent_watcher_started = True
                     # Keep the SDK pipe drained while the client idles: a
                     # finishing background subagent triggers a CLI-initiated
                     # parent turn whose events would otherwise rot in the
@@ -6999,6 +7011,7 @@ class ProjectChatManager:
                     # a live view of that follow-up turn.
                     if chat_for_watcher.provider == "claude":
                         self._start_between_turns_drain(chat_id, project_id)
+                        nudge_can_reannounce = True
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
@@ -7018,17 +7031,25 @@ class ProjectChatManager:
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
                     # A turn that ends on "I'll report back once the agents
-                    # finish" is not a result: the watcher started above will
+                    # finish" is not a result: the drain started above will
                     # nudge the synthesis turn and that reply carries the real
                     # push. Only the announce is held back — the state above
                     # (recents order, snippet, pending-retry clear) belongs to
                     # every non-error turn, and withholding it left a retried
-                    # chat pinned at retry_status="pending" forever. Gated on
-                    # the watcher too, so a chat with no background subagents
-                    # at all (another provider, or a reply that merely says
-                    # "waiting on legal") still announces normally.
-                    interim = subagent_watcher_started and (
-                        self._is_interim_subagent_text(last_assistant_text)
+                    # chat pinned at retry_status="pending" forever.
+                    #
+                    # Held back only when something will announce in its place:
+                    # the nudge needs the between-turns drain (claude), and it
+                    # stands down when the turn ended on a question for the
+                    # user (see _nudge_synthesis_after_subagents), which would
+                    # otherwise leave that question with no notification at
+                    # all. `_INTERIM_SUBAGENT_PATTERNS` is broad on purpose
+                    # ("waiting on ..."), so every case where the nudge cannot
+                    # fire has to announce normally.
+                    interim = (
+                        nudge_can_reannounce
+                        and not (chat_now is not None and chat_now.pending_question)
+                        and self._is_interim_subagent_text(last_assistant_text)
                     )
                     if not interim:
                         # Schedule the push with a small delay. If the user reads
