@@ -9,7 +9,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS
 from ciao.models import BridgeMode
@@ -60,6 +60,49 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
 
 
 _REROOTED_CACHE: dict[str, bool] = {}
+
+# Keys ``from_env`` has injected into ``os.environ`` from a workspace ``.env``.
+#
+# The export itself is load-bearing and must stay: `.mcp.json` carries
+# credentials as `${NAME}` placeholders that the provider CLI resolves from the
+# environment it inherits from this process, so a Notion/n8n/Airtable server
+# gets its token only because the workspace `.env` reached `os.environ`. What
+# was missing is a way to put the process back: `load_dotenv` sets keys it has
+# never seen and nothing restores them, so a call that every caller treats as a
+# read permanently changed its caller's environment.
+_EXPORTED_DOTENV_KEYS: set[str] = set()
+
+
+def _workspace_env(source: Any) -> str:
+    """``CIAO_WORKSPACE`` as a usable path, or "" — never raw whitespace.
+
+    Read through one helper because three separate decisions keyed off it and
+    only some of them stripped. ``export CIAO_WORKSPACE=" "`` (a stray space in
+    a shell profile) then skipped LaunchAgent discovery because the value was
+    truthy, cleared ``bootstrap_mode`` for the same reason, and finally
+    resolved ``Path("  ")`` to the CURRENT DIRECTORY — so a bare CLI run
+    created ``.runtime`` and minted a session secret under whatever directory
+    the operator happened to be standing in.
+    """
+    return str(source.get("CIAO_WORKSPACE", "") or "").strip()
+
+
+def reset_exported_dotenv() -> None:
+    """Drop every key ``from_env`` injected from a workspace ``.env``.
+
+    Only keys this module actually added are removed — a value the process
+    already had is left exactly as it was, so this can never clear a variable
+    the operator exported themselves.
+
+    Tests use it to stop one fixture's workspace bleeding into the next. It
+    matters more than tidiness: a `.env` sets `CIAO_RUNTIME_ROOT=.runtime`,
+    which is RELATIVE, and once leaked it resolves against whatever cwd the
+    next caller happens to have — which is how a later CLI run wrote its
+    outcome log into the repo checkout instead of its own workspace.
+    """
+    for key in sorted(_EXPORTED_DOTENV_KEYS):
+        os.environ.pop(key, None)
+    _EXPORTED_DOTENV_KEYS.clear()
 
 
 def reset_reroot_cache() -> None:
@@ -475,7 +518,11 @@ class CiaoConfig:
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
     pwa_port: int = 8443
-    pwa_host: str = "127.0.0.1"
+    # The server binds all interfaces by default so the PWA is reachable over
+    # LAN and Tailscale; the dashboard password + login rate limit are the
+    # access control. Set ``PWA_HOST=127.0.0.1`` in ``.env`` for loopback-only.
+    # This must stay equal to the ``PWA_HOST`` fallback in ``from_env`` below.
+    pwa_host: str = "0.0.0.0"
     gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
@@ -511,13 +558,6 @@ class CiaoConfig:
     # See ``ciao/memory_tool.py``.
     memory_char_limit: int = 3000
     user_char_limit: int = 1375
-    # Lazy MCP tool discovery. Every tool schema in ``tools/list`` is injected
-    # into every chat's context window whether the turn uses it or not; the
-    # full catalog costs ~9k tokens. With this on, only a small core plus the
-    # destructive tools are listed and the rest are reached through
-    # ``tools_search`` / ``tools_call``. Set ``CIAO_MCP_LAZY_TOOLS=0`` to list
-    # the whole catalog again. See ``ciao/mcp_server.py``.
-    mcp_lazy_tools: bool = True
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1261,19 +1301,127 @@ class CiaoConfig:
         tmp.replace(path)
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
+    def from_env(
+        cls, env: dict[str, str] | None = None, *, export: bool = True
+    ) -> "CiaoConfig":
+        """Build a config from the environment.
+
+        With ``env is None`` the workspace's ``.env`` is applied. ``export``
+        decides whether that lands in ``os.environ``:
+
+        ``True`` (default) is what a process that goes on to SPAWN something
+        needs — the server and every CLI path that shells out to a provider.
+        `.mcp.json` stores credentials as ``${NAME}`` placeholders resolved by
+        the provider CLI from the environment it inherits, so dropping the
+        export would reach the Notion/n8n servers as an unresolved literal and
+        every call would 401. Injected keys are recorded so
+        :func:`reset_exported_dotenv` can put the process back.
+
+        ``False`` reads the same values without touching the process: the
+        file is overlaid *under* ``os.environ`` in a private mapping, which is
+        the same precedence ``load_dotenv`` applies and the same trick the
+        discovery branch below already uses. Use it for anything read-only —
+        a diagnostic must not change its caller's environment.
+        """
+        overlay: dict[str, str] = {}
         if env is None:
             workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."
             dotenv_path = Path(workspace_env_val).expanduser().resolve() / ".env"
             if dotenv_path.exists():
-                from dotenv import load_dotenv
-                load_dotenv(dotenv_path)
-            # Default to disabling Claude Code's auto memory inside Ciaobot
-            os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
-            # Artifacts publish to claude.ai; ciaobot has no use for that surface
-            os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+                if export:
+                    from dotenv import load_dotenv
 
-        source = env if env is not None else os.environ
+                    # Which keys this call is about to add. load_dotenv does not
+                    # report that, and it must not be inferred afterwards: a key
+                    # the process already carried looks identical once set, and
+                    # removing one of those on reset would clear a variable the
+                    # operator exported themselves.
+                    before = set(os.environ)
+                    load_dotenv(dotenv_path)
+                    _EXPORTED_DOTENV_KEYS.update(set(os.environ) - before)
+                else:
+                    from dotenv import dotenv_values
+
+                    try:
+                        overlay = {
+                            key: value
+                            for key, value in dotenv_values(dotenv_path).items()
+                            if key and value is not None
+                        }
+                    except OSError:
+                        overlay = {}
+            if export:
+                # Default to disabling Claude Code's auto memory inside Ciaobot
+                os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+                # Artifacts publish to claude.ai; ciaobot has no use for that surface
+                os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+            else:
+                overlay.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+                overlay.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+
+        if env is not None:
+            source: Any = env
+        elif overlay:
+            # Process environment wins over the file, matching load_dotenv.
+            source = {**overlay, **os.environ}
+        else:
+            source = os.environ
+
+        discovered_workspace = ""
+        if env is None and not _workspace_env(source):
+            # A bare-shell CLI invocation (`ciao health get` from any directory)
+            # has no CIAO_WORKSPACE. Fall back to the workspace the installed
+            # server's LaunchAgent points at before dropping to bootstrap, so
+            # CLI diagnostics report on the install the operator actually has
+            # instead of manufacturing a fresh bootstrap workspace beside it.
+            # Gated on ``env is None``: explicit env dicts (every test, and any
+            # caller constructing a config) must keep their exact semantics.
+            from ciao.macos_service import discover_runtime
+
+            try:
+                discovered = discover_runtime(environ=dict(os.environ))
+            except Exception:  # noqa: BLE001 - plist missing/unreadable
+                discovered = None
+            if discovered and discovered.workspace:
+                discovered_workspace = discovered.workspace
+        if env is None and discovered_workspace:
+            # The discovered workspace's .env is what the running server reads;
+            # a bare-shell invocation must see the same values — auth settings
+            # first: `ciao run` against a stopped install must require the
+            # workspace's password, not fall back to an unauthenticated shell
+            # env. Values are overlaid into the source mapping rather than
+            # loaded into os.environ: a direct env write would leak into the
+            # process after this call (load_dotenv sets keys it has never seen,
+            # and nothing restores them), so a read-only diagnostic changed its
+            # caller's environment. Precedence matches load_dotenv: the process
+            # environment wins over the file, and the discovered workspace is
+            # pinned absolutely so the file's relative CIAO_WORKSPACE=. cannot
+            # rebase onto the shell cwd. This must run before any field below
+            # is parsed from ``source``, or it would see only the bare shell.
+            from dotenv import dotenv_values
+
+            dotenv_path = Path(discovered_workspace) / ".env"
+            if dotenv_path.exists():
+                try:
+                    dotenv_overlay = {
+                        key: value
+                        for key, value in dotenv_values(dotenv_path).items()
+                        if key and value is not None
+                    }
+                except OSError:
+                    dotenv_overlay = {}
+                dotenv_overlay["CIAO_WORKSPACE"] = discovered_workspace
+                source = {**dotenv_overlay, **source}
+                # Pinned again after the merge, not only in the overlay: discovery is
+                # entered for an *empty* CIAO_WORKSPACE as well as an unset one
+                # (`export CIAO_WORKSPACE=` in a shell profile), and the
+                # process environment wins the merge, so the empty string beat
+                # the pin. The result was the hybrid this pinning exists to
+                # prevent — the installed workspace's auth and provider
+                # settings applied to a freshly manufactured bootstrap root,
+                # because `bootstrap_mode` below still saw no workspace.
+                if not _workspace_env(source):
+                    source["CIAO_WORKSPACE"] = discovered_workspace
 
         pwa_allowed_origins = tuple(
             o.strip()
@@ -1299,7 +1447,7 @@ class CiaoConfig:
             pwa_auth_required = bool(pwa_auth_token)
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
-            and bool(source.get("CIAO_WORKSPACE"))
+            and bool(_workspace_env(source))
         )
         if bootstrap_mode:
             workspace_root = _bootstrap_workspace(source)
@@ -1309,7 +1457,7 @@ class CiaoConfig:
             )
         else:
             workspace_root = Path(
-                source.get("CIAO_WORKSPACE", ".")
+                _workspace_env(source) or "."
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
@@ -1396,7 +1544,7 @@ class CiaoConfig:
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
-            pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
+            pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
             gws_default_profile=gws_default_profile,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
@@ -1419,8 +1567,6 @@ class CiaoConfig:
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
             ),
-            mcp_lazy_tools=source.get("CIAO_MCP_LAZY_TOOLS", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
         )
 
 

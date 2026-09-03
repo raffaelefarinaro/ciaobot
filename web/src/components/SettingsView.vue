@@ -78,8 +78,8 @@
               <span>Toggle voice dictation (start / stop)</span>
             </li>
             <li>
-              <kbd v-if="inDesktopApp">&#8984;A</kbd>
-              <kbd v-else>&#8224;A</kbd>
+              <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
+              <kbd v-else>&#8224;&#9003;</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
             <li>
@@ -3072,8 +3072,10 @@ function gwsOnEngineHost(): boolean {
 async function gwsReloginStart(profileName: string) {
   gwsReloginError.value[profileName] = ''
   if (!gwsOnEngineHost()) {
-    gwsReloginError.value[profileName] =
-      'One-click sign-in only works from a browser on this machine. Use Manual connect (paste code) instead.'
+    // On a client/LAN browser the loopback redirect can never arrive. Open the
+    // manual paste flow directly so the button does something useful instead of
+    // just showing an error the user then has to act on.
+    await startGwsAuth(profileName)
     return
   }
   gwsSavingProfile.value = profileName
@@ -3097,7 +3099,15 @@ async function gwsReloginStart(profileName: string) {
     gwsPollRelogin(profileName)
   } catch (e) {
     if (tab) tab.close()
-    gwsReloginError.value[profileName] = errorMessage(e, 'Could not start the sign-in flow.')
+    const msg = errorMessage(e, 'Could not start the sign-in flow.')
+    // Web OAuth clients reject the loopback redirect entirely. That is not a
+    // transient failure — retrying the same endpoint will never work. Fall
+    // through to the manual paste flow so the sign-in still completes.
+    if (/web app/i.test(msg)) {
+      await startGwsAuth(profileName)
+      return
+    }
+    gwsReloginError.value[profileName] = msg
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3199,6 +3209,11 @@ async function startGwsAuth(profileName: string) {
   // that would otherwise win over the manual-flow box and hide it.
   delete gwsReloginError.value[profileName]
   delete gwsReloginPending.value[profileName]
+  // Open a placeholder tab synchronously so the manual auth URL does not get
+  // blocked as a popup — `window.open` after an `await` is outside the click's
+  // user-activation window and most browsers block it, forcing the user to
+  // click the fallback link. Same pattern as `gwsReloginStart`.
+  const tab = window.open('', '_blank')
   try {
     const res = await api.post<{ auth_url: string; flow_id?: string }>('/api/integrations/gws/auth-url', {
       profile: profileName,
@@ -3208,8 +3223,16 @@ async function startGwsAuth(profileName: string) {
     // exchange has no verifier to send and the server refuses it outright.
     gwsFlowIds.value[profileName] = res.flow_id || ''
     gwsRedirectUrls.value[profileName] = ''
-    window.open(res.auth_url, '_blank')
+    if (tab && tab.location) {
+      tab.location.href = res.auth_url
+    } else if (tab) {
+      tab.close()
+    }
+    // The in-card "Open authorization page" link remains as the fallback when
+    // the popup was blocked (tab is null). No extra error needed — the
+    // gws-auth-flow-box already shows it.
   } catch (e) {
+    if (tab) tab.close()
     notifyFailed('Could not generate the authorization URL', errorMessage(e, 'The request failed.'))
   } finally {
     gwsSavingProfile.value = null

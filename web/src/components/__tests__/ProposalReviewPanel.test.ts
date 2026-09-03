@@ -152,8 +152,11 @@ describe('ProposalReviewPanel', () => {
       action: 'accept',
       ids: ['a', 'b', 'c'],
     })
-    // The store re-fetches after the batch to reflect the server's list.
-    expect(apiGet).toHaveBeenCalledTimes(2)
+    // The store re-fetches the queue after the batch to reflect the server's
+    // list. Counted per endpoint: the panel also prefetches and refreshes the
+    // decision ledger for the History tab's badge.
+    const queueCalls = apiGet.mock.calls.filter(([path]) => path === '/api/proposals')
+    expect(queueCalls).toHaveLength(2)
     wrapper.unmount()
   })
 
@@ -626,6 +629,153 @@ describe('workspace scoping', () => {
       action: 'accept',
       ids: ['p1'],
     })
+    wrapper.unmount()
+  })
+})
+
+
+describe('Queue / History tabs', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function mockProposalApi() {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+            },
+          ],
+          total: 1,
+          truncated: false,
+        })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+  }
+
+  it('defaults to the Queue tab', async () => {
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs).toHaveLength(2)
+    expect(tabs[0]!.text()).toBe('Queue')
+    expect(tabs[1]!.text()).toContain('History')
+    expect(tabs[0]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals')
+    wrapper.unmount()
+  })
+
+  it('switching to History fetches and renders the decision ledger', async () => {
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
+    expect(wrapper.find('.pr-row').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Remember the thing')
+    expect(wrapper.text()).toContain('Accepted')
+    wrapper.unmount()
+  })
+
+  it('prefetches the ledger so the History count is there before the first open', async () => {
+    // The count used to wait for the tab switch, so the badge appeared only
+    // after the one moment it had something to tell you.
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
+    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('reports the scoped total in the badge, not the page size', async () => {
+    // The page is capped, so a workspace with more decisions than the limit
+    // showed the limit itself as though it were the whole ledger.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+            },
+          ],
+          total: 500,
+          truncated: true,
+          limit: 200,
+          at_max: false,
+        })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').text()).toBe('500')
+
+    // Under a filter the visible count is the honest number.
+    useProposalsStore().kindFilter = 'skill'
+    await nextTick()
+    expect(wrapper.find('.pr-tab-count').text()).toBe('0')
+    wrapper.unmount()
+  })
+
+  it('refreshes history after a direct per-row accept', async () => {
+    // The primary accept button posts directly and calls `store.fetch`, which
+    // deliberately leaves history alone. With the ledger prefetched on mount,
+    // switching to History reused the cached page and the badge stayed stale.
+    mockProposalApi()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const historyCalls = () =>
+      apiGet.mock.calls.filter(([p]) => String(p).startsWith('/api/proposals/history')).length
+    const before = historyCalls()
+
+    apiPost.mockResolvedValue({} as never)
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith(expect.stringContaining('/accept'))
+    expect(historyCalls()).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+
+  it('renders no History count while the ledger is still unloaded', async () => {
+    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
+    // opposite of what a badge is for.
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
+      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
     wrapper.unmount()
   })
 })

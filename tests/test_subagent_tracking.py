@@ -17,6 +17,7 @@ from ciao.subagent_tracking import (
     is_synthesis_nudge,
     parse_session_subagents,
     running_background_agents,
+    running_tasks,
     subagent_transcript_path,
 )
 
@@ -85,6 +86,50 @@ def _notification(agent_id: str, status: str = "completed") -> str:
         "<summary>Agent finished</summary>\n"
         "</task-notification>"
     )
+
+
+def _monitor_dispatch(tool_use_id: str, description: str) -> dict:
+    command = "tail -f /tmp/adoption_2026-08.log | grep -E --line-buffered \"FAILED|PASSED\""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": "Monitor",
+                    "input": {
+                        "command": command,
+                        "description": description,
+                        "timeout_ms": 3600000,
+                        "persistent": False,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def _task_result(tool_use_id: str, task_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Monitor started (task bl7dzu4ku, timeout 3600000ms).",
+                }
+            ],
+        },
+        "toolUseResult": {
+            "taskId": task_id,
+            "timeoutMs": 3600000,
+            "persistent": False,
+        },
+    }
 
 
 def _write_session(tmp_path: Path, records: list[dict]) -> Path:
@@ -540,3 +585,146 @@ def test_second_notification_after_a_closed_one_reopens_the_window(
     state = parse_session_subagents(_write_session(tmp_path, records))
 
     assert state.notification_pending is True
+
+
+def test_monitor_dispatch_is_tracked_as_running_task(tmp_path: Path) -> None:
+    description = "adoption report 2026-08 DAG progress and failures"
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", description),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bl7dzu4ku"]
+    assert info.kind == "task"
+    assert info.status == "running"
+    assert info.subagent_type == "Monitor"
+    assert info.description == description
+    assert info.command.startswith("tail -f /tmp/adoption_2026-08.log")
+    # Agent counts are unchanged by CLI tasks.
+    assert state.running_background == 0
+    assert len(running_tasks(state)) == 1
+
+
+def test_background_bash_dispatch_is_tracked_as_task(tmp_path: Path) -> None:
+    records = [
+        _user_text("run the build"),
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_bash1",
+                        "name": "Bash",
+                        "input": {
+                            "command": "npm run build > /tmp/build.log 2>&1",
+                            "run_in_background": True,
+                        },
+                    }
+                ],
+            },
+        },
+        _task_result("toolu_bash1", "bdvtr6cvj"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bdvtr6cvj"]
+    assert info.kind == "task"
+    assert info.status == "running"
+    assert info.subagent_type == "Bash"
+
+
+def test_task_notification_completes_task(tmp_path: Path) -> None:
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+        _user_text(_notification("bl7dzu4ku")),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.subagents["bl7dzu4ku"].status == "completed"
+    assert running_tasks(state) == []
+
+
+def test_stopped_notification_keeps_raw_status(tmp_path: Path) -> None:
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+        _user_text(_notification("bl7dzu4ku", "stopped")),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bl7dzu4ku"]
+    assert info.status == "completed"
+    assert info.raw_status == "stopped"
+
+
+def test_agent_and_task_counts_are_independent(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Curate memory"),
+        _dispatch_result("toolu_1", "abc123"),
+        _monitor_dispatch("toolu_2", "adoption report"),
+        _task_result("toolu_2", "bl7dzu4ku"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.running_background == 1
+    assert len(running_tasks(state)) == 1
+
+
+def test_running_agents_ignores_tasks(tmp_path: Path) -> None:
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+    ]
+    path = _write_session(tmp_path, records)
+    state = parse_session_subagents(path)
+    agents = running_background_agents(path, state)  # exercises running_agents
+    assert agents == 0
+    assert all(info.kind == "task" for info in state.subagents.values())
+
+
+def test_cli_task_wake_marks_tasks_lost(tmp_path: Path) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+        _user_text(
+            CLI_TASK_WAKE_PREFIX
+            + " 1 CLI task you started (Monitor / background shell) were lost: "
+            "the Claude CLI process that owned them has exited.\n\n"
+            "— Monitor: adoption report (task bl7dzu4ku)"
+        ),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bl7dzu4ku"]
+    assert info.status == "lost"
+    assert info.raw_status == "lost"
+    assert info.kind == "task"
+    assert running_tasks(state) == []
+
+
+def test_cli_task_wake_marks_tasks_lost_with_context_prefix(tmp_path: Path) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_01SsjL", "adoption report"),
+        _task_result("toolu_01SsjL", "bl7dzu4ku"),
+        _user_text(
+            "[CIAO_CONTEXT_BEGIN]\nworkspace=x\n[CIAO_CONTEXT_END]\n"
+            + CLI_TASK_WAKE_PREFIX
+            + " 1 CLI task you started (Monitor / background shell) were lost: "
+            "the Claude CLI process that owned them has exited.\n\n"
+            "— Monitor: adoption report (task bl7dzu4ku)"
+        ),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    info = state.subagents["bl7dzu4ku"]
+    assert info.status == "lost"
+    assert info.raw_status == "lost"
+    assert running_tasks(state) == []

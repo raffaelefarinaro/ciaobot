@@ -526,6 +526,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # through its event bus (see job_runs.set_publisher).
     pcm.attach_job_runs_publisher()
 
+    # Dispatch failures stamp last_status on the stored schedule row so the
+    # Automations sidebar flags them for attention instead of leaving an
+    # endless string of invisible `stream error` job records (issue #407).
+    # The manager cannot hold a store reference in its constructor without
+    # reshuffling init order, so it is attached right after both exist.
+    pcm.schedule_store = schedule_store
+
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
         result = await pcm.dispatch_schedule(
@@ -556,9 +563,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
-        ctx = ChatContext(chat_id=0)
-        mode = entry.mode or state.get_mode(ctx)
+        # The mode default is the operator's pin for the provider this run
+        # actually resolves to (Settings -> Providers -> permission mode), so a
+        # routine obeys the same setting a hand-opened chat on that provider
+        # does. It used to fall back to the Telegram context's mode, which is a
+        # different surface's state and belongs to no workspace.
         provider, model, _workspace = pcm.schedule_effective_routing(entry)
+        mode = entry.mode or config.default_mode_for_provider(provider)
         return ("claude", model, mode, provider)
 
     from ciao.node_state import NodeStateManager
@@ -846,6 +857,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 "Resolved %d orphaned/replayed background run(s) after restart: %s",
                 len(orphaned), ", ".join(run.run_id for run in orphaned),
             )
+
+        # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
+        # still running when the old server died: no completion watcher
+        # survives a restart, so the wake must be armed here.
+        swept = pcm.sweep_orphaned_cli_tasks()
+        if swept:
+            logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
 
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every

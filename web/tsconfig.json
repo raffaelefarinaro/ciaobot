@@ -16,5 +16,5 @@
     },
     "baseUrl": "."
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "src/vite-env.d.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "src/vite-env.d.ts", "src/jsdom-shim.d.ts"]
 }

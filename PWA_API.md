@@ -628,9 +628,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 
 **Proposal queue**
 
-Routes: `GET /api/proposals`, `POST /api/proposals/{id}/{action}` (action is
-`accept` or `dismiss`), `POST /api/proposals/batch`,
-`POST /api/proposals/dismiss-older-than`.
+Routes: `GET /api/proposals`, `GET /api/proposals/history`,
+`POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
+`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
@@ -672,6 +672,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
 # A July proposal about a forgotten chat is not worth promoting.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/dismiss-older-than?date=2026-08-01"
+
+# Decision history across workspaces, newest first: what was accepted or
+# dismissed, by whom (`via`: pwa | agent | auto), and where it landed
+# (`destination`). Reads the same per-workspace sidecar the accept/dismiss
+# routes above write to (Memory-Proposals.dismissed.jsonl), so it also shows
+# what the archive-time auto-promoter wrote or skipped ("outcome":
+# "suppressed"/"duplicate") overnight, and what the nightly curation agent
+# resolved via the CLI ("via": "agent"). Optional query params: workspace,
+# limit (default 200, max 1000), action (accepted|dismissed). The reply carries
+# {rows, total, truncated, limit, at_max}: `limit` is the clamped page size
+# actually served and `at_max` says the request asked for more than the cap, so
+# a wider limit would return the same page - a client paging with "show more"
+# must stop on `at_max` rather than on `truncated`.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 ```
 
 
@@ -695,7 +709,7 @@ Global `/ws/events` payloads the PWA reacts to:
 
 Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.
 
-**Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by up to 3 same-backend vision models. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted), `picker` closes the question so the PWA can open the model selector and the user re-sends, and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The question is skipped entirely for text-only turns and for unattended (automation) turns, which close with the bubble instead of waiting.
+**Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by all same-backend vision models (for `opencode`, every catalog entry with `images is True`; other providers have no non-vision models today). The PWA renders the full provider-filtered `ModelSelector` inline — vision models only — with the current model shown disabled, so the user can pick any suitable model in one step. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted) and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The `picker` action is retained only for old clients. The question is skipped entirely for text-only turns and for unattended (automation) turns, which close with the bubble instead of waiting.
 
 **Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
@@ -740,7 +754,8 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - Self-contained audio and video may use `data:` URLs. Network media and `blob:` URLs remain blocked, so artifacts do not need relative asset paths or access to workspace APIs.
 - `script-src 'unsafe-inline'` is load-bearing: an artifact inlines its own script, so removing it breaks every artifact rather than hardening anything. Containment is `sandbox allow-scripts` without `allow-same-origin` (opaque origin: no session cookie, no `localStorage`, no parent access) plus `connect-src 'none'` and a `data:`-only `img-src`. An artifact cannot reach `/api/*` despite being same-host.
 - `X-Frame-Options` must stay explicit: `SecurityHeadersMiddleware` sets `DENY` via `setdefault`, so an unconditional assignment there would break the frame. `tests/test_workspace_html.py` guards this.
-- Client: `HtmlArtifactViewer.vue` (shared by `PinnedFilePanel` and `FileViewerModal`) frames it with `sandbox="allow-scripts"`, matching the CSP directive — the effective sandbox is the intersection of attribute and header. Source for Code view is a separate lazy fetch, because `error` blanks the viewer body and an oversized-source failure must not hide a page that renders. Artifacts are not commentable (comment anchors need markdown highlights or text lines).
+- Client: `HtmlArtifactViewer.vue` (shared by `PinnedFilePanel` and `FileViewerModal`) frames it with `sandbox="allow-scripts"`, matching the CSP directive — the effective sandbox is the intersection of attribute and header. Source for Code view is a separate lazy fetch, because `error` blanks the viewer body and an oversized-source failure must not hide a page that renders.
+- **Comments**: the response body carries an injected bridge script (`ciao/web/artifact_bridge.py`, inserted after `<head>` when present). Inside the frame it floats a Comment pill on text selection, supports Alt+Click to comment on a whole element, and sends the anchor — CSS selector plus character offsets into the element's text, plus the verbatim quote — to the panel over `postMessage`, the only channel an opaque-origin frame has. `HtmlArtifactViewer` relays those to `PinnedFilePanel`/`FileViewerModal`, which stage them as the same pending file comments as the markdown viewer (chips above the composer, `<user-comment-reference>` blocks with an `(element <tag>)` locator instead of line numbers). The panel also pushes the durable comment list back into the frame so past comments re-draw as `<mark>` highlights after each revision reload. Frame messages are untrusted (model-authored script could forge them); the worst case is a note in the user's own composer, reviewed before sending. The selector is not migration-proof across artifact revisions — the quote is the durable anchor the model reads.
 - Manual checks live in `tests/fixtures/html_artifacts/` (inline script runs, external requests blocked, API/session unreachable). Header tests pass on a blank frame, so those fixtures are the real verification.
 
 **File snapshots, history, diff, edit-in-place**

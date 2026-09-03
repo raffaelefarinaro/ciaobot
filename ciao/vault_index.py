@@ -35,6 +35,16 @@ from urllib.parse import unquote
 
 import yaml
 
+from ciao.vault_links import (
+    FENCED_CODE_RE,
+    FM_LIST_ITEM_RE,
+    FM_RELATED_KEY_RE,
+    FRONTMATTER_RE,
+    INLINE_CODE_RE,
+    MARKDOWN_LINK_RE,
+    is_link_start,
+)
+
 
 def default_vault_root() -> Path:
     """Locate the vault when no root was passed.
@@ -205,33 +215,11 @@ def promotion_threshold() -> int:
     except ValueError:
         return DEFAULT_PROMOTION_THRESHOLD
 
-FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-# One inline markdown link. `label` is the visible text (needed so a stripped
-# link can be replaced by readable prose instead of vanishing); the destination
-# is either angle-bracketed — the only form that survives a filename with a
-# space — or bare, with an optional link title after it.
-# Examples matched:
-#   [Mo](./People/Mo.md)              -> label "Mo", bare "./People/Mo.md"
-#   [Mo](<./People/Mo Salah.md>)      -> label "Mo", angle "./People/Mo Salah.md"
-#   [Mo](./People/Mo.md "Tooltip")    -> title ignored
-# A leading `!` (image) or backslash (escaped) is rejected at the call site,
-# where the preceding character is in hand.
-MARKDOWN_LINK_RE = re.compile(
-    r"\[(?P<label>[^\[\]\n]*)\]\("
-    r"[ \t]*(?:<(?P<angle>[^<>\n]*)>|(?P<bare>[^\s()]*))"
-    r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)"
-)
 # Duplicated from `vault_lint` rather than imported: `vault_lint` imports this
 # module, so the dependency only runs one way.
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _MD_SUFFIXES = (".md", ".markdown")
-FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
-INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-# A `related:`/`relatedTo:` frontmatter key, optionally with an inline flow
-# value on the same line (`related: [A, B]` or `related: People/Mo`).
-_FM_RELATED_KEY_RE = re.compile(r"^(related|relatedTo):[ \t]*(.*)$")
-_FM_LIST_ITEM_RE = re.compile(r"^(\s+)-\s?(.*)$")
 
 
 @dataclass
@@ -263,7 +251,7 @@ class Entry:
     updated: str = ""
 
 
-def _is_excluded(rel_path: Path) -> bool:
+def is_excluded(rel_path: Path) -> bool:
     parts = rel_path.parts
     if not parts:
         return True
@@ -402,24 +390,6 @@ def resolve_vault_link(source_rel: str | Path, ref: str) -> str:
     return joined
 
 
-def _is_link_start(text: str, index: int) -> bool:
-    """False when the `[` at ``index`` opens an image or is backslash-escaped.
-
-    `![alt](x.png)` is an embed, not a link, and `\\[not a link](x.md)` is prose
-    documenting the syntax — both would otherwise become phantom graph edges.
-    """
-    if index == 0:
-        return True
-    if text[index - 1] == "!":
-        return False
-    backslashes = 0
-    cursor = index - 1
-    while cursor >= 0 and text[cursor] == "\\":
-        backslashes += 1
-        cursor -= 1
-    return backslashes % 2 == 0
-
-
 def _body_after_frontmatter(text: str) -> str:
     """Body with frontmatter, fenced blocks, and inline code spans removed."""
     m = FRONTMATTER_RE.match(text)
@@ -439,7 +409,7 @@ def _extract_body_links(text: str, source_rel: str | Path = "") -> list[str]:
     body = _body_after_frontmatter(text)
     out: list[str] = []
     for match in MARKDOWN_LINK_RE.finditer(body):
-        if not _is_link_start(body, match.start()):
+        if not is_link_start(body, match.start()):
             continue
         raw = match.group("angle")
         if raw is None:
@@ -456,7 +426,7 @@ def _normalize_related_value(value: str) -> str:
     Handles: "People/Mo", "Projects/Foo.md", and the same quoted or backticked.
 
     Frontmatter refs stay *bare* — deliberately not markdown links. YAML sees
-    `related: [Mo](./People/Mo.md)` as one opaque string, which `_resolve_related`
+    `related: [Mo](./People/Mo.md)` as one opaque string, which `resolve_related`
     cannot resolve, and OKF has no opinion on frontmatter link syntax. A leftover
     `[[People/Mo]]` from before the swap no longer resolves; the link migration
     normalizes those to bare refs.
@@ -464,7 +434,7 @@ def _normalize_related_value(value: str) -> str:
     return value.strip().strip("\"'`")
 
 
-def _build_filename_index(
+def build_filename_index(
     entries: list[Entry], path_prefix: Path | None = None
 ) -> dict[str, list[Path]]:
     """Index entries by vault-relative path and by bare stem.
@@ -499,7 +469,7 @@ def _strip_prefix(path: Path, prefix: Path) -> Path:
         return path
 
 
-def _resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | None:
+def resolve_related(ref: str, filename_idx: dict[str, list[Path]]) -> Path | None:
     """Map a related ref (e.g. 'People/Mo', 'Mo', 'Work/People/X') to a repo-relative Path."""
     if not ref:
         return None
@@ -545,7 +515,7 @@ def scan_vault(
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
-        if _is_excluded(rel_from_vault):
+        if is_excluded(rel_from_vault):
             continue
         # MEMORY.md stays curated; INDEX.md and VOCABULARY.md are this
         # script's own output. None of them are notes.
@@ -597,13 +567,13 @@ def scan_vault(
         )
 
     # Resolve related refs to actual repo-relative paths.
-    filename_idx = _build_filename_index(entries, prefix)
+    filename_idx = build_filename_index(entries, prefix)
     for e in entries:
         resolved: list[str] = []
         unresolved: list[str] = []
         seen: set[str] = set()
         for ref in e.related:
-            target = _resolve_related(ref, filename_idx)
+            target = resolve_related(ref, filename_idx)
             if target is None:
                 # Not necessarily broken: in a per-root scan this is every ref
                 # naming another workspace. `scan_targets` sorts the two apart
@@ -636,7 +606,7 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
 
 def _ref_matches(raw: str, filename_idx: dict[str, list[Path]], deleted_path: str) -> bool:
     """True if a raw related/link reference string resolves to deleted_path."""
-    target = _resolve_related(_normalize_related_value(raw), filename_idx)
+    target = resolve_related(_normalize_related_value(raw), filename_idx)
     return target is not None and str(target) == deleted_path
 
 
@@ -655,7 +625,7 @@ def _strip_frontmatter_related(
     i, n = 0, len(lines)
     while i < n:
         line = lines[i]
-        m = _FM_RELATED_KEY_RE.match(line)
+        m = FM_RELATED_KEY_RE.match(line)
         if not m:
             out.append(line)
             i += 1
@@ -682,7 +652,7 @@ def _strip_frontmatter_related(
         kept_item_lines: list[str] = []
         block_changed = False
         while j < n:
-            item_m = _FM_LIST_ITEM_RE.match(lines[j])
+            item_m = FM_LIST_ITEM_RE.match(lines[j])
             if not item_m:
                 break
             item_value = item_m.group(2).strip().strip("\"'")
@@ -732,7 +702,7 @@ def _strip_body_links(
     out: list[str] = []
     last = 0
     for m in MARKDOWN_LINK_RE.finditer(body):
-        if _is_excluded_pos(m.start()) or not _is_link_start(body, m.start()):
+        if _is_excluded_pos(m.start()) or not is_link_start(body, m.start()):
             continue
         raw = m.group("angle")
         if raw is None:
@@ -856,7 +826,7 @@ def strip_references(
     vault_root = vault_root.resolve()
     prefix = path_prefix or Path("memory-vault")
     entries = scan_vault(vault_root, path_prefix=path_prefix)
-    filename_idx = _build_filename_index(entries)
+    filename_idx = build_filename_index(entries)
     # Phase 1 (pure): compute every rewrite up front, so a bad or unreadable
     # note aborts the whole cleanup before any other note has been touched.
     edits: list[tuple[Path, str, str]] = []
@@ -1138,7 +1108,7 @@ def _build_workspace_index(
 
     A ref names the other half as ``work/People/Mira-Rossi-Acme`` — the
     workspace, then the path inside that workspace's vault. Neither of
-    ``_build_filename_index``'s keys is that shape: it strips the whole prefix,
+    ``build_filename_index``'s keys is that shape: it strips the whole prefix,
     workspace segment included, because within one root the segment is not part
     of any ref. So this keys by ``<workspace>/<vault-relative>`` and by
     ``<workspace>/<stem>``.

@@ -116,8 +116,15 @@
               <dt>Next run</dt><dd class="prop-highlight">{{ nextRunLabel(schedule) }}</dd>
             </div>
             <!-- Interval cadence has no expected slot, so the missed-run check
-                 cannot report its health. last_status does instead. -->
-            <div v-if="isIntervalSchedule(schedule)" class="prop-row">
+                 cannot report its health. last_status does instead. A
+                 wall-clock entry shows the row too when its last dispatch
+                 failed: the missed-run check only trips long after the failed
+                 fire (next occurrence + 5 minutes), and without it the failure
+                 sat in the job log with nothing user-visible anywhere. -->
+            <div
+              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped'"
+              class="prop-row"
+            >
               <dt>Status</dt><dd>{{ intervalStatusLabel(schedule) }}</dd>
             </div>
             <div class="prop-row">
@@ -235,7 +242,7 @@
                 <p class="hint">
                   This routine runs once per workspace. You are looking at the
                   {{ workspaceDisplayName(schedule.workspace) }} run; each one can be
-                  paused on its own and inherits that workspace's provider and default model.
+                  paused on its own and uses that workspace's provider and default model unless you set an override in Engine.
                 </p>
               </template>
               <template v-else>
@@ -247,7 +254,7 @@
                     </option>
                   </select>
                 </div>
-                <p class="hint">The routine inherits this workspace's provider and default model.</p>
+                <p class="hint">Uses that workspace's provider and default model unless you set an override in Engine.</p>
               </template>
             </div>
           </template>
@@ -285,7 +292,7 @@
             <span class="prop-card-name">Engine</span>
             <span v-if="editingCard === 'engine'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
-              v-else-if="canEditSchedule && !editingCard"
+              v-else-if="canEditEngine && !editingCard"
               type="button"
               class="card-edit"
               :aria-label="'Edit engine'"
@@ -333,12 +340,12 @@
         </section>
 
         <!-- Advanced -->
-        <section v-if="schedule.scope !== 'system'" class="prop-card" :class="{ 'card-editing': editingCard === 'advanced' }">
+        <section class="prop-card" :class="{ 'card-editing': editingCard === 'advanced' }">
           <div class="prop-card-head">
             <span class="prop-card-name">Advanced</span>
             <span v-if="editingCard === 'advanced'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
-              v-else-if="canEditSchedule && !editingCard"
+              v-else-if="canEditAdvanced && !editingCard"
               type="button"
               class="card-edit"
               :aria-label="'Edit advanced settings'"
@@ -896,7 +903,10 @@ function enabledToggleLabel(s: Schedule): string {
 }
 
 // Interval entries have no expected slot, so the missed-run check cannot speak
-// for them. last_status is the server's health report instead.
+// for them. last_status is the server's health report instead. A wall-clock
+// entry lands here too when its last dispatch failed (the dispatch stamps
+// last_status = "error" on the row), which the missed-run check alone reports
+// far too late to be actionable.
 function intervalStatusLabel(s: Schedule): string {
   if (s.last_status === 'missing-chat') return 'stopped — chat missing'
   if (s.last_status === 'busy') return 'waiting — chat busy'
@@ -1008,6 +1018,8 @@ async function onSystemWorkspaceChange(event: Event) {
   await router.push(`/schedules/${scheduleId}`)
 }
 const canEditSchedule = computed(() => !!schedule.value && schedule.value.scope !== 'system')
+const canEditEngine = computed(() => !!schedule.value)
+const canEditAdvanced = computed(() => !!schedule.value)
 
 // Every card seeds the full editData from the schedule, so an unedited field
 // always round-trips its current value and saving one card can't clobber another.
@@ -1018,7 +1030,11 @@ function editSnapshot(): string {
 const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== editBaseline.value)
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
-  if (!schedule.value || !canEditSchedule.value) return
+  if (!schedule.value) return
+  const isSystem = schedule.value.scope === 'system'
+  if (isSystem) {
+    if (card !== 'engine' && card !== 'advanced') return
+  } else if (!canEditSchedule.value) return
   editData.value = {
     workspace: schedule.value.workspace || projectStore.activeWorkspace,
     title: schedule.value.title || '',
@@ -1048,6 +1064,24 @@ async function cancelCardEdit() {
 async function saveCardEdit() {
   if (!schedule.value) return
   const d = editData.value
+  // System routines persist only a small overlay (enabled + workspace + engine + archive).
+  // Sending the full user-schedule payload would try to change title/prompt/cadence
+  // which the backend deliberately ignores or rejects, and would confuse the response.
+  if (schedule.value.scope === 'system') {
+    const updates: ScheduleUpdate = {}
+    if (editingCard.value === 'engine') {
+      updates.model = d.model
+      updates.provider = d.model ? (editModelProvider.value || schedule.value.provider || 'claude') : ''
+    } else if (editingCard.value === 'advanced') {
+      updates.archive_policy = d.archive_policy
+    } else {
+      return
+    }
+    await store.updateSchedule(schedule.value.schedule_id, updates)
+    editingCard.value = ''
+    editBaseline.value = ''
+    return
+  }
   const updates: ScheduleUpdate = {
     workspace: d.workspace,
     title: d.title,

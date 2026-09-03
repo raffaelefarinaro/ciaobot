@@ -141,7 +141,7 @@ skill surface (admin or redundant with native tools).
 |---|---|
 | Context | `context_get` (includes `system` status) |
 | Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
-| Vault | `vault_search` |
+| Vault | `vault_search`, `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
 | Google Workspace | `gws_status` (read-only connection/token health) |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
@@ -171,7 +171,7 @@ app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_action`, `chat_delete`, `chat_stop`,
 `background_run_start`, `background_run_cancel`, `schedule_action`,
-`loop_action`) are deliberately excluded and
+`loop_action`, `vault_review`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

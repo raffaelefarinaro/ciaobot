@@ -221,7 +221,6 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 **Ciaobot agent control plane:**
 
 - The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
-- `CIAO_MCP_LAZY_TOOLS`: lists only the core and destructive Ciaobot tools in `tools/list` and defers the rest to the `tools_search` / `tools_call` pair, so the full catalog (~9k tokens of JSON schema) is not injected into every chat. Set to `0` to list the whole catalog eagerly. Default `true`.
 - `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).
@@ -296,7 +295,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   host's too (that card is proxied). The local token still guards this machine's
   own never-proxied routes, `/api/node/*` and `/api/device/*`.
 - `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log. Read mutations emit a clear control for matching delivered PWA and macOS notifications.
-- `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
+- `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`). The server binds
+  all interfaces so the PWA is reachable over LAN and Tailscale; set
+  `PWA_HOST=127.0.0.1` in `.env` for loopback-only access.
 - `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
   this from the configured workspace `.env` and resolves a relative value
   against the workspace.
@@ -362,6 +363,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_TTS_LOCAL_VOICE`: macOS voice identifier or name for the local engine (e.g. `com.apple.voice.compact.en-US.Samantha`). Empty by default, which means the highest-quality installed voice for `CIAO_TRANSCRIPTION_LOCALE` — preferring premium, then enhanced, then default. The stock voices are all the basic tier; voices marked **Premium** (then Enhanced) sound markedly better and are a free download under System Settings → Accessibility → Read & Speak → System voice → Manage Voices ([Apple's guide](https://support.apple.com/guide/mac-help/mchlp2290/mac)). Ciaobot picks the best installed voice automatically, so downloading one is enough. Siri's voices are not available to third-party apps.
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_PUBLIC_PRIVATE_PATTERNS`: comma-separated private string patterns used by `ciao public-preflight scan` when a `--private-patterns` file is not supplied. Intended for public extraction checks, not normal runtime.
+- `CIAO_ALLOW_LAUNCH_AGENT_REPOINT`: set to `1`/`true`/`yes` (case-insensitive) to allow `setup_workspace`/`_write_launchd_plist` and `ciao setup` to repoint the live `~/Library/LaunchAgents/com.ciao.server.plist` to a different workspace without `confirm_repoint=True`/`--yes`. For automation that intentionally moves the install; leave unset for the safe default (refuse). `CIAO_LAUNCH_AGENTS_DIR` (test-only) already isolates the suite by redirecting the plist location.
 
 **Note:** `ciao gws-auth-helper` is the helper for headless `gws` auth when the keyring backend fails.
 

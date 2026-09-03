@@ -754,19 +754,22 @@
       />
       </div>
     </div>
-
+      <!-- Scroll-to-bottom floats inside the scroll area so it tracks the
+           composer height: .chat-with-sidebar ends at the top of the input
+           bar, so bottom:12px stays 12px above the composer even when the
+           textarea expands to 200px. Previously it was absolute to
+           .chat-panel at bottom:72px and was overlapped by an expanding
+           composer (see screenshot where the chevron sits mid-text). -->
+      <button
+        v-if="showScrollBtn"
+        class="scroll-to-bottom-btn"
+        @click="scrollToBottom"
+        title="Scroll to bottom"
+        aria-label="Scroll to bottom"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
     </div>
-
-    <!-- Scroll-to-bottom float button -->
-    <button
-      v-if="showScrollBtn"
-      class="scroll-to-bottom-btn"
-      @click="scrollToBottom"
-      title="Scroll to bottom"
-      aria-label="Scroll to bottom"
-    >
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-    </button>
 
     <!-- AskUserQuestion picker. The model paused mid-turn to ask the user
          a structured question; we render an interactive option list so the
@@ -831,11 +834,11 @@
     </div>
 
     <!-- Image-capability question. The server paused before dispatch because
-         the selected model can't see images. The first candidate is the current
-         model, disabled; the rest are same-backend vision models. Picking one
-         switches the chat and re-dispatches the turn; "Open picker" hands over
-         to the full ModelSelector filtered to the current backend; Cancel (or
-         the 30s timeout) closes the turn with a system bubble. -->
+         the selected model can't see images. The card shows the full
+         provider-filtered ModelSelector (vision-capable models only) with the
+         current model visible but disabled. Picking one switches the chat and
+         re-dispatches the turn with the image; Cancel (or the 30s timeout)
+         closes the turn with a system bubble. -->
     <div v-if="activeCapabilityQuestions.length" class="question-card capability-card">
       <div class="question-card-header">
         <span class="question-card-icon">&#128444;</span>
@@ -845,21 +848,17 @@
       <div
         v-for="q in activeCapabilityQuestions"
         :key="q.request_id"
-        class="question-block"
+        class="question-block capability-picker-block"
       >
-        <div class="question-options">
-          <button
-            v-for="c in q.candidates"
-            :key="c.id"
-            type="button"
-            class="question-option"
-            :disabled="c.disabled || capabilityExpired(q)"
-            @click="switchCapabilityModel(q, c.id)"
-          >
-            <span class="question-option-label">{{ c.label }}</span>
-            <span v-if="c.disabled" class="question-option-desc">current model</span>
-          </button>
-        </div>
+        <ModelSelector
+          :model-value="q.current_model"
+          :sections="capabilitySectionsFor(q)"
+          :disabled="capabilityExpired(q)"
+          :active-models="[q.current_model]"
+          searchable
+          placeholder="Pick a vision model..."
+          @select="(val) => handleCapabilityPickerSelect(q, val)"
+        />
       </div>
       <div class="question-card-actions">
         <button
@@ -868,12 +867,6 @@
           :disabled="capabilityExpired(activeCapabilityQuestions[0])"
           @click="cancelCapability(activeCapabilityQuestions[0])"
         >Cancel</button>
-        <button
-          class="btn-sm"
-          type="button"
-          :disabled="capabilityExpired(activeCapabilityQuestions[0])"
-          @click="openCapabilityPicker(activeCapabilityQuestions[0])"
-        >Open picker</button>
       </div>
     </div>
 
@@ -2440,13 +2433,33 @@ function switchCapabilityModel(q: { request_id: string }, modelId: string) {
   store.respondCapability(chat.value.chat_id, q.request_id, 'switch', modelId)
 }
 
-function openCapabilityPicker(q: { request_id: string }) {
-  if (!chat.value) return
-  store.respondCapability(chat.value.chat_id, q.request_id, 'picker')
-  // Land the picker on the current backend so the user only sees same-provider
-  // vision models, not the full cross-provider list.
-  capabilityPickerSection.value = capabilitySectionForBucket(activeBucket.value)
-  showModelPicker.value = true
+function handleCapabilityPickerSelect(q: { request_id: string }, val: string | string[]) {
+  const modelId = Array.isArray(val) ? val[0] : val
+  if (!modelId) return
+  switchCapabilityModel(q, modelId)
+}
+
+function capabilitySectionsFor(q: { current_model: string; candidates: Array<{ id: string; label: string; disabled?: boolean; supports_vision?: boolean }> }): import('../lib/modelSections').ModelSection[] {
+  const current = q.current_model
+  const visionCandidates = q.candidates.filter(c => c.supports_vision && !c.disabled)
+  const bucket = activeBucket.value
+  const labelMap: Record<string, string> = {}
+  for (const c of visionCandidates) labelMap[c.id] = c.label
+  const sections: import('../lib/modelSections').ModelSection[] = []
+  if (current) {
+    sections.push({ key: 'current', label: 'Current model — can’t see images', models: [current], disabled: true })
+  }
+  if (visionCandidates.length) {
+    const bucketSection = chatModelSections.value.find(s => s.key === capabilitySectionForBucket(bucket))
+    const label = bucketSection?.label || bucket
+    sections.push({
+      key: capabilitySectionForBucket(bucket),
+      label,
+      models: visionCandidates.map(c => c.id),
+      modelLabels: labelMap,
+    })
+  }
+  return sections
 }
 
 function cancelCapability(q: { request_id: string }) {
@@ -3095,6 +3108,34 @@ if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', onChatSelectionChange)
 }
 
+// Opening a chat puts the cursor in the composer, so typing just works.
+// ChatLayout keys this panel on chat_id, so it remounts per chat and this
+// covers switching chats as well as opening one.
+//
+// Two deliberate exceptions:
+//
+//   A pending question or permission card. Its options are numbered on screen
+//     and 1-9 picks one, but ChatLayout only offers a key to the card when
+//     focus is NOT in a text field (see handleQuestionShortcut's contract).
+//     Focusing here would turn "press 2" into typing "2", in exactly the chats
+//     that are blocked waiting for that answer.
+//
+//   Narrow viewports. Focus is what raises the on-screen keyboard (see
+//     handleInputFocus), so on a phone this would cover half the transcript on
+//     every chat you tap into, and iOS zooms the page on focus besides.
+const COMPOSER_FOCUS_MIN_WIDTH = 768
+
+function focusComposerOnOpen(): void {
+  if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
+  if (questionCardVisible.value || pendingApprovals.value.length) return
+  const el = inputEl.value
+  if (!el) return
+  el.focus()
+  // A restored draft would otherwise take the caret at offset 0, so the next
+  // keystroke would prepend to what the user already wrote.
+  el.selectionStart = el.selectionEnd = el.value.length
+}
+
 onMounted(async () => {
   window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
@@ -3129,6 +3170,7 @@ onMounted(async () => {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       pinToBottom()
     }
+    focusComposerOnOpen()
   })
 })
 
@@ -3888,6 +3930,22 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
+// Cmd/Ctrl+Enter offered by ChatLayout when the chord lands outside the
+// composer. Attaching an image or a comment leaves focus on the control that
+// closed, not the textarea, so the next press of the same chord -- the one that
+// means "now send it" -- never reached handleKeydown, and a message that
+// carried only attachments could not be sent from the keyboard at all. The
+// caller has already screened out text fields, but the comment popovers'
+// own Save/Cancel buttons are not text fields either -- while one is
+// focused there, this must still decline so the button's own Enter
+// activation runs instead of sending the unrelated composer draft.
+function handleSendShortcut(): boolean {
+  if (chat.value.archived || !canSend.value) return false
+  if (commentDraft.value || editingChatCommentId.value) return false
+  send()
+  return true
+}
+
 function handleInputFocus() {
   refreshComposerPickers()
   if (window.innerWidth < 768 && messagesEl.value) {
@@ -4459,14 +4517,16 @@ function toggleDictation() {
   voiceRecorderRef.value?.toggleRecording()
 }
 
-// Cmd+A mirrors the header archive button (including its confirm dialog).
+// Cmd+Backspace mirrors the header archive button (including its confirm
+// dialog). Fires even while a text field is focused: that is the point of the
+// binding, and the confirm dialog is what makes it safe.
 function archiveActiveChat() {
   if (!chat.value || chat.value.archived) return
   void doArchive()
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut })
+defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut })
 </script>
 
 <style scoped>
@@ -4493,11 +4553,14 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   pointer-events: none;
 }
 
-/* Scroll-to-bottom float button — centered above the input bar so it
-   doesn't overlap the send button on the right. */
+/* Scroll-to-bottom float button — centered inside .chat-with-sidebar
+   (which ends at the top of the composer) so bottom:12px stays 12px
+   above the composer even when the textarea expands. Previously it was
+   absolute to .chat-panel at bottom:72px and was overlapped by a
+   tall composer. */
 .scroll-to-bottom-btn {
   position: absolute;
-  bottom: 72px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   width: 36px;

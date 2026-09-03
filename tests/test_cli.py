@@ -457,6 +457,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert "ciao:memory" in (
         root / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
+    # setup seeds through _seed_stock_commands, so each stock copy carries the
+    # sibling marker (with the sha256 of the written bytes) from the start.
+    assert (root / "commands" / "remember.md.ciao-stock-command").is_file()
     assert (root / "CLAUDE.md").is_file()
     assert (root / "AGENTS.md").is_symlink()
     assert (root / "AGENTS.md").readlink() == Path("CLAUDE.md")
@@ -1316,3 +1319,243 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     assert "Alba" not in out
     # And the link points at the note that actually exists on disk.
     assert str(work_vault / "People" / "Aymen.md") in out
+
+
+def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
+    """`/critique` must not depend on an external `python3`.
+
+    The bundled runtime puts only a `ciao` wrapper on PATH
+    (`scripts/build-bundled-runtime.sh` writes `$output/bin/ciao` and nothing
+    else), so `python3 -m ciao.critique` resolves whatever interpreter the
+    user's shell has — one with neither `ciao` nor its dependencies. The
+    command doc therefore names `ciao critique`, and this pins that it works.
+    """
+    from ciao import cli
+
+    seen: list[list[str]] = []
+
+    def fake_main(argv):
+        seen.append(list(argv))
+        return 0
+
+    monkeypatch.setattr("ciao.critique.main", fake_main)
+    assert cli.main(["critique", "--input", "a.md", "--type", "plan"]) == 0
+    # Flags reach the panel untouched: argparse must not eat them on the way.
+    assert seen == [["--input", "a.md", "--type", "plan"]]
+
+
+def test_ciao_help_lists_critique():
+    """Registered as a subparser too, so `ciao --help` discloses it."""
+    from ciao import cli
+
+    parser = cli.build_parser()
+    action = next(a for a in parser._subparsers._actions if hasattr(a, "choices") and a.choices)
+    assert "critique" in action.choices
+
+
+def test_critique_leaves_a_home_relative_input_for_expanduser(monkeypatch):
+    """A quoted `~/...` reaches the CLI unexpanded and must not be rebased.
+
+    `Path("~/x").is_absolute()` is False, so rebasing it against the caller's
+    directory yields `<cwd>/~/x` and defeats the `expanduser()` that
+    `ciao.critique` does later — an artifact that resolved fine before would be
+    reported missing.
+    """
+    from ciao import cli
+
+    monkeypatch.setenv("CIAO_INVOCATION_CWD", "/some/workspace")
+    seen: list[list[str]] = []
+    monkeypatch.setattr("ciao.critique.main", lambda argv: seen.append(list(argv)) or 0)
+
+    assert cli.main(["critique", "--input", "~/Documents/plan.md"]) == 0
+    assert seen == [["--input", "~/Documents/plan.md"]]
+
+    seen.clear()
+    assert cli.main(["critique", "--input=~/plan.md"]) == 0
+    assert seen == [["--input=~/plan.md"]]
+
+
+def _write_installed_launch_agent(
+    agents: Path, workspace: Path, *, runtime_root: str = ".runtime"
+) -> None:
+    import plistlib
+
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "com.ciao.server",
+                "WorkingDirectory": str(workspace),
+                "EnvironmentVariables": {
+                    "CIAO_WORKSPACE": str(workspace),
+                    "CIAO_RUNTIME_ROOT": runtime_root,
+                },
+            }
+        )
+    )
+
+
+def _per_root_workspace(root: Path) -> None:
+    """Scaffold a migrated per-workspace install like setup_workspace does."""
+    from ciao.cli import setup_workspace
+
+    setup_workspace(root, auth_token="t", auth_required=True)
+
+
+def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`ciao health get` with no CIAO_WORKSPACE in the environment must report
+    on the workspace the installed server's LaunchAgent points at.
+
+    The fallback used to be the bootstrap workspace, so a bare-shell probe
+    (exactly what the desktop-install skill runs after an install) manufactured
+    `~/.ciao/bootstrap`, resolved the LEGACY shared-vault layout there, and
+    warned about a memory vault that was actually healthy. It also created
+    `~/.ciao/bootstrap` as a side effect of a read-only diagnostic.
+    """
+    from ciao.config import reset_reroot_cache
+
+    workspace = tmp_path / "workspace"
+    _per_root_workspace(workspace)
+    agents = tmp_path / "LaunchAgents"
+    _write_installed_launch_agent(agents, workspace)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    for name in (
+        "CIAO_WORKSPACE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT",
+        "CIAO_BOOTSTRAP_WORKSPACE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    reset_reroot_cache()
+    try:
+        assert cli.main(["health", "get"]) == 0
+    finally:
+        reset_reroot_cache()
+    out = capsys.readouterr().out
+    # setup_workspace prints skill-install progress lines ahead of the JSON.
+    report = json.loads(out[out.index("{"):])
+    assert report["status"] == "ok", [c for c in report["checks"] if c["status"] != "ok"]
+    # The probe is read-only: no bootstrap workspace may appear as a side effect.
+    assert not (home / ".ciao" / "bootstrap").exists()
+    # Read-only also means the caller's environment: the workspace .env must be
+    # folded into the config resolution, not loaded into os.environ (load_dotenv
+    # sets keys it has never seen and nothing restores them, so the probe would
+    # leak the install's token into the shell that ran it).
+    import os
+
+    assert os.environ.get("CIAO_WORKSPACE") is None
+    assert os.environ.get("PWA_AUTH_TOKEN") != "t"
+
+
+def test_config_discovery_applies_the_workspace_auth_before_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare-shell `ciao run` against a stopped install must adopt the
+    workspace .env's auth settings, not the bare shell's absence of them.
+
+    Discovery used to apply its overlay after PWA_AUTH_TOKEN and
+    PWA_AUTH_REQUIRED were parsed, so the started server ignored the
+    workspace's configured password and booted unauthenticated.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    workspace = tmp_path / "workspace"
+    _per_root_workspace(workspace)
+    # A distinctive token in the .env, as a configured install has.
+    env_path = workspace / ".env"
+    env_path.write_text(
+        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token")
+        + "PWA_AUTH_REQUIRED=true\n",
+        encoding="utf-8",
+    )
+    agents = tmp_path / "LaunchAgents"
+    _write_installed_launch_agent(agents, workspace)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    for name in (
+        "CIAO_WORKSPACE",
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT",
+        "CIAO_BOOTSTRAP_WORKSPACE",
+        "PWA_AUTH_TOKEN",
+        "PWA_AUTH_REQUIRED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env()
+    finally:
+        reset_reroot_cache()
+
+    assert config.workspace_root == workspace.resolve()
+    assert config.pwa_auth_token == "ws-secret-token"
+    assert config.pwa_auth_required is True
+
+
+def test_config_discovery_survives_an_exported_empty_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exported-but-empty CIAO_WORKSPACE must not beat the discovered pin.
+
+    Discovery is entered for an empty value as well as an unset one (a bare
+    `export CIAO_WORKSPACE=` in a shell profile), but the process environment
+    wins the overlay merge, so the empty string overrode the pin set inside it.
+    That produced exactly the hybrid the pinning exists to prevent: the
+    installed workspace's auth and provider settings applied to a freshly
+    manufactured bootstrap root, because `bootstrap_mode` still saw no
+    workspace.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    workspace = tmp_path / "workspace"
+    _per_root_workspace(workspace)
+    env_path = workspace / ".env"
+    env_path.write_text(
+        (env_path.read_text(encoding="utf-8")).replace(
+            "PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token"
+        ),
+        encoding="utf-8",
+    )
+    agents = tmp_path / "LaunchAgents"
+    _write_installed_launch_agent(agents, workspace)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    for name in (
+        "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT",
+        "CIAO_BOOTSTRAP_WORKSPACE",
+        "PWA_AUTH_TOKEN",
+        "PWA_AUTH_REQUIRED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # The whole point: present in the environment, but empty.
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env()
+    finally:
+        reset_reroot_cache()
+
+    # The discovered install wins, so the .env and the root agree.
+    assert config.workspace_root == workspace.resolve()
+    assert config.pwa_auth_token == "ws-secret-token"

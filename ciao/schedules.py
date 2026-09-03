@@ -29,11 +29,13 @@ from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from collections.abc import Sequence
-from typing import Any, Callable, Coroutine, Protocol
+from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
 from ciao.models import BridgeMode
+
+_BRIDGE_MODES = frozenset({"normal", "plan", "auto", "bypass"})
 
 DEFAULT_TIMEZONE = "Europe/Zurich"
 logger = logging.getLogger(__name__)
@@ -99,6 +101,9 @@ SYSTEM_STATE_FIELDS = {
     "last_run_chat_id",
     "last_status",
     "workspace",
+    "model",
+    "provider",
+    "archive_policy",
 }
 
 # Separator between a packaged system routine's id and the workspace it was
@@ -588,7 +593,16 @@ class ScheduleEntry:
     # means "inherit the target chat's provider (existing web_chat_id) or use
     # the resolver's default (new web_project_id chat)".
     provider: str = ""
-    mode: BridgeMode = "auto"
+    # "" means "inherit", exactly as an empty `model`/`provider` does: the
+    # permission mode is resolved from the operator's own per-provider pin
+    # (Settings -> Providers) on every dispatch. A hardcoded "auto" here was
+    # not a default, it was an override — truthy, so it won every dispatch and
+    # the inheritance fallback below it could never fire. A routine on a
+    # provider pinned to `bypass` still stamped its chat `auto`, and a reply
+    # to that chat then ran under different permission rules than the run it
+    # was answering (which `unattended` forces to bypass) — which on opencode
+    # rotates the session, because a session's rules are fixed at creation.
+    mode: str = ""
     timezone_name: str = DEFAULT_TIMEZONE
     last_triggered_on: str = ""
     # Full ISO timestamp of the most recent dispatch through any path
@@ -670,6 +684,9 @@ class ScheduleStore:
         # schedules (and every existing test) keeps working: without it, a
         # per-workspace definition degrades to the single legacy entry.
         self._workspace_names = workspace_names
+        # Packaged stock definitions, cached after the first successful read.
+        # See _load_system_definitions for why this is not re-read per tick.
+        self._system_definitions: list[dict] | None = None
         self._lock = threading.RLock()
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
@@ -923,16 +940,47 @@ class ScheduleStore:
         return state.get(legacy_id, {})
 
     def _load_system_definitions(self) -> list[dict]:
+        """The packaged system-routine definitions, read once per process.
+
+        Cached deliberately, not for speed. ``_system_entries`` derives the
+        system rows on every ``list_entries`` call, and ``tick`` calls
+        ``list_entries`` every pass, so this used to read the packaged file off
+        disk on every tick. Package data is read-only and immutable for the life
+        of an installed version, so there is nothing to re-read — but the
+        install swap replaces the bundle *underneath* the running process, and a
+        read landing in that window failed and returned no definitions at all.
+        Every system routine then vanished from that tick, and a daily routine
+        is matched on ``%H:%M``, so one whose minute fell in the window was
+        silently skipped rather than delayed. Holding the first good read means
+        a bundle swap cannot take the routines away from a live process.
+
+        A missing file is NOT logged as an error. It is expected and
+        self-healing during an install swap (issue #416): the replacement
+        bundle contains the file and the next process start reads it. Malformed
+        packaged JSON is a real defect and keeps its traceback.
+        """
+        if self._system_definitions is not None:
+            return self._system_definitions
         try:
             raw = resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8")
             data = json.loads(raw)
-        except (FileNotFoundError, json.JSONDecodeError, ModuleNotFoundError):
-            logger.exception("Failed to load stock system schedules")
+        except (FileNotFoundError, ModuleNotFoundError) as exc:
+            # No cache to fall back on, so this read yields nothing either way;
+            # say so without a traceback that reads as a failed start.
+            logger.warning(
+                "Stock system schedules unavailable (%s); "
+                "skipping system routines until the next start", exc,
+            )
             return []
-        return [
+        except json.JSONDecodeError:
+            logger.exception("Failed to parse stock system schedules")
+            return []
+        definitions = [
             item for item in data.get("schedules", [])
             if isinstance(item, dict) and item.get("scope") == "system"
         ]
+        self._system_definitions = definitions
+        return definitions
 
     def _normalized_overlay(self, overlay: dict) -> dict:
         """Drop a persisted workspace that no longer names a registered one.
@@ -1036,6 +1084,20 @@ class ScheduleStore:
         # (empty string means "use current default at dispatch time").
         payload.pop("mode", None)
         return payload
+
+
+def entry_mode(entry: "ScheduleEntry") -> BridgeMode:
+    """The entry's own permission mode, narrowed for the no-resolver path.
+
+    ``ScheduleEntry.mode`` is a plain ``str`` because "" means "inherit", which
+    is not a ``BridgeMode``. Resolution normally happens in the manager's
+    ``resolve_target`` callback, which consults the operator's per-provider pin;
+    this is only the fallback for a manager constructed without one (tests, and
+    any standalone driver), where there is no config to consult and ``auto`` is
+    the safe read of "unset".
+    """
+    mode = getattr(entry, "mode", "")
+    return cast(BridgeMode, mode) if mode in _BRIDGE_MODES else "auto"
 
 
 class _DispatchToWeb(Protocol):
@@ -1313,7 +1375,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry.mode, entry.provider)
+            else ("claude", entry.model, entry_mode(entry), entry.provider)
         )
         # The binding as it stood *before* prepare_chat, which is what
         # `_run_interval` needs to tell a re-home apart from a user edit.
@@ -1446,7 +1508,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry.mode, entry.provider)
+            else ("claude", entry.model, entry_mode(entry), entry.provider)
         )
         # Prepare the chat synchronously so we can return its ID immediately.
         # Pass it through to dispatch so it doesn't create a second chat.
@@ -1521,7 +1583,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry.mode, entry.provider)
+                else ("claude", entry.model, entry_mode(entry), entry.provider)
             )
             # Prepare the chat synchronously (like dispatch_now) so
             # last_run_chat_id is durable in the same write as
@@ -1610,7 +1672,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry.mode, entry.provider)
+                else ("claude", entry.model, entry_mode(entry), entry.provider)
             )
             logger.info(
                 "Schedule %s: catch-up fire (latest missed %s, now %s)",

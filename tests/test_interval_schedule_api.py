@@ -236,6 +236,24 @@ def test_context_stays_available_while_the_project_resolves(
     assert body["context_available"] is True
 
 
+def test_wall_clock_entry_with_a_recoverable_target_is_available(
+    client: TestClient,
+) -> None:
+    """Re-homing is not an interval privilege: a daily/weekly/monthly
+    chat-bound entry whose chat is gone but whose fallback project resolves
+    gets a replacement chat on its next run too, so the panel must not claim
+    "this target no longer exists" about a target the dispatcher can recover."""
+    resp = client.post("/api/schedules", json={
+        "prompt": "p", "frequency": "daily", "time": "09:00",
+        "web_chat_id": "chat-idle",
+    })
+    schedule_id = resp.json()["schedule_id"]
+    body = client.patch(
+        f"/api/schedules/{schedule_id}", json={"web_chat_id": "chat-gone"}
+    ).json()
+    assert body["context_available"] is True
+
+
 # ── /api/loops compatibility ─────────────────────────────────────────────
 
 

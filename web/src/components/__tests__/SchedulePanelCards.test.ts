@@ -225,9 +225,14 @@ describe('SchedulePanel property cards', () => {
     expect(wrapper.findAll('.card-edit')).toHaveLength(4)
   })
 
-  it('hides the per-card edit buttons on system routines', async () => {
+  it('limits system routines to the Engine and Advanced edit cards', async () => {
     const wrapper = await mountPanel(makeSchedule({ scope: 'system' }))
-    expect(wrapper.findAll('.card-edit')).toHaveLength(0)
+    // Title, cadence, and delivery target are fixed for a system routine;
+    // only the engine override and archive behavior are editable.
+    expect(card(wrapper, 'Schedule').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Delivery').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Engine').find('.card-edit').exists()).toBe(true)
+    expect(card(wrapper, 'Advanced').find('.card-edit').exists()).toBe(true)
     // …but the system workspace switcher is still reachable.
     expect(card(wrapper, 'Delivery').find('.system-workspace-control').exists()).toBe(true)
   })
@@ -254,6 +259,29 @@ describe('SchedulePanel property cards', () => {
     expect(rows.some(r => r.includes('waiting — chat busy'))).toBe(true)
     // An overdue interval is not rendered as an absolute past time.
     expect(rows.some(r => r.includes('when the chat is free'))).toBe(true)
+  })
+
+  it('shows a status row for a wall-clock entry whose last dispatch failed', async () => {
+    // A dispatch failure stamps last_status on the row (issue #407). The
+    // missed-run check only trips at the next occurrence + 5 minutes; without
+    // this row the failure sat in the job log with nothing visible anywhere.
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: 'error',
+    }))
+    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('last run failed'))).toBe(true)
+  })
+
+  it('hides the status row for a healthy wall-clock entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: '',
+    }))
+    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('last run failed'))).toBe(false)
   })
 
   it('reads the model off the target chat for a chat-bound interval entry', async () => {

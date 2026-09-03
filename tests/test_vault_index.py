@@ -202,7 +202,7 @@ def test_scan_vault_falls_back_to_a_unique_stem(tmp_path: Path):
     """A sibling-relative link that misses still resolves by unique stem.
 
     `[Mo](./Mo.md)` inside `Projects/` names `Projects/Mo`, which does not
-    exist. Rather than drop the edge, `_resolve_related` falls back to the last
+    exist. Rather than drop the edge, `resolve_related` falls back to the last
     segment when exactly one note in the vault carries that stem — the same
     best-effort rescue a bare `[[Mo]]` used to get.
     """
@@ -289,7 +289,7 @@ def test_strip_body_links_label_becomes_plain_text():
     entries = [
         vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
     ]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_body, changed = vi._strip_body_links(body, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert new_body == "Worked with Mo on this.\n"
@@ -298,7 +298,7 @@ def test_strip_body_links_label_becomes_plain_text():
 def test_strip_body_links_keeps_a_multiword_label_as_display_text():
     body = "See [Mo B.](./People/Mo.md) for details.\n"
     entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_body, changed = vi._strip_body_links(body, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert new_body == "See Mo B. for details.\n"
@@ -315,7 +315,7 @@ def test_strip_body_links_resolves_against_the_containing_note():
         vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
         vi.Entry(path=Path("memory-vault/Projects/Mo.md"), title="Mo", type="project"),
     ]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_body, changed = vi._strip_body_links(
         body, idx, "memory-vault/People/Mo.md", "People/Alba.md"
     )
@@ -329,7 +329,7 @@ def test_strip_body_links_leaves_unrelated_links_alone():
         vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
         vi.Entry(path=Path("memory-vault/Projects/Foo.md"), title="Foo", type="project"),
     ]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_body, changed = vi._strip_body_links(body, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert new_body == "See Mo and [Foo](./Projects/Foo.md).\n"
@@ -338,7 +338,7 @@ def test_strip_body_links_leaves_unrelated_links_alone():
 def test_strip_body_links_ignores_fenced_code():
     body = "Real: [Mo](./People/Mo.md).\n```\nExample: [Mo](./People/Mo.md)\n```\n"
     entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_body, changed = vi._strip_body_links(body, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert new_body == "Real: Mo.\n```\nExample: [Mo](./People/Mo.md)\n```\n"
@@ -350,7 +350,7 @@ def test_strip_frontmatter_related_removes_single_matching_item_keeps_others():
         vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
         vi.Entry(path=Path("memory-vault/Projects/Bar.md"), title="Bar", type="project"),
     ]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert "People/Mo" not in new_fm
@@ -361,7 +361,7 @@ def test_strip_frontmatter_related_removes_single_matching_item_keeps_others():
 def test_strip_frontmatter_related_drops_key_when_last_item_removed():
     fm = "name: Foo\ntype: project\nrelated:\n  - People/Mo\n"
     entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert "related:" not in new_fm
@@ -374,7 +374,7 @@ def test_strip_frontmatter_related_inline_flow_list():
         vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person"),
         vi.Entry(path=Path("memory-vault/Projects/Bar.md"), title="Bar", type="project"),
     ]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert "related: [Projects/Bar]" in new_fm
@@ -383,7 +383,7 @@ def test_strip_frontmatter_related_inline_flow_list():
 def test_strip_frontmatter_related_single_scalar_drops_key():
     fm = "name: Foo\nrelated: People/Mo\n"
     entries = [vi.Entry(path=Path("memory-vault/People/Mo.md"), title="Mo", type="person")]
-    idx = vi._build_filename_index(entries)
+    idx = vi.build_filename_index(entries)
     new_fm, changed = vi._strip_frontmatter_related(fm, idx, "memory-vault/People/Mo.md")
     assert changed is True
     assert "related" not in new_fm

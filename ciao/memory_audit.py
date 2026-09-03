@@ -296,6 +296,15 @@ def find_superseded_state(
 
 _AS_OF_RE = re.compile(r"\[as-of:\s*(\d{4}-\d{2}-\d{2})\]")
 _LEARNED_STAMP_RE = re.compile(r"\s*\[(\d{4}-\d{2}-\d{2})\]\s*$")
+# Every trailing stamp, not just the last. Stripping one was enough while
+# nothing could write two, but a reconcile bug did: the model echoes the old
+# entry's stamp into its merge and the promoter stamped on top, leaving
+# `fact [2026-01-01] [2026-09-02]` in the region. Because the pattern is
+# `$`-anchored, stripping one of those still left a stamp attached, so the
+# text never compared equal to the fact again and the duplicate guard let it
+# be appended a second time. Those rows are already on disk in real installs,
+# so the strip has to heal them, not just stop making new ones.
+_LEARNED_STAMPS_RE = re.compile(r"(?:\s*\[\d{4}-\d{2}-\d{2}\])+\s*$")
 
 # An `[as-of]` fact declares itself a snapshot, so it ages fast; a plain
 # learned-at entry claims to be standing state and gets the default horizon
@@ -308,9 +317,13 @@ def strip_learned_stamp(entry: str) -> str:
     """The entry text without its trailing learned-at stamp.
 
     Promotion dedupe compares through this: the same fact promoted on two
-    different days must still count as a duplicate.
+    different days must still count as a duplicate — and so must one an older
+    build left carrying two stamps (see :data:`_LEARNED_STAMPS_RE`).
+
+    Only the extraction of a learned date still reads a single stamp: the last
+    one is the most recent promotion, which is what aging should measure from.
     """
-    return _LEARNED_STAMP_RE.sub("", entry).rstrip()
+    return _LEARNED_STAMPS_RE.sub("", entry).rstrip()
 
 
 def find_aging_state(

@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
 import { useProposalsStore } from './proposals'
-import type { ProposalRow, ProposalsResponse } from '../lib/types'
+import type { ProposalHistoryRow, ProposalRow, ProposalsResponse } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -166,5 +166,243 @@ describe('post-mutation refresh', () => {
 
     expect(api.get).toHaveBeenCalledTimes(1)
     expect(store.rows.map(r => r.id)).toEqual(['p1'])
+  })
+})
+
+
+function historyRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
+  return {
+    id: 'h1',
+    ts: '2026-09-01T10:00:00+00:00',
+    action: 'accepted',
+    via: 'pwa',
+    kind: 'memory',
+    text: 'Remember the thing',
+    source: '',
+    workspace: 'personal',
+    destination: 'ciao:memory',
+    outcome: 'written',
+    proposal_id: 'p1',
+    ...overrides,
+  }
+}
+
+describe('proposal history', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  it('loads history rows and exposes truncation', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()],
+      total: 1,
+      truncated: true,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory()
+
+    expect(api.get).toHaveBeenCalledWith('/api/proposals/history?limit=200')
+    expect(store.historyRows).toHaveLength(1)
+    expect(store.historyLoaded).toBe(true)
+    expect(store.historyTruncated).toBe(true)
+  })
+
+  it('drops a stale history response that lands after a forced refetch', async () => {
+    let releaseFirst!: (value: unknown) => void
+    const stale = new Promise((r) => { releaseFirst = r })
+    vi.mocked(api.get)
+      .mockReturnValueOnce(stale as never)
+      .mockResolvedValueOnce({ rows: [historyRow({ id: 'h2' })], total: 1, truncated: false } as never)
+
+    const store = useProposalsStore()
+    const first = store.fetchHistory()
+    const second = store.fetchHistory({ force: true })
+
+    releaseFirst({ rows: [historyRow({ id: 'h1' })], total: 1, truncated: false })
+    await first
+    await second
+
+    expect(store.historyRows.map(r => r.id)).toEqual(['h2'])
+  })
+
+  it('filters visibleHistory by workspace scope, kind, action, actor, and search', () => {
+    const store = useProposalsStore()
+    store.historyRows = [
+      historyRow({ id: 'p-mem', workspace: 'personal' }),
+      historyRow({ id: 'p-dismiss', workspace: 'personal', action: 'dismissed', via: 'agent', outcome: '' }),
+      historyRow({ id: 'w-auto', workspace: 'work', via: 'auto', kind: 'learnings', text: 'Ship weekly' }),
+      historyRow({ id: 'global', workspace: '', text: 'Applies everywhere' }),
+    ]
+
+    expect(store.visibleHistory('personal').map(r => r.id)).toEqual(['p-mem', 'p-dismiss', 'global'])
+
+    store.historyActionFilter = 'dismissed'
+    expect(store.visibleHistory('personal').map(r => r.id)).toEqual(['p-dismiss'])
+    store.historyActionFilter = 'all'
+
+    store.historyActorFilter = 'auto'
+    expect(store.visibleHistory('work').map(r => r.id)).toEqual(['w-auto'])
+    store.historyActorFilter = 'all'
+
+    store.search = 'weekly'
+    expect(store.visibleHistory('work').map(r => r.id)).toEqual(['w-auto'])
+  })
+
+  it('does not fetch history after a mutation while nothing is displaying it', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
+    store.historyLoaded = false
+
+    await store.act('p1', 'dismiss')
+    await Promise.resolve()
+
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+  })
+
+  it('refreshes a loaded ledger after a mutation even from the Queue tab', async () => {
+    // The Queue tab's count badge renders off the loaded ledger, so dropping
+    // `historyLoaded` without refetching made the badge vanish on every
+    // accept/dismiss and stay gone until the History tab was reopened.
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
+    store.view = 'queue'
+    store.historyLoaded = true
+
+    await store.act('p1', 'dismiss')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+    expect(store.historyLoaded).toBe(true)
+  })
+
+  it('invalidates and re-fetches history after a mutation on the History tab', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+
+    const store = useProposalsStore()
+    await store.fetch()
+    store.view = 'history'
+    store.historyLoaded = true
+
+    await store.act('p2', 'dismiss')
+    await Promise.resolve()
+
+    expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/proposals/history'))
+  })
+
+  it('does not invalidate history on a plain queue reload', async () => {
+    // It used to flip the flag on every `fetch`, so each tab switch
+    // re-downloaded the whole ledger even when nothing had changed.
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+
+    const store = useProposalsStore()
+    store.historyLoaded = true
+    await store.fetch({ force: true })
+
+    expect(store.historyLoaded).toBe(true)
+  })
+
+  it('stops paging once the server caps the page', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 1500, truncated: true, limit: 1000, at_max: true,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory({ limit: 1200 })
+
+    expect(store.historyTruncated).toBe(true)
+    expect(store.historyAtMax).toBe(true)
+    expect(store.historyCanLoadMore).toBe(false)
+    // The limit tracks what the server served, not what was asked for.
+    expect(store.historyLimit).toBe(1000)
+
+    vi.mocked(api.get).mockClear()
+    await store.loadMoreHistory()
+    expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it('keeps paging while the server is still below its cap', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory()
+
+    expect(store.historyCanLoadMore).toBe(true)
+    await store.loadMoreHistory()
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=400')
+  })
+
+  it('does not latch the page cap when a newer request supersedes "show more"', async () => {
+    // `fetchHistory` bails on its seq check before touching any state when a
+    // newer request has started, so the superseded one leaves `historyRows` at
+    // its previous length — indistinguishable from "nothing more to give". It
+    // also clears `historyError`, so testing the error alone missed this and
+    // "show more" was hidden permanently while more rows still existed.
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+    const store = useProposalsStore()
+    await store.fetchHistory()
+    expect(store.historyCanLoadMore).toBe(true)
+
+    // "Show more" is in flight, and never resolves before the newer one does.
+    let release: (v: unknown) => void = () => {}
+    vi.mocked(api.get).mockImplementationOnce(
+      () => new Promise((r) => { release = r }) as never,
+    )
+    const slow = store.loadMoreHistory()
+
+    // A queue mutation forces a fresh history read, which wins.
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [historyRow()], total: 500, truncated: true, limit: 200, at_max: false,
+    } as never)
+    await store.fetchHistory({ force: true })
+
+    release({ rows: [historyRow()], total: 500, truncated: true, limit: 400, at_max: false })
+    await slow
+
+    expect(store.historyError).toBe('')
+    expect(store.historyAtMax).toBe(false)
+    expect(store.historyCanLoadMore).toBe(true)
+  })
+
+  it('scopes the history request to a workspace and refetches when it changes', async () => {
+    vi.mocked(api.get).mockResolvedValue({ rows: [historyRow()], total: 1, truncated: false } as never)
+
+    const store = useProposalsStore()
+    await store.ensureHistoryLoaded('personal')
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=200&workspace=personal')
+
+    // Same workspace, already loaded: no second request.
+    vi.mocked(api.get).mockClear()
+    await store.ensureHistoryLoaded('personal')
+    expect(api.get).not.toHaveBeenCalled()
+
+    // A different workspace is a different page on the server.
+    await store.ensureHistoryLoaded('work')
+    expect(api.get).toHaveBeenLastCalledWith('/api/proposals/history?limit=200&workspace=work')
+  })
+
+  it('keeps a history failure out of the queue error slot', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('history is unreachable'))
+
+    const store = useProposalsStore()
+    store.error = 'an unread accept failure'
+    await store.fetchHistory()
+
+    expect(store.historyError).toBe('history is unreachable')
+    expect(store.error).toBe('an unread accept failure')
   })
 })

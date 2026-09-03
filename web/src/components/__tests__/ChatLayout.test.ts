@@ -13,12 +13,14 @@ import { pendingNewChat } from '../../lib/newChat'
 
 const toggleDictation = vi.fn()
 const toggleModelPicker = vi.fn()
+const handleSendShortcut = vi.fn(() => true)
+const archiveActiveChat = vi.fn()
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleDictation, toggleModelPicker })
+    expose({ toggleDictation, toggleModelPicker, handleSendShortcut, archiveActiveChat })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -62,6 +64,9 @@ describe('ChatLayout', () => {
     window.__CIAOBOT_DESKTOP__ = undefined
     toggleDictation.mockReset()
     toggleModelPicker.mockReset()
+    handleSendShortcut.mockReset()
+    handleSendShortcut.mockReturnValue(true)
+    archiveActiveChat.mockReset()
     vi.restoreAllMocks()
   })
 
@@ -829,6 +834,381 @@ describe('ChatLayout', () => {
 
     expect(toggleModelPicker).toHaveBeenCalledOnce()
     expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  // Archive moved off Cmd+A (select-all owns it inside text fields) to
+  // Cmd+Backspace in the desktop app and Option+Backspace in the PWA, and it
+  // deliberately fires even while a text field is focused: archiving from
+  // mid-thought without clicking out is the point, and the confirm dialog
+  // archiveActiveChat raises is what makes that safe.
+  it.each([
+    ['the desktop app', true, { key: 'Backspace', metaKey: true }],
+    ['the web PWA', undefined, { key: 'Backspace', altKey: true }],
+  ] as const)('archives the open chat on Cmd/Option+Backspace in %s, even while typing', async (_label, desktopFlag, keyInit) => {
+    window.__CIAOBOT_DESKTOP__ = desktopFlag
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    // Focus sits in a text field, as it would mid-compose.
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    const event = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  // No open chat: nothing to archive, so the chord keeps its default meaning
+  // (e.g. the browser's history-back on Option+Backspace).
+  it('leaves Cmd+Backspace alone when no chat is open', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Backspace', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(archiveActiveChat).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  // Cmd/Ctrl+Enter has to reach the composer from outside it. Attaching an
+  // image or a comment leaves focus on the control that closed, so without
+  // this a message carrying only attachments could not be sent by keyboard.
+  it.each([
+    ['the desktop app', true],
+    ['the web PWA', undefined],
+  ] as const)('sends the composer draft on Cmd+Enter from outside the composer in %s', async (_label, desktopFlag) => {
+    window.__CIAOBOT_DESKTOP__ = desktopFlag
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(handleSendShortcut).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  // Nothing to send: the panel declines, and the key is left alone so it keeps
+  // whatever meaning the focused control gives it.
+  it('leaves Cmd+Enter alone when the composer declines it', async () => {
+    handleSendShortcut.mockReturnValue(false)
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(handleSendShortcut).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  // The composer and the comment popovers bind Cmd+Enter themselves, so the
+  // layout must never claim it from a text field: sending from the popover
+  // would fire alongside the popover's own save.
+  it('leaves Cmd+Enter to the focused text field', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }))
+    await nextTick()
+
+    expect(handleSendShortcut).not.toHaveBeenCalled()
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  // PinnedFilePanel renders its own comment popover outside ChatPanel, and that
+  // popover's Save/Cancel buttons are not text fields -- isTypingTarget alone
+  // would miss focus sitting on one of them. Without this, Cmd+Enter there
+  // would send the unrelated chat draft and swallow the button's own Enter
+  // activation instead of saving the file comment.
+  it('defers to an open comment popover in the pinned file panel', async () => {
+    window.__CIAOBOT_DESKTOP__ = true
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    store.pinFile('chat-1', 'src/pinned-file.ts')
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const BusyPinnedFilePanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      setup(_, { expose }) {
+        expose({ isBusyAuthoring: true })
+        return () => h('div')
+      },
+    })
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: BusyPinnedFilePanelStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(handleSendShortcut).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
     wrapper.unmount()
   })
 

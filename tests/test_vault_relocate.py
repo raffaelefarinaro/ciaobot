@@ -462,7 +462,7 @@ def test_apply_unstages_earlier_sources_when_a_later_stage_fails(
     install, config = _shared_root_install(tmp_path)
     runtime = install / ".runtime"
 
-    real_run_git = vault_relocate._run_git
+    real_run_git = vault_relocate.run_git
     adds = {"n": 0}
 
     def flaky_git(root: Path, *args: str) -> tuple[int, str]:
@@ -475,14 +475,14 @@ def test_apply_unstages_earlier_sources_when_a_later_stage_fails(
                 return (128, "fatal: simulated add failure")
         return real_run_git(root, *args)
 
-    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+    monkeypatch.setattr(vault_relocate, "run_git", flaky_git)
 
     result = apply(config, "scandit", runtime)
 
     assert result["status"] == "refused"
     assert any("could not stage" in r for r in result["refusals"])
     # The index is back to HEAD: nothing from this attempt stayed staged.
-    code, staged = vault_relocate._run_git(install, "diff", "--cached", "--name-only")
+    code, staged = vault_relocate.run_git(install, "diff", "--cached", "--name-only")
     assert code == 0
     assert staged.strip() == "", staged
 
@@ -501,7 +501,7 @@ def test_apply_reports_a_failed_partial_move_rollback(
     install, config = _shared_root_install(tmp_path)
     runtime = install / ".runtime"
 
-    real_run_git = vault_relocate._run_git
+    real_run_git = vault_relocate.run_git
     forward_calls = [0]
 
     def flaky_git(root: Path, *args: str) -> tuple[int, str]:
@@ -519,7 +519,7 @@ def test_apply_reports_a_failed_partial_move_rollback(
                 return (128, "fatal: simulated rollback failure")
         return real_run_git(root, *args)
 
-    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+    monkeypatch.setattr(vault_relocate, "run_git", flaky_git)
 
     result = apply(config, "scandit", runtime)
 
@@ -650,7 +650,7 @@ def test_undo_rolls_earlier_reversals_forward_when_a_later_one_fails(
     applied = apply(config, "scandit", runtime)
     assert applied["status"] == "relocated"
 
-    real_run_git = vault_relocate._run_git
+    real_run_git = vault_relocate.run_git
     # The apply path also runs git mv; only fail the SECOND reverse move
     # (destination -> source), once one reversal has already landed.
     state = {"reverse_calls": 0}
@@ -667,7 +667,7 @@ def test_undo_rolls_earlier_reversals_forward_when_a_later_one_fails(
                     return (128, "fatal: simulated git mv failure")
         return real_run_git(root, *args)
 
-    monkeypatch.setattr(vault_relocate, "_run_git", flaky_git)
+    monkeypatch.setattr(vault_relocate, "run_git", flaky_git)
 
     result = undo(config, "scandit", runtime)
 

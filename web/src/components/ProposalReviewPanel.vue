@@ -4,6 +4,9 @@ import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalRow } from '../lib/types'
+import { descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
+import type { ProposalMergeFallback } from '../lib/proposalKinds'
+import ProposalHistoryList from './ProposalHistoryList.vue'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -163,6 +166,70 @@ const selected = computed({
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
+// -- Queue / History tabs ---------------------------------------------------
+//
+// The two sub-views share this panel (and its workspace/kind/search filter
+// state in the store) rather than living on separate routes: switching is a
+// glance, not a navigation, and the sidebar's scope picker must not reset.
+const REVIEW_TABS = [
+  { key: 'queue' as const, label: 'Queue' },
+  { key: 'history' as const, label: 'History' },
+]
+const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+
+function tabId(key: string): string {
+  return `pr-tab-${key}`
+}
+
+function panelId(key: string): string {
+  return `pr-panel-${key}`
+}
+
+function switchTab(key: 'queue' | 'history') {
+  store.view = key
+  if (key === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
+}
+
+// Roving tabindex, mirroring ProjectView's project-tabs pattern: the bar is a
+// single Tab stop and Left/Right/Home/End move (and switch) between the two.
+function onReviewTabKeydown(event: KeyboardEvent): void {
+  if (!TAB_KEYS.includes(event.key)) return
+  const current = event.currentTarget as HTMLElement | null
+  const bar = current?.parentElement
+  if (!current || !bar) return
+  const tabs = Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'))
+  const index = tabs.indexOf(current)
+  if (index < 0) return
+  event.preventDefault()
+  let next = index
+  if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
+  else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
+  else if (event.key === 'Home') next = 0
+  else next = tabs.length - 1
+  const target = tabs[next]
+  const key = target?.dataset.tab as 'queue' | 'history' | undefined
+  if (!key) return
+  switchTab(key)
+  target.focus()
+}
+
+// Null until the ledger has loaded, and the badge is hidden while it is: a
+// count rendered before the fetch read "History 0" on a ledger with hundreds
+// of rows - the opposite of what a badge is for. `onMounted` prefetches, so
+// the wait is the first request, not the first tab switch.
+//
+// Unfiltered it reports the server's scoped total rather than the rows we
+// happen to hold: the page is capped, so a workspace with more decisions than
+// the limit showed the limit itself (200) as though that were the whole
+// ledger. Under a filter the visible count is the honest number.
+const historyCount = computed(() => {
+  if (!store.historyLoaded) return null
+  if (store.historyFiltersActive) {
+    return store.visibleHistory(projectStore.activeWorkspace).length
+  }
+  return store.historyTotal
+})
+
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
  * until each skill is reflected again.
@@ -203,22 +270,6 @@ const groups = computed(() => {
 })
 
 
-const KIND_LABELS: Record<string, string> = {
-  memory: 'memory',
-  profile: 'profile',
-  user: 'profile',
-  rehome: 're-home',
-  project: 'project',
-  people: 'people',
-  learnings: 'learnings',
-  review: 'review',
-  skill: 'skill',
-}
-
-function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind
-}
-
 /** The one line that says what this row is about.
  *
  * A re-home bullet is a paragraph of prose that reprints both paths and a CLI
@@ -234,35 +285,13 @@ function rowTitle(row: ProposalRow): string {
   return row.text
 }
 
+/** The line under the title: where an accept would write.
+ *
+ * Every kind's answer lives in its descriptor, including the re-home row's
+ * `from → to · why` form and the skill row's path.
+ */
 function rowSubtitle(row: ProposalRow): string {
-  if (isRehome(row)) {
-    const sig = row.rehome
-    const from = row.workspace
-    if (sig?.candidates?.length && sig.candidates.length > 1) {
-      return `${from} → ${sig.candidates.join(' or ')} · tags name more than one`
-    }
-    if (sig?.destination) {
-      const to = sig.destination.split('/')[0]
-      return sig.justified
-        ? `${from} → ${to} · tags back this`
-        : `${from} → ${to} · no tag backs it`
-    }
-    // A stale row is not asking anything: its cause is gone. Saying "needs a
-    // decision" made litter look identical to a real question.
-    if (sig?.stale) return `${from} · no longer applies · safe to dismiss`
-    return `${from} · no destination, needs a decision`
-  }
-  // The path, not the words "a skill proposal file". The row's whole content is
-  // in that file, and naming it is what makes "view" obviously the first thing
-  // to press.
-  if (isSkill(row)) return row.path || 'a skill proposal file'
-  // Destination kinds name where an accept writes, so say that instead of the
-  // generic region form.
-  if (row.kind === 'project') return row.target || 'no project doc named'
-  if (row.kind === 'people') return `People/${row.target || '?'}.md`
-  if (row.kind === 'learnings') return 'Workspace/Learnings.md'
-  if (row.kind === 'review') return 'no destination yet — decide what it is'
-  return `ciao:${row.region ?? row.kind}`
+  return descriptorFor(row).destination(row)
 }
 
 /** The verbose original, kept behind a disclosure rather than on the surface. */
@@ -271,17 +300,9 @@ function rowDetail(row: ProposalRow): string {
   return row.source ? `from ${row.source}` : ''
 }
 
-/** Whether an accept can do what it says.
- *
- * A skill row has no accept descriptor on the server, a re-home row with no
- * backed destination has nowhere to go, and a review row has no known
- * destination at all — accepting one would be a guess wearing a button.
- */
+/** Whether an accept can do what it says. Each kind's descriptor decides. */
 function canAccept(row: ProposalRow): boolean {
-  if (isSkill(row)) return false
-  if (isRehome(row)) return rehomeMode(row) === 'accept'
-  if (row.kind === 'review') return false
-  return true
+  return descriptorFor(row).canAccept(row)
 }
 
 const allSelected = computed(() =>
@@ -329,27 +350,12 @@ const selectedAcceptable = computed(
   () => selectedVisible.value.filter(canAccept).map(r => r.id),
 )
 
-function isRegionKind(row: ProposalRow): boolean {
-  return row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user'
-}
-
 function isRehome(row: ProposalRow): boolean {
   return row.kind === 'rehome'
 }
 
 function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
-}
-
-// How a rehome row is presented. Never a pre-filled one-click accept for a
-// destination no tag backs: a single clean signal is a plain accept, multiple
-// candidates are a picker, and no signal is a question.
-function rehomeMode(row: ProposalRow): 'accept' | 'picker' | 'question' {
-  const sig = row.rehome
-  if (!sig) return 'question'
-  if (sig.candidates.length > 1) return 'picker'
-  if (sig.justified) return 'accept'
-  return 'question'
 }
 
 async function confirmAccept(row: ProposalRow) {
@@ -359,37 +365,39 @@ async function confirmAccept(row: ProposalRow) {
     confirmLeakId.value = row.id
     return
   }
-  await acceptWithPeopleFallback(row)
+  await acceptWithFallback(row)
 }
 
 async function doAccept(row: ProposalRow, workspace = '') {
   confirmLeakId.value = ''
-  await acceptWithPeopleFallback(row, workspace)
+  await acceptWithFallback(row, workspace)
 }
 
-async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
+async function acceptWithFallback(row: ProposalRow, workspace = '') {
   // Direct accept is best-effort by design – create-only for people
   // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
   // fold-guard for projects (`ciao/web/routes_api.py:7602`), cap/region
   // for memory (`ciao/web/routes_api.py:7518`). When it refuses, falling
   // back to a chat that merges keeps the prompt self-contained and nothing
-  // breaks – the row stays queued until the merge lands.
+  // breaks – the row stays queued until the merge lands. Which refusals are
+  // expected, and what the merge chat is told, is the kind's descriptor.
   const { api } = await import('../lib/api')
   store.setBusy(row.id, true)
   try {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     await api.post(`/api/proposals/${row.id}/accept${query}`)
     await store.fetch()
+    // `store.fetch` deliberately leaves history alone, so this direct post -
+    // the only mutation that does not go through `store.act` - has to say so
+    // itself. Without it the accepted decision and the tab badge stayed stale
+    // until the next mutation or workspace switch.
+    store.invalidateHistory()
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    const isFallbackCase =
-      row.kind === 'people' && /already exists/i.test(msg) ||
-      row.kind === 'project' ||
-      row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user' ||
-      row.kind === 'learnings'
-    if (isFallbackCase) {
-      await mergeViaChat(row, msg)
+    const fallback = descriptorFor(row).fallback
+    if (fallback && fallback.when(msg)) {
+      await mergeViaChat(row, msg, fallback)
       return
     }
     store.error = msg
@@ -399,113 +407,28 @@ async function acceptWithPeopleFallback(row: ProposalRow, workspace = '') {
   }
 }
 
-async function mergeViaChat(row: ProposalRow, errorMsg: string) {
-  // Reuse the people-specific helper for its title, otherwise generic.
-  if (row.kind === 'people') return mergePeopleViaChat(row)
-  if (row.kind === 'project') return mergeProjectViaChat(row, errorMsg)
-  if (row.kind === 'memory' || row.kind === 'profile' || row.kind === 'user') return mergeMemoryViaChat(row, errorMsg)
-  if (row.kind === 'learnings') return mergeLearningsViaChat(row, errorMsg)
-  return mergePeopleViaChat(row)
-}
-
-async function mergePeopleViaChat(row: ProposalRow) {
+/** Hand a refused accept to a background chat that can merge it by hand.
+ *
+ * One function for every kind: the four that existed differed only in the chat
+ * title, the toast detail and the prompt, all three of which the descriptor now
+ * supplies.
+ */
+async function mergeViaChat(row: ProposalRow, errorMsg: string, fallback: ProposalMergeFallback) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge ${row.target || 'person'} fact`, resolutionHelper(row.id))
+    const chat = await openWorkspaceChatInBackground(
+      row.workspace,
+      fallback.chatTitle(row),
+      resolutionHelper(row.id),
+    )
     if (!chat) return
     linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, peopleMergePrompt(row))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', `${row.target || 'Person'} fact — click to open the chat`)
+    projectStore.sendMessage(chat.chat_id, fallback.prompt(row, errorMsg))
+    pushBackgroundToast(chat.chat_id, 'Merging in background', fallback.toastDetail(row))
   } finally {
     chatBusy.value = false
   }
-}
-
-async function mergeProjectViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge project fact`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, projectMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Project fact — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-async function mergeMemoryViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge memory fact`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, memoryMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Memory fact — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-async function mergeLearningsViaChat(row: ProposalRow, errorMsg: string) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Merge learning`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, learningsMergePrompt(row, errorMsg))
-    pushBackgroundToast(chat.chat_id, 'Merging in background', 'Learning — click to open the chat')
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-function peopleMergePrompt(row: ProposalRow): string {
-  const target = row.target || '?'
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it. Work in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
-    `After the note is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` so it disappears from Review (the flag records the promotion; do not delete the bullet from the file directly — that skips the outcome log). ` +
-    `If the fact is already present verbatim, just dismiss the proposal. Leave other proposals untouched. Nothing is broken – this is the expected merge path for existing person notes.`
-  )
-}
-
-function projectMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const target = row.target || 'the project doc'
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[project ${target}]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`${target}\` (vault-relative, in the ${row.workspace} workspace), merge this fact into the appropriate section without duplicating existing content, and write it back. Keep frontmatter and structure intact.\n\n` +
-    `After the doc is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\`. If the fact is already covered, run the same command without \`--promoted\`. Do not delete the bullet from the file directly — that skips the outcome log. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
-  )
-}
-
-function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const region = row.region || row.kind
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
-    `After the region is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
-  )
-}
-
-function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
-    `After the file is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss "<substring>" --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present, just dismiss. Leave other proposals untouched.`
-  )
 }
 
 /** The workspace a justified re-home row would move into. */
@@ -660,9 +583,7 @@ function discussPrompt(row: ProposalRow): string {
       'Leave the proposal queued either way; I will accept or dismiss it myself.'
     )
   }
-  const about = row.kind === 'review'
-    ? 'a fact with no decided destination'
-    : `a \`${row.kind}\` proposal`
+  const about = descriptorFor(row).discussLabel(row)
   return (
     `${about} is waiting for a decision (${where}): ${row.text}\n\n` +
     'Tell me whether this is durable and cross-session enough to keep, and where it ' +
@@ -734,13 +655,47 @@ function dismissOlder() {
 onMounted(() => {
   pruneProposalChatLinks()
   void store.fetch().then(pruneProposalChatLinks)
+  // Prefetch the ledger for the tab badge. Loading it only on the tab switch
+  // meant the badge never appeared until the tab had been opened once, which
+  // is the one moment it has nothing left to tell you.
+  void store.ensureHistoryLoaded(projectStore.activeWorkspace)
 })
+
+// Re-scope the ledger when the workspace changes. `ProposalHistoryList` has
+// its own watcher, but it is `v-if`-ed out while the Queue tab is showing, so
+// switching workspace from there left the History badge reporting the previous
+// workspace's total until the tab was opened or a queue mutation refetched.
+watch(
+  () => projectStore.activeWorkspace,
+  ws => { void store.ensureHistoryLoaded(ws) },
+)
 </script>
 
 <template>
   <div class="proposal-review">
     <header class="pr-head">
-      <p class="pr-summary">
+      <!-- A tablist, not a nav landmark: this switches sub-views in place. -->
+      <div class="pr-tabs" role="tablist" aria-label="Proposal review">
+        <button
+          v-for="tab in REVIEW_TABS"
+          :key="tab.key"
+          :id="tabId(tab.key)"
+          type="button"
+          class="pr-tab"
+          :class="{ active: store.view === tab.key }"
+          role="tab"
+          :aria-selected="store.view === tab.key"
+          :aria-controls="panelId(tab.key)"
+          :tabindex="store.view === tab.key ? 0 : -1"
+          :data-tab="tab.key"
+          @click="switchTab(tab.key)"
+          @keydown="onReviewTabKeydown"
+        >
+          {{ tab.label }}
+          <span v-if="tab.key === 'history' && historyCount !== null" class="pr-tab-count">{{ historyCount }}</span>
+        </button>
+      </div>
+      <p v-if="store.view === 'queue'" class="pr-summary">
         <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
         <button
           v-if="store.kindFilter !== 'all' || store.search"
@@ -751,6 +706,14 @@ onMounted(() => {
       </p>
     </header>
 
+    <ProposalHistoryList
+      v-if="store.view === 'history'"
+      :id="panelId('history')"
+      role="tabpanel"
+      :aria-labelledby="tabId('history')"
+    />
+
+    <div v-else :id="panelId('queue')" role="tabpanel" :aria-labelledby="tabId('queue')">
     <p class="pr-hint">
       This is a fallback queue, not a list of every new fact: confident facts are
       applied when a chat is archived. Daily Memory curation retries addressable
@@ -941,6 +904,7 @@ onMounted(() => {
       </label>
       <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
     </footer>
+    </div>
   </div>
 </template>
 
@@ -999,27 +963,49 @@ onMounted(() => {
   padding: var(--space-4) 0;
 }
 
-/* Segmented kind filter, matching the memory view's Graph/List control. */
-.pr-seg {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
+/* Queue / History tablist, matching ProjectView's project-tabs underline
+   style so switching sub-views reads the same way across the app. */
+.pr-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-2);
+  overflow-x: auto;
 }
 
-.pr-seg button {
+.pr-tab {
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
   border: 0;
+  border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--fg2);
-  padding: 0.25rem 0.7rem;
-  font-size: 0.8rem;
   cursor: pointer;
+  font: 600 var(--text-sm) var(--font);
+  white-space: nowrap;
 }
-
-.pr-seg button.active {
-  background: var(--bg3);
+.pr-tab:hover { color: var(--fg); background: var(--bg3); }
+.pr-tab.active {
+  border-bottom-color: var(--accent);
   color: var(--fg);
 }
+.pr-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.pr-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--text-xs) + var(--space-2));
+  min-height: calc(var(--text-xs) + var(--space-1));
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.pr-tab.active .pr-tab-count { color: var(--fg); }
 
 /* The batch bar appears only with a selection, so it never occupies space while
    reading. It is sticky, so it must be OPAQUE and above the rows: it used to

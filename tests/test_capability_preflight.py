@@ -121,8 +121,8 @@ async def test_preflight_question_shape_and_cancel(tmp_path: Path, monkeypatch) 
     """A non-vision model with images pauses on a well-formed question.
 
     The current model leads the candidates as the disabled entry, followed by
-    the models opencode states accept images (capped at three). Cancel closes
-    the turn with the system bubble: no dispatch, no result.
+    every model opencode states accepts images. Cancel closes the turn with
+    the system bubble: no dispatch, no result.
     """
     _stub_catalog(monkeypatch)
     pcm = _make_manager(tmp_path)
@@ -162,8 +162,8 @@ async def test_preflight_question_shape_and_cancel(tmp_path: Path, monkeypatch) 
         "label": _TEXT_ONLY,
         "disabled": True,
     }
-    # Only models opencode positively states accept images are offered, capped
-    # at three. `test/unstated` is omitted: an unknown answer is good enough to
+    # Only models opencode positively states accept images are offered.
+    # `test/unstated` is omitted: an unknown answer is good enough to
     # let the current turn through, but not to recommend a switch.
     assert [c["id"] for c in q["candidates"][1:]] == [
         "test/sees",

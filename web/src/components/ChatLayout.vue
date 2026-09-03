@@ -138,7 +138,7 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <PinnedFilePanel :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
@@ -295,9 +295,10 @@ const fileViewer = useFileViewerStore()
 // `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
 // file). Both copies must carry the ref: only one is ever mounted, so the ref
 // holds whichever that is, but tagging only the split-view copy left Cmd+D,
-// Cmd+A and the home arrow keys silently dead in the far more common
+// Cmd+Backspace and the home arrow keys silently dead in the far more common
 // no-pinned-file layout.
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
+const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
@@ -743,9 +744,11 @@ function closeChat() {
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
 // Bound in both the PWA and the desktop app, but on different modifiers: the
-// Tauri webview owns Cmd+T / Cmd+D / Cmd+A, while a browser tab has already
-// spent them on new-tab / bookmark / select-all, so the PWA uses Option
-// instead. See onShortcutKeydown for the pairs.
+// Tauri webview owns Cmd+T / Cmd+D, while a browser tab has already spent
+// them on new-tab / bookmark, so the PWA uses Option instead. See
+// onShortcutKeydown for the pairs. Archive deliberately moved off Cmd+A
+// (which select-all owns inside text fields) to Cmd/Option+Backspace, which
+// fires everywhere including while typing.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
@@ -964,6 +967,26 @@ function onShortcutKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
 
+  // Cmd/Ctrl+Enter sends the composer draft from anywhere in the chat view.
+  // The composer's own keydown covers the focused case; this covers the press
+  // straight after attaching an image or a comment, when focus sits on the
+  // control that just closed rather than the textarea. Text fields keep the
+  // chord -- the composer and the comment popovers each handle it themselves
+  // while focus is in their textarea -- and shortcutsActive already excludes
+  // the file viewer and the dialogs, so nothing sends from behind them.
+  //
+  // A comment popover's own Save/Cancel buttons are not text fields, so
+  // isTypingTarget alone would miss focus sitting there: this would send the
+  // unrelated chat draft and swallow the button's own Enter activation.
+  // PinnedFilePanel's popover lives outside ChatPanel, so it needs its own
+  // check; ChatPanel's own popovers are guarded inside handleSendShortcut.
+  if (mod && !alt && e.key === 'Enter') {
+    if (isTypingTarget(e.target) || e.defaultPrevented || !store.activeChat) return
+    if (pinnedFilePanelRef.value?.isBusyAuthoring) return
+    if (chatPanelRef.value?.handleSendShortcut?.()) e.preventDefault()
+    return
+  }
+
   // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
   // choose the workspace the new chat should live in; Enter creates it in the
   // active workspace's General project.
@@ -981,10 +1004,13 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Archive: Cmd+A (Desktop) or Option+A (Web/PWA). Skip while typing so Cmd+A/Alt+A keeps its
-  // select-all meaning inside text fields.
-  if ((isDesktop && mod && (e.key === 'a' || e.key === 'A')) || (!isDesktop && alt && (e.key === 'a' || e.key === 'A'))) {
-    if (isTypingTarget(e.target) || !store.activeChat) return
+  // Archive: Cmd+Backspace (Desktop) or Option+Backspace (Web/PWA). Unlike
+  // the old Cmd+A it also fires while a text field is focused — that is the
+  // point: archive from mid-thought without clicking out. The confirm dialog
+  // from archiveActiveChat is what makes this safe to fire while typing, and
+  // it gates on shortcutsActive anyway, so the dialog swallows further keys.
+  if ((isDesktop && mod && !alt && e.key === 'Backspace') || (!isDesktop && alt && !mod && e.key === 'Backspace')) {
+    if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return

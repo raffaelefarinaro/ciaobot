@@ -103,10 +103,13 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     assert settings["skillOverrides"]["loop"] == "off"
     # A background Bash process dies when the SDK turn ends and Claude only
     # reports that stop after the next user message. The managed provider
-    # must install the hook that forces those calls to stay in the turn.
+    # must install the hook that forces those calls to stay in the turn,
+    # plus the hook that denies the CLI's Monitor watcher (same lifetime
+    # problem): both long-running paths must route through
+    # background_run_start instead.
     bash_hooks = options.hooks["PreToolUse"]
-    assert len(bash_hooks) == 1
-    assert bash_hooks[0].matcher == "Bash"
+    matchers = {hook.matcher for hook in bash_hooks}
+    assert matchers == {"Bash", "Monitor"}
 
 
 @pytest.mark.asyncio
@@ -975,3 +978,77 @@ def test_opencode_auto_mode_still_pre_approves_the_control_plane() -> None:
     allowed = {r["permission"] for r in rules if r.get("action") == "allow"}
     assert "ciaobot_schedule" in allowed
     assert "ciaobot_chat_delete" not in allowed
+
+
+@pytest.mark.asyncio
+async def test_drain_marks_cli_disconnected_on_transport_error(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A dead CLI transport must flip cli_connected, not just end the drain."""
+    from claude_agent_sdk import CLIConnectionError
+
+    class DeadClient:
+        async def receive_messages(self):
+            raise CLIConnectionError("process died")
+            yield  # pragma: no cover
+
+    claude_provider._client = DeadClient()
+    claude_provider._connected = True
+    assert claude_provider.cli_connected is True
+
+    async for _ in claude_provider.drain_events():
+        pass
+
+    assert claude_provider.cli_connected is False
+    assert claude_provider._client is None
+
+
+@pytest.mark.asyncio
+async def test_drain_keeps_connection_on_unhandled_result(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """An odd SDK result shape ends the drain but the client is still usable."""
+    from ciao.models import StreamEvent
+
+    class OddResultClient:
+        async def receive_messages(self):
+            raise Exception("unhandled result shape")
+            yield  # pragma: no cover
+
+    provider = claude_provider
+    provider._client = OddResultClient()
+    provider._connected = True
+
+    events = []
+    async for event in provider.drain_events():
+        events.append(event)
+
+    assert events == []
+    assert provider.cli_connected is True
+    assert provider._client is not None
+    _ = StreamEvent  # imported shape parity with real drain payloads
+
+
+@pytest.mark.asyncio
+async def test_drain_keeps_connection_on_message_parse_error(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A bad payload from a still-alive CLI must not kill the connection."""
+    from claude_agent_sdk._errors import MessageParseError
+
+    class ParseErrorClient:
+        async def receive_messages(self):
+            raise MessageParseError("bad payload", data=None)
+            yield  # pragma: no cover
+
+    provider = claude_provider
+    provider._client = ParseErrorClient()
+    provider._connected = True
+
+    events = []
+    async for event in provider.drain_events():
+        events.append(event)
+
+    assert events == []
+    assert provider.cli_connected is True
+    assert provider._client is not None

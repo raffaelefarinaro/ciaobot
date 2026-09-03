@@ -29,6 +29,7 @@ ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
+ciao critique --input plan.md --type plan
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
@@ -239,6 +240,7 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
+ciao critique --input plan.md --type plan # Multi-model adversarial review panel
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
 cd web && npm test             # Frontend unit tests
@@ -257,7 +259,7 @@ schedule is the job's *sole* trigger: such a job is hidden on machines where
 that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
-For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests.
+For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 For sidebar chat-group changes, verify that a chat's subagent disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its subagent rows, and automatically reopens when the open route is one of those subagents.
@@ -393,6 +395,7 @@ Some packaged schedules are multi-step workflows (load state, gate, model call, 
 - `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`, `retention`.
 - `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
 - `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
+- `subagent` nodes accept an opt-in `payload['requires']` post-condition list: each item is a file path that must exist and be non-empty after the node ran, or `{"path": ..., "contains": "<regex>"}` where at least one line must match. Paths may reference ctx like the prompt and resolve against `payload['cwd']`; `contains` regexes are used verbatim (never ctx-formatted, so quantifiers like `{2}` are safe). Exit 0 with unmet requirements fails the node (guards against an unauthenticated subagent silently doing nothing); DAGs without `requires` are unchanged.
 
 Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 

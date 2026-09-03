@@ -326,8 +326,15 @@ def rehearse(
     return payload
 
 
-def _run_git(root: Path, *args: str) -> tuple[int, str]:
-    """Run one git command in ``root``, returning (exit code, combined output)."""
+def run_git(root: Path, *args: str) -> tuple[int, str]:
+    """Run one git command in ``root``, returning (exit code, combined output).
+
+    Not the same helper as :func:`ciao.vault_migrate_links.run_git`, which
+    returns stdout alone and swallows OSError. This one folds stderr in (the
+    reroot rails report git's own error text back to the operator) and lets a
+    missing git raise. Keep them separate: unifying them would change what one
+    set of callers sees.
+    """
     import subprocess
 
     proc = subprocess.run(
@@ -362,7 +369,7 @@ def dirty_tracked_paths(install_root: Path, *relatives: str) -> list[str]:
     ]
     if not paths:
         return []
-    code, out = _run_git(
+    code, out = run_git(
         install_root, "status", "--porcelain", "--untracked-files=no", "--", *paths
     )
     if code != 0 or not out:
@@ -483,7 +490,7 @@ def apply(
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
-    code, head = _run_git(install_root, "rev-parse", "HEAD")
+    code, head = run_git(install_root, "rev-parse", "HEAD")
     payload["git_head_before"] = head if code == 0 else ""
 
     # Read the shared guide before it moves. The split is computed here so a
@@ -530,12 +537,12 @@ def apply(
                 pass
             pruned_empty.append(move.source)
             continue
-        code, out = _run_git(install_root, "mv", move.source, move.destination)
+        code, out = run_git(install_root, "mv", move.source, move.destination)
         if code != 0:
             # Roll back what this run already moved, so the install is never left
             # half-rooted, then record why it stopped.
             for done in reversed(applied):
-                _run_git(install_root, "mv", done["destination"], done["source"])
+                run_git(install_root, "mv", done["destination"], done["source"])
             payload["status"] = "refused"
             payload["refused"] = True
             payload["refusals"] = [f"git mv failed for {move.source}: {out}"]
@@ -583,7 +590,7 @@ def apply(
             # Stage the removal so the migration's git state is self-consistent and
             # whoever commits it does not carry two ghost entries.
             tracked = (
-                _run_git(install_root, "ls-files", "--error-unmatch", "--", relative)[0] == 0
+                run_git(install_root, "ls-files", "--error-unmatch", "--", relative)[0] == 0
             )
             target = backup_dir / Path(relative).name
             # `Path.replace` is os.rename, which fails with EXDEV when the
@@ -591,7 +598,7 @@ def apply(
             # can put it anywhere. shutil.move falls back to copy+unlink.
             shutil.move(str(source), str(target))
             if tracked:
-                _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+                run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
             stashed.append(
                 {
                     "source": relative,
@@ -678,11 +685,11 @@ def apply(
             # tracked key, and one of those ahead of the failure used to kill
             # the unwind itself with a KeyError.
             if entry.get("tracked"):
-                _run_git(install_root, "add", "--", entry["source"])
+                run_git(install_root, "add", "--", entry["source"])
         if removed_vault:
             vault_root.mkdir(parents=True, exist_ok=True)
         for done in reversed(applied):
-            _run_git(install_root, "mv", done["destination"], done["source"])
+            run_git(install_root, "mv", done["destination"], done["source"])
         # What the run itself wrote comes back out, or the leftovers keep every
         # destination root non-empty and the next attempt refuses forever. Only
         # recorded paths, never a pattern.
@@ -820,7 +827,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             # Re-stage only what WAS tracked. `git add` on a file that was
             # untracked before would newly track it, which is not a restoration.
             if entry.get("tracked"):
-                _run_git(install_root, "add", "--", entry["source"])
+                run_git(install_root, "add", "--", entry["source"])
             restored.append(entry["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,
@@ -839,7 +846,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             # is gone, and `git mv` of any ancestor directory then fails with
             # "bad source" — which is exactly how an undo stalled halfway on the
             # reference install.
-            _run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+            run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
     source_dir = install_root / _SKILLS_SRC
@@ -862,7 +869,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             # Same reason as the created files: once the migration is committed
             # everything under here is tracked, so the index has to follow the
             # worktree or `git mv` of an ancestor fails.
-            _run_git(install_root, "rm", "-r", "--cached", "--quiet", "--", relative)
+            run_git(install_root, "rm", "-r", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
 
@@ -882,7 +889,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             already.append(entry["source"])
             continue
         source.parent.mkdir(parents=True, exist_ok=True)
-        code, out = _run_git(install_root, "mv", entry["destination"], entry["source"])
+        code, out = run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
             return {
                 "status": "failed",
@@ -1577,10 +1584,10 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["status"] = "no_install_root"
         return out
 
-    code, top = _run_git(root, "rev-parse", "--show-toplevel")
+    code, top = run_git(root, "rev-parse", "--show-toplevel")
     inside = code == 0 and top.strip() != ""
     if inside:
-        head_code, head = _run_git(root, "rev-parse", "HEAD")
+        head_code, head = run_git(root, "rev-parse", "HEAD")
         if head_code == 0 and head.strip():
             out["status"] = "existing"
             out["commit"] = head.strip()
@@ -1588,7 +1595,7 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["status"] = "seeded_empty_repo"
     else:
         _write_snapshot_gitignore(root)
-        init_code, init_out = _run_git(root, "init", "-b", "main")
+        init_code, init_out = run_git(root, "init", "-b", "main")
         if init_code != 0:
             out["status"] = "init_failed"
             out["error"] = init_out.strip()
@@ -1596,12 +1603,12 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["created_repo"] = True
         out["status"] = "created"
 
-    add_code, add_out = _run_git(root, "add", "-A")
+    add_code, add_out = run_git(root, "add", "-A")
     if add_code != 0:
         out["status"] = "add_failed"
         out["error"] = add_out.strip()
         return out
-    commit_code, commit_out = _run_git(
+    commit_code, commit_out = run_git(
         root,
         "-c",
         "user.name=Ciaobot",
@@ -1615,7 +1622,7 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["status"] = "commit_failed"
         out["error"] = commit_out.strip()
         return out
-    head_code, head = _run_git(root, "rev-parse", "HEAD")
+    head_code, head = run_git(root, "rev-parse", "HEAD")
     out["commit"] = head.strip() if head_code == 0 else ""
     return out
 

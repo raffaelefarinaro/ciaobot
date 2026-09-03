@@ -5,10 +5,12 @@ Three SDK features worth knowing when you touch this file:
 - ``fallback_model``: picked by ``_fallback_model_for(primary)``. Fable →
   Opus → Sonnet → Haiku → none. Keeps schedules alive when the primary tier is
   rate-limited.
-- ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn.
-  Workspace/project/date/entity context is already supplied by the shared
-  request capsule, so Claude does not receive a duplicate UserPromptSubmit
-  injection.
+- ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn
+  and denies detached shell invocations (``nohup … &``) and ``Monitor`` so
+  long-running work goes through the managed ``background_run_start`` MCP
+  tool. Workspace/project/date/entity context is already supplied by the
+  shared request capsule, so Claude does not receive a duplicate
+  UserPromptSubmit injection.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
   ``.claude/skills/``, ``.claude/agents/``, and ``.claude/commands/`` (including
   ciao-native commands like ``/remember``).
@@ -73,6 +75,7 @@ from ciao.execution_modes import (
 from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import (
     build_foreground_bash_hook,
+    build_monitor_deny_hook,
 )
 from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
@@ -555,9 +558,16 @@ class ClaudeProvider(BaseSDKProvider):
                 # Ending the turn kills them, and Claude does not report that
                 # stop until the next turn resumes the session. Keep Bash in
                 # the active turn so the UI receives a real terminal result.
+                # Detached launches (nohup … &, setsid) and the Monitor
+                # watcher are denied outright: they die with the CLI
+                # subprocess and never wake the chat. background_run_start
+                # is the managed path that survives reconnects.
                 "PreToolUse": [HookMatcher(
                     matcher="Bash",
                     hooks=[build_foreground_bash_hook()],
+                ), HookMatcher(
+                    matcher="Monitor",
+                    hooks=[build_monitor_deny_hook()],
                 )],
             },
             # Auto mode's classifier handles most tool calls silently, but
@@ -700,6 +710,11 @@ class ClaudeProvider(BaseSDKProvider):
         """True when a connected client exists to drain between turns."""
         return self._client is not None and self._connected
 
+    @property
+    def cli_connected(self) -> bool:
+        """True while the persistent CLI subprocess this provider owns is alive."""
+        return self._client is not None and self._connected
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield SDK events arriving *between* turns until cancelled.
 
@@ -734,7 +749,27 @@ class ClaudeProvider(BaseSDKProvider):
                 async for msg in client.receive_messages():
                     for event in self._convert_message(msg):
                         merged.put_nowait(event)
+            except (CLIConnectionError, ProcessError):
+                logger.debug("Between-turns drain ended on SDK error", exc_info=True)
+                # The transport is gone (the CLI process died between turns).
+                # Only these two mean a dead process: ClaudeSDKError also
+                # covers MessageParseError, which is a bad payload from a
+                # still-alive CLI and must not kill the connection. Mirror
+                # disconnect()'s state clearing minus the awaited client
+                # call — we are inside the consumer task, so a disconnect()
+                # await here would deadlock the drain. _ensure_connected
+                # rebuilds the client on the next turn, exactly as after a
+                # disconnect(); leaving _connected True would make
+                # cli_connected lie to the CLI-task watcher.
+                self._client = None
+                self._connected = False
+                self._session_id = None
+                self._pending_quota = {}
+                self._mcp_token = ""
+                self._reset_settings()
             except _CLAUDE_OP_ERRORS:
+                # Other typed SDK errors (e.g. MessageParseError) are not
+                # transport death; end the drain, keep the client usable.
                 logger.debug("Between-turns drain ended on SDK error", exc_info=True)
             except Exception:
                 # The SDK raises bare ``Exception`` for some result shapes

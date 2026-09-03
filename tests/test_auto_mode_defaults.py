@@ -30,8 +30,13 @@ def test_chat_info_default_mode_is_auto() -> None:
     assert chat.mode == "auto"
 
 
-def test_schedule_default_mode_is_auto() -> None:
-    """Scheduled runs also go through the classifier."""
+def test_schedule_default_mode_inherits() -> None:
+    """A schedule pins no mode: "" resolves to the operator's per-provider pin
+    at dispatch, the same setting a hand-opened chat on that provider obeys.
+
+    It used to default to "auto", which is truthy and therefore an override,
+    not a default — a routine on a provider pinned to `bypass` still stamped
+    its chat `auto`, and the inheritance fallback behind it was dead code."""
     sched = ScheduleEntry(
         schedule_id="s1",
         daily_time_utc="09:00",
@@ -39,7 +44,7 @@ def test_schedule_default_mode_is_auto() -> None:
         chat_id=0,
         created_at="2026-04-20T00:00:00Z",
     )
-    assert sched.mode == "auto"
+    assert sched.mode == ""
 
 
 def test_bridge_config_default_claude_mode_is_auto() -> None:
@@ -62,3 +67,45 @@ def test_config_ignores_legacy_mode_env() -> None:
         "CLAUDE_PERMISSION_MODE": "bypassPermissions",
     })
     assert config.claude_mode == "auto"
+
+
+def test_schedule_chat_is_stamped_with_the_providers_pinned_mode(tmp_path) -> None:
+    """The end of the chain the empty default unblocks.
+
+    A routine chat is created with the entry's mode, so a hardcoded "auto" on
+    the entry was stamped onto the chat and the operator's Settings -> Providers
+    pin never applied. The chat then disagreed with its own unattended run
+    (which `_effective_mode_for_chat` forces to bypass), and on opencode a reply
+    to that chat rotated the session — a session's permission rules are fixed
+    when it is created.
+    """
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    config.provider_default_modes = {"opencode": "bypass", "claude": "auto"}
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("General", "personal")
+
+    inherited = pcm.create_chat(
+        project.project_id, title="routine", mode="", provider="opencode"
+    )
+    assert inherited.mode == "bypass"
+
+    explicit = pcm.create_chat(
+        project.project_id, title="pinned", mode="plan", provider="opencode"
+    )
+    assert explicit.mode == "plan", "an explicit mode still wins"

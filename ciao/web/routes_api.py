@@ -716,7 +716,10 @@ def _local_session_jsonl_paths(
 ) -> list[Path]:
     """Find local Claude Code JSONL files for ``session_id``."""
     try:
-        from ciao.transcripts import _claude_projects_dir
+        from ciao.transcripts import (
+            _claude_projects_dir,
+            _global_session_matches,
+        )
     except ImportError:
         return []
     paths: list[Path] = []
@@ -730,9 +733,14 @@ def _local_session_jsonl_paths(
     # scan so callers that supply nothing behave exactly as today.
     if agent_root is not None:
         return paths
-    projects_root = Path.home() / ".claude" / "projects"
+    # Sweep every cross-cwd match, not just the first: a session resumed or
+    # copied under another cwd can have subagent progress records spread
+    # across the files, and _local_subagent_transcripts reads them all. The
+    # listing is cached (transcripts._global_session_matches) so this costs
+    # one walk per TTL window, not one per poll — and a miss re-scans
+    # (rate-limited) so a session created mid-window is not missed.
     try:
-        for path in projects_root.glob(f"*/{session_id}.jsonl"):
+        for path in _global_session_matches(session_id):
             if path not in paths:
                 paths.append(path)
     except OSError:
@@ -785,9 +793,24 @@ def _local_subagent_transcripts(
     grouped: dict[str, list[dict]] = {}
 
     try:
-        nested_paths = sorted(projects_root.glob(f"*/{session_id}/subagents/*.jsonl"))
+        # The projects dir holds one slug folder per cwd; a bare glob over
+        # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
+        # dirs the cached listing already knows, so a stale-slug pileup
+        # cannot turn this fallback into a multi-second scandir storm.
+        candidate_dirs = [
+            entry
+            for entry in projects_root.iterdir()
+            if entry.is_dir() and (entry / session_id / "subagents").is_dir()
+        ]
     except OSError:
-        nested_paths = []
+        candidate_dirs = []
+    nested_paths: list[Path] = []
+    for entry in candidate_dirs:
+        subagents_dir = entry / session_id / "subagents"
+        try:
+            nested_paths.extend(sorted(subagents_dir.glob("*.jsonl")))
+        except OSError:
+            continue
     for path in nested_paths:
         msgs = _read_jsonl_messages(path)
         if msgs:
@@ -4395,8 +4418,23 @@ async def workspace_html(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
-    return FileResponse(
-        resolved,
+    # The bridge script is what makes the rendered page commentable: it watches
+    # selections inside the sandboxed frame and posts anchors to the panel via
+    # postMessage — the only channel an opaque-origin frame has. Inline script
+    # is already permitted ('unsafe-inline' is load-bearing for artifacts), and
+    # a fragment without <head> still gets the bridge prepended. Injecting
+    # model-authored text is not a concern: we append our own markup, never
+    # user content.
+    from ciao.web.artifact_bridge import inject_bridge
+
+    # Decode leniently rather than with the default strict codec: a workspace
+    # can hold a cp1252/latin-1 HTML export, and a strict decode raises inside
+    # the handler for a file that used to stream fine as a FileResponse. A
+    # replacement char in one artifact beats a 500 for the whole page.
+    source = resolved.read_bytes().decode("utf-8", errors="replace")
+
+    return Response(
+        content=inject_bridge(source),
         media_type="text/html; charset=utf-8",
         headers={
             "Content-Security-Policy": _ARTIFACT_CSP,
@@ -5379,12 +5417,13 @@ def _enrich_schedule(
     elif web_chat_id and pcm:
         chat = pcm.get_chat(web_chat_id)
         entry_dict["context_label"] = chat.title if chat else web_chat_id
-        # An interval entry whose chat was archived or deleted is still
-        # dispatchable while its project resolves — the run continues in a
-        # replacement chat — so do not mark it unavailable and send the user to
-        # re-pick a target they do not need to change.
+        # A chat-bound entry whose chat was archived or deleted is still
+        # dispatchable on any cadence while its project resolves — the run
+        # continues in a replacement chat (fork or fresh, prepare_schedule_chat
+        # re-homes every cadence now) — so do not mark it unavailable and send
+        # the user to re-pick a target they do not need to change.
         entry_dict["context_available"] = chat is not None or (
-            is_interval(entry) and pcm.resolve_automation_project(entry) is not None
+            pcm.resolve_automation_project(entry) is not None
         )
     else:
         entry_dict["context_label"] = ""
@@ -5485,7 +5524,10 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
             model=model,
         ) as handle:
             result = await backfill_insights_task(
-                config, mode="both", model_override=model,
+                config,
+                mode="both",
+                model_override=model,
+                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
             )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
@@ -5502,7 +5544,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
 
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
-    state = request.app.state.state_store
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
@@ -5512,9 +5553,11 @@ async def create_schedule(request: Request) -> JSONResponse:
     # Persist only explicit overrides. Empty model/provider values mean
     # "inherit the selected workspace" and are resolved afresh at dispatch
     # time, so changing a workspace default also changes future runs.
-    ctx = ChatContext(chat_id=0)
     model = (body.get("model") or "").strip()
-    mode = state.get_mode(ctx)
+    # Left unset on purpose. The form offers no permission-mode choice, so
+    # capturing one here froze whatever the Telegram context happened to be on
+    # into the entry; mode inherits at dispatch like model and provider do.
+    mode = ""
 
     frequency = body.get("frequency", "weekly")
     if frequency not in FREQUENCIES:
@@ -5846,13 +5889,14 @@ async def create_loop(request: Request) -> JSONResponse:
 
     project_id = getattr(chat, "project_id", "") or ""
     project = pcm.get_project(project_id) if project_id else None
-    state = request.app.state.state_store
     entry = sm.create(
         daily_time_utc="",
         prompt=prompt,
-        # Empty model/mode is what makes each run inherit the target chat.
+        # Empty model/mode is what makes each run inherit the target chat, as
+        # the comment always said — it used to freeze the Telegram context's
+        # mode into the entry instead, which is a different surface's state.
         model="",
-        mode=state.get_mode(ChatContext(chat_id=0)),
+        mode="",
         chat_id=0,
         frequency=INTERVAL_FREQUENCY,
         interval_minutes=interval_minutes,
@@ -6546,23 +6590,26 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
     # responsive and never reaches out to GitHub.
-    written = await asyncio.to_thread(
-        functools.partial(
-            setup_workspace,
-            workspace,
-            auth_token=password,
-            auth_required=True,
-            push_contact=push_contact,
-            vault_root=str(body.get("vault_root", "")).strip() or None,
-            vault_mode=vault_mode,
-            workspace_name=workspace_name,
-            default_provider=default_provider,
-            python_path=str(body.get("python", "")).strip() or None,
-            port=port,
-            launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-            app_dir=str(body.get("app_dir", "")).strip() or None,
+    try:
+        written = await asyncio.to_thread(
+            functools.partial(
+                setup_workspace,
+                workspace,
+                auth_token=password,
+                auth_required=True,
+                push_contact=push_contact,
+                vault_root=str(body.get("vault_root", "")).strip() or None,
+                vault_mode=vault_mode,
+                workspace_name=workspace_name,
+                default_provider=default_provider,
+                python_path=str(body.get("python", "")).strip() or None,
+                port=port,
+                launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
+                app_dir=str(body.get("app_dir", "")).strip() or None,
+            )
         )
-    )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
     # and nothing else tells the fresh process where setup landed — without
@@ -7771,6 +7818,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                         "destination": signal["destination"],
                         "candidates": signal["candidates"],
                         "justified": signal["justified"],
+                        # Whether the bullet outlived its cause. Dropping this
+                        # field made a stale row render identically to a
+                        # genuine "needs a decision" one in the PWA, which is
+                        # exactly what `_rehome_lookup` computes it to prevent.
+                        "stale": bool(signal.get("stale")),
                         "reason": signal["reason"],
                     }
                 rows.append(row)
@@ -7882,6 +7934,87 @@ async def list_proposals(request: Request) -> JSONResponse:
     return JSONResponse({"rows": rows})
 
 
+_HISTORY_DEFAULT_LIMIT = 200
+_HISTORY_MAX_LIMIT = 1000
+
+
+async def proposals_history(request: Request) -> JSONResponse:
+    """Every recorded proposal decision across workspaces, newest first.
+
+    Reads the same per-workspace decision sidecar :func:`record_dismissal`
+    and :func:`record_promotion` write (``Memory-Proposals.dismissed.jsonl``),
+    which now carries ``via`` (who decided: the operator through the PWA, the
+    curation agent, or the archive-time auto-promoter), a ``destination``, and
+    an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
+    the read side of the review page's History tab: what was accepted or
+    dismissed, by whom, and what the overnight pipeline added or skipped on
+    its own.
+    """
+    from ciao.memory_proposals import history_row_id, read_decisions
+
+    config = request.app.state.config
+    workspace_filter = request.query_params.get("workspace", "").strip()
+    action_filter = request.query_params.get("action", "").strip()
+    if action_filter and action_filter not in {"accepted", "dismissed"}:
+        return JSONResponse(
+            {"error": "action must be accepted|dismissed"}, status_code=400
+        )
+    try:
+        requested = int(request.query_params.get("limit", _HISTORY_DEFAULT_LIMIT))
+    except ValueError:
+        return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+    requested = max(1, requested)
+    limit = min(requested, _HISTORY_MAX_LIMIT)
+
+    rows: list[dict[str, Any]] = []
+    # Two registered names can resolve to one vault root (a ``vault_root: "."``
+    # entry, or the legacy entity layout), and then they share a sidecar. Read
+    # each sidecar once, under the first name that claims it, or every decision
+    # in it shows up twice and ``total`` double-counts.
+    seen: set[str] = set()
+    for workspace in config.workspace_names():
+        if workspace_filter and workspace != workspace_filter:
+            continue
+        queue = _proposals_file(config, workspace)
+        try:
+            key = str(queue.resolve())
+        except OSError:
+            key = str(queue)
+        if key in seen:
+            continue
+        seen.add(key)
+        for entry in read_decisions(queue):
+            if action_filter and entry["action"] != action_filter:
+                continue
+            row = dict(entry)
+            row["workspace"] = workspace
+            row["id"] = history_row_id(entry, workspace)
+            # Read-side disambiguators for the id only; not part of the contract.
+            row.pop("seq", None)
+            row.pop("log", None)
+            rows.append(row)
+
+    # Newest first; undated legacy rows (empty ts) sort last within that order.
+    rows.sort(key=lambda r: r["ts"], reverse=True)
+    total = len(rows)
+    # ``limit`` is the clamped value actually served, so ``truncated`` stays
+    # honest about rows existing beyond the page. ``at_max`` is what tells the
+    # client to stop asking: past the cap a wider limit returns the same page,
+    # and a "show more" button wired to ``truncated`` alone stayed visible and
+    # did nothing forever. It keys off the served limit reaching the cap, not
+    # ``requested > limit`` — a request for exactly the cap is already at it,
+    # and reporting False there bought one pointless full-page refetch.
+    return JSONResponse(
+        {
+            "rows": rows[:limit],
+            "total": total,
+            "truncated": total > limit,
+            "limit": limit,
+            "at_max": limit >= _HISTORY_MAX_LIMIT,
+        }
+    )
+
+
 def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Map ids to removable file contexts, or return an error.
 
@@ -7926,6 +8059,7 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         # a failed write must not leave phantom dismissals in the tally.
         swept_kinds: list[str] = []
         swept_texts: list[str] = []
+        swept_sources: list[str] = []
         for raw_line in lines:
             m = _SECTION_DATE_RE.match(raw_line)
             if m:
@@ -7938,17 +8072,27 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 changed = True
                 swept_kinds.append(bullet.kind)
                 swept_texts.append(bullet.text)
+                swept_sources.append(bullet.source)
                 continue
             keep.append(raw_line)
         if changed:
             queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
             from ciao.memory_proposals import record_dismissal
 
-            for swept_kind, swept_text in zip(swept_kinds, swept_texts):
+            for swept_kind, swept_text, swept_source in zip(
+                swept_kinds, swept_texts, swept_sources
+            ):
                 # Expiry is a decision too: without the text in the dedupe
                 # history, a curator pass that re-reads the same transcript
                 # re-files the fact the operator just let expire.
-                record_dismissal(queue, text=swept_text, kind=swept_kind)
+                record_dismissal(
+                    queue,
+                    text=swept_text,
+                    kind=swept_kind,
+                    via="pwa",
+                    source=swept_source,
+                    outcome="swept",
+                )
             for kind in swept_kinds:
                 if proposal_outcomes.is_extraction_kind(kind):
                     proposal_outcomes.record(
@@ -7993,6 +8137,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
     ]
     results_moves: list[dict[str, Any]] = []
     moved_ids: set[str] = set()
+    moved_destinations: dict[str, str] = {}
     for ctx in move_rows:
         row = ctx["row"]
         target, target_error = _rehome_target(row, requested_workspace)
@@ -8010,6 +8155,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
             })
             continue
         moved_ids.add(row["id"])
+        moved_destinations[row["id"]] = str(outcome.get("destination", ""))
         results_moves.append({
             "id": row["id"], "action": "move_file", "dismissed": True,
             "destination": outcome.get("destination", ""),
@@ -8045,6 +8191,20 @@ async def proposals_batch(request: Request) -> JSONResponse:
         entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
         if not outcome.get("ok"):
             entry["error"] = outcome["error"]
+        elif ctx["workspace"]:
+            from ciao.memory_proposals import record_dismissal
+
+            # The file is already unlinked; a sidecar write failure must not
+            # fail a dismiss that happened.
+            try:
+                record_dismissal(
+                    _proposals_file(config, ctx["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                )
+            except OSError:
+                logger.info(
+                    "proposals: could not record skill dismissal for %s", row["id"]
+                )
         results.append(entry)
 
     # Group by file so each affected file is rewritten exactly once.
@@ -8122,13 +8282,30 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 from ciao.memory_proposals import record_dismissal
 
                 record_dismissal(
-                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                    queue,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
+                    via="pwa",
+                    source=str(row.get("source") or ""),
+                    proposal_id=pid,
                 )
             elif action == "accept":
                 from ciao.memory_proposals import record_promotion
 
+                accept_here = proposal_kinds.accept_for(row["kind"])
+                if accept_here.action == "move_file":
+                    row_outcome = {"destination": moved_destinations.get(pid, "")}
+                else:
+                    row_outcome = promoted.get(pid, {})
                 record_promotion(
-                    queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                    queue,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
+                    via="pwa",
+                    source=str(row.get("source") or ""),
+                    destination=_decision_destination(accept_here.action, row, row_outcome),
+                    outcome="duplicate" if row_outcome.get("duplicate") else "written",
+                    proposal_id=pid,
                 )
             if not proposal_outcomes.is_extraction_kind(row["kind"]):
                 # Not recorded: this ledger measures the MEMORY extraction
@@ -8157,6 +8334,14 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     result["region"] = outcome.get("region", accept.region)
                     result["promoted"] = bool(outcome.get("ok"))
                     result["leak_warning"] = row.get("leak_warning", False)
+                    # What actually landed, which is not always the row's text:
+                    # the event-shape guard can promote only a bullet's trailing
+                    # "Durable rule:" clause. `duplicate` says the fact was
+                    # already there and nothing was written.
+                    if outcome.get("written"):
+                        result["written"] = outcome["written"]
+                    if outcome.get("duplicate"):
+                        result["duplicate"] = True
                     if failed:
                         result["error"] = outcome.get("error", "could not write the region")
                 elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
@@ -8186,18 +8371,24 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
     curation prompt states: the reverse loses the fact if anything fails between
     the two steps. So this returns a failure and the caller keeps the bullet.
 
+    Goes through ``accept_region_fact`` rather than ``update_region`` directly,
+    so a click gets what an archive-time promotion gets: the event-shape guard,
+    the stamp-stripped duplicate check, the learned-at stamp the aging audit
+    reads, and the consolidations undo log. It takes the same guide lock
+    ``update_region`` did.
+
+    The region cap stays ADVISORY, as `update_region` documents: enforcing it
+    made the accept button dead for 67 of 130 queued proposals on a real vault.
+    Usage is reported, never used to refuse.
+
     The guide is resolved through ``agent_root``, so before the re-rooting this
     writes the shared guide (and the row's ``leak_warning`` is why the UI asks
     for confirmation first) and afterwards that workspace's own.
     """
-    from ciao.memory_tool import ensure_regions, resolve_region as _resolve, update_region
+    from ciao.memory_proposals import accept_region_fact
+    from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
 
     region = _resolve(row.get("region") or row["kind"])
-    limit = int(
-        getattr(config, "memory_char_limit", 3000)
-        if region == "memory"
-        else getattr(config, "user_char_limit", 1375)
-    )
     guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
     try:
         # A guide with no region markers yet is not a reason to refuse a
@@ -8206,13 +8397,59 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         ensure_regions(guide)
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"could not prepare {guide}: {exc}", "region": region}
+
     try:
-        result = update_region(
-            guide, region, action="add", entry=row["text"], char_limit=limit
+        vault_root = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError):
+        # Only the undo log needs it; a promotion must not fail for want of one.
+        vault_root = None
+
+    try:
+        outcome, promotable = accept_region_fact(
+            guide_path=guide,
+            target=row.get("region") or row["kind"],
+            text=row["text"],
+            vault_root=vault_root,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
-    return {"ok": True, "region": region, "usage": result.get("usage", {})}
+
+    def _usage() -> dict[str, Any]:
+        try:
+            status = memory_status(
+                guide,
+                memory_char_limit=int(getattr(config, "memory_char_limit", 3000)),
+                user_char_limit=int(getattr(config, "user_char_limit", 1375)),
+            )
+        except Exception:  # noqa: BLE001 — usage is advisory reporting only
+            return {}
+        if not isinstance(status, dict):
+            return {}
+        entry = status.get(region, {})
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    if outcome == "written":
+        # `written` is reported because the guard can promote only the trailing
+        # durable-rule clause of a bullet, so what landed is not always the
+        # sentence the operator read on the row.
+        return {"ok": True, "region": region, "written": promotable, "usage": _usage()}
+    if outcome == "duplicate":
+        # Already remembered. The fact is in the region either way, so the row
+        # is resolved and may leave the queue.
+        return {"ok": True, "region": region, "duplicate": True, "usage": _usage()}
+    if outcome == "unshaped":
+        # Event-shaped text is exactly what the region must not hold; this used
+        # to be written verbatim. The row stays queued.
+        return {
+            "ok": False,
+            "region": region,
+            "error": (
+                "this reads as an event, not a standing rule, so it would rot "
+                "in always-loaded memory. Use \u201ctalk about it\u201d to rephrase it as "
+                "what is true from now on, then accept."
+            ),
+        }
+    return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
 
 
 def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
@@ -8295,6 +8532,24 @@ async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "destination": doc_raw}
 
 
+def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict[str, Any]) -> str:
+    """Where an accepted row's fact landed, for the decision history's benefit.
+
+    Mirrors the per-branch destination each accept helper already knows, so
+    the history ledger and the response payload agree without a second
+    source of truth. Rehome rows: nothing is written here (the move is
+    performed above the queue-file grouping), so ``outcome`` carries the
+    move's own ``destination``.
+    """
+    if accept_action == "edit_region":
+        region = outcome.get("region") or row.get("region") or row.get("kind", "")
+        return f"ciao:{region}" if region else ""
+    if accept_action == "move_file":
+        return str(outcome.get("destination", ""))
+    # fold_doc, write_people_note, append_learnings all set "destination".
+    return str(outcome.get("destination", ""))
+
+
 async def proposal_action(request: Request) -> JSONResponse:
     """Accept or dismiss exactly one proposal by its stable id.
 
@@ -8338,8 +8593,25 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = _dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
-        # Not recorded: this ledger measures the MEMORY extraction pipeline;
-        # skill proposals come from the separate skill-evolution pipeline.
+        # Not recorded in the outcomes tally: that ledger measures the MEMORY
+        # extraction pipeline, and skill proposals come from the separate
+        # skill-evolution pipeline. It IS recorded in the decision history,
+        # so the review page's History tab shows it was resolved.
+        # Guarded like the batch path: ``workspace_vault_root("")`` falls back
+        # to the default root, so a row with a blank workspace would file its
+        # decision into the wrong workspace's sidecar. And the file is already
+        # gone by now — a recording failure must not turn a completed dismiss
+        # into a 500, or the client's retry 404s on work that succeeded.
+        if row["workspace"]:
+            from ciao.memory_proposals import record_dismissal
+
+            try:
+                record_dismissal(
+                    _proposals_file(config, row["workspace"]),
+                    text=row["text"], kind="skill", via="pwa", proposal_id=pid,
+                )
+            except OSError:
+                logger.info("proposals: could not record skill dismissal for %s", pid)
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
@@ -8425,6 +8697,12 @@ async def proposal_action(request: Request) -> JSONResponse:
             result["promoted"] = True
             result["usage"] = promoted.get("usage", {})
             result["leak_warning"] = row.get("leak_warning", False)
+            # See the batch builder: the text written can differ from the row's,
+            # and a duplicate resolves the row without writing anything.
+            if promoted.get("written"):
+                result["written"] = promoted["written"]
+            if promoted.get("duplicate"):
+                result["duplicate"] = True
         elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
             result["promoted"] = True
             result["destination"] = promoted.get("destination", "")
@@ -8449,7 +8727,14 @@ async def proposal_action(request: Request) -> JSONResponse:
             from ciao.memory_proposals import record_promotion
 
             record_promotion(
-                queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+                queue,
+                text=str(row.get("text") or ""),
+                kind=str(row.get("kind") or ""),
+                via="pwa",
+                source=str(row.get("source") or ""),
+                destination=_decision_destination(accept.action, row, promoted),
+                outcome="duplicate" if promoted.get("duplicate") else "written",
+                proposal_id=pid,
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":
@@ -8459,7 +8744,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         from ciao.memory_proposals import record_dismissal
 
         record_dismissal(
-            queue, text=str(row.get("text") or ""), kind=str(row.get("kind") or "")
+            queue,
+            text=str(row.get("text") or ""),
+            kind=str(row.get("kind") or ""),
+            via="pwa",
+            source=str(row.get("source") or ""),
+            proposal_id=pid,
         )
     if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
         proposal_outcomes.record(

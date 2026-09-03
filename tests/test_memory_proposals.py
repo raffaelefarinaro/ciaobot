@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import unittest.mock
@@ -1494,3 +1495,449 @@ def test_already_applied_guard_scopes_negation_to_its_own_bullet(
     assert not mp._is_already_in_file(
         destination, "Commit secrets to the repository"
     )
+
+
+# ── accept_region_fact: the UI accept path's guards ───────────────────────
+#
+# Accepting a queued fact used to call `update_region(action="add")` directly,
+# which skipped every guard the archive-time path applies. These pin what a
+# click now gets — and, just as importantly, what it must NOT have acquired.
+
+
+def _guide_with(tmp_path: Path, region: str, entries: list[str]) -> Path:
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    if entries:
+        write_region(guide, region, entries)
+    return guide
+
+
+def _entries(guide: Path, region: str) -> list[str]:
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_tool import read_region
+
+    entries, _diags = read_region(guide, region)
+    return [strip_learned_stamp(e) for e in entries]
+
+
+def test_accept_refuses_event_shaped_text(tmp_path):
+    """The guard that matters most: always-loaded context must hold rules.
+
+    An event-shaped bullet used to be written verbatim, which is exactly the
+    rot the shipped memory audit flags.
+    """
+    guide = _guide_with(tmp_path, "memory", [])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="The user asked me to check the logs and I found the bug.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "unshaped"
+    assert _entries(guide, "memory") == []
+
+
+def test_accept_writes_a_state_shaped_fact_with_a_stamp(tmp_path):
+    guide = _guide_with(tmp_path, "memory", [])
+    outcome, promotable = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+    assert promotable == "Prefers tabs over spaces."
+    assert _entries(guide, "memory") == ["Prefers tabs over spaces."]
+    # The stamp the aging audit reads. Without it a UI-accepted fact was
+    # invisible to re-verification forever.
+    from ciao.memory_tool import read_region
+
+    raw, _ = read_region(guide, "memory")
+    assert re.search(r"\[\d{4}-\d{2}-\d{2}\]$", raw[0])
+
+
+def test_accept_drops_a_stamp_stripped_duplicate(tmp_path):
+    """The same fact accepted twice is one entry, whatever day it was."""
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "duplicate"
+    assert _entries(guide, "memory") == ["Prefers tabs over spaces."]
+
+
+def test_accept_still_writes_past_the_advisory_cap(tmp_path):
+    """The cap is ADVISORY and must stay that way.
+
+    `update_region` says so outright: enforcing it "made the accept button dead
+    for 67 of 130 queued proposals" on a real vault, and
+    tests/test_memory_tool.py pins that. Routing accept through the guarded
+    write must not quietly reinstate the wall.
+    """
+    guide = _guide_with(tmp_path, "memory", ["x" * 5000])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers tabs over spaces.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+    assert "Prefers tabs over spaces." in _entries(guide, "memory")
+
+
+def test_accept_makes_no_model_call(tmp_path, monkeypatch):
+    """A click must not block on a provider.
+
+    Reconciliation would be welcome here, but one `run_oneshot` per row is a
+    120s timeout each and the batch endpoint accepts rows sequentially inside a
+    single request — 30 rows would be up to an hour. It stays out of this path.
+    """
+    async def must_not_run(prompt, **kwargs):
+        raise AssertionError("the accept path must not call a model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", must_not_run)
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=tmp_path,
+    )
+    assert outcome == "written"
+
+
+def test_accept_applies_a_reconcile_decision_it_is_handed(tmp_path):
+    """The seam a future reconcile pass writes through."""
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=tmp_path,
+        decision={
+            "action": "update",
+            "index": 1,
+            "text": "Prefers spaces over tabs.",
+            "old": "Prefers tabs over spaces. [2020-01-01]",
+        },
+    )
+    assert outcome == "written"
+    assert _entries(guide, "memory") == ["Prefers spaces over tabs."]
+
+
+def test_a_covered_verdict_with_no_vault_appends_rather_than_dropping(tmp_path):
+    """Nothing is dropped without a trace — the standing contract.
+
+    `covered` is a model verdict, not a provable match. With no vault to log it
+    to, honour the contract instead of the verdict: a duplicate is visible and
+    removable, a silently dropped fact is neither.
+    """
+    guide = _guide_with(tmp_path, "memory", ["Prefers tabs over spaces. [2020-01-01]"])
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Prefers spaces over tabs.",
+        vault_root=None,
+        decision={"action": "covered"},
+    )
+    assert outcome == "written"
+    assert "Prefers spaces over tabs." in _entries(guide, "memory")
+
+
+# -- Decision recording is append-only, except where it must be idempotent ----
+
+
+def test_record_promotion_once_does_not_append_a_duplicate(tmp_path: Path) -> None:
+    """The archive-time suppression verdict is re-derived on every pass.
+
+    ``_is_already_applied`` recognises the same applied fact each time the same
+    archive is re-processed, and recording per pass grew the decision history
+    without recording anything new.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    assert mp.record_promotion(
+        queue, text="A known fact.", kind="memory", via="auto",
+        source="chat-1", outcome="suppressed", once=True,
+    ) is True
+    assert mp.record_promotion(
+        queue, text="A known fact.", kind="memory", via="auto",
+        source="chat-1", outcome="suppressed", once=True,
+    ) is False
+
+    rows = mp.read_decisions(queue)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "suppressed"
+
+
+def test_record_promotion_once_still_records_a_different_outcome(tmp_path: Path) -> None:
+    """A real promotion of a fact previously logged as "already known" is news."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    mp.record_promotion(
+        queue, text="A fact.", kind="memory", via="auto", outcome="suppressed", once=True,
+    )
+    assert mp.record_promotion(
+        queue, text="A fact.", kind="memory", via="pwa", once=True,
+    ) is True
+
+    assert [r["outcome"] for r in mp.read_decisions(queue)] == ["suppressed", ""]
+
+
+def test_record_promotion_defaults_to_appending(tmp_path: Path) -> None:
+    """Operator decisions are fresh events every time; only ``once`` dedupes."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    for _ in range(2):
+        assert mp.record_promotion(queue, text="A fact.", kind="memory", via="pwa") is True
+
+    assert len(mp.read_decisions(queue)) == 2
+
+
+def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> None:
+    """Two byte-identical rows must still get distinct history ids."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    log = mp.dismissed_log_path(queue)
+    log.write_text('{"kind": "memory", "text": "Same."}\n' * 2, encoding="utf-8")
+
+    rows = mp.read_decisions(queue)
+
+    assert [r["seq"] for r in rows] == [0, 1]
+    assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[1], "personal")
+    # And the same row in two workspaces is two ids.
+    assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")
+
+
+def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> None:
+    """Archiving asks "already decided?" once per proposal.
+
+    Each call used to re-read and re-parse the whole sidecar, so one archive
+    pass over a long-lived ledger was O(proposals x history). The cache is
+    keyed on stat identity, so its correctness rests on noticing an append.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    assert mp.record_dismissal(queue, text="First.", kind="memory", via="pwa") is True
+    sidecar = str(mp.dismissed_log_path(queue))
+
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        reads.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with unittest.mock.patch.object(Path, "read_text", counting_read_text):
+        # Repeated questions about an unchanged sidecar read it once.
+        for _ in range(5):
+            mp._has_decision(queue, key="dismissed_at", text="First.", outcome="")
+        assert reads.count(sidecar) == 1, reads
+
+    # An append must be seen: a stale cache would silently re-file or
+    # re-suppress proposals.
+    assert mp.record_dismissal(queue, text="Second.", kind="memory", via="pwa") is True
+    assert mp._has_decision(queue, key="dismissed_at", text="Second.", outcome="") is True
+    assert {r["text"] for r in mp.read_decisions(queue)} == {"First.", "Second."}
+
+
+def test_legacy_row_ids_survive_a_new_decision(tmp_path: Path) -> None:
+    """A decision in the current sidecar must not renumber the legacy one.
+
+    ``seq`` used to count across the concatenation of ``.dismissed.jsonl`` then
+    ``.dismissed.log``, so every append to the former shifted every legacy
+    row's ``seq`` — and with it the ``history_row_id`` the History list keys
+    its ``<li>`` on. That is the exact instability ``seq`` exists to prevent.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.with_suffix(".dismissed.log").write_text(
+        '{"kind": "memory", "text": "Legacy fact."}\n', encoding="utf-8"
+    )
+
+    legacy_before = next(r for r in mp.read_decisions(queue) if r["text"] == "Legacy fact.")
+    id_before = mp.history_row_id(legacy_before, "personal")
+
+    assert mp.record_promotion(queue, text="A new fact.", kind="memory", via="pwa") is True
+
+    legacy_after = next(r for r in mp.read_decisions(queue) if r["text"] == "Legacy fact.")
+    assert mp.history_row_id(legacy_after, "personal") == id_before
+
+
+def test_rows_in_different_sidecars_get_distinct_ids(tmp_path: Path) -> None:
+    """Identical text at position 0 of each sidecar must not collide."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.with_suffix(".dismissed.jsonl").write_text(
+        '{"kind": "memory", "text": "Same."}\n', encoding="utf-8"
+    )
+    queue.with_suffix(".dismissed.log").write_text(
+        '{"kind": "memory", "text": "Same."}\n', encoding="utf-8"
+    )
+
+    rows = mp.read_decisions(queue)
+
+    assert [r["seq"] for r in rows] == [0, 0]
+    assert len({mp.history_row_id(r, "personal") for r in rows}) == 2
+
+
+def test_suppressed_row_shows_in_history_without_blocking_a_refile(tmp_path: Path) -> None:
+    """The archive-time "already applied" row is ledger-only.
+
+    It is written under ``promoted_at`` so the History tab can show it, but
+    nobody promoted the fact through the queue. Letting the dedupe readers see
+    it made ``was_promoted`` true and ``append_proposals`` refuse the fact
+    forever, so a reverted in-session edit could never be re-queued.
+    """
+    vault = tmp_path / "vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+
+    assert (
+        mp.record_promotion(
+            queue,
+            text="Already applied fact.",
+            kind="memory",
+            via="auto",
+            outcome="suppressed",
+            once=True,
+            history_only=True,
+        )
+        is True
+    )
+
+    # Visible in the ledger the History tab reads...
+    rows = mp.read_decisions(queue)
+    assert [(r["action"], r["outcome"]) for r in rows] == [("accepted", "suppressed")]
+
+    # ...but invisible to every dedupe reader.
+    assert mp.was_promoted(vault, "Already applied fact.") is False
+    assert mp.was_dismissed(vault, "Already applied fact.") is False
+    assert "Already applied fact." not in mp._dismissed_texts(queue)
+    assert "Already applied fact." not in mp._promoted_texts(queue)
+
+    # And `once=True` still suppresses the duplicate row on a second pass.
+    assert (
+        mp.record_promotion(
+            queue,
+            text="Already applied fact.",
+            kind="memory",
+            via="auto",
+            outcome="suppressed",
+            once=True,
+            history_only=True,
+        )
+        is False
+    )
+    assert len(mp.read_decisions(queue)) == 1
+
+
+def test_a_real_promotion_still_dedupes(tmp_path: Path) -> None:
+    """The ledger-only flag must not weaken the normal promotion record."""
+    vault = tmp_path / "vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+
+    assert mp.record_promotion(queue, text="Operator accepted.", kind="memory", via="pwa") is True
+
+    assert mp.was_promoted(vault, "Operator accepted.") is True
+    assert "Operator accepted." in mp._promoted_texts(queue)
+
+
+def test_reconciled_update_does_not_stack_a_second_learned_stamp(tmp_path: Path) -> None:
+    """A merged entry carries exactly one stamp, whatever the model echoed.
+
+    The model is told to keep every still-true part of the old entry, and the
+    numbered list it reads carries that entry's learned-at stamp, so a
+    compliant merge often echoes it back. Stamping on top produced
+    `... [old] [new]`, and `_LEARNED_STAMP_RE` is `$`-anchored, so stripping
+    such an entry never yields the fact's own text again — the duplicate guard
+    stopped recognising it and the fact was appended again on the next pass.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Insights model is deepseek-flash. [2026-01-01]"],
+    )
+    text = "Insights model is sonnet since the Ollama quota 429s."
+    proposal = mp.MemoryProposal(target="memory", text=text, source_section="Decisions")
+    decisions = {
+        mp._decision_key("memory", text): {
+            "action": "update",
+            "index": 1,
+            # The model echoes the old entry's stamp back, as instructed.
+            "text": "Insights model is sonnet (moved off deepseek-flash). [2026-01-01]",
+        }
+    }
+
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=vault, region_decisions=decisions
+    )
+
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    merged = next(e for e in entries if "moved off deepseek-flash" in e)
+    # Exactly one stamp, and stripping it recovers the fact itself — which is
+    # what the duplicate guard compares on the next archive pass.
+    assert len(re.findall(r"\[\d{4}-\d{2}-\d{2}\]", merged)) == 1, merged
+    assert strip_learned_stamp(merged) == "Insights model is sonnet (moved off deepseek-flash)."
+
+
+def test_an_already_double_stamped_entry_is_still_recognised_as_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    """Rows an older build corrupted must heal, not stay permanently duplicable.
+
+    The reconcile bug wrote `fact [old] [new]` into the region. Because the
+    stamp pattern is `$`-anchored, stripping one still left a stamp attached,
+    so the text never compared equal to the fact again and the duplicate guard
+    let the same fact be appended on every later archive pass. Those rows are
+    already on disk in real installs, so the strip has to heal them.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+
+    corrupted = "Insights model is sonnet. [2026-01-01] [2026-09-02]"
+    assert strip_learned_stamp(corrupted) == "Insights model is sonnet."
+
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=[corrupted])
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Insights model is sonnet.",
+        source_section="Decisions",
+    )
+
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path / "vault"
+    )
+
+    entries, _diags = mt.read_region(guide, "memory")
+    # Recognised as already remembered: not appended a second time.
+    assert len(entries) == 1, entries
+    assert not remaining
+
+
+def test_the_learned_date_still_reads_the_most_recent_stamp() -> None:
+    """Stripping all stamps must not change how aging measures one.
+
+    `find_aging_state` searches for a single trailing stamp to decide how old a
+    fact is; the last one is the most recent promotion, which is what it should
+    measure from.
+    """
+    from ciao import memory_audit as ma
+
+    match = ma._LEARNED_STAMP_RE.search("fact [2026-01-01] [2026-09-02]")
+    assert match is not None
+    assert match.group(1) == "2026-09-02"

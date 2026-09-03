@@ -13,6 +13,14 @@ session spawned and whether they are still running:
   ``<task-notification>`` envelope naming the ``<task-id>`` (the agent id)
   and a ``<status>``.
 
+The CLI also owns tasks that outlive a turn and have no subagent
+transcript: ``Monitor`` calls, ``Bash`` calls with ``run_in_background``,
+and workflow launches. Their ``tool_result`` carries
+``toolUseResult.taskId`` (not ``agentId``). Those are recorded here too,
+with ``kind="task"``, so the completion watcher can wake the chat when the
+CLI process that owned them is gone; agent counts
+(``running_background``, ``running_agents``) exclude them.
+
 ``list_subagents`` in the SDK only enumerates transcript *files*, which
 persist after completion, so it can never answer "how many are still
 running". Parsing the parent JSONL is the reliable signal, and it also
@@ -33,6 +41,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DISPATCH_TOOL_NAMES = {"Agent", "Task", "agent", "task"}
+
+# CLI-owned task tools: their tool_result carries ``toolUseResult.taskId``
+# instead of ``agentId``, and they have no subagent transcript file. ``Bash``
+# only counts when it actually ran detached (``run_in_background``).
+_TASK_TOOL_NAMES = {"Monitor", "Bash"}
 
 # How long a background agent's own transcript must sit untouched before we
 # treat it as finished without a ``<task-notification>``. See
@@ -99,6 +112,15 @@ SUBAGENT_SYNTHESIS_NUDGE = (
     "report, reply with a brief confirmation instead of repeating it."
 )
 
+# Prefix of the wake prompt the server sends for CLI tasks orphaned by a dead
+# CLI (``ProjectChatManager._build_cli_task_wake_prompt``). The prompt lands in
+# the parent JSONL as the user record it was sent as; recognising it here lets
+# the parser mark those tasks ``lost`` so the watcher (and the startup sweep)
+# never wake for them twice. Kept beside SUBAGENT_SYNTHESIS_NUDGE for the same
+# reason: the sender and the parser need the same string.
+CLI_TASK_WAKE_PREFIX = "[Ciaobot] Lost CLI tasks:"
+_CLI_TASK_WAKE_ID_RE = re.compile(r"\(task ([A-Za-z0-9_-]+)\)")
+
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -153,6 +175,17 @@ class SubagentInfo:
     # the `turn_index` the /messages endpoint stamps on user bubbles. None
     # when the dispatch happened before any countable user turn.
     turn_index: int | None = None
+    # "agent" for Agent/Task dispatches (with a transcript) or "task" for
+    # CLI-owned Monitor / background Bash / workflow tasks (no transcript,
+    # identified by toolUseResult.taskId).
+    kind: str = "agent"
+    # Raw <status> from the CLI's <task-notification> ("stopped" maps to
+    # "completed" in `status`). Kept so the wake prompt can distinguish the
+    # CLI's synthetic "no completion record" case.
+    raw_status: str = ""
+    # First 200 chars of the dispatch command (Monitor / background Bash), so
+    # a wake prompt can name the log or output file to check.
+    command: str = ""
 
 
 @dataclass
@@ -182,7 +215,7 @@ class SessionSubagentState:
         return sum(
             1
             for info in self.subagents.values()
-            if info.is_async and info.status == "running"
+            if info.is_async and info.status == "running" and info.kind == "agent"
         )
 
 
@@ -191,32 +224,34 @@ def find_parent_session_file(
     workspace_root: Path | str,
     *,
     agent_root: Path | str | None = None,
+    force_refresh: bool = False,
 ) -> Path | None:
-    """Locate the parent session JSONL for ``session_id`` on this machine."""
+    """Locate the parent session JSONL for ``session_id`` on this machine.
+
+    ``force_refresh`` bypasses the shared cache's rescan rate limit. Callers
+    that look the file up exactly once (the subagent completion watcher and
+    the schedule drain wait) must pass True: a miss here is final for them,
+    so the rate-limit gate must never suppress their decisive probe.
+    """
     if not session_id:
         return None
     try:
-        from ciao.transcripts import _claude_projects_dir
-
-        root = agent_root if agent_root is not None else workspace_root
-        preferred = _claude_projects_dir(Path(root)) / f"{session_id}.jsonl"
-        if preferred.exists():
-            return preferred
+        from ciao.transcripts import find_claude_session_file
     except Exception:  # noqa: BLE001 — fall through to the glob scan
-        pass
-    # The glob scan stays for every caller, with or without an agent root.
-    # It is the safety net for the exact failure this phase guards against: the
-    # projects dir is a slug of the cwd, so a session recorded under a different
-    # cwd is only findable this way. Isolating roots from each other is correct
-    # once agent_root actually differs per workspace, and wrong before then,
-    # because today it would remove the net while the hazard is still live.
-    projects_root = Path.home() / ".claude" / "projects"
-    try:
-        for path in projects_root.glob(f"*/{session_id}.jsonl"):
-            return path
-    except OSError:
-        pass
-    return None
+        # No cached helper available. The uncached net below is then the
+        # only lookup; it is bounded by this import-failure path, never the
+        # ordinary miss path.
+        projects_root = Path.home() / ".claude" / "projects"
+        try:
+            for path in projects_root.glob(f"*/{session_id}.jsonl"):
+                return path
+        except OSError:
+            pass
+        return None
+    return find_claude_session_file(
+        session_id, workspace_root, agent_root=agent_root,
+        force_refresh=force_refresh,
+    )
 
 
 def subagent_transcript_path(parent_path: Path, agent_id: str) -> Path:
@@ -340,15 +375,33 @@ def running_agents(
     mid-dispatch never writes the ``tool_result`` (or the
     ``<task-notification>``) that would move the status off "running", so
     without it a dead row would sit in the sidebar forever.
+
+    CLI-owned tasks (``kind == "task"``) never appear here: they have no
+    transcript file, so the lookup below would be meaningless for them — see
+    ``running_tasks`` instead.
     """
     return [
         info
         for info in state.subagents.values()
         if info.status == "running"
+        and info.kind == "agent"
         and (info.is_async or not only_async)
         and not has_finished_transcript(
             parent_path, info.agent_id, now=now, idle_seconds=idle_seconds
         )
+    ]
+
+
+def running_tasks(state: SessionSubagentState) -> list[SubagentInfo]:
+    """CLI-owned tasks (Monitor / background Bash / workflows) still running.
+
+    These have no transcript, so their lifecycle is the parent JSONL's:
+    ``running`` until a ``<task-notification>`` lands for the taskId.
+    """
+    return [
+        info
+        for info in state.subagents.values()
+        if info.kind == "task" and info.status == "running"
     ]
 
 
@@ -503,18 +556,36 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
-                    if (
+                    if not (
                         isinstance(block, dict)
                         and block.get("type") == "tool_use"
-                        and block.get("name") in _DISPATCH_TOOL_NAMES
                         and block.get("id")
                     ):
-                        tool_input = block.get("input") or {}
-                        if not isinstance(tool_input, dict):
-                            tool_input = {}
+                        continue
+                    tool_input = block.get("input") or {}
+                    if not isinstance(tool_input, dict):
+                        tool_input = {}
+                    name = str(block.get("name") or "")
+                    if name in _DISPATCH_TOOL_NAMES:
                         dispatch_inputs[str(block["id"])] = {
                             "description": str(tool_input.get("description") or ""),
                             "subagent_type": str(tool_input.get("subagent_type") or ""),
+                            "kind": "agent",
+                        }
+                    elif name in _TASK_TOOL_NAMES:
+                        # Only a detached Bash carries a taskId; a foreground
+                        # Bash has no task lifecycle to track.
+                        if name == "Bash" and not tool_input.get("run_in_background"):
+                            continue
+                        command = str(tool_input.get("command") or "")[:200]
+                        dispatch_inputs[str(block["id"])] = {
+                            "description": str(
+                                tool_input.get("description")
+                                or command[:80]
+                            ),
+                            "tool_name": name,
+                            "kind": "task",
+                            "command": command,
                         }
                 continue
 
@@ -550,7 +621,59 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 )
                 continue
 
+            if isinstance(tool_use_result, dict) and tool_use_result.get("taskId"):
+                # CLI-owned task launch receipt (Monitor, background Bash,
+                # workflow): no agentId, no transcript, keyed by taskId.
+                task_id = _normalize_agent_id(str(tool_use_result["taskId"]))
+                tool_use_id = _tool_result_use_id(message)
+                dispatched = dispatch_inputs.get(tool_use_id, {})
+                existing = state.subagents.get(task_id)
+                # Same never-downgrade rule as agents.
+                status = "running"
+                if existing is not None and existing.status not in ("", "running"):
+                    status = existing.status
+                state.subagents[task_id] = SubagentInfo(
+                    agent_id=task_id,
+                    tool_use_id=tool_use_id,
+                    description=str(dispatched.get("description") or ""),
+                    # The tool name (Monitor/Bash) labels the task in the UI;
+                    # an unknown tool falls back to the CLI's taskType.
+                    subagent_type=str(
+                        dispatched.get("tool_name")
+                        or tool_use_result.get("taskType")
+                        or "task"
+                    ),
+                    is_async=True,
+                    status=status,
+                    turn_index=user_idx - 1 if user_idx > 0 else None,
+                    kind="task",
+                    command=str(dispatched.get("command") or ""),
+                )
+                continue
+
             content = _text_content(message)
+            if CLI_TASK_WAKE_PREFIX in content:
+                # Our own dead-CLI wake turn, recorded as the user prompt it
+                # was sent as. The server persists prompts with the
+                # [CIAO_CONTEXT_BEGIN] capsule prepended, so matching on the
+                # prefix's presence (not a startswith, the same reason
+                # is_synthesis_nudge matches on the tail) and extracting ids
+                # only from the text after it. Mark every task it names lost
+                # so the watcher and the startup sweep never send a second
+                # wake. It still advances the turn counter below — it IS a
+                # prompt the server sent; the background-run wake is counted
+                # the same way.
+                wake_text = content.split(CLI_TASK_WAKE_PREFIX, 1)[1]
+                for wake_id in _CLI_TASK_WAKE_ID_RE.findall(wake_text):
+                    wake_id = _normalize_agent_id(wake_id)
+                    info = state.subagents.get(wake_id)
+                    if info is None:
+                        info = SubagentInfo(
+                            agent_id=wake_id, is_async=True, kind="task"
+                        )
+                        state.subagents[wake_id] = info
+                    info.status = "lost"
+                    info.raw_status = "lost"
             if _notification_fields(content) is not None:
                 _apply_notification(state, content)
                 # A notification landed as a user record. If no assistant
@@ -596,7 +719,8 @@ def _apply_notification(state: SessionSubagentState, content: str) -> None:
     task_id = _normalize_agent_id(fields.get("task-id", ""))
     if not task_id:
         return
-    status = fields.get("status", "") or "completed"
+    raw_status = fields.get("status", "") or "completed"
+    status = raw_status
     if status not in ("completed", "failed"):
         # The CLI's vocabulary may grow; anything non-failed counts as done
         # for "is it still running" purposes.
@@ -607,7 +731,11 @@ def _apply_notification(state: SessionSubagentState, content: str) -> None:
         # (e.g. an agent spawned by another subagent). Record it so the
         # transcript endpoint can still attach a status.
         state.subagents[task_id] = SubagentInfo(
-            agent_id=task_id, is_async=True, status=status
+            agent_id=task_id,
+            is_async=True,
+            status=status,
+            raw_status=raw_status,
         )
     else:
         info.status = status
+        info.raw_status = raw_status

@@ -365,25 +365,7 @@ def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
     return actions
 
 
-# -- unrehomed people --------------------------------------------------------
-
-
-def _count(value: Any) -> int:
-    """How many, from a receipt field that may be a count or a list.
-
-    The tile read `mechanical`/`conflicts`, which this receipt has never had, and
-    `needs_judgement`, which is a LIST. So it reported "0 to move" while 87 notes
-    were recorded as moved, and interpolated a list of dicts straight into the
-    prose the user reads. Counting defensively is the point: a detail string must
-    never render a container, whatever the schema does next.
-    """
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, (list, tuple, set, dict)):
-        return len(value)
-    return 0
+# -- workspace re-rooting ----------------------------------------------------
 
 
 def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorAction]:
@@ -469,139 +451,6 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
                 "Do NOT pass --apply. When the command prints no refusals, say so "
                 "and tell me the button is ready; the migration itself is mine to "
                 "press."
-            ),
-        )
-    ]
-
-
-_QUEUE_RELATIVE = ("Workspace", "Memory-Proposals.md")
-
-
-def _queued_rehome_rows(context: DetectionContext) -> int | None:
-    """How many re-home rows the review queue currently holds, or None.
-
-    This is the number the tile's own button opens, which is the only number a
-    tile should quote. The receipt cannot supply it: it is written once, at
-    migration time, so it cannot know that the operator has dismissed rows since,
-    or that a later rule resolved some of them.
-
-    Counting bullets rather than re-detecting: `detect_misfiled_people` walks
-    every person note, which is not something to do on every strip render, and
-    the queue is two small files.
-    """
-    config = context.config
-    resolver = getattr(config, "workspace_vault_root", None)
-    lister = getattr(config, "workspace_names", None)
-    if not callable(resolver) or not callable(lister):
-        return None
-    total = 0
-    seen = False
-    for name in lister():
-        try:
-            queue = Path(resolver(name)).joinpath(*_QUEUE_RELATIVE)
-        except Exception:  # noqa: BLE001 — advisory
-            continue
-        if not queue.is_file():
-            continue
-        try:
-            text = queue.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        seen = True
-        total += sum(
-            1 for line in text.splitlines()
-            if line.lstrip().startswith(("- ", "* ")) and "[rehome]" in line
-        )
-    return total if seen else None
-
-
-def _detect_unrehomed_people(context: DetectionContext) -> list[OperatorAction]:
-    """Person notes that a global curation run may have filed wrong.
-
-    Detected from the re-home **receipt** alone, never a walk of the person
-    notes. Same gate as the Settings audit: with one registered workspace every
-    candidate has an empty destination, so there is nothing to move and firing
-    would offer an unactionable tile. A receipt means the migration ran — only
-    an applied run writes one — so the tile then speaks for whatever is still
-    queued for a decision; no receipt means nothing has moved yet. The fix is a
-    judged migration, so this is chat-only.
-    """
-    runtime = context.runtime
-    config = context.config
-    if runtime is None:
-        return []
-    lister = getattr(config, "workspace_names", None)
-    if not callable(lister):
-        return []
-    names = list(lister())
-    if len(names) <= 1:
-        return []
-    try:
-        from ciao.vault_rehome import read_receipt
-
-        # Completed-only. A missing status still counts as complete (legacy
-        # receipts predate the field), but a PARTIAL one no longer silences the
-        # tile — a half-finished re-home used to hide it exactly as well as a
-        # finished one.
-        receipt = read_receipt(runtime)
-    except Exception:  # noqa: BLE001 — advisory
-        logger.exception("operator actions: re-home check failed")
-        return []
-    if receipt is not None:
-        moved = _count(receipt.get("moves"))
-        # The QUEUE decides this number, not the receipt. Two bugs lived in the
-        # old line: it summed `needs_judgement` and `proposals`, which are not
-        # disjoint — `proposals` records the queue entries written FOR those
-        # judgement cases — and both are frozen at migration time, so neither
-        # knows the operator has dismissed rows since or that a later rule
-        # resolved some. On the reference install that produced four different
-        # numbers for one thing: 16 on the tile, 15 in the receipt, 14 rows in
-        # the queue the tile's own button opens, and 12 live candidates.
-        queued = _queued_rehome_rows(context)
-        undecided = queued if queued is not None else _count(receipt.get("needs_judgement"))
-        # The receipt is proof the migration RAN: only an applied run writes
-        # one, and a receipt written before the `status` field existed records a
-        # completed re-home with no status at all — reading those as unfinished
-        # made this tile a permanent false positive on exactly the installs that
-        # had done the work. The reference install shows it: 87 moves and 165
-        # link rewrites recorded, no status, tile still firing a day later.
-        #
-        # Applied with nothing left to decide is genuinely finished. Applied with
-        # notes still needing a decision is NOT: the mechanical moves are done
-        # and a human still owes an answer on the rest.
-        if undecided == 0:
-            return []
-        detail = (
-            f"{moved} person note(s) were re-homed. {undecided} still need a "
-            "decision because no tag names a workspace, and are queued as "
-            "proposals for review."
-        )
-    else:
-        detail = (
-            "Person notes may be filed in the wrong workspace, and none have "
-            "been re-homed yet. A preview lists the candidates without moving "
-            "anything."
-        )
-    return [
-        OperatorAction(
-            id="vault-unrehomed-people",
-            kind="unrehomed-people",
-            severity=20,
-            title="Person notes may be in the wrong workspace",
-            detail=detail,
-            glyph="¶",
-            workspace="",
-            view_label="Open queue",
-            view_route="/proposals",
-            chat_label="Review in chat",
-            chat_prompt=(
-                "Some person notes may be filed in the wrong workspace's vault. "
-                "Preview the candidates with `ciao vault-rehome` (dry-run by "
-                "default), then apply the tag-obvious moves with "
-                "`ciao vault-rehome --apply`. Notes with no workspace-naming tag "
-                "need a decision and are queued, never moved automatically. Every "
-                "move and link rewrite is recorded, so `ciao vault-unrehome "
-                "--apply` can restore the notes and their references."
             ),
         )
     ]
@@ -1270,7 +1119,6 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
     _detect_vault_location,
-    _detect_unrehomed_people,
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
     _detect_missed_schedules,

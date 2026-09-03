@@ -992,3 +992,131 @@ def test_create_accepts_title_and_description(tmp_path: Path) -> None:
     assert reloaded is not None
     assert reloaded.title == "My Routine"
     assert reloaded.description == "Explains what it does"
+
+
+# -- packaged definitions survive an install swap (issue #416) ---------------
+
+
+def _break_stock_read(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    """Make the packaged schedules.json unreadable, as a bundle swap does."""
+    import ciao.schedules as schedules_mod
+
+    real_files = schedules_mod.resources.files
+
+    class _Missing:
+        def joinpath(self, *_parts: str) -> "_Missing":
+            return self
+
+        def read_text(self, **_kwargs: object) -> str:
+            raise exc
+
+    def fake_files(package: str):
+        if package == "ciao.stock":
+            return _Missing()
+        return real_files(package)
+
+    monkeypatch.setattr(schedules_mod.resources, "files", fake_files)
+
+
+def test_system_definitions_survive_the_bundle_being_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live process keeps its system routines when the bundle is replaced.
+
+    The install swap replaces the package directory underneath the running
+    engine. `tick` derives system rows from the packaged file on every pass, so
+    before the definitions were cached a read landing in that window returned
+    nothing and every system routine disappeared for that tick — and a daily
+    routine is matched on `%H:%M`, so one whose minute fell in the window was
+    skipped outright rather than delayed.
+    """
+    store = ScheduleStore(tmp_path, include_system=True)
+    assert store.get("system-memory-curation") is not None
+
+    _break_stock_read(monkeypatch, FileNotFoundError("schedules.json"))
+
+    # Same live store, bundle now gone: the routines are still derived.
+    assert store.get("system-memory-curation") is not None
+    assert any(
+        entry.scope == "system" for entry in store.list_entries()
+    )
+
+
+def test_missing_stock_schedules_warns_without_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cold read of an absent packaged file is a warning, not an error.
+
+    It is expected and self-healing during an install swap: the replacement
+    bundle carries the file and the next start reads it. Logging it as an
+    ERROR with a traceback made a transient, recovered condition look like a
+    failed startup.
+    """
+    _break_stock_read(monkeypatch, FileNotFoundError("schedules.json"))
+    store = ScheduleStore(tmp_path, include_system=True)
+
+    with caplog.at_level("WARNING", logger="ciao.schedules"):
+        entries = store.list_entries()
+
+    assert entries == []
+    records = [r for r in caplog.records if r.name == "ciao.schedules"]
+    assert records, "expected a log record about the unavailable definitions"
+    assert all(r.levelname == "WARNING" for r in records)
+    assert all(r.exc_info is None for r in records)
+
+
+def test_malformed_stock_schedules_still_log_an_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Corrupt packaged JSON is a real defect and keeps its traceback."""
+    import json as json_mod
+
+    _break_stock_read(
+        monkeypatch, json_mod.JSONDecodeError("bad", "{", 0)
+    )
+    store = ScheduleStore(tmp_path, include_system=True)
+
+    with caplog.at_level("ERROR", logger="ciao.schedules"):
+        entries = store.list_entries()
+
+    assert entries == []
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and any(r.exc_info is not None for r in errors)
+
+
+def test_packaged_definitions_are_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Immutable package data is not re-read on every tick."""
+    import ciao.schedules as schedules_mod
+
+    real_files = schedules_mod.resources.files
+    reads = {"n": 0}
+
+    class _Counting:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def joinpath(self, *parts: str) -> "_Counting":
+            return _Counting(self._inner.joinpath(*parts))
+
+        def read_text(self, **kwargs: object) -> str:
+            reads["n"] += 1
+            return self._inner.read_text(**kwargs)
+
+    def fake_files(package: str):
+        if package == "ciao.stock":
+            return _Counting(real_files(package))
+        return real_files(package)
+
+    monkeypatch.setattr(schedules_mod.resources, "files", fake_files)
+
+    store = ScheduleStore(tmp_path, include_system=True)
+    for _ in range(5):
+        store.list_entries()
+
+    assert reads["n"] == 1

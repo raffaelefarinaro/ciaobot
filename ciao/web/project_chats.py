@@ -64,6 +64,7 @@ except ImportError:  # pragma: no cover
 import yaml
 
 from ciao import job_runs, provider_registry, subagent_tracking
+from ciao.subagent_tracking import SubagentInfo
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -98,6 +99,7 @@ from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
     _claude_projects_dir,
+    _global_session_matches,
     _journal_event_record,
 )
 from ciao.web.chat_broker import (
@@ -205,6 +207,11 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
+# The orphaned-CLI-task startup sweep only wakes chats active within this
+# window: the first upgrade after the sweep shipped must not wake every chat
+# that ever left a Monitor running months ago, and a Monitor worth checking
+# is one from this week.
+_ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
@@ -1182,12 +1189,18 @@ def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | N
 
     A pending retry means the provider deferred the work, such as after a
     quota rejection. It remains unclean and visible, but is not an app error.
+    Unsettled background subagents (or a run that ended on an interim message
+    with no synthesis turn) mean the work is not done yet either — not a
+    failure to report as such, but not a healthy run either: recording "ok"
+    would clear a previous error while the follow-up never completed.
     """
     if outcome.retry_pending:
         return "skipped", None
     if outcome.stream_error or outcome.is_error:
         return "error", (outcome.final_text or "stream error")[:1000]
     if outcome.permission_requested or outcome.question_requested:
+        return "skipped", None
+    if outcome.subagents_pending:
         return "skipped", None
     return "ok", None
 
@@ -1318,6 +1331,15 @@ class ProjectChatManager:
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # CLI-task wakes already delivered this process, as (chat_id,
+        # task_id). Bounds redelivery to once per process lifetime: if the
+        # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
+        # is down), nothing marks the tasks lost, and without this set the
+        # failed stream's cleanup would re-arm the watcher and the wake
+        # every two ticks forever. Across a restart the JSONL "lost" marker
+        # written by a persisted wake is the durable guard, so a wake that
+        # never persisted is retried at most once per restart.
+        self._cli_task_wakes_sent: set[tuple[str, str]] = set()
         # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
         # At most one per chat; cancelled before a new user turn starts so
         # the drain never competes with receive_response for SDK messages.
@@ -1335,6 +1357,11 @@ class ProjectChatManager:
         # Bound by main.py so a wake dropped by the restart drain can mark its
         # runs for replay on the next start instead of vanishing.
         self._background_runner: Any = None
+        # Bound by main.py right after both objects exist. dispatch_schedule
+        # stamps a failed run's last_status on the stored row so the Automations
+        # sidebar flags it for attention (issue #407) — without a store there is
+        # nowhere durable to write, and tests build managers without one.
+        self.schedule_store: Any = None
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
@@ -2484,14 +2511,16 @@ class ProjectChatManager:
         projects_dir = _claude_projects_dir(root)
         if (projects_dir / f"{session_id}.jsonl").exists():
             return True
-        # The glob scan stays for every caller. The projects dir is a slug of
-        # the cwd, so a session recorded under a different cwd is only findable
-        # this way. Isolating roots belongs in the re-rooting release, when
-        # agent_root actually differs; removing the net now would drop sessions
-        # while the hazard is still live.
+        # The cross-cwd fallback stays for every caller. The projects dir is a
+        # slug of the cwd, so a session recorded under a different cwd is only
+        # findable this way. It is served from a cached directory listing (see
+        # transcripts._global_session_matches) so N probes cost one walk,
+        # not N — the uncached glob used to stall the event loop for minutes
+        # on installs with hundreds of stale project slug dirs. A miss
+        # refreshes the listing (rate-limited) so a session created under
+        # another cwd inside the TTL window is not reported absent.
         try:
-            projects_root = Path.home() / ".claude" / "projects"
-            return projects_root.exists() and any(projects_root.glob(f"*/{session_id}.jsonl"))
+            return bool(_global_session_matches(session_id))
         except OSError:
             return False
 
@@ -3733,6 +3762,8 @@ class ProjectChatManager:
         self,
         chat: ChatInfo,
         session_ids: list[str] | None = None,
+        *,
+        agent_root: Path | None = None,
     ) -> None:
         """Drop provider-side session blobs/threads for abandoned chats.
 
@@ -3740,13 +3771,30 @@ class ProjectChatManager:
         session through ``DELETE /session/{id}``.
         Provider cleanup is fail-open: the Ciaobot archive remains durable even
         when an external provider is unavailable.
+
+        Both providers store a session under the agent root the chat ran in —
+        the Claude SDK by hashing that path into its projects directory, and
+        opencode because its server is started there. Reclaiming against
+        ``workspace_root`` therefore found nothing for a workspace-scoped chat
+        and leaked every blob and session it was meant to drop.
+
+        ``agent_root`` is that root, and a caller that has already dropped the
+        chat from the registry MUST pass it: ``_agent_root_for_chat`` resolves
+        through ``self._chats``, so on the delete path (which pops the row
+        before scheduling this cleanup) it would silently fall back to the
+        PRIMARY workspace's root and reclaim nothing — the same leak, now
+        reported as a success.
         """
         raw_ids = (
             session_ids
             if session_ids is not None
             else [*chat.previous_session_ids, chat.session_id]
         )
-        workspace = self._config.workspace_root
+        root = (
+            agent_root
+            if agent_root is not None
+            else self._agent_root_for_chat(chat.chat_id)
+        )
         seen: set[str] = set()
         for sid in raw_ids:
             sid = str(sid or "")
@@ -3755,9 +3803,9 @@ class ProjectChatManager:
             seen.add(sid)
             try:
                 if chat.provider == "claude":
-                    deleted = self._transcripts.delete_sdk_session_blob(workspace, sid)
+                    deleted = self._transcripts.delete_sdk_session_blob(root, sid)
                 elif chat.provider == "opencode":
-                    deleted = await OpencodeProvider.delete_thread(workspace, sid)
+                    deleted = await OpencodeProvider.delete_thread(root, sid)
                 else:
                     continue
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
@@ -3794,8 +3842,14 @@ class ProjectChatManager:
         chat: ChatInfo,
         provider: ProviderService | None,
         session_ids: list[str] | None = None,
+        *,
+        agent_root: Path | None = None,
     ) -> None:
-        """Disconnect then reclaim provider storage for sync lifecycle calls."""
+        """Disconnect then reclaim provider storage for sync lifecycle calls.
+
+        ``agent_root`` is forwarded to the reclaim; see its docstring for why a
+        caller that has already unregistered the chat has to resolve it first.
+        """
 
         if provider is None and not any(
             str(session_id or "")
@@ -3809,11 +3863,18 @@ class ProjectChatManager:
 
         async def cleanup() -> None:
             await self._disconnect_provider(chat.chat_id, provider)
-            await self._reclaim_provider_sessions_async(chat, session_ids)
+            await self._reclaim_provider_sessions_async(
+                chat, session_ids, agent_root=agent_root
+            )
 
         asyncio.ensure_future(cleanup())
 
     def delete_chat(self, chat_id: str) -> bool:
+        # Resolved before the row leaves the registry: the cleanup below runs
+        # after the pop (and asynchronously), and `_agent_root_for_chat` reads
+        # `self._chats`, so resolving it there lands on the primary workspace's
+        # root and leaves this chat's blob or opencode session behind.
+        agent_root = self._agent_root_for_chat(chat_id)
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
@@ -3825,7 +3886,7 @@ class ProjectChatManager:
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
         provider = self._providers.pop(chat_id, None)
-        self._schedule_provider_cleanup(chat, provider)
+        self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -3884,7 +3945,7 @@ class ProjectChatManager:
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
-        self, chat_id: str, ctx: ChatContext, chat: ChatInfo
+        self, chat_id: str, ctx: ChatContext, chat: ChatInfo, agent_root: Path
     ) -> tuple[int, str | None, Path | None]:
         """Disk half of archiving one chat, safe to run off the event loop.
 
@@ -3892,11 +3953,20 @@ class ProjectChatManager:
         id — read the turn count and the filtered JSONL, then render and write
         the markdown archive. It touches no shared in-memory state and no
         asyncio primitives, which is what lets ``archive_chat`` hand it to a
-        worker thread.
+        worker thread. ``agent_root`` is resolved by the caller on the loop for
+        that reason.
 
         Ordering matters: the turn count has to be taken before
         ``archive_session`` consumes the in-progress transcript, and the
         filtered JSONL before the caller deletes the session blob.
+
+        The Claude SDK writes a chat's session blob under the agent root the
+        chat actually ran in, so that root — not ``workspace_root`` — is what
+        finds it. Resolving it against the install root instead returned None
+        for every workspace-scoped chat, and a None here is indistinguishable
+        from "nothing to extract": ``run_archive_postprocess`` skipped insights,
+        the project-doc fold, the trajectory and memory proposals in silence,
+        with no job run and no log line.
         """
         turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
         filtered_jsonl: str | None = None
@@ -3904,7 +3974,9 @@ class ProjectChatManager:
             from ciao.insights import filter_session_jsonl
             try:
                 filtered_jsonl = filter_session_jsonl(
-                    self._config.workspace_root, chat.session_id
+                    self._config.workspace_root,
+                    chat.session_id,
+                    agent_root=agent_root,
                 )
             except Exception:  # noqa: BLE001 — never fail archive over insights prep
                 logger.exception(
@@ -3973,8 +4045,9 @@ class ProjectChatManager:
         # every streaming turn until it finished, so it runs in a worker
         # thread. Awaited before anything else happens, so the chat_archived
         # event still fires in the same place it always did.
+        agent_root = self._agent_root_for_chat(chat_id)
         turn_count, filtered_jsonl, result = await asyncio.to_thread(
-            self._read_archive_inputs, chat_id, ctx, chat
+            self._read_archive_inputs, chat_id, ctx, chat, agent_root
         )
         # The await above is a suspension point, so the chat may have been
         # deleted while the transcript was being written. Marking a row that is
@@ -4234,10 +4307,10 @@ class ProjectChatManager:
             # A system-schedule chat (memory curation, hygiene, skill
             # evolution) is the memory machinery itself. Its archive keeps the
             # insights section — the audit trail of what an unattended run did
-            # — but it may never write memory or project docs: extraction has
-            # been observed lifting the curation prompt's own rules as
-            # "Decisions" and auto-promoting the machinery's self-description
-            # into the bounded regions every session loads.
+            # — and memory proposals still run, but extraction is told to
+            # ignore unattended (automation) turns: a real user statement made
+            # mid-run is caught, while the machinery's self-description is not
+            # lifted as a fact. See the "unattended" rule in ciao/insights.py.
             is_system_chat = is_system_schedule_id(
                 chat_meta.schedule_id if chat_meta else ""
             )
@@ -4268,7 +4341,7 @@ class ProjectChatManager:
                 expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if proposal_vault_root is not None and not is_system_chat:
+            if proposal_vault_root is not None:
                 expected.append("memory_proposals")
             self._begin_postprocess(chat_id, expected)
             asyncio.create_task(
@@ -4296,7 +4369,7 @@ class ProjectChatManager:
                         ),
                         provider=chat_meta.provider if chat_meta else "claude",
                         project_doc_path=project_doc_path,
-                        memory_proposals_enabled=not is_system_chat,
+                        memory_proposals_enabled=True,
                     ),
                 )
             )
@@ -4781,6 +4854,23 @@ class ProjectChatManager:
             )
         return primary
 
+    def chat_workspaces(self) -> dict[str, str]:
+        """Every known chat id mapped to its project's workspace.
+
+        Archives live under one shared ``Logs/Chats/<chat-id>/`` tree — the
+        re-rooting promotes Logs out of the vault but does not split it per
+        workspace — so an archive's path says which CHAT wrote it and nothing
+        about where that chat ran. Anything filtering archives by workspace has
+        to come back through the registry, which is here and not in
+        ``ciao.insights``; the backfill scanner compared the chat-id path
+        segment to a workspace name directly, which can never match, so a
+        workspace-scoped run silently found nothing.
+        """
+        return {
+            chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""
+            for chat_id, chat in self._chats.items()
+        }
+
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
         web_chat_id = getattr(entry, "web_chat_id", None)
@@ -5247,12 +5337,15 @@ class ProjectChatManager:
         return True if supports is None else supports
 
     async def _capability_candidates(self, chat: ChatInfo, model: str) -> list[dict]:
-        """Up to three vision-capable alternatives for the capability question.
+        """Vision-capable alternatives for the capability question.
 
         Always leads with the current model as a disabled ``current`` entry so
         the PWA can render the active-but-unsuitable choice. The rest are models
-        opencode states accept images, drawn from the same catalog that ruled
-        the current one out, so a suggestion cannot be a guess.
+        the chat's provider states accept images, drawn from the same catalog
+        that ruled the current one out, so a suggestion cannot be a guess.
+        For opencode, every entry with ``images is True`` in its catalog is
+        offered (no 3-item cap); other providers have no non-vision models
+        today, so only the current entry is returned there.
         """
         entries: list[dict] = [{"id": model, "label": model, "disabled": True}]
         if chat.provider != "opencode":
@@ -5265,8 +5358,6 @@ class ProjectChatManager:
             logger.info("opencode catalog unavailable for candidates", exc_info=True)
             return entries
         for row in catalog:
-            if len(entries) > 3:
-                break
             candidate = str(row.get("model") or "")
             if not candidate or candidate == model or row.get("images") is not True:
                 continue
@@ -7134,10 +7225,14 @@ class ProjectChatManager:
         if chat.provider == "opencode":
             await self._watch_opencode_subagent_completion(chat_id, project_id)
             return
+        # This watcher looks the file up exactly once; a miss here is final
+        # (the loop below would never run), so force the cross-cwd fallback
+        # past the shared cache's rescan rate limit — see subagent_tracking.
         path = subagent_tracking.find_parent_session_file(
             chat.session_id,
             self._config.workspace_root,
             agent_root=self._agent_root_for_chat(chat_id),
+            force_refresh=True,
         )
         if path is None:
             return
@@ -7159,6 +7254,8 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
+        task_wake_sent = False
+        cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
@@ -7174,6 +7271,23 @@ class ProjectChatManager:
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
                 pending = state.notification_pending
+                # CLI-owned tasks (Monitor / background Bash): when the CLI
+                # subprocess that owns them is gone, their completion will
+                # never be delivered. Two consecutive disconnected ticks give
+                # a normal between-turns reconnect time to come back before
+                # the wake fires.
+                tasks = subagent_tracking.running_tasks(state)
+                if tasks and not task_wake_sent:
+                    if not self._unwoken_tasks(chat_id, tasks):
+                        # Already woken this process; a wake whose turn never
+                        # persisted is retried at most once per restart, not
+                        # every tick.
+                        task_wake_sent = True
+                    else:
+                        cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
+                        if cli_gone_ticks >= 2:
+                            self._wake_for_dead_cli_tasks(chat, project_id, tasks)
+                            task_wake_sent = True
                 if pending:
                     held_ticks += 1
                 else:
@@ -7221,6 +7335,24 @@ class ProjectChatManager:
                     if count != last_count or (ready_to_nudge and nudged):
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
+                # Keep the watcher alive while tracked CLI tasks are still
+                # running and their wake has not gone out: once the owning
+                # CLI dies, nothing else would ever deliver the completion.
+                # After the wake (or once the tasks complete via
+                # notification) the normal exit rules apply — the CLI
+                # answers its own task-notifications on resume.
+                if count == 0 and tasks and not task_wake_sent:
+                    if self._restart_draining:
+                        # A restart must not wait an hour on this watcher:
+                        # active_chat_ids() counts it and the restart drain
+                        # has no timeout. sweep_orphaned_cli_tasks wakes the
+                        # chat after the restart, so there is nothing left
+                        # to guard here.
+                        break
+                    if time.perf_counter() >= deadline:
+                        break
+                    await asyncio.sleep(3)
+                    continue
                 if count == 0 and (not pending or nudged or grace_expired):
                     break
                 await asyncio.sleep(3)
@@ -7352,6 +7484,178 @@ class ProjectChatManager:
                 "Subagent synthesis nudge failed for chat %s", chat_id
             )
             return False
+
+    def _cli_owner_alive(self, chat_id: str) -> bool:
+        """True while the chat's CLI subprocess (if any) is still connected.
+
+        A chat with no provider entry at all (server restart) counts as gone:
+        nothing owns its CLI tasks any more. Providers without the concept
+        report alive so only a genuinely dead Claude CLI triggers a wake.
+        """
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None:
+            return False
+        return provider_service.cli_connected
+
+    def _unwoken_tasks(
+        self, chat_id: str, tasks: list[SubagentInfo]
+    ) -> list[SubagentInfo]:
+        """CLI tasks in *tasks* this process has not already woken for.
+
+        ``_cli_task_wakes_sent`` bounds redelivery to once per process
+        lifetime: a wake whose turn never reached the JSONL (CLI cannot
+        reconnect, auth down) would otherwise re-arm on every watcher tick
+        or restart sweep, because nothing marks the tasks lost. Across a
+        restart the JSONL "lost" marker from a persisted wake is the durable
+        guard, so a wake that never persisted is retried at most once per
+        restart.
+        """
+        return [
+            task
+            for task in tasks
+            if (chat_id, task.agent_id) not in self._cli_task_wakes_sent
+        ]
+
+    def _wake_for_dead_cli_tasks(
+        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
+    ) -> None:
+        """Deliver one wake turn for CLI tasks whose owning CLI is gone.
+
+        Tasks already woken this process are filtered out first; if none
+        remain, nothing is delivered and the (chat_id, task_id) pairs are
+        recorded *before* delivery so a failed wake is not re-armed.
+        """
+        tasks = self._unwoken_tasks(parent.chat_id, tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            self._cli_task_wakes_sent.add((parent.chat_id, task.agent_id))
+        prompt = self._build_cli_task_wake_prompt(tasks)
+        self._deliver_wake(parent, prompt, count=len(tasks))
+
+    def sweep_orphaned_cli_tasks(self) -> int:
+        """After a restart, wake chats whose CLI tasks (Monitor / background Bash)
+        were still running: the CLI that owned them died with the old server.
+
+        No watcher survives a restart (one is only armed when a turn finishes),
+        so without this sweep a task that was running at shutdown would never
+        produce a wake. Only chats active within
+        ``_ORPHANED_CLI_TASK_SWEEP_MAX_AGE`` are woken: the first upgrade after
+        the sweep shipped must not wake every chat that ever left a Monitor
+        running months ago. An unparseable or empty ``last_activity_at`` never
+        skips a chat — the wake is worth more than the risk of missing one.
+        Delivery goes through the same deferred path as
+        ``queue_background_wake`` — a bounded coalescing sleep, then
+        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
+        raises into the caller. Tasks already woken this process
+        (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
+        "lost" marker from a persisted wake is the durable guard, so a wake
+        that never persisted is retried at most once per restart. Returns
+        the number of chats armed for a wake.
+        """
+        woken = 0
+        for chat in list(self._chats.values()):
+            try:
+                if chat.archived or not chat.session_id:
+                    continue
+                if chat.provider != "claude":
+                    continue
+                last_active = _parse_iso(chat.last_activity_at)
+                if (
+                    last_active is not None
+                    and datetime.now(UTC) - last_active
+                    > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE
+                ):
+                    continue
+                path = subagent_tracking.find_parent_session_file(
+                    chat.session_id,
+                    self._config.workspace_root,
+                    agent_root=self._agent_root_for_chat(chat.chat_id),
+                )
+                if path is None:
+                    continue
+                state = subagent_tracking.parse_session_subagents(path)
+                tasks = self._unwoken_tasks(
+                    chat.chat_id, subagent_tracking.running_tasks(state)
+                )
+                if not tasks:
+                    continue
+                woken += 1
+                try:
+                    asyncio.create_task(self._deferred_cli_task_wake(chat))
+                except RuntimeError:
+                    # No running loop (e.g. a sync startup path). Dropping the
+                    # wake beats raising into the caller; the tasks stay
+                    # "running" in the JSONL, so nothing is lost by trying
+                    # again on the next sweep.
+                    logger.debug(
+                        "No event loop for orphaned CLI task wake of %s",
+                        chat.chat_id,
+                    )
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill startup
+                logger.exception(
+                    "Orphaned CLI task sweep failed for chat %s",
+                    getattr(chat, "chat_id", "?"),
+                )
+        return woken
+
+    async def _deferred_cli_task_wake(self, parent: ChatInfo) -> None:
+        """Wait out the startup coalescing window, then wake for dead-CLI tasks."""
+        try:
+            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
+            tasks = self._unwoken_tasks(
+                parent.chat_id,
+                subagent_tracking.running_tasks(
+                    subagent_tracking.parse_session_subagents(
+                        subagent_tracking.find_parent_session_file(
+                            parent.session_id,
+                            self._config.workspace_root,
+                            agent_root=self._agent_root_for_chat(parent.chat_id),
+                        )
+                        or Path("nonexistent")
+                    )
+                ),
+            )
+            if not tasks:
+                return
+            self._wake_for_dead_cli_tasks(parent, parent.project_id, tasks)
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception(
+                "Orphaned CLI task wake failed for chat %s", parent.chat_id
+            )
+
+    @staticmethod
+    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
+        """Compose the wake turn for CLI tasks orphaned by a dead CLI.
+
+        Mirrors the background-run wake: name the log/output the command was
+        writing and tell the chat to verify rather than assume. The first line
+        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
+        recognise this prompt in the JSONL later and mark the tasks lost —
+        the wake must never be sent twice.
+        """
+        lines = [
+            f"{subagent_tracking.CLI_TASK_WAKE_PREFIX} {len(tasks)} CLI task"
+            f"{'s' if len(tasks) != 1 else ''} you started "
+            "(Monitor / background shell) were lost: the Claude CLI process "
+            "that owned them has exited, so their completion will never be "
+            "delivered to this chat."
+        ]
+        for task in tasks:
+            lines.append("")
+            lines.append(f"— {task.subagent_type}: {task.description} (task {task.agent_id})")
+            if task.command:
+                lines.append(f"command: {task.command}")
+        lines.append("")
+        lines.append(
+            "Check the real state yourself now: read the log or output file "
+            "the command was writing, and inspect the process (pgrep/ps) "
+            "rather than assuming it finished or that the last lines tell the "
+            "whole story. For future long-running commands use the "
+            "`background_run_start` MCP tool, which survives CLI restarts and "
+            "wakes this chat with the exit code, log tail and log path."
+        )
+        return "\n".join(lines)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
         """Deliver one background-run wake turn into *parent* and announce it.
@@ -8172,10 +8476,14 @@ class ProjectChatManager:
         if chat.provider != "claude":
             return True, False
         try:
+            # Single-shot lookup: a miss reports the agents settled and can
+            # archive the chat, so force the lookup past the shared cache's
+            # rescan rate limit — see subagent_tracking.find_parent_session_file.
             path = subagent_tracking.find_parent_session_file(
                 chat.session_id,
                 self._config.workspace_root,
                 agent_root=self._agent_root_for_chat(chat_id),
+                force_refresh=True,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
@@ -8204,7 +8512,8 @@ class ProjectChatManager:
                     return True, had_async
                 if not had_async:
                     had_async = any(
-                        info.is_async for info in state.subagents.values()
+                        info.is_async and info.kind == "agent"
+                        for info in state.subagents.values()
                     )
             # Recomputed every tick, not just when the parent file grows: a
             # completion the CLI never wrote there still shows up as the
@@ -8379,14 +8688,17 @@ class ProjectChatManager:
         (web_project_id path). For fixed-chat schedules (web_chat_id),
         the existing chat's provider is honoured.
 
-        A fixed-chat *interval* entry is handled differently in two ways. It
-        never has its model/mode overwritten — each run uses whatever the user
-        configured on the chat, which is the defining property the merged
-        `interval` cadence inherited from loops. And a missing or archived
-        target does not end the run: the archived transcript is forked, or a
-        fresh chat is opened in the entry's project, and ``entry.web_chat_id``
-        is re-pointed at it. Only when no project resolves either does this
-        return None, which the caller turns into "disable the entry".
+        A fixed-chat entry is handled differently in two ways. It never has its
+        model/mode overwritten — each run uses whatever the user configured on
+        the chat, which is the defining property the merged `interval` cadence
+        inherited from loops. And a missing or archived target does not end the
+        run, whatever the cadence: the archived transcript is forked
+        (``chat_continue`` semantics), or a fresh chat is opened in the entry's
+        project, and ``entry.web_chat_id`` is re-pointed at it. Dispatching into
+        the archived chat itself would resume a reclaimed provider session and
+        fail instantly with a silent ``stream error`` on every future run (see
+        issue #407). Only when no project resolves either does this return
+        None, which the caller turns into "disable the entry".
         """
         from datetime import UTC, datetime
 
@@ -8432,8 +8744,7 @@ class ProjectChatManager:
             return chat.chat_id
         elif web_chat_id:
             target_chat = self._chats.get(web_chat_id)
-            interval = getattr(entry, "frequency", "") == "interval"
-            if interval and (target_chat is None or target_chat.archived):
+            if target_chat is None or target_chat.archived:
                 replacement = self._rehome_interval_chat(entry, prompt)
                 if replacement is None:
                     return None
@@ -8442,10 +8753,20 @@ class ProjectChatManager:
             if target_chat is None:
                 logger.warning("Schedule target chat %s not found, skipping", web_chat_id)
                 return None
+            interval = getattr(entry, "frequency", "") == "interval"
             if not interval:
                 # Interval runs inherit the chat's own model/mode instead.
                 target_chat.model = model
                 target_chat.mode = mode
+                # A rehomed replacement was created without a provider arg, so
+                # create_chat defaulted it to the workspace's default — which
+                # can differ from the engine this dispatch resolved (entry
+                # override or workspace default at schedule_effective_routing
+                # time). Dispatch runs the replacement's provider, and would
+                # then feed it a model chosen for a different engine. Pin all
+                # three so the run uses what the schedule asked for.
+                if getattr(target_chat, "provider", "") != (provider or ""):
+                    target_chat.provider = provider
             _stamp(target_chat)
             self._save()
             return cast(str, web_chat_id)
@@ -8490,11 +8811,16 @@ class ProjectChatManager:
         return existing is not None and not existing.background
 
     def _rehome_interval_chat(self, entry, prompt: str) -> ChatInfo | None:
-        """Point a fixed-chat interval entry at a usable chat, or None.
+        """Point a chat-bound entry at a usable chat, or None.
 
         An archived target is forked so the run keeps the conversation it was
         following; a deleted one is replaced with a fresh chat in the entry's
         project. Mutates ``entry.web_chat_id``; the caller persists the entry.
+
+        Despite the name this serves every cadence, not just interval: a
+        wall-clock entry bound to a chat hits the same dead target after the
+        chat is archived, and dispatching into it fails with an unobservable
+        ``stream error`` on every later run (issue #407).
         """
         chat_id = getattr(entry, "web_chat_id", "") or ""
         chat = self._chats.get(chat_id)
@@ -8725,6 +9051,33 @@ class ProjectChatManager:
         # retry) is not an error, but it is not a completed run either -- report
         # it as such rather than flattening it to "ok".
         result["status"] = "error" if _sched_status == "error" else _sched_status
+        # A failed run is stamped on the stored row, not just in the job log:
+        # without this a wall-clock entry failing every run (an archived target
+        # resuming a dead provider session, say) produced an endless string of
+        # invisible `stream error` records and nothing the operator could see
+        # anywhere (issue #407). The stamp makes the PWA sidebar flag the
+        # automation for attention on the next schedules refetch. A completed
+        # run clears it again, so a one-off failure does not brand the entry
+        # unhealthy forever — interval entries get this for free from
+        # _run_interval's write-back; wall-clock entries get it here. Re-read
+        # the row first: the run streamed for minutes and the user may have
+        # edited or retargeted it meanwhile — only the health field is ours to
+        # write.
+        if _sched_schedule_id and _sched_status in {"error", "ok", "skipped"}:
+            store = getattr(self, "schedule_store", None)
+            if store is not None:
+                latest = store.get(_sched_schedule_id)
+                if latest is not None and latest.last_status != _sched_status:
+                    latest.last_status = _sched_status
+                    store.replace(latest)
+                    # An open sidebar or Automations page only refetches on the
+                    # schedules_changed event; without publishing it the newly
+                    # stamped health (a failure that needs attention, or a
+                    # skipped run waiting on the user) stays invisible until an
+                    # unrelated refetch or reload.
+                    from ciao.schedules import publish_automations_changed
+
+                    publish_automations_changed(self)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",

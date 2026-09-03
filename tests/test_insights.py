@@ -169,6 +169,41 @@ def test_filter_drops_sidechain_entries(
     assert lines[0]["content"][0]["text"] == "main"
 
 
+def test_filter_flags_unattended_user_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An automation turn carries the capsule marker and is flagged unattended.
+
+    The marker is what lets extraction tell a real user turn from the machinery
+    that fired it, so a system-schedule chat can still surface a genuine user
+    statement without lifting the schedule's own rules as facts.
+    """
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    workspace = tmp_path / "ws"
+    session_id = "sess-unatt"
+    jsonl = _project_dir(workspace) / f"{session_id}.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"content": (
+            "[CIAO_CONTEXT_BEGIN]\n<ciao-context>\n"
+            "unattended=true; this turn was fired automatically. Do not ask "
+            "questions or wait for approval.\n</ciao-context>\n"
+            "[CIAO_CONTEXT_END]\n\nRun the nightly curation pass."
+        )}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Curation done."},
+        ]}},
+        {"type": "user", "message": {"content": "Actually, remember: never deploy on Fridays."}},
+    ])
+
+    out = insights.filter_session_jsonl(workspace, session_id)
+    assert out is not None
+    lines = [json.loads(line) for line in out.splitlines()]
+    assert lines[0]["unattended"] is True
+    assert "unattended" not in lines[1]
+    assert "unattended" not in lines[2]
+
+
 # ── extract_and_append ───────────────────────────────────────────────────
 
 
@@ -1243,3 +1278,485 @@ def test_text_user_prompt_prepends_context():
     assert plain.startswith("Below is a rendered")
     assert augmented.startswith("## Known context")
     assert augmented.endswith(plain)
+
+
+# ── call_with_retry: the one retry policy ────────────────────────────────
+#
+# The policy used to exist three times (JSONL input, rendered-archive input,
+# and inline in the backfill worker) and the copies had drifted. These pin the
+# shared one, including the two flags that preserve the drift on purpose.
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the retry wait without patching `asyncio.sleep` process-wide.
+
+    `insights.asyncio` *is* the asyncio module, so setattr'ing `sleep` on it
+    would make every `asyncio.sleep` in the process a no-op for the duration
+    of the test. Zeroing the delay constant is the narrow equivalent.
+    """
+    monkeypatch.setattr(insights, "_RETRY_DELAY_S", 0)
+
+
+class _Terminal(Exception):
+    """A provider rejection the provider already classified as non-transient."""
+
+    transient = False
+
+
+def test_call_with_retry_succeeds_first_time() -> None:
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        return "output"
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert (outcome.output, outcome.error, outcome.attempts) == ("output", "", 1)
+    assert outcome.gave_up == ""
+    assert calls == 1
+
+
+def test_call_with_retry_retries_a_transient_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "second try"
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.output == "second try"
+    assert outcome.attempts == 2
+    assert outcome.gave_up == ""
+    assert calls == 2
+
+
+def test_call_with_retry_gives_up_after_two_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("boom")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "failed-twice"
+    assert outcome.attempts == 2
+    assert outcome.error == "boom"
+    assert calls == 2
+
+
+def test_call_with_retry_never_retries_a_terminal_rejection() -> None:
+    """Quota/auth/bad-model fail identically on a second call.
+
+    Re-sending costs another rejected request plus the 30s wait, once per
+    archive across a whole backfill run.
+    """
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise _Terminal("over quota")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "terminal"
+    assert outcome.attempts == 1
+    assert outcome.error == "over quota"
+    assert calls == 1
+
+
+def test_call_with_retry_never_retries_a_context_overflow() -> None:
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(insights.call_with_retry(call, label="test call"))
+    assert outcome.gave_up == "context-overflow"
+    assert calls == 1
+
+
+def test_call_with_retry_can_be_told_to_retry_an_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag still exists for a caller that wants the old behaviour.
+
+    No production path sets it today — text mode used to, by accident of the
+    policy existing in three copies, and now refuses an overflow like the JSONL
+    path does.
+    """
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(call, label="test call", check_context_overflow=False)
+    )
+    assert outcome.gave_up == "failed-twice"
+    assert calls == 2
+
+
+def test_call_with_retry_skips_an_unavailable_apple_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(insights.native_sidecar, "is_apple_model", lambda model: True)
+    monkeypatch.setattr(insights.native_sidecar, "apple_model_available", lambda: False)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("sidecar missing")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(call, label="test call", model="apple-on-device")
+    )
+    assert outcome.gave_up == "apple-unavailable"
+    assert calls == 1
+
+
+def test_call_with_retry_can_be_told_not_to_check_the_apple_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill worker's deliberate asymmetry: it never made that check."""
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(insights.native_sidecar, "is_apple_model", lambda model: True)
+    monkeypatch.setattr(insights.native_sidecar, "apple_model_available", lambda: False)
+    calls = 0
+
+    async def call() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("sidecar missing")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(
+            call,
+            label="test call",
+            model="apple-on-device",
+            check_apple_available=False,
+        )
+    )
+    assert outcome.gave_up == "failed-twice"
+    assert calls == 2
+
+
+def test_retry_outcome_distinguishes_never_asked_from_answered_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the outcome is typed at all.
+
+    Both cases used to surface as an empty string plus a log line, so a caller
+    could not tell "the account is over quota, the model was never asked" from
+    "the model answered nothing twice".
+    """
+    _no_sleep(monkeypatch)
+
+    async def refused() -> str:
+        raise _Terminal("over quota")
+
+    async def empty() -> str:
+        return ""
+
+    never_asked = asyncio.run(insights.call_with_retry(refused, label="test call"))
+    answered_nothing = asyncio.run(insights.call_with_retry(empty, label="test call"))
+
+    assert never_asked.output == answered_nothing.output == ""
+    assert never_asked.gave_up == "terminal"
+    assert answered_nothing.gave_up == ""
+
+def test_text_mode_does_not_retry_a_context_overflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An oversized archive fails once, not twice.
+
+    Text mode sends the rendered archive unchanged, so a second identical
+    request is rejected identically — at 600s of timeout budget plus the 30s
+    wait, that is ten minutes to learn nothing. It used to retry: the policy
+    existed in three copies and only the JSONL one made this check.
+    """
+    archive = tmp_path / "archive.md"
+    archive.write_text("## Turn 1\n\nhello\n", encoding="utf-8")
+    calls = 0
+
+    async def overflowing(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    monkeypatch.setattr(insights, "_call_text_model", overflowing)
+
+    # Zeroed rather than patched, so a regression that reintroduces the retry
+    # fails the call count instead of hanging for 30s.
+    _no_sleep(monkeypatch)
+
+    out, err = asyncio.run(
+        insights._run_text_model_with_retry(archive_path=archive, model="some-model")
+    )
+    assert out == ""
+    assert "too long" in err
+    assert calls == 1
+
+
+def test_text_mode_still_retries_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Refusing an overflow must not have turned off retrying in general."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("## Turn 1\n\nhello\n", encoding="utf-8")
+    calls = 0
+
+    async def flaky(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "## Decisions\n- shipped it"
+
+    monkeypatch.setattr(insights, "_call_text_model", flaky)
+    _no_sleep(monkeypatch)
+
+    out, err = asyncio.run(
+        insights._run_text_model_with_retry(archive_path=archive, model="some-model")
+    )
+    assert err == ""
+    assert "shipped it" in out
+    assert calls == 2
+
+
+def test_backfill_does_not_retry_a_context_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill worker refuses an overflow too.
+
+    It sends the rendered archive whole, exactly as text mode does, so a second
+    identical request is rejected identically. This path runs over every archive
+    missing insights, and each doomed retry holds a worker slot for two full
+    600s timeout budgets plus the 30s wait.
+    """
+    _no_sleep(monkeypatch)
+    calls = 0
+
+    async def overflowing() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("prompt is too long for this model")
+
+    outcome = asyncio.run(
+        insights.call_with_retry(
+            overflowing,
+            label="Text fallback insights call",
+            check_apple_available=False,
+            budget_applies=False,
+        )
+    )
+    assert outcome.gave_up == "context-overflow"
+    assert calls == 1
+
+
+def test_overflow_log_only_names_the_budget_that_applies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A text-mode overflow must not send the operator to an inert setting.
+
+    Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS.
+    Naming that variable on a path that ignores it is advice that cannot work.
+    """
+    async def overflowing() -> str:
+        raise RuntimeError("prompt is too long for this model")
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(insights.call_with_retry(overflowing, label="Insights model call"))
+    assert "CIAO_INSIGHTS_MAX_INPUT_CHARS" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            insights.call_with_retry(
+                overflowing, label="Insights text call", budget_applies=False
+            )
+        )
+    assert "CIAO_INSIGHTS_MAX_INPUT_CHARS" not in caplog.text
+    assert "larger window" in caplog.text
+
+
+# ── backfill across agent roots, and opencode session ids ────────────────────
+#
+# Backfill slugged one project directory out of `config.workspace_root`. On a
+# multi-workspace install every Claude blob lives under its own agent root, so
+# that directory held none of them: every archive fell through to the text-mode
+# path (or, when discovery could not read an id out of the filename at all, was
+# skipped entirely). The id regex was UUID-only, which made every opencode
+# archive — `ses_<base62>` — permanently unreachable by backfill, even though
+# text mode needs nothing but the markdown.
+
+
+def _rerooted_config(tmp_path: Path):
+    from ciao.config import WorkspaceConfig, reset_reroot_cache
+
+    runtime = tmp_path / "ws" / ".runtime"
+    receipt = runtime / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text('{"status": "migrated"}', encoding="utf-8")
+    reset_reroot_cache()
+
+    config = _config()
+    config.state_path = runtime / "state.json"
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+    config.workspaces = {
+        "work": WorkspaceConfig(name="work", vault_root=str(tmp_path / "vault"))
+    }
+    return config
+
+
+def test_backfill_finds_a_blob_under_a_workspace_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # After the re-rooting `config.logs_root` is <install>/Logs, not the vault's.
+    chats_dir = tmp_path / "ws" / "Logs" / "Chats" / "chat-123" / "claude"
+    chats_dir.mkdir(parents=True)
+    session = "00000000-0000-0000-0000-0000000000aa"
+    archive = chats_dir / f"work-{session}.md"
+    archive.write_text("# Archived chat\n", encoding="utf-8")
+
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    config = _rerooted_config(tmp_path)
+
+    agent_root = config.agent_root("work")
+    assert agent_root != config.workspace_root
+    slug = str(agent_root).replace("/", "-").lstrip("-")
+    project_dir = fake_home / ".claude" / "projects" / f"-{slug}"
+    project_dir.mkdir(parents=True)
+    _write_jsonl(project_dir / f"{session}.jsonl", [
+        {"type": "user", "message": {"content": "hello"}},
+    ])
+
+    seen: list[str] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        seen.append(user_prompt)
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(config, mode="full", concurrency=1)
+    )
+
+    assert result["eligible"] == 1, "the blob is under the work root, not the install root"
+    assert result["success"] == 1
+    assert any("line-oriented JSON" in p or "JSONL" in p for p in seen)
+
+
+def test_backfill_discovers_an_opencode_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-456" / "opencode"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "2026-08-31T00-04-57Z-ses_faae15d4affeoEsvKh19Ro4Tob.md"
+    archive.write_text("# Archived chat\n\nsome text\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(config, mode="both", concurrency=1)
+    )
+
+    assert result["eligible"] == 1, "a ses_ id is a session id too"
+    assert "## Session insights" in archive.read_text(encoding="utf-8")
+
+
+def test_backfill_workspace_filter_uses_the_chat_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Archives sit under a shared `Logs/Chats/<chat-id>/` tree, so the path
+    segment is a chat id and comparing it to a workspace name never matches —
+    a workspace-scoped run found nothing at all."""
+    chats = tmp_path / "vault" / "Logs" / "Chats"
+    for chat_id in ("chat-work1", "chat-home1"):
+        d = chats / chat_id / "opencode"
+        d.mkdir(parents=True)
+        (d / f"2026-08-31T00-00-00Z-ses_{chat_id.replace('-', '')}.md").write_text(
+            "# Archived chat\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            workspace="work",
+            chat_workspaces={"chat-work1": "work", "chat-home1": "personal"},
+        )
+    )
+
+    assert result["eligible"] == 1
+    assert "## Session insights" in next(
+        (chats / "chat-work1" / "opencode").glob("*.md")
+    ).read_text(encoding="utf-8")
+    assert "## Session insights" not in next(
+        (chats / "chat-home1" / "opencode").glob("*.md")
+    ).read_text(encoding="utf-8")
+
+
+def test_backfill_refuses_to_silently_scope_without_a_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A workspace with no mapping cannot filter; scan everything and say so
+    rather than reporting a clean run over zero archives."""
+    d = tmp_path / "vault" / "Logs" / "Chats" / "chat-a" / "opencode"
+    d.mkdir(parents=True)
+    (d / "2026-08-31T00-00-00Z-ses_aaa.md").write_text("# c\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config, mode="both", concurrency=1, workspace="work"
+        )
+    )
+    assert result["eligible"] == 1

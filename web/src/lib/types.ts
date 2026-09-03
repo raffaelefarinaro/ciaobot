@@ -95,10 +95,6 @@ export interface McpStatus {
   url?: string
   tool_count: number
   tools?: string[]
-  // Lazy discovery: `tools` is everything registered and callable, while
-  // `listed_tools` is the subset a chat sees in tools/list up front.
-  lazy_tools?: boolean
-  listed_tools?: string[]
   env_path?: string
   project_servers?: McpProjectServer[]
   active_sessions?: number
@@ -486,7 +482,9 @@ export interface Schedule {
   interval_minutes: number
   // Outcome of the most recent interval run. Interval entries have no expected
   // wall-clock slot, so `missed` is always false for them and this is what
-  // reports their health instead. Empty on wall-clock schedules.
+  // reports their health instead. A wall-clock entry carries it too when its
+  // last dispatch failed ('error'): the missed-run check alone reports that
+  // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
   // retry) — see project_chats._schedule_dispatch_status.
@@ -1158,4 +1156,42 @@ export interface ProposalBatchResponse {
 export interface ProposalDismissOlderResponse {
   ok: boolean
   removed: number
+}
+
+// ── Proposal history (decision ledger) ───────────────────────────────────
+
+/** Who made the decision: through the app, the curation agent, or on its own. */
+export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
+
+/**
+ * One decided proposal from `GET /api/proposals/history`. Read side of the
+ * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
+ * in `ciao/memory_proposals.py`. `outcome` qualifies `action`: an "accepted"
+ * row with `outcome: "duplicate"` or `"suppressed"` was recognized as already
+ * known rather than freshly written, and `"swept"` marks an expiry dismissal.
+ * Legacy sidecar rows predate `ts`/`via` and surface with both blank.
+ */
+export interface ProposalHistoryRow {
+  id: string
+  ts: string
+  action: 'accepted' | 'dismissed'
+  via: ProposalHistoryVia
+  kind: string
+  text: string
+  source: string
+  workspace: string
+  destination: string
+  outcome: string
+  proposal_id: string
+}
+
+export interface ProposalHistoryResponse {
+  rows: ProposalHistoryRow[]
+  total: number
+  truncated: boolean
+  /** Page size the server actually served, after clamping to its cap. */
+  limit?: number
+  /** The request asked for more than the cap, so a wider limit returns the
+   * same page. Paging must stop on this, not on `truncated`. */
+  at_max?: boolean
 }

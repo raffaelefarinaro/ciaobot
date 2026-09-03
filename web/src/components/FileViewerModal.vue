@@ -153,6 +153,7 @@
             ></iframe>
             <HtmlArtifactViewer
               v-else-if="store.kind === 'html' && !store.editing"
+              ref="artifactViewerRef"
               :file-path="store.path"
               :reload-token="store.loadToken"
               :view="store.htmlView"
@@ -160,6 +161,9 @@
               :source-loading="store.sourceLoading"
               :source-error="store.sourceError"
               @update:view="store.setHtmlView"
+              @compose-comment="onArtifactCompose"
+              @open-comment="onArtifactOpenComment"
+              @bridge-ready="onArtifactBridgeReady"
             />
             <template v-else>
             <div v-if="frontmatter" class="fv-meta-card">
@@ -245,8 +249,8 @@
           :anchor="commentDraft && draftAnchor ? draftAnchor : null"
           v-model="composeText"
           :images="commentDraftImages"
-          @cancel="cancelComment"
-          @save="saveComment"
+          @cancel="artifactDraft ? cancelArtifactComment() : cancelComment()"
+          @save="artifactDraft ? saveArtifactComment() : saveComment()"
           @upload="handleDraftImageUpload"
           @remove-image="removeDraftImage"
         />
@@ -309,6 +313,7 @@ import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { formatFileComments } from '../lib/commentContext'
+import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
@@ -912,6 +917,156 @@ const {
 } = comments
 comments.setApplyHighlights(applyHighlights)
 
+// ── Artifact comments (HTML preview) ─────────────────────────────────
+// Same flow as PinnedFilePanel: the bridge inside the frame posts selection/
+// element anchors, this stages them as pending file comments. The modal's
+// read popover is modal-local (not Teleported), so the frame coords convert
+// through modalEl; the compose popover is Teleported, so it wants viewport.
+const artifactViewerRef = ref<InstanceType<typeof HtmlArtifactViewer> | null>(null)
+
+// Anchor captured with the compose flow; null for non-artifact drafts.
+let artifactDraft: {
+  selector: string
+  startOffset: number
+  endOffset: number
+  elementTag: string | null
+  wholeElement: boolean
+} | null = null
+
+// Draft highlight pushed into the frame while the compose popover is open, so
+// the annotation stays visible after the selection collapses.
+const artifactDraftHighlight = ref<ArtifactHighlight | null>(null)
+
+const artifactHighlights = computed<ArtifactHighlight[]>(() =>
+  activeFileComments.value
+    .filter(c => !!c.artifactSelector)
+    .map(c => ({
+      id: c.id,
+      selector: c.artifactSelector as string,
+      quote: c.selection,
+      startOffset: c.artifactStartOffset,
+      endOffset: c.artifactEndOffset,
+      wholeElement: c.artifactWholeElement ?? false,
+    })),
+)
+
+// Without this the modal rendered no marks at all: it staged anchors fine but
+// never pushed the list back into the frame, which also left the mark-click
+// handler below unreachable.
+function pushArtifactHighlights(): void {
+  if (store.kind !== 'html' || store.editing || store.htmlView !== 'preview') return
+  const list = artifactDraftHighlight.value
+    ? [...artifactHighlights.value, artifactDraftHighlight.value]
+    : artifactHighlights.value
+  nextTick(() => artifactViewerRef.value?.sendHighlights(list))
+}
+
+// Comment-list changes only. Frame loads are covered by @bridge-ready: a push
+// on mount or right after a loadToken bump reaches the previous document and
+// is dropped.
+watch(
+  () => activeFileComments.value.map(c => c.id).join(','),
+  () => pushArtifactHighlights(),
+)
+
+function onArtifactBridgeReady(): void {
+  pushArtifactHighlights()
+}
+
+function onArtifactCompose(a: {
+  selector: string
+  quote: string
+  startOffset: number
+  endOffset: number
+  elementTag?: string
+  wholeElement?: boolean
+  frameX: number
+  frameY: number
+}): void {
+  if (commentDraft.value || editingCommentId.value) return
+  // Close any read popover first, as the pinned panel already does: without
+  // this, clicking an existing highlight and then selecting other text in the
+  // frame floated the read and compose popovers over it at the same time.
+  closePopupComment()
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  draftAnchor.value = frameRect
+    ? { top: frameRect.top + a.frameY + 8, left: frameRect.left + a.frameX }
+    : { top: 120, left: 120 }
+  commentDraft.value = {
+    selection: a.quote,
+    text: '',
+    lines: null,
+    cell: null,
+  }
+  artifactDraft = {
+    selector: a.selector,
+    startOffset: a.startOffset,
+    endOffset: a.endOffset,
+    elementTag: a.elementTag ?? null,
+    wholeElement: a.wholeElement ?? false,
+  }
+  commentDraftImages.value = []
+  artifactDraftHighlight.value = {
+    id: comments.DRAFT_COMMENT_ID,
+    selector: a.selector,
+    quote: a.quote,
+    startOffset: a.startOffset,
+    endOffset: a.endOffset,
+    wholeElement: a.wholeElement,
+  }
+  pushArtifactHighlights()
+}
+
+// The shared cancel knows nothing about the artifact draft; without this the
+// draft mark stayed in the frame and was re-sent by every later push.
+function cancelArtifactComment(): void {
+  artifactDraft = null
+  artifactDraftHighlight.value = null
+  cancelComment()
+  pushArtifactHighlights()
+}
+
+function saveArtifactComment(): void {
+  const draft = commentDraft.value
+  if (!draft || !artifactDraft) return
+  const note = draft.text.trim()
+  if (!note) return
+  projectsStore.addPendingComment({
+    path: cleanPath(store.path),
+    selection: draft.selection,
+    comment: note,
+    artifactSelector: artifactDraft.selector,
+    artifactStartOffset: artifactDraft.startOffset,
+    artifactEndOffset: artifactDraft.endOffset,
+    artifactElementTag: artifactDraft.elementTag,
+    artifactWholeElement: artifactDraft.wholeElement,
+    images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+  })
+  commentDraft.value = null
+  draftAnchor.value = null
+  commentDraftImages.value = []
+  artifactDraft = null
+  artifactDraftHighlight.value = null
+}
+
+function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }): void {
+  // The popup template is v-if="activePopupComment", so an id with no stored
+  // comment (a draft mark, or a stale frame) would open nothing and silently
+  // swallow the click. Bail before touching the anchor state.
+  if (!activeFileComments.value.some(c => c.id === p.id)) return
+  if (artifactDraft) cancelArtifactComment()
+  const modal = modalEl.value
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  if (!modal || !frameRect) return
+  const modalRect = modal.getBoundingClientRect()
+  popupAnchor.value = {
+    top: frameRect.top - modalRect.top + p.frameY + 6,
+    left: Math.max(8, frameRect.left - modalRect.left + p.frameX),
+  }
+  activePopupId.value = p.id
+  popupOpenTimestamp = Date.now()
+}
+
 const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 
 // Selecting text and typing (or pasting, or hitting Cmd+D) opens the composer
@@ -1072,6 +1227,8 @@ watch(
   () => {
     comments.selectionAnchor.value = null
     comments.commentDraft.value = null
+    artifactDraft = null
+    artifactDraftHighlight.value = null
     comments.lastSelectionText = ''
     comments.lastSelectionLines = null
     comments.lastSelectionRange = null
@@ -1083,6 +1240,8 @@ watch(
     if (!open) {
       comments.selectionAnchor.value = null
       comments.commentDraft.value = null
+      artifactDraft = null
+      artifactDraftHighlight.value = null
       comments.lastSelectionRange = null
       activePopupId.value = null
       detachScrollSync()

@@ -120,6 +120,7 @@
         ></iframe>
         <HtmlArtifactViewer
           v-else-if="kind === 'html' && !isEditingText"
+          ref="artifactViewerRef"
           :file-path="cleanPath"
           :reload-token="imageTimestamp"
           :view="htmlView"
@@ -127,6 +128,9 @@
           :source-loading="sourceLoading"
           :source-error="sourceError"
           @update:view="setHtmlView"
+          @compose-comment="onArtifactCompose"
+          @open-comment="onArtifactOpenComment"
+          @bridge-ready="onArtifactBridgeReady"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -251,8 +255,8 @@
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
         v-model="composeText"
         :images="commentDraftImages"
-        @cancel="cancelComment"
-        @save="saveComment"
+        @cancel="artifactDraft ? cancelArtifactComment() : cancelComment()"
+        @save="artifactDraft ? saveArtifactComment() : saveComment()"
         @upload="handleDraftImageUpload"
         @remove-image="removeDraftImage"
       />
@@ -312,6 +316,7 @@ import { isCsvPath } from '../lib/csv'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import PaneHeader from './PaneHeader.vue'
@@ -837,6 +842,7 @@ function handlePfpBackdropClick(): void {
 function deleteFromPopover(id: string): void {
   closeCommentPopover()
   comments.deleteFileComment(id)
+  pushArtifactHighlights()
 }
 
 function editFromPopover(c: { id: string; comment: string; images?: string[] }): void {
@@ -948,10 +954,8 @@ watch(
 // Commenting stays available while the model works, matching FileViewerModal:
 // a comment is staged locally and rides along on the next message the user
 // sends (queued), so there is nothing to wait for.
-// Artifacts are not commentable: a comment anchors to a markdown highlight or
-// a text line, and a rendered page in a sandboxed frame offers neither. This is
-// a real capability loss versus .md, which is why the html-artifact skill tells
-// the model to keep prose in markdown.
+// Markdown/CSV comment through text/line/cell anchors; HTML artifacts comment
+// through the frame bridge (see the artifact section below).
 const isCommentable = computed(() =>
   !loading.value && !error.value
   && kind.value !== 'image' && kind.value !== 'pdf' && kind.value !== 'html'
@@ -981,6 +985,176 @@ const {
   cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
+
+// ── Artifact comments (HTML preview) ─────────────────────────────────
+// The bridge script inside the sandboxed frame posts selection/element
+// anchors over postMessage; this converts them into the same pending file
+// comments the markdown path produces, so chips, send-along, and the
+// <user-comment-reference> formatting all work unchanged. Anchoring is a CSS
+// selector plus text offsets inside the rendered page; the quote (verbatim
+// text) is the durable part the model reads — the selector only has to
+// re-find the highlight until the next revision reloads the frame.
+const artifactViewerRef = ref<InstanceType<typeof HtmlArtifactViewer> | null>(null)
+
+// Draft highlight pushed into the frame while the compose popover is open, so
+// the annotation stays visible after the selection collapses.
+const artifactDraftHighlight = ref<ArtifactHighlight | null>(null)
+
+// Anchor captured with the compose flow; null for non-artifact drafts.
+let artifactDraft: {
+  selector: string
+  startOffset: number
+  endOffset: number
+  elementTag: string | null
+  wholeElement: boolean
+} | null = null
+
+const artifactHighlights = computed<ArtifactHighlight[]>(() =>
+  commentsForFile.value
+    .filter(c => !!c.artifactSelector)
+    .map(c => ({
+      id: c.id,
+      selector: c.artifactSelector as string,
+      quote: c.selection,
+      startOffset: c.artifactStartOffset,
+      endOffset: c.artifactEndOffset,
+      wholeElement: c.artifactWholeElement ?? false,
+    })),
+)
+
+// Push the durable highlights (plus the open draft) into the frame. Called on
+// comment-list changes and on the bridge's ready handshake; a no-op outside
+// Preview.
+function pushArtifactHighlights(): void {
+  if (kind.value !== 'html' || htmlView.value !== 'preview') return
+  const list = artifactDraftHighlight.value
+    ? [...artifactHighlights.value, artifactDraftHighlight.value]
+    : artifactHighlights.value
+  nextTick(() => artifactViewerRef.value?.sendHighlights(list))
+}
+
+// The comment list changing is the only push this watcher can own. It must NOT
+// try to cover frame loads: on mount and on an imageTimestamp bump the message
+// would go out before the new document's bridge exists and would be dropped.
+// Loads are covered by @bridge-ready below.
+watch(
+  () => commentsForFile.value.map(c => c.id).join(','),
+  () => pushArtifactHighlights(),
+)
+
+// Sole load-time push: the bridge posts `ready` once its DOM is parsed, which
+// covers pinning an artifact that already has comments, toggling Code→Preview,
+// and the post-revision reload.
+function onArtifactBridgeReady(): void {
+  pushArtifactHighlights()
+}
+
+function onArtifactCompose(a: {
+  selector: string
+  quote: string
+  startOffset: number
+  endOffset: number
+  elementTag?: string
+  wholeElement?: boolean
+  frameX: number
+  frameY: number
+}): void {
+  if (commentDraft.value || editingCommentId.value) return
+  closeCommentPopover()
+  // Anchor the compose popover in viewport coordinates: CommentComposePopover
+  // teleports to body as position: fixed and clamps itself. The bridge
+  // measured frame-relative coordinates, so add the iframe's viewport offset.
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  draftAnchor.value = frameRect
+    ? { top: frameRect.top + a.frameY + 8, left: frameRect.left + a.frameX }
+    : { top: 120, left: 120 }
+  commentDraft.value = {
+    selection: a.quote,
+    text: '',
+    lines: null,
+    cell: null,
+  }
+  artifactDraft = {
+    selector: a.selector,
+    startOffset: a.startOffset,
+    endOffset: a.endOffset,
+    elementTag: a.elementTag ?? null,
+    wholeElement: a.wholeElement ?? false,
+  }
+  commentDraftImages.value = []
+  artifactDraftHighlight.value = {
+    id: comments.DRAFT_COMMENT_ID,
+    selector: a.selector,
+    quote: a.quote,
+    startOffset: a.startOffset,
+    endOffset: a.endOffset,
+    wholeElement: a.wholeElement,
+  }
+  pushArtifactHighlights()
+}
+
+// Save path for an artifact comment: same store call as the markdown path but
+// with the anchor fields instead of line numbers. Kept separate from the
+// shared saveComment rather than wrapped, so the two stay readable.
+function saveArtifactComment(): void {
+  const draft = commentDraft.value
+  if (!draft || !artifactDraft) return
+  const note = draft.text.trim()
+  if (!note) return
+  projectsStore.addPendingComment({
+    path: cleanPath.value,
+    selection: draft.selection,
+    comment: note,
+    artifactSelector: artifactDraft.selector,
+    artifactStartOffset: artifactDraft.startOffset,
+    artifactEndOffset: artifactDraft.endOffset,
+    artifactElementTag: artifactDraft.elementTag,
+    artifactWholeElement: artifactDraft.wholeElement,
+    images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+  })
+  commentDraft.value = null
+  draftAnchor.value = null
+  commentDraftImages.value = []
+  artifactDraft = null
+  artifactDraftHighlight.value = null
+}
+
+// The shared cancel knows nothing about the artifact draft, so cancelling
+// through it alone left the draft <mark> in the frame forever — re-sent by
+// every later push, and inert on click because DRAFT_COMMENT_ID matches no
+// stored comment.
+function cancelArtifactComment(): void {
+  artifactDraft = null
+  artifactDraftHighlight.value = null
+  cancelComment()
+  pushArtifactHighlights()
+}
+
+function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }): void {
+  const match = commentsForFile.value.find(c => c.id === p.id)
+  if (!match) return
+  // Clicking a stored mark abandons an open draft, so it goes through the
+  // artifact-aware cancel — otherwise the draft mark survives in the frame.
+  if (artifactDraft) cancelArtifactComment()
+  else comments.cancelComment()
+  // Anchor the read popover at the clicked mark: build a point-like element
+  // whose rect sits where the bridge measured the mark, in viewport coords —
+  // comments.anchorFromElement subtracts the container rect itself.
+  const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
+  if (!frameRect) return
+  const x = frameRect.left + p.frameX
+  const y = frameRect.top + p.frameY
+  showCommentPopover(
+    p.id,
+    {
+      getBoundingClientRect: () => ({
+        x, y, top: y, left: x, bottom: y, right: x, width: 0, height: 0,
+        toJSON: () => ({}),
+      }),
+    } as unknown as HTMLElement,
+    true,
+  )
+}
 
 const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 
@@ -1130,6 +1304,8 @@ watch(() => props.filePath, () => {
   comments.selectionAnchor.value = null
   comments.draftAnchor.value = null
   comments.commentDraft.value = null
+  artifactDraft = null
+  artifactDraftHighlight.value = null
   closeCommentPopover()
   showCommentList.value = false
   comments.lastSelectionText = ''
@@ -1140,6 +1316,12 @@ watch(() => props.filePath, () => {
   editError.value = ''
   deferredReload.value = false
 })
+
+// ChatLayout's global Cmd/Ctrl+Enter send shortcut checks this before acting:
+// while a text edit or comment draft is open here, focus can sit on this
+// panel's own Save/Add-comment button rather than a textarea, so the global
+// handler would otherwise send the unrelated chat composer draft instead.
+defineExpose({ isBusyAuthoring })
 </script>
 
 <style scoped>

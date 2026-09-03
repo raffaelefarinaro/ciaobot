@@ -132,7 +132,7 @@ async def test_watch_subagent_completion_emits_ready_events(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -202,7 +202,7 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -308,7 +308,7 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_questio
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -398,7 +398,7 @@ async def test_watch_subagent_completion_holds_nudge_on_pending_notification(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     # The notification stays unprocessed for a couple of ticks (the window
@@ -505,7 +505,7 @@ async def test_notification_grace_resets_between_windows(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     def assistant_record(text: str) -> dict:
@@ -605,7 +605,7 @@ async def test_watch_subagent_completion_clears_on_idle_agent_transcript(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     def finish_agent() -> None:
@@ -673,7 +673,7 @@ async def test_watch_subagent_completion_publishes_zero_when_it_gives_up(
     monkeypatch.setattr(
         subagent_tracking,
         "find_parent_session_file",
-        lambda session_id, workspace_root, *, agent_root=None: session_path,
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
     # Second tick: the session file is gone (session reset, workspace moved).
@@ -1005,3 +1005,633 @@ async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
     reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
     assert reloaded is not None
     assert reloaded.last_snippet == chat.last_snippet
+
+
+def _monitor_task_records() -> list[dict]:
+    return [
+        {"type": "user", "message": {"role": "user", "content": "watch the report"}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01SsjL",
+                        "name": "Monitor",
+                        "input": {
+                            "command": "tail -f /tmp/adoption_2026-08.log",
+                            "description": "adoption report 2026-08 DAG progress and failures",
+                            "timeout_ms": 3600000,
+                            "persistent": False,
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01SsjL",
+                        "content": "Monitor started (task bl7dzu4ku, timeout 3600000ms).",
+                    }
+                ],
+            },
+            "toolUseResult": {"taskId": "bl7dzu4ku", "timeoutMs": 3600000, "persistent": False},
+        },
+    ]
+
+
+def _task_notification_record(task_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": (
+                f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            ),
+        },
+    }
+
+
+def test_build_cli_task_wake_prompt_names_command_and_tool() -> None:
+    from ciao.subagent_tracking import SubagentInfo
+
+    prompt = ProjectChatManager._build_cli_task_wake_prompt(
+        [
+            SubagentInfo(
+                agent_id="bl7dzu4ku",
+                description="adoption report 2026-08 DAG progress and failures",
+                subagent_type="Monitor",
+                is_async=True,
+                status="running",
+                kind="task",
+                command="tail -f /tmp/adoption_2026-08.log",
+            )
+        ]
+    )
+    assert "1 CLI task" in prompt
+    assert "bl7dzu4ku" in prompt
+    assert "Monitor" in prompt
+    assert "adoption report 2026-08 DAG progress and failures" in prompt
+    assert "command: tail -f /tmp/adoption_2026-08.log" in prompt
+    assert "background_run_start" in prompt
+    assert "pgrep/ps" in prompt
+
+
+async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-wake", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-wake-test")
+    chat.session_id = "sess-task-wake-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-wake-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    ticks = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks["n"] += 1
+        if ticks["n"] > 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    except KeyboardInterrupt:
+        pass
+
+    assert len(wakes) == 1
+    _parent, prompt, count = wakes[0]
+    assert count == 1
+    assert "bl7dzu4ku" in prompt
+    assert "Monitor" in prompt
+    assert "background_run_start" in prompt
+    assert "tail -f /tmp/adoption_2026-08.log" in prompt
+
+
+async def test_watcher_does_not_wake_while_cli_is_alive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-alive", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-alive-test")
+    chat.session_id = "sess-task-alive-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-alive-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    ticks = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks["n"] += 1
+        if ticks["n"] > 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    except KeyboardInterrupt:
+        pass
+
+    assert wakes == []
+
+
+async def test_watcher_does_not_wake_for_completed_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-done", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-done-test")
+    chat.session_id = "sess-task-done-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-done-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [*_monitor_task_records(), _task_notification_record("bl7dzu4ku")],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert wakes == []
+
+
+async def test_watcher_grace_needs_two_disconnected_ticks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-grace", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-grace-test")
+    chat.session_id = "sess-task-grace-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-grace-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    # First tick sees the CLI gone, later ticks see it back (a normal
+    # between-turns reconnect): the grace must absorb the blip.
+    alive_by_tick = {0: False}
+
+    def cli_alive(chat_id: str) -> bool:
+        return alive_by_tick.get(ticks["n"], True)
+
+    ticks = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks["n"] += 1
+        if ticks["n"] > 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(pcm, "_cli_owner_alive", cli_alive)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    except KeyboardInterrupt:
+        pass
+
+    assert wakes == []
+
+
+async def test_agent_badge_unchanged_with_tasks_tracked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-badge", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-badge-test")
+    chat.session_id = "sess-task-badge-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-badge-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    ticks = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks["n"] += 1
+        if ticks["n"] > 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    except KeyboardInterrupt:
+        pass
+
+    ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready == [0]
+    assert len(wakes) == 1
+
+
+async def test_sweep_wakes_chat_with_running_cli_task_after_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-sweep", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-sweep-test")
+    chat.session_id = "sess-task-sweep-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-sweep-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    swept = pcm.sweep_orphaned_cli_tasks()
+    assert swept == 1
+
+    # Let the deferred wake task run out its (patched) sleep.
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
+    _parent, prompt, count = wakes[0]
+    assert count == 1
+    assert prompt.startswith(subagent_tracking.CLI_TASK_WAKE_PREFIX)
+    assert "bl7dzu4ku" in prompt
+
+
+async def test_sweep_skips_task_already_woken(tmp_path: Path, monkeypatch) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-swept", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-swept-test")
+    chat.session_id = "sess-task-swept-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-swept-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [
+            *_monitor_task_records(),
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        CLI_TASK_WAKE_PREFIX
+                        + " 1 CLI task you started (Monitor / background shell) "
+                        "were lost.\n\n— Monitor: adoption report (task bl7dzu4ku)"
+                    ),
+                },
+            },
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
+
+
+async def test_sweep_skips_archived_and_non_claude_chats(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-skip", workspace="personal")
+    archived = pcm.create_chat(project.project_id, title="task-archived")
+    archived.session_id = "sess-task-archived-1"
+    archived.archived = True
+    opencode_chat = pcm.create_chat(project.project_id, title="task-opencode")
+    opencode_chat.session_id = "sess-task-opencode-1"
+    opencode_chat.provider = "opencode"
+    claude_chat = pcm.create_chat(project.project_id, title="task-no-session")
+    claude_chat.session_id = ""
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-archived-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
+
+
+async def test_sweep_skips_chats_idle_for_more_than_a_week(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-stale", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-stale-test")
+    chat.session_id = "sess-task-stale-1"
+    chat.last_activity_at = (
+        datetime.now(UTC) - timedelta(days=8)
+    ).isoformat().replace("+00:00", "Z")
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-stale-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert wakes == []
+
+
+async def test_sweep_wakes_recently_active_chat(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-fresh", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-fresh-test")
+    chat.session_id = "sess-task-fresh-1"
+    chat.last_activity_at = (
+        datetime.now(UTC) - timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-fresh-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert pcm.sweep_orphaned_cli_tasks() == 1
+
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
+
+
+async def test_task_only_watcher_exits_on_restart_drain(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-drain", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-drain-test")
+    chat.session_id = "sess-task-drain-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-drain-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    async def fail_sleep(seconds: float) -> None:
+        raise AssertionError("task-only watcher must exit when a restart drains")
+
+    monkeypatch.setattr(asyncio, "sleep", fail_sleep)
+
+    pcm.begin_restart_drain()
+
+    await asyncio.wait_for(
+        pcm._watch_subagent_completion(chat.chat_id, project.project_id),
+        timeout=5,
+    )
+
+    assert wakes == []
+    assert chat.chat_id not in pcm.active_chat_ids()
+
+
+async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
+    """A wake that never reaches the JSONL must not re-arm forever."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-rearm", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-rearm-test")
+    chat.session_id = "sess-task-rearm-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-rearm-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
+
+    calls: list[tuple[object, str, int]] = []
+
+    def failing_wake(parent, prompt, *, count):
+        calls.append((parent, prompt, count))
+        # Deliberately writes nothing to the JSONL: the wake turn never
+        # persists, so nothing marks the task lost.
+        return "queued"
+
+    monkeypatch.setattr(pcm, "_deliver_wake", failing_wake)
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    # First run: the watcher fires the wake.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert len(calls) == 1
+
+    # A failed stream's cleanup would start a new watcher: it must not
+    # deliver again within the same process.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert len(calls) == 1
+
+    # The startup sweep after a crash must also skip the already-woken task.
+    assert pcm.sweep_orphaned_cli_tasks() == 0
+    assert len(calls) == 1

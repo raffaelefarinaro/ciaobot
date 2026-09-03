@@ -79,11 +79,6 @@ def harness_skill_overrides() -> dict[str, str]:
 MCP_SERVER_NAME = "ciaobot"
 
 AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
-    # The lazy-discovery pair. tools_call only ever dispatches to the rest of
-    # this tuple: it refuses every _DESTRUCTIVE tool, so its reach is exactly
-    # the set already auto-approved here. See ciao/mcp_server.py.
-    "tools_search",
-    "tools_call",
     "context_get",
     "memory_status",
     "memory_update",

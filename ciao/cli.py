@@ -185,7 +185,38 @@ def _write_launchd_plist(
     port: int,
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
+    confirm_repoint: bool = False,
 ) -> Path:
+    if not confirm_repoint:
+        allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not allow_env:
+            # Only guard the real per-user dir. Shadow dirs (tests, explicit
+            # launch_agents_dir overrides) are not live — the resolved-path
+            # comparison already distinguishes them, so an env override alone
+            # must not bypass protection when the target is still the real dir.
+            real_dir = Path.home() / "Library" / "LaunchAgents"
+            try:
+                is_real = launch_agents_dir.expanduser().resolve() == real_dir.expanduser().resolve()
+            except OSError:
+                is_real = launch_agents_dir.expanduser() == real_dir
+            if is_real:
+                existing = _plist_workspace(launch_agents_dir)
+                try:
+                    requested = Path(workspace).expanduser().resolve()
+                except OSError:
+                    requested = Path(workspace).expanduser()
+                if existing is not None and existing != requested:
+                    raise RuntimeError(
+                        f"Refusing to repoint live LaunchAgent from {existing} to {requested}: "
+                        f"the real {launch_agents_dir / plist_name} already points elsewhere. "
+                        "Pass confirm_repoint=True (or --yes via CLI) or set "
+                        "CIAO_ALLOW_LAUNCH_AGENT_REPOINT=1 to allow, or pass "
+                        "launch_agents_dir to isolate."
+                    )
     plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_text(
@@ -652,6 +683,7 @@ def setup_workspace(
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
+    confirm_repoint: bool = False,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -661,6 +693,37 @@ def setup_workspace(
             "workspace name must use letters, numbers, dashes, or underscores"
         )
     root = Path(workspace).expanduser().resolve()
+    # Guard before any mutation: do not create/append to an arbitrary
+    # existing notes folder when the live LaunchAgent would be hijacked.
+    # The later `_write_launchd_plist` guard is defense-in-depth; this one
+    # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
+    if not confirm_repoint:
+        allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not allow_env:
+            _early_launch = (
+                Path(launch_agents_dir)
+                if launch_agents_dir is not None
+                else default_launch_agents_dir()
+            )
+            real_dir = Path.home() / "Library" / "LaunchAgents"
+            try:
+                is_real = _early_launch.expanduser().resolve() == real_dir.expanduser().resolve()
+            except OSError:
+                is_real = _early_launch.expanduser() == real_dir
+            if is_real:
+                existing = _plist_workspace(_early_launch)
+                if existing is not None and existing != root:
+                    raise RuntimeError(
+                        f"Refusing to repoint live LaunchAgent from {existing} to {root}: "
+                        f"the real {_early_launch / 'com.ciao.server.plist'} already points elsewhere. "
+                        "Pass confirm_repoint=True (or --yes via CLI) or set "
+                        "CIAO_ALLOW_LAUNCH_AGENT_REPOINT=1 to allow, or pass "
+                        "launch_agents_dir to isolate."
+                    )
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     setup_selected_vault = vault_root is not None
@@ -813,7 +876,6 @@ def setup_workspace(
         written.append(root / ".runtime" / "workspaces.json")
 
     stock = resources.files("ciao.stock")
-    stock_commands = stock.joinpath("commands")
     stock_workspace = stock.joinpath("workspace")
 
     # Canonical user-authored asset sources (mirrored into .claude/ by
@@ -823,6 +885,7 @@ def setup_workspace(
     from ciao.sync_skills import (
         _ensure_linked_workspace_guides,
         _install_stock_agents,
+        _seed_stock_commands,
         sync_workspace_skills,
     )
 
@@ -838,7 +901,7 @@ def setup_workspace(
             (asset_root / asset_dir).mkdir(parents=True, exist_ok=True)
         _install_stock_agents(asset_root)
         written.append(asset_root / ".claude" / "agents")
-        written.extend(_copy_tree_if_missing(stock_commands, asset_root / "commands"))
+        _seed_stock_commands(asset_root)
         written.append(asset_root / "commands")
         written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
         _ensure_linked_workspace_guides(asset_root)
@@ -1007,6 +1070,7 @@ def setup_workspace(
         port=port,
         path=os.environ.get("PATH", ""),
         plist_name="com.ciao.server.plist",
+        confirm_repoint=confirm_repoint,
     ))
     # Existing installs may still carry the launcher bundle and its agent from
     # a previous version; remove them rather than leaving orphans behind.
@@ -1085,14 +1149,18 @@ def _setup_command(args: argparse.Namespace) -> int:
             return 1
         existing = _plist_workspace(Path(args.launch_agents_dir))
         if existing is not None and existing != root:
-            print(
-                f"Error: Ciaobot is already set up with workspace {existing}.\n"
-                f"Running setup here would move it to {root}.\nRe-run from the "
-                "existing workspace, pass --workspace, or add --yes to confirm "
-                "the move.",
-                file=sys.stderr,
-            )
-            return 1
+            allow_env = os.environ.get(
+                "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
+            ).strip().lower() in ("1", "true", "yes")
+            if not allow_env:
+                print(
+                    f"Error: Ciaobot is already set up with workspace {existing}.\n"
+                    f"Running setup here would move it to {root}.\nRe-run from the "
+                    "existing workspace, pass --workspace, or add --yes to confirm "
+                    "the move.",
+                    file=sys.stderr,
+                )
+                return 1
 
     auth_required = not args.no_auth
     env_path = root / ".env"
@@ -1100,17 +1168,22 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
     except OSError:
         had_token = False
-    written = setup_workspace(
-        args.workspace,
-        auth_token=args.auth_token,
-        auth_required=auth_required,
-        push_contact=args.push_contact,
-        workspace_name=args.workspace_name,
-        python_path=args.python,
-        port=args.port,
-        launch_agents_dir=args.launch_agents_dir,
-        app_dir=args.app_dir,
-    )
+    try:
+        written = setup_workspace(
+            args.workspace,
+            auth_token=args.auth_token,
+            auth_required=auth_required,
+            push_contact=args.push_contact,
+            workspace_name=args.workspace_name,
+            python_path=args.python,
+            port=args.port,
+            launch_agents_dir=args.launch_agents_dir,
+            app_dir=args.app_dir,
+            confirm_repoint=args.yes,
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     for path in written:
         print(path)
     if auth_required and not args.auth_token and not had_token:
@@ -2592,11 +2665,34 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     nightly report. Re-filing an identical fact is a no-op; the queue dedupes
     by text.
     """
-    from ciao.memory_proposals import DESTINATIONS, MemoryProposal, append_proposals
+    from ciao.memory_proposals import (
+        DESTINATIONS,
+        MemoryProposal,
+        append_proposals,
+        was_dismissed,
+        was_promoted,
+    )
 
     workspace, vault = _resolve_workspace_and_vault(args)
     text_file = (getattr(args, "text_file", "") or "").strip()
     text = (args.text or "").strip()
+    # The payload is a project doc path or a person's name — user-controlled
+    # like the fact, and just as unsafe to hand to a shell. `--payload-file` is
+    # the same door `--text-file` opens for the text.
+    payload_file = (getattr(args, "payload_file", "") or "").strip()
+    payload = (getattr(args, "payload", "") or "").strip()
+    if payload and payload_file:
+        print(
+            "pass the payload either as --payload or via --payload-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if payload_file:
+        try:
+            payload = Path(payload_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {payload_file}: {exc}", file=sys.stderr)
+            return 2
     if text and text_file:
         print(
             "pass the fact either as text or via --text-file, not both",
@@ -2607,7 +2703,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         fact_path = Path(text_file)
         try:
             text = fact_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             print(f"could not read {text_file}: {exc}", file=sys.stderr)
             return 2
     if not text:
@@ -2625,7 +2721,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    payload = args.payload.strip()
     if kind in {"people", "project"} and not payload:
         # The PWA accept handlers refuse these bullets ("the bullet names no
         # person" / "...no project doc"), so queueing one would create a row
@@ -2642,12 +2737,23 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         source_section=args.source.strip() or "curation",
         payload=payload,
     )
-    path = append_proposals([proposal], vault)
+    path = append_proposals(
+        [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
+    )
+    # `append_proposals` returns None for two different situations and the
+    # difference matters to whoever asked: a fact already queued is waiting for
+    # them, while a fact they dismissed before will never come back on its own.
+    # Reporting both as "already in the queue" told a user reconsidering an
+    # earlier decision that their request had landed when no row exists.
+    dismissed = path is None and was_dismissed(vault, text)
+    promoted = path is None and not dismissed and was_promoted(vault, text)
     if args.json:
         json.dump(
             {
                 "queued": path is not None,
                 "duplicate": path is None,
+                "dismissed_before": dismissed,
+                "promoted_before": promoted,
                 "path": str(path) if path else None,
                 "text": text,
                 # argparse supplies a Path when --workspace is explicit, and
@@ -2658,6 +2764,16 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             ensure_ascii=False,
         )
         sys.stdout.write("\n")
+    elif promoted:
+        print(
+            f"Already promoted, so NOT queued: {text!r}. "
+            "It should already be live in its destination."
+        )
+    elif dismissed:
+        print(
+            f"Previously dismissed, so NOT queued: {text!r}. "
+            "Say so explicitly to file it again."
+        )
     elif path is None:
         print(f"Already in the queue; nothing added for {text!r}.")
     else:
@@ -2675,14 +2791,69 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     substring.
     """
     from ciao import proposal_outcomes
-    from ciao.memory_proposals import record_dismissal, remove_proposal_by_substring
+    from ciao.memory_proposals import (
+        find_proposal_matches,
+        record_dismissal,
+        record_promotion,
+        remove_proposal_by_substring,
+    )
 
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
-    needle = args.text.strip()
+    # Same resolution as `memory-proposal-add`. A proposal's text is arbitrary
+    # user prose, so putting it in argv is the hazard `--text-file` exists to
+    # avoid there; a dismissal names the same text and needed the same door.
+    text_file = (getattr(args, "text_file", "") or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        needle_path = Path(text_file)
+        try:
+            # Stripped, like the add path: a trailing newline is an artifact of
+            # writing the file, never part of the proposal it has to match.
+            needle = needle_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            # UnicodeDecodeError is a ValueError, not an OSError, so an
+            # undecodable file used to escape as a traceback and abort an
+            # unattended curation run.
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
+    # Two needle forms, because rows reach the queue two ways:
+    # `memory-proposal-add` flattens what it writes, while the curation skill
+    # appends `[review]` questions directly and may keep repeated whitespace.
+    # A needle read from the very file a fact was filed from needs the flattened
+    # form; a directly written row needs the raw one.
+    #
+    # Both are resolved to ROW IDENTITIES and unioned, rather than tried in
+    # turn. Trying in turn is wrong twice over: the remover reports "no match"
+    # and "ambiguous" identically, so a fallback after an ambiguous first pass
+    # can uniquely hit a differently spaced row; and a raw form that uniquely
+    # matches one row while the flattened form uniquely matches a DIFFERENT one
+    # would silently delete whichever was tried first. Either way the outcome is
+    # recorded against a proposal nobody named. One row or nothing.
+    flattened = " ".join(needle.split())
+    raw_matches = find_proposal_matches(path, needle)
+    flat_matches = (
+        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
+    )
+    union = set(raw_matches) | set(flat_matches)
+    if len(union) > 1:
+        print(
+            f"{len(union)} memory proposals match {needle!r}; "
+            "pass a longer, unique substring.",
+            file=sys.stderr,
+        )
+        return 1
+    if not raw_matches and flat_matches:
+        needle = flattened
     removed = remove_proposal_by_substring(path, needle)
     if removed is None:
         print(
@@ -2695,7 +2866,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # Preserve what was decided, not just that something was: append-time
     # dedupe consults this history, so without it the next curator pass that
     # re-reads the same transcript re-files the fact the user just rejected.
-    record_dismissal(path, text=removed_text, kind=kind)
+    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
+    # under `dismissed_at` used to make `was_promoted()` false for anything
+    # the agent filed itself, and hid it from the review page's History tab
+    # as an accepted row.
+    if args.promoted:
+        record_promotion(path, text=removed_text, kind=kind, via="agent")
+    else:
+        record_dismissal(path, text=removed_text, kind=kind, via="agent")
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
     # a .runtime beside the shell. Precedence: explicit --runtime-root, then
@@ -3445,6 +3623,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_vault_export_command)
 
+    # Registered for discoverability only; `main` intercepts "critique" before
+    # argparse so the panel's own flags reach `ciao.critique` untouched (the
+    # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
+    # a subparser's REMAINDER can see them). Do not give it a `func`.
+    #
+    # It needs a `ciao` entry point at all because the bundled runtime puts only
+    # a `ciao` wrapper on PATH (`scripts/build-bundled-runtime.sh`): on a
+    # packaged install `python3 -m ciao.critique` resolves some external
+    # interpreter that has neither `ciao` nor its dependencies, so /critique
+    # failed for every user who had not installed from source.
+    subparsers.add_parser(
+        "critique",
+        help="Run the multi-model critique panel on an artifact.",
+        add_help=False,
+    )
+
     lint_parser = subparsers.add_parser(
         "vault-lint",
         help="Run vault hygiene checks.",
@@ -3802,7 +3996,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Lists the reviewable memory proposals produced from archived "
             "chats. Read-only. Each pending bullet is emitted with its kind, "
             "text, and source. Decide each item (promote via a region Edit, "
-            "or dismiss with `ciao memory-proposal-dismiss <text>`), keeping "
+            "or dismiss with `ciao memory-proposal-dismiss --text-file <file>`), keeping "
             "the queue clean so the nightly curator has real signal to work "
             "with."
         ),
@@ -3843,6 +4037,15 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default="",
         help="The durable fact to queue. Omit when --text-file supplies it.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--payload-file",
+        default="",
+        help=(
+            "Read --payload from this file. The payload is a document path or a "
+            "person's name, both user-controlled, so it needs the same door out "
+            "of argv that --text-file gives the fact."
+        ),
     )
     memory_proposal_add_parser.add_argument(
         "--text-file",
@@ -3892,6 +4095,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
     )
+    memory_proposal_add_parser.add_argument(
+        "--allow-dismissed",
+        action="store_true",
+        help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
+    )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
     memory_proposal_dismiss_parser = subparsers.add_parser(
@@ -3907,7 +4115,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposal_dismiss_parser.add_argument(
         "text",
-        help="Proposal text or unique substring to dismiss.",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--text-file",
+        default="",
+        help=(
+            "Read the substring from this file instead of the argument. Use it "
+            "whenever the text is not known to be free of shell metacharacters "
+            "-- the same reason `memory-proposal-add` has one."
+        ),
     )
     memory_proposal_dismiss_parser.add_argument(
         "--workspace",
@@ -4173,6 +4392,42 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
+def _resolve_critique_paths(args: list[str]) -> list[str]:
+    """Make a relative ``--input`` absolute against the caller's directory.
+
+    The bundled launcher `cd`s into the runtime root before exec'ing Python
+    (`scripts/build-bundled-runtime.sh`), so a relative path — including the
+    `memory-vault/...` form the command doc explicitly supports — would resolve
+    against the app bundle and be reported missing. The launcher records where
+    the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
+    no cd and the current directory is already right.
+    """
+    base = os.environ.get("CIAO_INVOCATION_CWD", "").strip()
+    if not base:
+        return args
+    out = list(args)
+    for index, token in enumerate(out):
+        value = ""
+        if token == "--input" and index + 1 < len(out):
+            target = index + 1
+            value = out[target]
+        elif token.startswith("--input="):
+            target = index
+            value = token.split("=", 1)[1]
+        else:
+            continue
+        # A tilde path is never relative to the caller's directory. Quoted, it
+        # reaches here unexpanded and `Path("~/x").is_absolute()` is False, so
+        # rebasing would produce `<cwd>/~/x` and defeat the `expanduser()` that
+        # `ciao.critique` does later — turning an artifact that resolved fine
+        # into one reported missing. Left alone, that expansion still works.
+        if not value or value.startswith("~") or Path(value).is_absolute():
+            continue
+        resolved = str(Path(base) / value)
+        out[target] = resolved if target != index else f"--input={resolved}"
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
@@ -4183,6 +4438,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["critique"]:
+        from ciao.critique import main as critique_main
+
+        return critique_main(_resolve_critique_paths(argv_list[1:]))
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.

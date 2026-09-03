@@ -31,6 +31,8 @@ import json
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +65,12 @@ def resolve_insights_model(
         return config.default_model_for_workspace(workspace, provider)
     return config.insights_model
 
+
+# The capsule marker an unattended (schedule/automation) turn carries in its
+# injected context. It survives into the raw session JSONL as part of the user
+# message, so extraction can tell a real user turn from the machinery that
+# fired it. See ciao/context/capsule.py.
+_UNATTENDED_MARKER = "unattended=true; this turn was fired automatically"
 
 _INSIGHTS_HEADER = "## Session insights"
 # Written by _append_section immediately before the header so the real
@@ -311,6 +319,108 @@ def is_terminal_failure(exc: Exception) -> bool:
     return getattr(exc, "transient", None) is False
 
 
+@dataclass(frozen=True)
+class RetryOutcome:
+    """What one guarded model call actually did.
+
+    The three extraction paths used to report a partial failure only through a
+    log line and an empty string, so "the model was never asked because the
+    account is over quota" and "the model answered nothing twice" were
+    indistinguishable to a caller and to a test. ``gave_up`` names the reason
+    instead.
+    """
+
+    output: str
+    error: str
+    #: How many times the call was actually made — 1 when a guard refused the
+    #: retry, 2 when it ran and failed again.
+    attempts: int
+    #: "" when the call succeeded, else one of ``apple-unavailable``,
+    #: ``context-overflow``, ``terminal``, ``failed-twice``.
+    gave_up: str = ""
+
+
+async def call_with_retry(
+    call: Callable[[], Awaitable[str]],
+    *,
+    label: str,
+    model: str = "",
+    check_apple_available: bool = True,
+    check_context_overflow: bool = True,
+    budget_applies: bool = True,
+) -> RetryOutcome:
+    """Run ``call``; on a transient failure wait 30s and run it once more.
+
+    The one place the insights retry policy lives. It previously existed three
+    times — for the JSONL input, for the rendered-archive input, and inline in
+    the backfill worker — and the copies had drifted: only the JSONL one checked
+    for a context overflow, and only the two named functions checked whether the
+    Apple sidecar was available at all. The drift is now explicit in the two
+    keyword flags rather than implicit in which copy you were reading.
+
+    Three failures are never retried, because an identical second request fails
+    the same way and costs another slow call plus the 30s wait:
+
+    * the Apple sidecar is not available on this machine,
+    * the input still exceeds the model's context window (the payload was
+      already trimmed to the configured budget before the first call),
+    * the provider classified the rejection as non-transient — auth, quota,
+      usage limit, bad model.
+
+    ``label`` prefixes the log lines so a reader can still tell the three paths
+    apart ("Insights model call", "Insights text call", "Text fallback insights
+    call").
+    """
+    try:
+        return RetryOutcome(output=await call(), error="", attempts=1)
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc).strip() or type(exc).__name__
+        if (
+            check_apple_available
+            and native_sidecar.is_apple_model(model)
+            and not native_sidecar.apple_model_available()
+        ):
+            logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
+            return RetryOutcome("", detail, 1, "apple-unavailable")
+        if check_context_overflow and is_context_overflow(exc):
+            # Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS,
+            # so naming that variable on a text-mode overflow sends the operator
+            # to a setting that does nothing for it. Both messages end at the
+            # remedy that always applies.
+            if budget_applies:
+                logger.error(
+                    "%s input still exceeds the model's context window (%s); "
+                    "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS "
+                    "(currently %d) or pick a model with a larger window.",
+                    label,
+                    exc,
+                    _max_input_chars(),
+                )
+            else:
+                logger.error(
+                    "%s input still exceeds the model's context window (%s); "
+                    "not retrying. This path sends the rendered archive whole, "
+                    "so pick a model with a larger window.",
+                    label,
+                    exc,
+                )
+            return RetryOutcome("", detail, 1, "context-overflow")
+        if is_terminal_failure(exc):
+            # Quota / auth / bad-model. No traceback: this is an account or
+            # settings condition, not a code fault, and the detail already
+            # says which.
+            logger.error("%s rejected terminally (%s); not retrying", label, exc)
+            return RetryOutcome("", detail, 1, "terminal")
+        logger.info("%s failed (%s); retrying in %ds", label, exc, _RETRY_DELAY_S)
+
+    await asyncio.sleep(_RETRY_DELAY_S)
+    try:
+        return RetryOutcome(output=await call(), error="", attempts=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("%s failed twice; skipping", label)
+        return RetryOutcome("", str(exc).strip() or type(exc).__name__, 2, "failed-twice")
+
+
 # Rules shared verbatim by both extraction prompts (JSONL and text mode).
 # Stated once so the two modes cannot drift apart — the same reason the
 # curation contract was collapsed into one skill file.
@@ -350,6 +460,11 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
+- A user message flagged `"unattended": true` is an automation turn (a
+  schedule or routine fired it), not the user typing. Never extract a fact
+  from an unattended turn or from the assistant work it triggered. Only
+  extract facts from turns the user actually typed. A real user turn in an
+  otherwise-automated session is still fair game.
 """ + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
@@ -473,6 +588,11 @@ def filter_session_jsonl(
                     "ts": obj.get("timestamp", ""),
                     "content": kept_blocks,
                 }
+                # An unattended (schedule/automation) turn carries the capsule
+                # marker in its injected context. Flag it so the extraction
+                # model can tell machinery from a real user turn.
+                if otype == "user" and _UNATTENDED_MARKER in _stringify_content(content):
+                    record["unattended"] = True
                 out_lines.append(json.dumps(record, ensure_ascii=False))
     except OSError:
         logger.exception("Could not read session JSONL at %s", path)
@@ -1025,38 +1145,8 @@ async def _run_model_with_retry(
             payload, model, provider=provider, cwd=cwd, context_block=context_block
         )
 
-    try:
-        return await call(), ""
-    except Exception as exc:  # noqa: BLE001
-        if (
-            native_sidecar.is_apple_model(model)
-            and not native_sidecar.apple_model_available()
-        ):
-            logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
-            return "", str(exc).strip() or type(exc).__name__
-        if is_context_overflow(exc):
-            logger.error(
-                "Insights input still exceeds the model's context window (%s); "
-                "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS (currently %d) "
-                "or pick a model with a larger window.",
-                exc,
-                _max_input_chars(),
-            )
-            return "", str(exc).strip() or type(exc).__name__
-        if is_terminal_failure(exc):
-            # Quota / auth / bad-model. No traceback: this is an account or
-            # settings condition, not a code fault, and the detail already
-            # says which.
-            logger.error("Insights model call rejected terminally (%s); not retrying", exc)
-            return "", str(exc).strip() or type(exc).__name__
-        logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
-
-    await asyncio.sleep(_RETRY_DELAY_S)
-    try:
-        return await call(), ""
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Insights model call failed twice; skipping")
-        return "", str(exc).strip() or type(exc).__name__
+    outcome = await call_with_retry(call, label="Insights model call", model=model)
+    return outcome.output, outcome.error
 
 
 def _text_user_prompt(body: str, context_block: str = "") -> str:
@@ -1133,26 +1223,26 @@ async def _run_text_model_with_retry(
             body, model, provider=provider, cwd=cwd, context_block=context_block
         )
 
-    try:
-        return await call(), ""
-    except Exception as exc:  # noqa: BLE001
-        if (
-            native_sidecar.is_apple_model(model)
-            and not native_sidecar.apple_model_available()
-        ):
-            logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
-            return "", str(exc).strip() or type(exc).__name__
-        if is_terminal_failure(exc):
-            logger.error("Insights text call rejected terminally (%s); not retrying", exc)
-            return "", str(exc).strip() or type(exc).__name__
-        logger.info("Insights text call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
-
-    await asyncio.sleep(_RETRY_DELAY_S)
-    try:
-        return await call(), ""
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Insights text call failed twice; skipping")
-        return "", str(exc).strip() or type(exc).__name__
+    # An overflow is refused here for the same reason it is on the JSONL path:
+    # the payload does not change between attempts, so the retry buys a second
+    # slow call (the timeout budget is 600s) plus the 30s wait to reach the
+    # identical rejection. This path used to retry it, which was an accident of
+    # the policy existing in two copies rather than a decision.
+    #
+    # No fitting step, though, unlike the JSONL path — and measurement says it
+    # does not need one. Text mode's input is the *rendered* archive, which is
+    # the stripped rendering (no tool_use, tool_result or thinking blocks); the
+    # 320k-char budget exists for raw JSONL, observed at 131k-262k tokens
+    # against a 126k-token window. Across 1568 real archives the rendered form
+    # runs ~2.6k tokens at the median and ~23k at p99, with exactly one
+    # outlier (134k tokens) able to overflow a 126k-token model at all. Apple
+    # on-device is the one budget that genuinely bites here (8k chars, over half
+    # of all archives), and `_call_text_model` already fits for it. Truncating
+    # the rest would be a general mechanism for a single archive.
+    outcome = await call_with_retry(
+        call, label="Insights text call", model=model, budget_applies=False
+    )
+    return outcome.output, outcome.error
 
 
 async def _call_model(
@@ -1202,6 +1292,14 @@ async def _call_model(
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
+
+# Archive filenames end in the session id, whose shape is the provider's: a
+# UUID from the Claude SDK, `ses_<base62>` from opencode. Matching only the
+# UUID made every opencode archive undiscoverable to backfill — `_discover`
+# reads the id out of the name and skips a file it cannot find one in — so an
+# opencode transcript that missed insights at archive time could never be
+# recovered, even though its text-mode path needs nothing but the markdown.
+SESSION_ID_RE = re.compile(rf"{UUID_RE.pattern}|ses_[A-Za-z0-9]+")
 
 
 def _empty_backfill_stats() -> dict[str, int]:
@@ -1258,6 +1356,11 @@ Rules:
   audits, skill evolution), never extract the session's own operating
   instructions, prompt rules, or memory-system procedures as facts — they
   are machinery, not knowledge about the user.
+- A user message flagged `"unattended": true` is an automation turn (a
+  schedule or routine fired it), not the user typing. Never extract a fact
+  from an unattended turn or from the assistant work it triggered. Only
+  extract facts from turns the user actually typed. A real user turn in an
+  otherwise-automated session is still fair game.
 """ + _KNOWN_CONTEXT_RULE + """\
 - When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
   or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.
@@ -1314,6 +1417,7 @@ async def backfill_insights_task(
     workspace: str = "",
     model_override: str = "",
     agent_root: Path | None = None,
+    chat_workspaces: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
     """Scan archived transcripts and return counts for the completed run.
 
@@ -1321,9 +1425,15 @@ async def backfill_insights_task(
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing.
 
-    *agent_root* is the per-workspace agent root whose session directory to
-    read; it defaults to ``config.workspace_root`` so callers that supply
-    nothing keep today's behaviour.
+    *chat_workspaces* maps chat id to workspace, and is required to scope a
+    run with *workspace*: an archive's path names the chat that wrote it, not
+    the workspace it ran in, so the mapping has to come from the chat registry.
+    A *workspace* given without one filters nothing and says so.
+
+    *agent_root* pins the run to one workspace's agent root. Callers that
+    supply nothing get every agent root in the install searched for each
+    archive's session blob, which is what a multi-workspace install needs: a
+    single root finds no blob for chats that ran anywhere else.
     """
     stats = _empty_backfill_stats()
     # Archives live under the promoted logs root (see main.py:transcript_root),
@@ -1331,10 +1441,35 @@ async def backfill_insights_task(
     # it. `config.logs_root` is the one place that distinction is made.
     base = config.logs_root / "Chats"
 
-    root = agent_root if agent_root is not None else config.workspace_root
-    project_dir = _claude_projects_dir(root)
+    # One project directory per agent root, not one for the install. The Claude
+    # SDK keys its session store by the cwd the session ran in, which for a
+    # workspace chat is that workspace's agent root; looking only under
+    # `workspace_root` found no blob for any of them and silently demoted every
+    # claude archive to the text-mode path (or, at archive time, skipped it
+    # altogether). An explicit `agent_root` still wins, for callers scoping a
+    # run to one workspace.
+    if agent_root is not None:
+        search_roots = [Path(agent_root)]
+    else:
+        search_roots = [root for root, _name in config.agent_root_targets()]
+        # The install root is not one of those targets after the re-rooting,
+        # but a blob written before the migration is still keyed by it — so
+        # keep it as a last candidate rather than demoting those archives to
+        # the text-mode path that this function previously handled in full.
+        if config.workspace_root not in search_roots:
+            search_roots.append(config.workspace_root)
+    project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
 
-    def _discover() -> tuple[list[tuple[Path, str, bool]], int, int]:
+    by_chat = dict(chat_workspaces or {})
+    if workspace and not by_chat:
+        logger.warning(
+            "Backfill asked for workspace %r without a chat->workspace map; "
+            "scanning every archive instead",
+            workspace,
+        )
+        workspace = ""
+
+    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int]:
         """Walk the archive tree and decide what needs backfilling.
 
         Runs off the loop: this globs the whole archive directory and reads
@@ -1344,7 +1479,7 @@ async def backfill_insights_task(
         both callers (startup and the Automations button) drive it from the
         event loop, where it would stall every request for its duration.
         """
-        found: list[tuple[Path, str, bool]] = []
+        found: list[tuple[Path, str, Path | None]] = []
         # Sorted for a deterministic order (oldest first / alphabetic).
         # All providers (claude and opencode) — the previous
         # `*/claude/*.md` made opencode transcripts invisible to
@@ -1355,10 +1490,10 @@ async def backfill_insights_task(
             # Cheap filters first. _has_insights_section reads the whole file,
             # so a workspace-scoped run must not pay for every archive in the
             # vault before discarding it.
-            if workspace and md.parent.parent.name != workspace:
+            if workspace and by_chat.get(md.parent.parent.name, "") != workspace:
                 continue
 
-            match = UUID_RE.search(md.name)
+            match = SESSION_ID_RE.search(md.name)
             session_id = match.group(0) if match else None
             if not session_id:
                 continue
@@ -1367,13 +1502,16 @@ async def backfill_insights_task(
                 done += 1
                 continue
 
-            has_jsonl = (project_dir / f"{session_id}.jsonl").exists()
+            jsonl_root = next(
+                (r for r, d in project_dirs if (d / f"{session_id}.jsonl").exists()),
+                None,
+            )
 
             # Decide if we keep this one based on mode filter
-            if has_jsonl and mode in {"both", "full"}:
-                found.append((md, session_id, True))
-            elif (not has_jsonl) and mode in {"both", "text"}:
-                found.append((md, session_id, False))
+            if jsonl_root is not None and mode in {"both", "full"}:
+                found.append((md, session_id, jsonl_root))
+            elif jsonl_root is None and mode in {"both", "text"}:
+                found.append((md, session_id, None))
         return found, len(archives), done
 
     if not base.exists():
@@ -1413,8 +1551,8 @@ async def backfill_insights_task(
 
     logger.info("Starting backfill for %d archives (dry_run=%s, mode=%s)...", len(todo), dry_run, mode)
     if dry_run:
-        for md, _, hj in todo[:20]:
-            m = "full" if hj else "text"
+        for md, _, jsonl_root in todo[:20]:
+            m = "full" if jsonl_root is not None else "text"
             # Relative to the ARCHIVE root, not the vault: the re-rooting
             # promotes Logs/ out of the vault, so `relative_to(vault_root)`
             # raises ValueError and takes down the dry run from inside a log
@@ -1430,12 +1568,16 @@ async def backfill_insights_task(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def worker(archive_path: Path, session_id: str, has_jsonl: bool) -> str:
+    async def worker(
+        archive_path: Path, session_id: str, jsonl_root: Path | None
+    ) -> str:
         async with sem:
             try:
                 insights_model = model_override or resolve_insights_model(config)
-                if has_jsonl:
-                    filtered = filter_session_jsonl(root, session_id)
+                if jsonl_root is not None:
+                    filtered = filter_session_jsonl(
+                        config.workspace_root, session_id, agent_root=jsonl_root
+                    )
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
                         return "skipped"
@@ -1507,24 +1649,29 @@ async def backfill_insights_task(
                             provider=text_provider,
                         )
 
-                    output = ""
-                    try:
-                        output = await run_text_extract()
-                    except Exception as exc:
-                        if is_terminal_failure(exc):
-                            logger.error(
-                                "Text fallback insights call rejected terminally (%s); "
-                                "not retrying %s",
-                                exc,
-                                archive_path,
-                            )
-                            return "error"
-                        logger.info("Text fallback insights call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
-                        await asyncio.sleep(_RETRY_DELAY_S)
-                        try:
-                            output = await run_text_extract()
-                        except Exception:
-                            logger.exception("Text fallback insights call failed twice; skipping %s", archive_path)
+                    # This path never checked the Apple sidecar or the
+                    # context window, and still does not — the flags say so
+                    # rather than the reader having to notice which copy this
+                    # was. `model` is passed even though the sidecar check is
+                    # off: `run_text_extract` really does call the sidecar for
+                    # an Apple model, so without it flipping the flag would
+                    # look effective and stay inert (`is_apple_model("")` is
+                    # False).
+                    outcome = await call_with_retry(
+                        run_text_extract,
+                        # The path is in the label so a backfill over hundreds
+                        # of archives still says which one failed, as the
+                        # inline version's log lines did.
+                        label=f"Text fallback insights call for {archive_path.name}",
+                        model=effective_model,
+                        check_apple_available=False,
+                        budget_applies=False,
+                    )
+                    # No `gave_up` branch: every giving-up reason leaves the
+                    # output empty, which the check below already reports as an
+                    # error. A magic-string comparison here would be a second
+                    # way to say the same thing, able to stop matching silently.
+                    output = outcome.output
 
                     if output and output.strip():
                         _append_section(archive_path, output)
@@ -1535,7 +1682,7 @@ async def backfill_insights_task(
                 logger.exception("Failed backfilling insights for %s", archive_path)
                 return "error"
 
-    tasks = [worker(md, sid, hj) for md, sid, hj in todo]
+    tasks = [worker(md, sid, jsonl_root) for md, sid, jsonl_root in todo]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     stats["processed"] = len(results)
     for result in results:

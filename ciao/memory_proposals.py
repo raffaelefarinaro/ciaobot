@@ -368,13 +368,29 @@ def _promote_to_region(
     the consolidations undo log first — and ``{"action": "add"}`` or ``None``
     is the plain append path.
     """
-    from ciao.memory_tool import ensure_regions, read_region, resolve_region, write_region
+    from ciao.memory_tool import (
+        _guide_lock,
+        ensure_regions,
+        read_region,
+        resolve_region,
+        write_region,
+    )
 
     promotable = _promotable_text(proposal.text)
     if promotable is None:
         return "unshaped", None
     from ciao.memory_audit import strip_learned_stamp
 
+    # The whole read-merge-write, under the same lock `update_region` takes.
+    # Without it two concurrent accepts — or an accept racing an MCP
+    # /remember — both read the region, both append to their own snapshot, and
+    # the second write drops the first fact while its row is dismissed as
+    # promoted.
+    lock = None
+    try:
+        lock = _guide_lock(guide_path)
+    except Exception:  # noqa: BLE001 — a lock we cannot take must not block a write
+        lock = None
     try:
         ensure_regions(guide_path)
         region = resolve_region(proposal.target)
@@ -404,14 +420,23 @@ def _promote_to_region(
             # A model verdict, not a provable string match: leave a trace in
             # the undo log so a hallucinated "covered" never silently loses
             # the fact — the standing "nothing is dropped silently" contract.
-            if vault_root is not None:
+            # With nowhere to write that trace, honour the contract instead of
+            # the verdict and take the plain append: a duplicate is visible and
+            # removable, a silently dropped fact is neither.
+            if vault_root is None:
+                logger.info(
+                    "memory apply: reconcile said covered but there is no vault "
+                    "to log it to; appending instead of dropping %r",
+                    promotable[:80],
+                )
+            else:
                 _log_consolidation(
                     vault_root,
                     region,
                     f"(incoming fact judged covered; not written) {promotable}",
                     label="auto-reconcile covered",
                 )
-            return "duplicate", promotable
+                return "duplicate", promotable
         if action == "update" and vault_root is not None:
             index = decision.get("index")
             merged = str(decision.get("text", "")).strip()
@@ -436,9 +461,19 @@ def _promote_to_region(
                 )
             ):
                 old = entries[index - 1]
-                _log_consolidation(vault_root, region, old)
                 updated = list(entries)
-                updated[index - 1] = f"{merged} [{date.today().isoformat()}]"
+                # The model is told to keep every still-true part of the old
+                # entry, and the numbered list it reads carries that entry's
+                # learned-at stamp, so a compliant merge often echoes it back.
+                # Stamping on top of it produced `... [2026-01-01] [2026-09-02]`,
+                # and `_LEARNED_STAMP_RE` is `$`-anchored, so stripping such an
+                # entry never yields the fact's own text again — the duplicate
+                # guard above stops recognising it and the fact gets appended a
+                # second time on the next archive pass.
+                updated[index - 1] = (
+                    f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
+                )
+                _log_consolidation(vault_root, region, old)
                 write_region(guide_path, region, updated)
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
@@ -458,6 +493,46 @@ def _promote_to_region(
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
         logger.info("memory apply: falling back to proposals (%s)", exc)
         return "failed", promotable
+    finally:
+        if lock is not None:
+            try:
+                lock.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def accept_region_fact(
+    *,
+    guide_path: Path,
+    target: str,
+    text: str,
+    vault_root: Path | None,
+    decision: dict[str, Any] | None = None,
+) -> tuple[str, str | None]:
+    """Write one approved region fact through the guarded path.
+
+    The UI accept button used to call ``update_region(action="add")`` directly,
+    which skipped everything the archive-time path does: the event-shape guard
+    (so an event-shaped bullet landed verbatim in always-loaded context), the
+    stamp-stripped duplicate check, the learned-at stamp the aging audit reads,
+    and the consolidations undo log.
+
+    Deliberately synchronous and model-free. Reconciliation belongs here in
+    principle — accepting an updated preference still appends beside the entry
+    it supersedes — but one ``run_oneshot`` per row on a click is a 120s timeout
+    each, and the batch endpoint accepts rows sequentially inside one request.
+    A caller that has already reconciled elsewhere may pass ``decision``; the
+    click path passes none.
+
+    Returns ``_promote_to_region``'s ``(outcome, promotable)``.
+    """
+    proposal = MemoryProposal(target=target, text=text, source_section="review")
+    return _promote_to_region(
+        proposal,
+        guide_path,
+        vault_root=vault_root,
+        decision=decision,
+    )
 
 
 def _safe_name(name: str) -> str:
@@ -637,6 +712,25 @@ def apply_proposals(
     remaining: list[MemoryProposal] = []
     applied: list[str] = []
 
+    def _record_auto(*, text: str, kind: str, destination: str, outcome: str) -> None:
+        # Best-effort: a decision-history write must never fail the apply it
+        # is only recording. Silent skip when there is no vault to log to
+        # (region-only callers, e.g. accept_region_fact, pass no vault_root).
+        if vault_root is None:
+            return
+        try:
+            record_promotion(
+                vault_root / _PROPOSALS_RELATIVE,
+                text=text,
+                kind=kind,
+                via="auto",
+                source=learning_source,
+                destination=destination,
+                outcome=outcome,
+            )
+        except Exception:  # noqa: BLE001
+            logger.info("memory apply: could not record auto decision for %r", text[:80])
+
     for proposal in proposals:
         try:
             if proposal.target in ("memory", "profile"):
@@ -657,20 +751,46 @@ def apply_proposals(
                 )
                 if outcome == "written":
                     applied.append(promotable or proposal.text)
-                elif outcome != "duplicate":
+                    _record_auto(
+                        text=promotable or proposal.text,
+                        kind=proposal.target,
+                        destination=f"ciao:{resolve_region(proposal.target)}",
+                        outcome="written",
+                    )
+                elif outcome == "duplicate":
+                    _record_auto(
+                        text=promotable or proposal.text,
+                        kind=proposal.target,
+                        destination=f"ciao:{resolve_region(proposal.target)}",
+                        outcome="duplicate",
+                    )
+                else:
                     # Failed writes and event-shaped text both stay queued:
                     # the first for a retry, the second for a curator to
-                    # rephrase into a standing rule.
+                    # rephrase into a standing rule. Neither is a decision
+                    # yet, so neither is recorded.
                     remaining.append(proposal)
             elif proposal.target == "people" and vault_root is not None:
                 name = proposal.payload or _safe_name(proposal.text.split("-")[0])
                 if write_people_note(vault_root, name, proposal.text):
                     applied.append(proposal.text)
+                    _record_auto(
+                        text=proposal.text,
+                        kind=proposal.target,
+                        destination=f"{_PEOPLE_DIR}/{_safe_name(name)}.md",
+                        outcome="written",
+                    )
                 else:
                     remaining.append(proposal)
             elif proposal.target == "learnings" and vault_root is not None:
                 if append_learning(vault_root, proposal.text, source=learning_source):
                     applied.append(proposal.text)
+                    _record_auto(
+                        text=proposal.text,
+                        kind=proposal.target,
+                        destination=_LEARNINGS_RELATIVE,
+                        outcome="written",
+                    )
                 else:
                     remaining.append(proposal)
             else:
@@ -816,61 +936,161 @@ async def plan_region_reconcile(
     if not by_region:
         return None
 
-    from ciao.providers.oneshot import run_oneshot
-
     decisions: dict[str, dict[str, Any]] = {}
     for region_name, candidates in by_region.items():
-        entries = entries_by_region[region_name]
-        numbered = "\n".join(
-            f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
+        rows = await _reconcile_region(
+            region_name,
+            entries_by_region[region_name],
+            candidates,
+            model=model,
+            provider=provider,
+            cwd=cwd,
         )
-        lettered = "\n".join(
-            f"{chr(ord('A') + index)}. {fact}"
-            for index, fact in enumerate(candidates)
-        )
-        prompt = (
-            f"Region `ciao:{region_name}` current entries:\n{numbered}\n\n"
-            f"Candidate facts:\n{lettered}\n"
-        )
-        try:
-            reply = await run_oneshot(
-                prompt,
-                system_prompt=_RECONCILE_SYSTEM_PROMPT,
-                model=model,
-                timeout_s=_RECONCILE_TIMEOUT_S,
-                provider=provider,
-                cwd=cwd,
-            )
-        except Exception as exc:  # noqa: BLE001 — degrade to plain appends
-            logger.info("memory reconcile: call failed (%s); using plain adds", exc)
-            continue
-        rows = _parse_reconcile_reply(reply, len(candidates))
         if rows is None:
-            logger.info(
-                "memory reconcile: unparseable reply for ciao:%s; using plain adds",
-                region_name,
-            )
             continue
         for fact, row in zip(candidates, rows):
-            if row.get("action") == "update":
-                index = row.get("index")
-                if not (isinstance(index, int) and 1 <= index <= len(entries)):
-                    # Out-of-range against the very snapshot the model saw:
-                    # degrade now rather than carry a junk decision around.
-                    row = {"action": "add"}
-                else:
-                    # Snapshot the entry this index named at plan time. The
-                    # apply step re-reads the region and refuses the update if
-                    # the entry changed during the model call — the index
-                    # would otherwise overwrite an unrelated fact.
-                    row = dict(row)
-                    row["old"] = entries[index - 1]
             decisions[_decision_key(region_name, fact)] = row
 
     return decisions or None
 
 
+async def _reconcile_region(
+    region_name: str,
+    entries: list[str],
+    candidates: list[str],
+    *,
+    model: str,
+    provider: str = "claude",
+    cwd: Path | None = None,
+) -> list[dict[str, Any]] | None:
+    """One reconcile call: decide ADD / UPDATE / COVERED per candidate.
+
+    Returns one row per candidate in the given order, or None when the call
+    failed or replied unparseably — every caller then degrades to the plain
+    append path, which never blocks and never loses a fact.
+
+    An ``update`` row carries ``old``: the entry its index named in the snapshot
+    the model actually saw. The apply step re-reads the region and refuses the
+    update if that entry changed during the call, so a stale index cannot
+    overwrite an unrelated fact.
+    """
+    from ciao.providers.oneshot import run_oneshot
+
+    numbered = "\n".join(
+        f"{index}. {entry}" for index, entry in enumerate(entries, start=1)
+    )
+    lettered = "\n".join(
+        f"{chr(ord('A') + index)}. {fact}" for index, fact in enumerate(candidates)
+    )
+    prompt = (
+        f"Region `ciao:{region_name}` current entries:\n{numbered}\n\n"
+        f"Candidate facts:\n{lettered}\n"
+    )
+    try:
+        reply = await run_oneshot(
+            prompt,
+            system_prompt=_RECONCILE_SYSTEM_PROMPT,
+            model=model,
+            timeout_s=_RECONCILE_TIMEOUT_S,
+            provider=provider,
+            cwd=cwd,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to plain appends
+        logger.info("memory reconcile: call failed (%s); using plain adds", exc)
+        return None
+    rows = _parse_reconcile_reply(reply, len(candidates))
+    if rows is None:
+        logger.info(
+            "memory reconcile: unparseable reply for ciao:%s; using plain adds",
+            region_name,
+        )
+        return None
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("action") == "update":
+            index = row.get("index")
+            if not (isinstance(index, int) and 1 <= index <= len(entries)):
+                # Out-of-range against the very snapshot the model saw:
+                # degrade now rather than carry a junk decision around.
+                row = {"action": "add"}
+            else:
+                row = dict(row)
+                row["old"] = entries[index - 1]
+        out.append(row)
+    return out
+
+
 # ── Persistence ───────────────────────────────────────────────────────────
+
+
+def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
+    """Whether ``text`` was *rejected* before, not merely decided before.
+
+    `append_proposals` dedupes against both pending bullets and the decision
+    sidecar and returns None for either, so a caller cannot otherwise tell "it
+    is already waiting for you" from "you rejected this before, and it will not
+    come back". Those need different words: the second is the one that silently
+    loses a user who has changed their mind.
+
+    Reads the sidecar directly rather than through `_dismissed_texts`, which
+    returns every decided text — `record_promotion` writes to the same log with
+    a `promoted_at` key. Reusing it would tell someone their fact had been
+    rejected when it was in fact accepted and may already be live.
+
+    Compared through `_one_line`, exactly as `append_proposals` compares.
+    """
+    out_path = Path(workspace_vault_root) / _PROPOSALS_RELATIVE
+    if not out_path.exists():
+        return False
+    wanted = _one_line(text)
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        try:
+            raw = out_path.with_suffix(suffix).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if key not in entry:
+                # The oldest sidecar shape records neither timestamp; it is a
+                # dismissal, exactly as `read_decisions` and the append-time
+                # dedupe in `_dismissed_texts` already treat it. Requiring the
+                # key made those rows invisible here, so re-filing a fact an
+                # ancient install had rejected was reported as "already in the
+                # queue" when no queue row existed.
+                if key != "dismissed_at" or "promoted_at" in entry:
+                    continue
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not report
+                # the fact as promoted or dismissed.
+                continue
+            if _one_line(str(entry.get("text", ""))) == wanted:
+                return True
+    return False
+
+
+
+def was_dismissed(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was rejected before."""
+    return _decided_with(workspace_vault_root, text, "dismissed_at")
+
+
+def was_promoted(workspace_vault_root: Path, text: str) -> bool:
+    """Whether ``text`` was accepted before, and so may already be live.
+
+    The third state a caller needs. `append_proposals` refuses a re-file for a
+    promoted fact exactly as it does for a dismissed one, and reporting either
+    as "already in the queue" is wrong — a promoted fact is not in the queue at
+    all, it is in its destination.
+    """
+    return _decided_with(workspace_vault_root, text, "promoted_at")
 
 
 def append_proposals(
@@ -878,6 +1098,7 @@ def append_proposals(
     workspace_vault_root: Path,
     *,
     source_path: Path | None = None,
+    allow_dismissed: bool = False,
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``."""
     if not proposals:
@@ -895,7 +1116,8 @@ def append_proposals(
     else:
         existing = _STUB_HEADER
 
-    already = _existing_proposal_texts(existing) | _dismissed_texts(out_path)
+    decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
+    already = _existing_proposal_texts(existing) | decided
     # Compare the text exactly as ``as_bullet`` will write it, or a proposal
     # whose text is only whitespace-different from a queued/dismissed one
     # slips past dedupe and lands as a visually identical duplicate row.
@@ -968,7 +1190,17 @@ def dismissed_log_path(proposals_path: Path) -> Path:
     return proposals_path.with_suffix(_DISMISSED_LOG_SUFFIX)
 
 
-def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+def record_dismissal(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str = "",
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
 
     ``append_proposals`` dedupes against bullets still in the queue file, so
@@ -982,11 +1214,39 @@ def record_dismissal(proposals_path: Path, *, text: str, kind: str = "") -> bool
     curator dedupes against the live queue and this sidecar, never against
     the promoted destination, so a promotion must record the text too or the
     same fact comes back the next time the transcript is re-read.
+
+    The extra fields (``via``, ``source``, ``destination``, ``outcome``,
+    ``proposal_id``) turn this dedupe sidecar into the decision history the
+    review page's History tab reads; they are optional and omitted when
+    blank so the on-disk shape stays backward compatible with the readers
+    below, which only ever look at the ``*_at`` key and ``text``.
     """
-    return _record_decision(proposals_path, text=text, kind=kind, key="dismissed_at")
+    return _record_decision(
+        proposals_path,
+        text=text,
+        kind=kind,
+        key="dismissed_at",
+        via=via,
+        source=source,
+        destination=destination,
+        outcome=outcome,
+        proposal_id=proposal_id,
+    )
 
 
-def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool:
+def record_promotion(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str = "",
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+    once: bool = False,
+    history_only: bool = False,
+) -> bool:
     """Record an accepted proposal in the same decision history.
 
     Same sidecar and the same reason as :func:`record_dismissal`: the dedupe
@@ -996,45 +1256,257 @@ def record_promotion(proposals_path: Path, *, text: str, kind: str = "") -> bool
     Mirrors the CLI's promote-then-dismiss flow, which records the text for
     every removal regardless of the outcome action.
     """
-    return _record_decision(proposals_path, text=text, kind=kind, key="promoted_at")
+    return _record_decision(
+        proposals_path,
+        text=text,
+        kind=kind,
+        key="promoted_at",
+        via=via,
+        source=source,
+        destination=destination,
+        outcome=outcome,
+        proposal_id=proposal_id,
+        once=once,
+        history_only=history_only,
+    )
 
 
-def _record_decision(proposals_path: Path, *, text: str, kind: str, key: str) -> bool:
+def _record_decision(
+    proposals_path: Path,
+    *,
+    text: str,
+    kind: str,
+    key: str,
+    via: str = "",
+    source: str = "",
+    destination: str = "",
+    outcome: str = "",
+    proposal_id: str = "",
+    once: bool = False,
+    history_only: bool = False,
+) -> bool:
     cleaned = text.strip()
     if not cleaned:
         return False
     log_path = dismissed_log_path(proposals_path)
+    if once and _has_decision(proposals_path, key=key, text=cleaned, outcome=outcome):
+        # Idempotent paths only. A decision the operator makes is a fresh event
+        # every time, but the archive-time pipeline re-derives the same
+        # "already applied, skipped" verdict on every pass over the same
+        # transcript, and appending a row per pass grew the history without
+        # recording anything new.
+        return False
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {
+    entry: dict[str, Any] = {
         key: datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "text": cleaned,
     }
+    # Omit blanks rather than writing empty strings: keeps legacy-shaped
+    # entries (just the ``*_at`` key, ``kind``, ``text``) indistinguishable
+    # from ones written before these fields existed.
+    if via:
+        entry["via"] = via
+    if source:
+        entry["source"] = source
+    if destination:
+        entry["destination"] = destination
+    if outcome:
+        entry["outcome"] = outcome
+    if proposal_id:
+        entry["proposal_id"] = proposal_id
+    if history_only:
+        # Ledger-only row: it records that a pass ran and decided nothing new,
+        # so the dedupe readers must not treat it as a decision. Without this
+        # the row makes ``was_promoted`` true and ``append_proposals`` refuses
+        # the fact forever, so a reverted in-session edit could never be
+        # re-queued. ``_has_decision`` still sees it, which is what keeps
+        # ``once=True`` idempotent.
+        entry["history_only"] = True
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
 
 
+# Parsed sidecar lines, keyed by path and invalidated on stat identity.
+_SIDECAR_CACHE: dict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = {}
+
+
+def _sidecar_entries(path: Path) -> list[dict[str, Any]]:
+    """Parsed JSON-object lines of one decision sidecar, newest last.
+
+    Cached on ``(mtime_ns, size, inode)``: the suppression path calls
+    :func:`_has_decision` once per proposal while archiving, so a long-lived
+    ledger was otherwise re-read and re-parsed O(proposals x history) times in
+    a single pass. Sidecars are append-only (and any rewrite lands on a new
+    inode), so stat identity is a sound key. Callers must treat the returned
+    entries as read-only.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        _SIDECAR_CACHE.pop(path, None)
+        return []
+    stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    cached = _SIDECAR_CACHE.get(path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        _SIDECAR_CACHE.pop(path, None)
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    _SIDECAR_CACHE[path] = (stamp, entries)
+    return entries
+
+
+def _sidecar_paths(proposals_path: Path) -> tuple[Path, ...]:
+    """Current plus legacy sidecar paths for one proposal queue, current first."""
+    return tuple(
+        proposals_path.with_suffix(suffix)
+        for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES)
+    )
+
+
+def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) -> bool:
+    """Whether this exact decision (action, text, outcome) is already recorded.
+
+    Used only by ``once=True`` writers; matching on the outcome as well keeps a
+    later real promotion of a fact recordable after an earlier "skipped,
+    already known" row for the same text.
+    """
+    for path in _sidecar_paths(proposals_path):
+        for entry in _sidecar_entries(path):
+            if key not in entry:
+                continue
+            if str(entry.get("text", "")).strip() != text:
+                continue
+            if str(entry.get("outcome", "")) == outcome:
+                return True
+    return False
+
+
 def _dismissed_texts(proposals_path: Path) -> set[str]:
     """Texts of previously decided proposals, from the sidecar log."""
+    # Older sidecars recorded only ``text`` and ``kind``; keep treating those
+    # entries as decisions when rebuilding the general dedupe set.
+    return _decision_texts(proposals_path, keys=())
+
+
+def _promoted_texts(proposals_path: Path) -> set[str]:
+    """Texts of proposals previously accepted into their destination."""
+    return _decision_texts(proposals_path, keys=("promoted_at",))
+
+
+def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     out: set[str] = set()
-    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
-        try:
-            raw = proposals_path.with_suffix(suffix).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
+    for path in _sidecar_paths(proposals_path):
+        for entry in _sidecar_entries(path):
+            if keys and not any(key in entry for key in keys):
                 continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
+            if entry.get("history_only"):
+                # Ledger-only row; it decided nothing, so it must not dedupe.
                 continue
-            text = str(entry.get("text", "")).strip()
+            text = _one_line(str(entry.get("text", "")))
             if text:
                 out.add(text)
     return out
+
+
+def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
+    """Stable id for one decision-history row, derived from its content.
+
+    Unlike the live queue's :func:`ciao.proposal_tracking.stable_proposal_id`,
+    this cannot key off a path/line: auto-apply only has a vault root, the CLI
+    only has an optional workspace name, and legacy sidecar rows have neither.
+
+    Timestamps are second-precision, so content alone is not unique: the same
+    fact accepted in two workspaces within one second, or two undated legacy
+    rows with identical text, hashed identically — and the History list keys
+    its ``<li>`` on this id, so a collision dropped a row on patch. The
+    ``workspace`` and the row's position in its sidecar (``log`` + ``seq``,
+    both assigned by :func:`read_decisions`) disambiguate. They are stable
+    across reads because each sidecar is append-only and ``seq`` counts within
+    one sidecar — a shared counter would renumber every legacy row each time a
+    decision landed in the current one.
+    """
+    import hashlib
+
+    basis = "|".join(
+        (
+            str(entry.get("ts", "")),
+            str(entry.get("action", "")),
+            str(entry.get("kind", "")),
+            str(entry.get("text", "")),
+            workspace,
+            str(entry.get("log", "")),
+            str(entry.get("seq", "")),
+        )
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
+    """Every recorded decision for one workspace's proposal queue, newest last.
+
+    Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
+    text-only rows into one shape: ``{ts, action, via, kind, text, source,
+    destination, outcome, proposal_id, log, seq}``. This is the read side of the
+    decision history the review page's History tab renders; :func:`record_dismissal`
+    and :func:`record_promotion` are the write side.
+
+    ``seq`` is the row's position *within its own* append-only sidecar, and
+    ``log`` names that sidecar. Together they let :func:`history_row_id` tell
+    apart two rows whose content is byte-identical; both are dropped before the
+    row reaches the API payload. Counting per sidecar rather than across the
+    concatenation matters: a shared counter offsets every legacy row by the
+    current sidecar's length, so each new decision changed the id of every
+    legacy row — the exact instability ``seq`` exists to prevent.
+    """
+    rows: list[dict[str, Any]] = []
+    for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
+        seq = 0
+        for entry in _sidecar_entries(proposals_path.with_suffix(suffix)):
+            text = _one_line(str(entry.get("text", "")))
+            if not text:
+                continue
+            if "promoted_at" in entry:
+                ts, action = str(entry["promoted_at"]), "accepted"
+            elif "dismissed_at" in entry:
+                ts, action = str(entry["dismissed_at"]), "dismissed"
+            else:
+                # Oldest sidecar shape: no timestamp, no action recorded.
+                # Treat as a dismissal (append-time dedupe already did) but
+                # never fabricate a time.
+                ts, action = "", "dismissed"
+            rows.append(
+                {
+                    "ts": ts,
+                    "action": action,
+                    "via": str(entry.get("via", "")),
+                    "kind": str(entry.get("kind", "")),
+                    "text": text,
+                    "source": str(entry.get("source", "")),
+                    "destination": str(entry.get("destination", "")),
+                    "outcome": str(entry.get("outcome", "")),
+                    "proposal_id": str(entry.get("proposal_id", "")),
+                    "log": suffix,
+                    "seq": seq,
+                }
+            )
+            seq += 1
+    return rows
 
 
 _STUB_HEADER = (
@@ -1047,7 +1519,7 @@ _STUB_HEADER = (
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
-    "first, then dismiss with `ciao memory-proposal-dismiss <text> "
+    "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
     "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
@@ -1376,6 +1848,27 @@ def proposals_from_archive(
                         _p.text[:80],
                         archive_path.name,
                     )
+                    try:
+                        record_promotion(
+                            workspace_vault_root / _PROPOSALS_RELATIVE,
+                            text=_p.text,
+                            kind=_p.target,
+                            via="auto",
+                            source=archive_path.stem,
+                            outcome="suppressed",
+                            # Re-processing the same archive re-derives this
+                            # same verdict; record it once, not once per pass.
+                            once=True,
+                            # The fact was applied in-session, not promoted
+                            # through the queue. Keep the row out of the dedupe
+                            # readers so a later revert can be re-queued.
+                            history_only=True,
+                        )
+                    except Exception:  # noqa: BLE001 — recording must not break the pipeline
+                        logger.info(
+                            "memory proposals: could not record suppression for %r",
+                            _p.text[:80],
+                        )
                     continue
                 filtered.append(_p)
             if suppressed:
@@ -1468,6 +1961,35 @@ def list_proposals(
                 }
             )
     return rows
+
+
+def find_proposal_matches(proposals_path: Path, needle: str) -> list[int]:
+    """Line indices of the pending bullets ``needle`` matches.
+
+    `remove_proposal_by_substring` returns None both for no match and for an
+    ambiguous one, which a caller that wants to try a second needle cannot act
+    on: retrying after an AMBIGUOUS match can uniquely hit a different row and
+    delete the wrong proposal. Indices rather than a count, because two needle
+    forms matching one row each is not the same as them matching the same row —
+    only the identities say which.
+
+    Same matching rule as the remover — casefolded substring over parsed
+    bullets — so the two never disagree.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    if not proposals_path.exists():
+        return []
+    needle = needle.strip()
+    if not needle:
+        return []
+    folded = needle.casefold()
+    lines = proposals_path.read_text(encoding="utf-8").splitlines()
+    return [
+        index
+        for index, line in enumerate(lines)
+        if parse_bullet(line) is not None and folded in line.casefold()
+    ]
 
 
 def remove_proposal_by_substring(
