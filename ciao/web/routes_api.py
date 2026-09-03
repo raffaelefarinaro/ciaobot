@@ -3947,6 +3947,18 @@ async def chat_subagents(request: Request) -> JSONResponse:
             continue
 
         rendered = _render_subagent_messages(msgs)
+        if not rendered:
+            # An empty read is a miss, not an empty transcript. On installs
+            # whose CLI writes the nested "<session>/subagents/*.jsonl" layout,
+            # ``list_subagents`` returns [] and ``get_subagent_messages``
+            # answers any id with [] rather than raising. The unfiltered path
+            # survives that (no ids -> empty result -> local fallback), but the
+            # narrowed one skips discovery and asks for the id directly, so it
+            # built a row with no messages and that non-empty ``result``
+            # suppressed the very fallback that does find the transcript. The
+            # read-only subagent view then showed "No captured turns" for every
+            # Claude subagent while the in-chat panel had the full thread.
+            continue
         result.append({"agent_id": agent_id, "messages": rendered})
 
     if not result:
