@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import json
@@ -189,6 +190,7 @@ def _provider(
     install_url: str = "",
     app_path: str = "",
     cli_path: str = "",
+    path_command: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -214,6 +216,8 @@ def _provider(
         row["app_path"] = app_path
     if cli_path:
         row["cli_path"] = cli_path
+    if path_command:
+        row["path_command"] = path_command
     return row
 
 
@@ -637,6 +641,51 @@ def claude_install_command() -> str:
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
+def claude_path_command() -> str:
+    """Shell line that puts Claude's install directory on the login PATH.
+
+    The documented installer drops ``claude`` into ``~/.local/bin``, which is
+    not on a default macOS PATH, so the very next command in the user's
+    terminal still reports "command not found". The installer prints this line
+    itself; repeating it here means the wizard can hand it over as a second
+    copyable step instead of leaving the user stuck one command short.
+    """
+    if sys.platform == "win32":
+        return ""
+    # The engine usually runs under launchd, where SHELL is unset; zsh is the
+    # macOS default and the shell the documented installer assumes.
+    shell = os.path.basename(os.environ.get("SHELL", "") or "zsh")
+    rc = "~/.bashrc" if shell == "bash" else "~/.zshrc"
+    return f"""echo 'export PATH="$HOME/.local/bin:$PATH"' >> {rc} && source {rc}"""
+
+
+def claude_auth_command(cli_path: str = "") -> str:
+    """Terminal command that signs the user into Claude Code.
+
+    Deliberately not ``ciao auth claude``: an app install keeps the engine
+    inside ``Ciaobot.app`` and puts nothing named ``ciao`` on PATH, so that
+    command only ever worked from a dev checkout. In a normal install the
+    user's shell either finds nothing or finds an unrelated ``ciao`` and
+    answers with a confusing "Unknown command 'auth'". Claude's own login
+    command works in every install.
+
+    The bare word is only usable when the user's own shell can resolve it.
+    Ciaobot itself usually runs the ``claude`` bundled with the Agent SDK,
+    which is inside the app and on nobody's PATH, so when the login shell has
+    no ``claude`` of its own the binary is named by absolute path instead.
+    """
+    from ciao.tool_path import resolve_tool
+
+    try:
+        on_login_path = resolve_tool("claude")
+    except Exception:
+        on_login_path = None
+    if on_login_path:
+        return "claude auth login"
+    binary = cli_path or claude_cli_path()
+    return f"{shlex.quote(binary)} auth login" if binary else "claude auth login"
+
+
 def claude_app_path() -> str:
     """Path to an installed Claude desktop app, or "".
 
@@ -722,13 +771,14 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             app_path=app_path,
+            path_command=claude_path_command(),
         )
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
             ok=True,
             auth="api_key",
-            command="ciao auth claude",
+            command=claude_auth_command(binary),
             detail="ANTHROPIC_API_KEY is set.",
             version=version,
             account="Anthropic API",
@@ -749,7 +799,7 @@ def _claude_status(
             name="claude",
             ok=True,
             auth="oauth",
-            command="ciao auth claude",
+            command=claude_auth_command(binary),
             detail=detail,
             version=version,
             account=account,
@@ -786,9 +836,10 @@ def _claude_status(
             cli_path=binary,
         )
     app_path = claude_app_path()
+    auth_command = claude_auth_command(binary)
     detail = (
-        "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
-        "no separate CLI install is needed."
+        "Claude Desktop uses an app-private login. Sign in once via "
+        f"`{auth_command}`; no separate CLI install is needed."
         if app_path
         else "Run Claude OAuth or set ANTHROPIC_API_KEY."
     )
@@ -796,7 +847,7 @@ def _claude_status(
         name="claude",
         ok=False,
         auth="missing",
-        command="ciao auth claude",
+        command=auth_command,
         detail=detail,
         version=version,
         skills=claude_skills,

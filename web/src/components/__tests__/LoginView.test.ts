@@ -88,7 +88,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'missing',
-          command: 'ciao auth claude',
+          command: 'claude auth login',
           detail: 'Run OAuth'
         }
       }
@@ -106,7 +106,7 @@ describe('LoginView setup wizard tests', () => {
     // No notification-email field: Web Push works out of the box with a
     // default VAPID subject, so setup never asks for a contact.
     expect(wrapper.find('#setup-push').exists()).toBe(false)
-    expect(wrapper.text()).toContain('ciao auth claude')
+    expect(wrapper.text()).toContain('claude auth login')
     expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
     expect(wrapper.text()).toContain('close the terminal and open Ciaobot Server.app')
 
@@ -208,7 +208,7 @@ describe('LoginView setup wizard tests', () => {
         bootstrap: true,
         mode: 'bootstrap',
         providers: {
-          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'ciao auth claude', detail: 'Ready' }
+          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'claude auth login', detail: 'Ready' }
         }
       })
     })
@@ -335,6 +335,7 @@ describe('LoginView setup wizard tests', () => {
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+          path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
         },
       },
     })
@@ -348,6 +349,91 @@ describe('LoginView setup wizard tests', () => {
     expect(link.attributes('href')).toBe(
       'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
     )
+  })
+
+  it('offers the PATH line as a second copyable step after the install', async () => {
+    // Claude's installer drops the binary in ~/.local/bin, which a default
+    // macOS PATH omits: without this step the next command a new user runs
+    // still reports "command not found".
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: {
+          name: 'claude',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'Claude Code is not installed on this machine.',
+          path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+
+    const rows = wrapper.findAll('.command-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[1].text()).toContain('export PATH="$HOME/.local/bin:$PATH"')
+    expect(wrapper.text()).toContain('Then make it findable in new terminals:')
+  })
+
+  it('flashes Copied! on the button that was pressed, not on both', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: {
+          name: 'claude',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'Claude Code is not installed on this machine.',
+          path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+    const buttons = wrapper.findAll('.command-row button')
+    await buttons[1].trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith(
+      'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
+    )
+    expect(wrapper.findAll('.command-row button')[0].text()).toBe('Copy')
+    expect(wrapper.findAll('.command-row button')[1].text()).toBe('Copied!')
+  })
+
+  it('shows no PATH step when the provider CLI is already installed', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: {
+          name: 'claude',
+          ok: false,
+          auth: 'missing',
+          command: 'claude auth login',
+          detail: 'Run Claude OAuth or set ANTHROPIC_API_KEY.',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+
+    expect(wrapper.findAll('.command-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('claude auth login')
+    expect(wrapper.text()).not.toContain('Then make it findable')
   })
 
   it('points at the desktop app when only the CLI is missing', async () => {
@@ -383,7 +469,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: true,
           auth: 'oauth',
-          command: 'ciao auth claude',
+          command: 'claude auth login',
           detail: 'Ready'
         }
       }

@@ -201,9 +201,27 @@
                 :disabled="loading"
                 @click="copyCommand(setupStatus.providers[provider].command || '')"
               >
-                {{ copyStatus || 'Copy' }}
+                {{ copyLabel(setupStatus.providers[provider].command || '') }}
               </button>
             </div>
+            <!-- The CLI installer drops `claude` in ~/.local/bin, which a
+                 default macOS PATH does not include, so the very next command
+                 still fails with "command not found". Offer the PATH line as a
+                 second copyable step rather than as prose nobody can run. -->
+            <template v-if="setupStatus.providers[provider].path_command">
+              <p class="hint">Then make it findable in new terminals:</p>
+              <div class="command-row">
+                <code>{{ setupStatus.providers[provider].path_command }}</code>
+                <button
+                  class="btn-small"
+                  type="button"
+                  :disabled="loading"
+                  @click="copyCommand(setupStatus.providers[provider].path_command || '')"
+                >
+                  {{ copyLabel(setupStatus.providers[provider].path_command || '') }}
+                </button>
+              </div>
+            </template>
             <p v-if="setupStatus.providers[provider].install_url" class="hint">
               Other ways to install (Homebrew, WinGet, Linux packages):
               <a
@@ -503,6 +521,9 @@ const passwordReady = computed(
 const isRestarting = ref(false)
 const workspaceName = ref('personal')
 const copyStatus = ref('')
+// Which command the status belongs to: the install step can show two copy
+// buttons, and a shared status would report "Copied!" on both.
+const copiedCommand = ref('')
 const advancedOpen = ref(false)
 
 // Folder inspection: when the chosen workspace folder already contains
@@ -711,8 +732,16 @@ const canFinish = computed(() => {
 
 async function copyCommand(text: string) {
   const copied = await writeClipboard(text)
+  copiedCommand.value = text
   copyStatus.value = copied ? 'Copied!' : 'Failed'
-  setTimeout(() => { copyStatus.value = '' }, 2000)
+  setTimeout(() => {
+    copyStatus.value = ''
+    copiedCommand.value = ''
+  }, 2000)
+}
+
+function copyLabel(text: string) {
+  return copyStatus.value && copiedCommand.value === text ? copyStatus.value : 'Copy'
 }
 
 async function doFinish() {

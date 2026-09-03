@@ -93,12 +93,39 @@ def _remove_installer_launch_agents(
     return removed
 
 
+# Line the one-line installer writes into ~/.local/bin/ciao so both sides can
+# tell its shim apart from a `ciao` belonging to some other project.
+SHIM_MARKER = "# Ciaobot shim (managed by the Ciaobot installer)"
+
+
+def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) -> str:
+    """Delete the installer's ``ciao`` shim when it points at this bundle.
+
+    Only a file carrying the installer's marker *and* naming this bundle is
+    touched: an unrelated ``ciao`` in ``~/.local/bin`` belongs to its owner,
+    and a shim naming a different bundle belongs to that install.
+    """
+    shim = shim_path or (Path.home() / ".local" / "bin" / "ciao")
+    try:
+        content = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if SHIM_MARKER not in content or str(destination) not in content:
+        return ""
+    try:
+        shim.unlink()
+    except OSError:
+        return ""
+    return str(shim)
+
+
 def uninstall_desktop_app(
     *,
     app_dir: Path,
     launch_agents_dir: Path | None = None,
     uid: int | None = None,
     runner: Callable[..., Any] = subprocess.run,
+    shim_path: Path | None = None,
 ) -> dict[str, Any]:
     """Remove a Ciaobot.app bundle without deleting a browser-installed PWA."""
 
@@ -118,12 +145,16 @@ def uninstall_desktop_app(
         uid=uid,
         runner=runner,
     )
+    removed_shim = _remove_installer_shim(destination=destination, shim_path=shim_path)
     try:
         shutil.rmtree(destination)
     except OSError as exc:
         raise InstallError(f"could not remove {destination}: {exc}") from exc
-    return {
+    result: dict[str, Any] = {
         "removed": True,
         "path": str(destination),
         "removed_agents": removed_agents,
     }
+    if removed_shim:
+        result["removed_shim"] = removed_shim
+    return result

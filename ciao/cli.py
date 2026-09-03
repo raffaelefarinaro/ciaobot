@@ -3290,14 +3290,14 @@ def _desktop_command(args: argparse.Namespace) -> int:
 
     try:
         result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
-        return report(
-            result,
-            [
-                f"Removed {result['path']}"
-                if result["removed"]
-                else f"Nothing to remove at {result['path']}"
-            ],
-        )
+        lines = [
+            f"Removed {result['path']}"
+            if result["removed"]
+            else f"Nothing to remove at {result['path']}"
+        ]
+        if result.get("removed_shim"):
+            lines.append(f"Removed {result['removed_shim']}")
+        return report(result, lines)
     except desktop_install.InstallError as exc:
         if as_json:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2))

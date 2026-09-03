@@ -689,6 +689,10 @@
                     <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
                       {{ conn.detail }}
                       Install it with <code>{{ conn.command }}</code>
+                      <template v-if="conn.path_command">
+                        , then put it on your PATH with
+                        <code>{{ conn.path_command }}</code>
+                      </template>
                       <a
                         v-if="conn.install_url"
                         :href="conn.install_url"
