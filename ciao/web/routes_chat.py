@@ -370,6 +370,10 @@ async def ws_events(websocket: WebSocket) -> None:
             # client can paint the "N agents running" indicator immediately
             # (and clear a count left stale by a missed event during a gap).
             "background_agents": pcm.background_agent_counts,
+            # Same idea for tracked background command runs. These outlive the
+            # turn that started them *and* a server restart, so a reconnecting
+            # client must be told about them or the chat reads as finished.
+            "background_runs": pcm.background_run_counts,
             # Chats whose post-archive pipeline is mid-flight. A client that
             # connects between the start and finish events would otherwise show
             # nothing at all until the next archive.

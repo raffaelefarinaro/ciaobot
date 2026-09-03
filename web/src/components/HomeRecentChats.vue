@@ -411,7 +411,8 @@ function makeLane(
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsInput(chatId),
-      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId) || store.chatHasRunningSubagents(chatId),
+      chatId => store.isChatStreaming(chatId) || store.chatHasBackgroundAgents(chatId)
+        || store.chatHasBackgroundRuns(chatId) || store.chatHasRunningSubagents(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
     archivingChats: (workspace && workspace !== 'unknown' && archivingChatsByWorkspace.value.get(workspace)) || [],

@@ -469,7 +469,8 @@ const totalUnread = computed(() => store.projectUnread(props.projectId))
 const needsInputCount = computed(() => store.projectNeedsInput(props.projectId))
 const workingCount = computed(() =>
   activeChats.value.filter(c =>
-    store.isChatStreaming(c.chat_id) || store.chatHasBackgroundAgents(c.chat_id),
+    store.isChatStreaming(c.chat_id) || store.chatHasBackgroundAgents(c.chat_id)
+    || store.chatHasBackgroundRuns(c.chat_id),
   ).length,
 )
 
