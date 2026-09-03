@@ -10,6 +10,7 @@ import pytest
 
 from ciao.skill_import import (
     MAX_SKILL_ASSET_BYTES,
+    MAX_SKILL_BYTES,
     MAX_SKILL_TOTAL_BYTES,
     extract_skill_zip,
     validate_skill_zip,
@@ -33,6 +34,53 @@ def _skill_zip(name: str = "demo", extra: dict[str, bytes] | None = None) -> byt
     if extra:
         entries.update(extra)
     return _zip_bytes(entries)
+
+
+def _oversized_skill_zip(name: str = "demo") -> bytes:
+    body = "x" * (MAX_SKILL_BYTES + 1)
+    return _zip_bytes(
+        {
+            f"{name}/SKILL.md": (
+                f"---\nname: {name}\ndescription: Demo skill\n---\n\n{body}\n"
+            ).encode()
+        }
+    )
+
+
+def test_oversized_skill_md_warns_instead_of_failing() -> None:
+    """The 15 KB budget is a context cost, not a validity rule.
+
+    Rejecting the upload left the owner nothing to do but rewrite a document
+    they may not own, so the import proceeds and the cost is reported.
+    """
+    warnings: list[str] = []
+    name, errors = validate_skill_zip(_oversized_skill_zip(), warnings=warnings)
+
+    assert errors == []
+    assert name == "demo"
+    assert any("context budget" in w for w in warnings)
+
+
+def test_oversized_skill_md_extracts(tmp_path: Path) -> None:
+    warnings: list[str] = []
+    name, errors = extract_skill_zip(
+        _oversized_skill_zip(), tmp_path, warnings=warnings
+    )
+
+    assert errors == []
+    assert name == "demo"
+    assert (tmp_path / "demo" / "SKILL.md").exists()
+    assert warnings
+
+
+def test_oversized_skill_md_without_a_warnings_sink_still_imports(
+    tmp_path: Path,
+) -> None:
+    """Callers that do not ask for warnings must not get an error instead."""
+    name, errors = extract_skill_zip(_oversized_skill_zip(), tmp_path)
+
+    assert errors == []
+    assert name == "demo"
 
 
 def test_validate_accepts_valid_skill_zip() -> None:

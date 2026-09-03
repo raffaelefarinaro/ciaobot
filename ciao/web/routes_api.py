@@ -7192,13 +7192,20 @@ async def admin_add_skill(request: Request) -> JSONResponse:
     )
 
 
+def _with_warnings(message: str, warnings: list[str]) -> str:
+    """Append non-blocking import notes to a success message."""
+    return " ".join([message, *warnings]) if warnings else message
+
+
 async def skill_import(request: Request) -> JSONResponse:
     """Import a skill from a validated zip archive.
 
     Accepts multipart/form-data with a ``file`` field containing the zip.
     Validates zip-slip, exactly one top-level folder with SKILL.md,
-    frontmatter name/description, size ≤ 15KB, and name equals folder.
-    On success extracts to ``skills/<name>/`` and syncs the catalog.
+    frontmatter name/description, and name equals folder. On success extracts
+    to ``skills/<name>/`` and syncs the catalog. A SKILL.md over the 15 KB
+    context budget imports with a warning on ``message``/``warnings`` rather
+    than being rejected.
     """
     config = request.app.state.config
     # Reject oversized bodies before multipart parsing. `request.form()` fully
@@ -7292,7 +7299,8 @@ async def skill_import(request: Request) -> JSONResponse:
     if not force and request.query_params.get("force", "").lower() in {"1", "true", "yes"}:
         force = True
 
-    # Read upload with size limit (zip + slack). Allow up to 5MB, but validator will enforce 15KB SKILL.md
+    # Read upload with size limit (zip + slack). The 15 KB SKILL.md budget is
+    # a warning, not a gate — see ciao/skill_import.validate_skill_zip.
     try:
         data = await _read_upload_limited(upload, max_zip_bytes)
     except ValueError:
@@ -7310,7 +7318,15 @@ async def skill_import(request: Request) -> JSONResponse:
     from ciao.skill_import import extract_skill_zip
 
     dest_skills.mkdir(parents=True, exist_ok=True)
-    name, errors = await asyncio.to_thread(extract_skill_zip, data, dest_skills, overwrite=force)
+    # Non-blocking notes (currently: SKILL.md over the context budget). The
+    # import still happens; the note rides along on the success message so the
+    # owner learns what it costs without being stopped at the door.
+    warnings: list[str] = []
+    name, errors = await asyncio.to_thread(
+        functools.partial(
+            extract_skill_zip, data, dest_skills, overwrite=force, warnings=warnings
+        )
+    )
     if errors:
         return JSONResponse({"ok": False, "error": "; ".join(errors)}, status_code=400)
     assert name is not None
@@ -7325,10 +7341,25 @@ async def skill_import(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001 — sync failure should not hide successful import
         logger.warning("skill import sync failed for %s: %s", dest_skills, exc)
         return JSONResponse(
-            {"ok": True, "name": name, "message": f"Skill '{name}' imported (sync warning: {exc})."},
+            {
+                "ok": True,
+                "name": name,
+                "warnings": warnings,
+                "message": _with_warnings(
+                    f"Skill '{name}' imported (sync warning: {exc}).", warnings
+                ),
+            },
             status_code=200,
         )
-    return JSONResponse({"ok": True, "name": name, "message": f"Skill '{name}' added — available to all operators after next sync."})
+    return JSONResponse({
+        "ok": True,
+        "name": name,
+        "warnings": warnings,
+        "message": _with_warnings(
+            f"Skill '{name}' added — available to all operators after next sync.",
+            warnings,
+        ),
+    })
 
 
 
