@@ -98,6 +98,13 @@ def _remove_installer_launch_agents(
 SHIM_MARKER = "# Ciaobot shim (managed by the Ciaobot installer)"
 
 
+def _collapse_slashes(value: str) -> str:
+    """Collapse duplicate ``/`` so a trailing-slash install dir matches."""
+    while "//" in value:
+        value = value.replace("//", "/")
+    return value
+
+
 def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) -> str:
     """Delete the installer's ``ciao`` shim when it points at this bundle.
 
@@ -112,8 +119,11 @@ def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) 
         return ""
     engine = destination / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
     # The full quoted exec target, not a substring of the path: a bundle
-    # directory can be the prefix of a longer one.
-    if SHIM_MARKER not in content or f'"{engine}"' not in content:
+    # directory can be the prefix of a longer one. Slash-collapsed on both
+    # sides: the installer used to embed ``$app_dir`` verbatim, so
+    # ``CIAO_APP_DIR=~/Applications/`` (trailing slash) wrote a ``//`` the
+    # exact-string match below would miss, orphaning the shim.
+    if SHIM_MARKER not in content or _collapse_slashes(f'"{engine}"') not in _collapse_slashes(content):
         return ""
     try:
         shim.unlink()

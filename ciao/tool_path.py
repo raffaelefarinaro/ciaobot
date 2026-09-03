@@ -19,6 +19,8 @@ import glob
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 # Markers wrap the printed PATH so noisy shell rc files (which may echo banners
@@ -44,7 +46,28 @@ def common_tool_dirs() -> list[str]:
     return dirs
 
 
-@functools.lru_cache(maxsize=1)
+# The setup wizard polls ``setup_status`` every 2s while telling the user
+# "this check refreshes on its own" after they edit their rc file to add
+# ``~/.local/bin``. A process-lifetime cache would keep serving the pre-edit
+# miss, so the wizard would keep showing the PATH hint after the terminal is
+# fixed until the engine restarts. Keep only a short TTL so repeated
+# ``resolve_on_terminal_path`` calls within one status probe share one shell
+# invocation, while the next poll re-probes. ``setup_status`` additionally
+# clears this cache at the start of each call (see
+# ``clear_terminal_path_cache``) so every wizard poll is fresh even when polls
+# land inside the TTL window.
+_TERMINAL_PATH_TTL_SECONDS = 5.0
+_terminal_path_cache: tuple[float, str] | None = None
+_terminal_path_lock = threading.Lock()
+
+
+def clear_terminal_path_cache() -> None:
+    """Drop the cached login-shell PATH probe (tests and status refresh)."""
+    global _terminal_path_cache
+    with _terminal_path_lock:
+        _terminal_path_cache = None
+
+
 def terminal_path() -> str:
     """PATH the user's own interactive login shell reports, or "".
 
@@ -53,8 +76,17 @@ def terminal_path() -> str:
     bare ``claude`` is only correct when *this* PATH resolves it, so the
     augmented :func:`login_shell_path` (which appends ``~/.local/bin`` and
     Homebrew whether or not the user's shell has them) cannot answer that
-    question. Cached for the process lifetime like the augmented form.
+    question. Cached briefly (see ``_TERMINAL_PATH_TTL_SECONDS``), unlike the
+    process-lifetime :func:`login_shell_path`.
     """
+    global _terminal_path_cache
+    now = time.monotonic()
+    with _terminal_path_lock:
+        if (
+            _terminal_path_cache is not None
+            and now - _terminal_path_cache[0] < _TERMINAL_PATH_TTL_SECONDS
+        ):
+            return _terminal_path_cache[1]
     shell = os.environ.get("SHELL", "/bin/zsh")
     # Without PATH the shell builds its own from /etc/profile (path_helper) and
     # the user's rc files — which is the question being asked. Inheriting ours
@@ -62,6 +94,7 @@ def terminal_path() -> str:
     # own PATH at startup (ciao/main.py), so ~/.local/bin would come back out
     # of the probe as if the user's terminal had it.
     env = {k: v for k, v in os.environ.items() if k != "PATH"}
+    value = ""
     try:
         # -l login, -i interactive so nvm / rbenv / rc-file PATH edits apply.
         result = subprocess.run(
@@ -73,10 +106,16 @@ def terminal_path() -> str:
         )
         out = result.stdout
         if _START in out and _END in out:
-            return out.split(_START, 1)[1].split(_END, 1)[0]
+            value = out.split(_START, 1)[1].split(_END, 1)[0]
     except Exception:
         pass
-    return ""
+    with _terminal_path_lock:
+        _terminal_path_cache = (time.monotonic(), value)
+    return value
+
+
+# Back-compat for callers/tests that clear the old lru_cache.
+terminal_path.cache_clear = clear_terminal_path_cache  # type: ignore[attr-defined]
 
 
 def resolve_on_terminal_path(cmd: str) -> str | None:

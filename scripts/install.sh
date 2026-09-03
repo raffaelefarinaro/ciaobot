@@ -120,6 +120,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Normalize for the shim identity check: a trailing slash would otherwise be
+# embedded verbatim (".../Applications//Ciaobot.app/...") while uninstall
+# computes the single-slash form and misses, orphaning the shim.
+app_dir=${app_dir%/}
+[ -n "$app_dir" ] || app_dir="/"
+
 for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed grep sysctl; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done

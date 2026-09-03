@@ -700,6 +700,13 @@
                         rel="noopener noreferrer"
                       >installation guide ↗</a>
                     </p>
+                    <p
+                      v-if="conn.auth !== 'not_installed' && conn.path_command"
+                      class="hint hint--compact"
+                    >
+                      Your terminal cannot find this CLI yet — put it on your PATH with
+                      <code>{{ conn.path_command }}</code>
+                    </p>
                   </div>
                   <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
                     {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
