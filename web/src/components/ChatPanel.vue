@@ -1053,13 +1053,16 @@
          running" pill above. The pill itself sits inside a <button> (can't
          nest a link there), so the actual links live in this sibling block,
          same disclosure pattern as queued-messages/questions below. -->
-    <div v-if="dockExpanded && dockAgentsPillShown && dockRunningAgents.length" class="dock-agent-links">
-      <router-link
-        v-for="sub in dockRunningAgents"
-        :key="sub.agent_id"
-        class="dock-agent-link"
-        :to="subagentPath(chat.chat_id, sub.agent_id)"
-      >{{ sub.description || shortAgentId(sub.agent_id) }}</router-link>
+    <div v-if="dockExpanded && dockAgentsPillShown" class="dock-agent-links">
+      <template v-if="dockRunningAgents.length">
+        <router-link
+          v-for="sub in dockRunningAgents"
+          :key="sub.agent_id"
+          class="dock-agent-link"
+          :to="subagentPath(chat.chat_id, sub.agent_id)"
+        >{{ sub.description || shortAgentId(sub.agent_id) }}</router-link>
+      </template>
+      <span v-else class="dock-agent-link dock-agent-link--pending">details loading…</span>
     </div>
 
     <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
@@ -6398,6 +6401,10 @@ details[open] > .activity-summary::before {
 }
 
 .dock-agent-link:hover { text-decoration: underline; }
+.dock-agent-link--pending {
+  color: var(--fg3);
+  background: none;
+}
 
 .bg-agents-dot {
   width: 8px;

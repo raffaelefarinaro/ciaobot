@@ -242,6 +242,8 @@ def resolve_cwd(workspace_root: Path, cwd: str) -> Path:
     root = Path(workspace_root).resolve()
     raw = (cwd or "").strip()
     if not raw:
+        if not root.is_dir():
+            raise BackgroundRunError("cwd_not_found", "workspace root is not a directory.")
         return root
     if "\x00" in raw:
         raise BackgroundRunError("invalid_cwd", "cwd may not contain NUL.")
@@ -628,7 +630,9 @@ class BackgroundRunner:
             return self._workspace_root
         try:
             root = Path(self._agent_root(workspace))
-        except ValueError as exc:
+        except BackgroundRunError:
+            raise
+        except Exception as exc:
             raise BackgroundRunError(
                 "workspace_unavailable",
                 f"Workspace '{workspace}' names no agent root.",
