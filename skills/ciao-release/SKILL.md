@@ -1,6 +1,6 @@
 ---
 name: ciao-release
-description: How to cut a Ciaobot release — the patch/minor/major convention, the pre-release checklist (dependencies, docs, capabilities skill, /code-review --fix gate via /pr), the prepare-release command, what merging into main triggers, and the known traps. Trigger on "release", "cut a release", "publish", "bump the version", "ship a new version", "prepare-release", or any question about how Ciaobot versioning and publishing work.
+description: How to cut a Ciaobot release — the patch/minor/major convention, the pre-release checklist (dependencies, docs, capabilities skill, /code-review --fix gate via /pr, and a local install of the candidate via /ciao-dev-install), the prepare-release command, what merging into main triggers, and the known traps. Trigger on "release", "cut a release", "publish", "bump the version", "ship a new version", "prepare-release", or any question about how Ciaobot versioning and publishing work.
 ---
 
 # Ciaobot Release
@@ -10,6 +10,8 @@ description: How to cut a Ciaobot release — the patch/minor/major convention, 
 Authoritative procedure for cutting a Ciaobot release. `develop` is the source line; `main` is publish-only — **merging a release PR into `main` is the trigger** for everything downstream (tag → GitHub release → bundled app assets). You never build artifacts or tag by hand.
 
 Canonical companions: `docs/DEVELOPMENT.md` (§ "Branching and releases") and `ciao/release.py`. When this skill and the code disagree, the code wins — say so and update this skill.
+
+Sibling skills this one calls into, rather than restating: **`/pr`** for the review gate's everyday form, **`/code-review`** and **`/simplify`** for the release-range gate, and **`/ciao-dev-install`** to build and run the candidate on this machine before cutting (checklist step 7). Read each at the point it is needed; the summaries here are prompts to do that, not replacements.
 
 ## Versioning convention (SemVer-by-impact)
 
@@ -51,8 +53,24 @@ Do these on `develop` (or a short prep branch merged into develop) **before** ru
    - **What to touch.** `README.md` (features/Providers), `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here), `docs/MCP.md` (the tool catalog must match `@tool(name=…)` in `ciao/mcp_server.py`), and — when the release touches the UI — `DESIGN.md` / `docs/DESIGN_SYSTEM.md` and the home-lanes plan's status. Commit doc fixes on `develop` before the cut; do not let them ride in the `release: prepare` commit.
 5. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
 6. **The desktop gate — run it if anything under `desktop/` changed.** `pytest tests/` and the `npm run build`s do not compile Rust, build the Swift voice sidecar, or assemble `Ciaobot.app`, so a desktop change can be green locally and still fail CI's `build-desktop` job — after the tag exists. `./scripts/check-desktop.sh` runs the same commands CI does (sidecar build, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then an aarch64 `tauri build`) and asserts the sidecar ends up bundled, signed, and runnable inside the built app. `prepare-release` runs it as part of its checks, but run it yourself first: finding a clippy failure before the release branch exists is much cheaper. Needs Rust 1.90.0 and `swiftc`; `--fast` skips the bundle build.
-7. **This skill.** If the release flow, flags, or traps changed, update `skills/ciao-release/SKILL.md` too.
-8. **CHANGELOG sanity.** The tool generates the entry from commits since the last tag. If commits landed on the release branch after `release: prepare`, append them to the entry before merging.
+7. **Install the release candidate on this machine and run it — `/ciao-dev-install`.** Nothing above this line ever *starts* the thing you are about to ship. `pytest`, the `npm` suites and `check-desktop.sh` all prove the parts compile and their tests pass; none of them boots an engine against a real workspace with real chats, schedules, MCP servers and credentials in it. The `ciao-dev-install` skill builds the current checkout into a self-contained `Ciaobot.app` — PWA, embedded Python runtime, Tauri shell — swaps it in over the live install preserving the workspace and password, then watches the engine logs. Do it **after** the final source change and **before** `prepare-release`, so what you smoke-test is what gets cut.
+
+   Read that skill and follow it; do not improvise the swap. Three of its rules matter enough to repeat:
+   - **Check `desktop-service status --json` for `active_chat_ids` first, and again right before the swap.** The swap restarts the engine underneath whatever is running. Non-empty means ask the user; never pass `--force` silently.
+   - **Never `rm -rf` the installed bundle before the new one is in place** — rename it aside, and `ditto --noextattr` (plain `ditto` fails on `com.apple.provenance` and leaves an unlaunchable half-copy).
+   - **A running process is not a working app.** Check the engine log for *this* boot only, count `Uvicorn running on` to rule out a crash loop, and confirm the PWA answers. An auth-required install returns `unauthorized` from `/api/startup` — that is a pass, not a failure.
+
+   Then verify the bundle actually contains the code you think it does, because a runtime built before the PWA build (or a skipped runtime step) silently ships older code:
+
+   ```bash
+   R=~/Applications/Ciaobot.app/Contents/Resources/ciao-runtime
+   PYTHONPATH="$R/site-packages/arm64" "$R/python/arm64/bin/python3.12" -c "
+   import ciao; print(ciao.__version__)"   # plus a symbol from the change you are shipping
+   ```
+
+   This step is also what closes out any issue the release claims to fix: v0.15.0 shipped a fix for a transient startup error, and the dev install is where "it did not recur" was actually established, by grepping the log from this boot's `Uvicorn running on` line onward rather than trusting an older occurrence higher up the file.
+8. **This skill.** If the release flow, flags, or traps changed, update `skills/ciao-release/SKILL.md` too.
+9. **CHANGELOG sanity.** The tool generates the entry from commits since the last tag. If commits landed on the release branch after `release: prepare`, append them to the entry before merging.
 
 Once the release PR is open, give its diff one more fresh read before merging — the `release: prepare` commit adds version/CHANGELOG/dependency changes that weren't in your pre-cut review. Prefer `/code-review --comment` on the open PR so findings land as inline comments; still act on anything that should block the merge.
 
@@ -71,7 +89,7 @@ The release tool runs `pytest`, `npm run test`/`npm run build` (in `web/`), and 
 
 - Use the repo `.venv` (Python 3.12+, `ciaobot` editable-installed) or a dedicated `python3.13 -m venv .venv-rel && .venv-rel/bin/pip install -e ".[test]"`.
 - `cd web && npm ci` at least once so `vitest` exists.
-- **A Rust toolchain, or plan to use `--skip-frontend`.** `_run_checks` puts `cd desktop && npm run test` (which is `cargo test`) and `cd desktop && npm run build` in the *same* group as the web checks, so there is no way to run the web checks locally without also needing `cargo`. Without Rust installed the run dies with `ReleaseError: command failed (127): npm run test` — a 127 from the desktop step, not a broken web suite. **`--skip-frontend` is not covered by the PR's CI on the desktop half.** `ci.yml` defines exactly one job, `test`; `build-desktop` lives in `publish.yml` behind `if: github.event_name == 'release'`, so nothing compiles Rust or Swift until *after* the tag exists, and a break there costs a version bump. Before merging with `--skip-frontend`, run `npm run test`, `npm run build`, and `npm run lint` in `web/` by hand **and** `./scripts/check-desktop.sh` yourself — that script is the only pre-merge desktop gate there is. (v0.7.2 was cut believing CI's `build-desktop` gated the PR; it does not, and the release's 500-line Swift sidecar had never been compiled anywhere. It passed, but that was luck, not a gate.)
+- **A Rust toolchain complete enough for doctests** (`cargo`, `rustc` *and* `rustdoc` — see the PATH trap), or plan to use `--skip-frontend`. `_run_checks` puts `cd desktop && npm run test` (which is `cargo test`) and `cd desktop && npm run build` in the *same* group as the web checks, so there is no way to run the web checks locally without also needing `cargo`. Without Rust installed the run dies with `ReleaseError: command failed (127): npm run test` — a 127 from the desktop step, not a broken web suite. **`--skip-frontend` is not covered by the PR's CI on the desktop half.** `ci.yml` defines exactly one job, `test`; `build-desktop` lives in `publish.yml` behind `if: github.event_name == 'release'`, so nothing compiles Rust or Swift until *after* the tag exists, and a break there costs a version bump. Before merging with `--skip-frontend`, run `npm run test`, `npm run build`, and `npm run lint` in `web/` by hand **and** `./scripts/check-desktop.sh` yourself — that script is the only pre-merge desktop gate there is. (v0.7.2 was cut believing CI's `build-desktop` gated the PR; it does not, and the release's 500-line Swift sidecar had never been compiled anywhere. It passed, but that was luck, not a gate.)
 - `gh` authenticated (for `--create-pr`).
 - Start from a **clean** tree on `develop` (see the dirty-tree trap below).
 
@@ -142,11 +160,21 @@ There is deliberately **no** independent app version: `desktop/package.json` and
   ```bash
   git rev-list --count origin/develop..HEAD   # 0, or pass an explicit SHA
   ```
-- **Double-bump on failed check.** The tool bumps files *before* running checks. If a check fails, `git checkout -- CHANGELOG.md ciao/__init__.py pyproject.toml web/package.json web/package-lock.json` before re-running, or it double-bumps. Two things a failed run leaves behind that are easy to miss: a **second `## vX.Y.Z` section** stacked on the changelog entry that was already there (`grep -c '^## vX\.Y\.Z' CHANGELOG.md` must be 1), and a **`pyproject.toml` auto-dependency bump with no matching `uv.lock`** — the lock is synced later in the run, so an early failure leaves the two disagreeing and every `uv --frozen` step, including `build-bundled-runtime.sh`, then fails. Revert *before* switching branches: `git checkout <branch>` carries uncommitted changes with you onto the branch you were trying to keep clean.
+- **Double-bump on failed check.** The tool bumps files *before* running checks. If a check fails, `git checkout -- CHANGELOG.md ciao/__init__.py pyproject.toml web/package.json web/package-lock.json` before re-running, or it double-bumps. Two things a failed run leaves behind that are easy to miss: a **second `## vX.Y.Z` section** stacked on the changelog entry that was already there (`grep -c '^## vX\.Y\.Z' CHANGELOG.md` must be 1), and a **`pyproject.toml` auto-dependency bump with no matching `uv.lock`** — every `uv --frozen` step, including `build-bundled-runtime.sh`, fails on that pair. Revert both files together.
+
+  A **successful** run used to leave the same mismatch, which this trap previously mis-described as a failed-run artifact only. `_apply_auto_dependency_updates` returned no paths, so the commit step never staged `uv.lock`; `pyproject.toml`, `web/package.json` and `web/package-lock.json` were staged anyway because they are independently version-bearing, so only the Python lock fell through — and the tagged commit carried the new pin beside the old lock. Fixed (issue #420): the dependency step now returns `auto_update_paths()` into `touched`, and `_ensure_nothing_left_behind` fails the run if the release commit leaves any modified **tracked** file behind. Untracked files are deliberately ignored there — the generated PWA bundle is gitignored and a shared checkout may hold another session's work. If that guard ever fires, stage what it names into the release commit rather than pushing past it. Revert *before* switching branches: `git checkout <branch>` carries uncommitted changes with you onto the branch you were trying to keep clean.
 - **`PYTHONPATH` / stray egg-info.** Never export `PYTHONPATH=.` before running the release/smoke tools — a leftover `ciao.egg-info/` or `ciaobot.egg-info/` at repo root leaks into the "isolated" smoke venv and the top-level wheel gets skipped, failing the probe with `ModuleNotFoundError: No module named 'ciao'` (tell: a bogus pip conflict naming an ancient pre-rename version). Use `env -u PYTHONPATH …`; `rm -rf ciao.egg-info` (gitignored, regenerates) if you see it.
 - **A stale `build/` resurrects deleted files into the runtime.** Packaging tools do not always prune old build trees, so a removed module or old frontend asset can be copied into a later artifact. Clean generated build directories before release builds and inspect the staged app/runtime contents.
 - **Post-merge watch timing.** Don't grab the latest `publish` run right after merging — it only spawns after `Release on main` finishes creating the tag, so you'd watch the *previous* release's run. Wait for a `Release on main` run on the merge commit, then take the `publish` run newer than it.
-- **Never pipe `gh run watch --exit-status` into `tail`/`head`.** The pipeline's exit code is the *last* command's, so `tail` returns 0 and swallows the failure signal `--exit-status` exists to provide. During v0.6.4 that turned a failed `publish` run into a reported-green one. Run it unpiped, or re-check with `gh run view <id> --json conclusion` afterwards.
+- **Never pipe a release-critical command into `tail`/`head` — including the release tool itself.** The pipeline's exit code is the *last* command's, so `tail` returns 0 and swallows the failure. During v0.6.4 that turned a failed `publish` run into a reported-green one; during v0.15.0 the same shape hid a `ReleaseError` from `ciao.release` behind a long dependency report, so the run looked like it had merely printed less than expected. Redirect to a file and grep it instead — that also survives the output being longer than any `tail -N` you would have guessed:
+
+  ```bash
+  env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" … > /tmp/release.log 2>&1
+  echo "EXIT=$?"
+  grep -nE "ReleaseError|command failed|/pull/" /tmp/release.log
+  ```
+
+  For workflow runs, run `gh run watch --exit-status` unpiped, or re-check with `gh run view <id> --json conclusion` afterwards.
 - **`pgrep` proves the process exists, not that the app runs.** The release smoke test must check the startup API and bundled runtime, not just process presence. When it fails, inspect the app's tray log, LaunchAgent state, and workspace runtime logs before theorising.
 - **The installer must fail closed.** The native verifier checks both the verifier binary hash and the signed app archive before extraction. Never turn a verification error into a warning or add an unsigned fallback.
 - **Ad-hoc signatures reset TCC grants on every update.** An ad-hoc bundle has no Team ID, so macOS pins Microphone / Full Disk Access / Accessibility records to its cdhash, which changes every build. Users re-granting permissions after an update is expected behaviour on the current signing setup, not a regression — only a Developer ID would fix it (`tauri.conf.json` `signingIdentity`, currently `"-"`).
@@ -160,7 +188,20 @@ There is deliberately **no** independent app version: `desktop/package.json` and
   env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" …
   ```
 
-  Verify with `node --version && cargo --version` before starting, and clean up per the double-bump trap below after any failed attempt.
+  Verify with `node --version && cargo --version && rustdoc --version` before starting, and clean up per the double-bump trap below after any failed attempt.
+
+  **`cargo --version` is not enough — check `rustdoc` too.** `cargo test` ends with a doctest pass, which shells out to `rustdoc` as a separate binary. A `~/.cargo/bin` holding hand-made symlinks for only `cargo` and `rustc` (pointing straight into a toolchain instead of being rustup shims) satisfies every check above and still dies here, *after* all the Rust unit tests pass:
+
+  ```
+  running 52 tests ... test result: ok. 52 passed; 0 failed
+     Doc-tests ciaobot_desktop_lib
+  error: doctest failed, to rerun pass `--doc`
+    could not execute process `rustdoc --edition=2024 …` (never executed)
+    No such file or directory (os error 2)
+  ReleaseError: command failed (101): npm run test
+  ```
+
+  Exit **101** is a Rust failure, not the **127** of a missing `cargo` — and the "52 passed" line above it makes it read like a flake. Prepending `/opt/homebrew/opt/rustup/bin` fixes it because those shims are complete (`rustdoc`, `rustfmt`, `rustup` included) and honour `rustup default`. Cost of missing this: v0.15.0 burned two full aborted cut attempts on it.
 - **`mypy ciao` is in the check suite now — but it cannot see a deleted module.** `_run_checks` runs mypy *first and blocking* (`ciao/release.py:457-466`), deliberately mirroring `ci.yml`'s bare `mypy ciao` step — contrast the adjacent `pip-audit --desc || true`, which is why the suite does not gate on that one. Earlier versions of this skill said to run mypy by hand because `_run_checks` omitted it; that is no longer true, re-verified 2026-08-24. What mypy still will **not** catch: with `ignore_missing_imports`, a leftover `from ciao.providers.<deleted> import …` stays green under both mypy *and* pytest. After removing any `ciao/` module, sweep by importing every module in the package:
 
   ```bash
@@ -182,6 +223,19 @@ There is deliberately **no** independent app version: `desktop/package.json` and
 - **Verify release-critical git state with `rtk proxy git …`, not bare `git`.** The RTK hook rewrites `git` invocations and filters their output, and the filtering is not always faithful. During v0.12.0 `git status --short` reported a **clean tree while seven files were modified**, and `git ls-files` omitted a file that `git ls-tree HEAD` showed as a committed blob. Both would have been silent disasters at release time: `--apply` traps on a dirty tree, so a false "clean" reading means either a `ReleaseError` you cannot explain or, with `--allow-dirty`, someone else's half-finished work baked into the shipped wheel. `rtk proxy <cmd>` runs the raw command unfiltered. Use it for `status`, `ls-files`, `ls-tree`, and anything else you are about to make a cut/commit decision on. A tell that you are reading filtered output: the same fact answered differently by two git commands, or a loop/pipeline whose per-item results disagree with the same command run alone.
 - **Never `git add -A`.** Another session may be editing the same checkout. Stage explicit file lists, and diff-check what you staged. If a conflicted file's mtime is moving, stop and coordinate rather than resolving it underneath someone.
 - **An explicit file list is still not enough — `git add <file>` stages the *whole* file.** In a shared checkout that sweeps in whoever else's half-finished work is sitting in it, and the result is worse than muddied authorship: during v0.6.0 it produced a commit that failed its own tests, because the backend half of someone's feature went in while the test update for it was still uncommitted. CI went red on a commit whose message had nothing to do with the failure, and `git bisect` no longer works across it. Before committing, `git diff --cached` and check every hunk is yours. When a file genuinely holds both, isolate your hunks: copy the file aside, `git checkout HEAD -- <file>`, re-apply only your change, stage, then restore the copy unstaged.
+- **A failed run leaves the release branch behind, and the retry cannot recreate it.** `_checkout_release_branch` uses `git switch -c release/vX.Y.Z origin/develop`, which refuses when the branch already exists — so the second attempt dies with `ReleaseError: command failed (128): git switch -c release/vX.Y.Z origin/develop`, an error about git that says nothing about the real problem. Before re-running, revert the bumps (see the double-bump trap), then delete the leftover branch — after checking it holds nothing:
+
+  ```bash
+  rtk proxy git log --oneline develop..release/vX.Y.Z   # must be empty
+  rtk proxy git ls-remote --heads origin release/vX.Y.Z # must be empty (never pushed)
+  rtk proxy git switch develop && rtk proxy git branch -D release/vX.Y.Z
+  ```
+
+  Order matters: revert *first*. The bumps are uncommitted, and `git switch` carries them onto `develop`.
+- **Pass the review effort explicitly, and check the level it reports back.** `/code-review` reuses the last level you typed when it cannot parse one, so an argument in the wrong position is silently downgraded — on v0.15.0 a request for `ultra` over a 14k-line range ran at **medium** and said so only in its own summary line. Read that line. A release wants `high` or above; combined with the findings cap, a medium pass over a large diff is close to a spot check.
+- **Verify a review finding against the code before acting on it, and write the test it did not.** Two failure modes seen on v0.15.0, both from an otherwise good pass:
+  - **Findings can be wrong.** One reported `pwa_host`'s default moving `127.0.0.1` → `0.0.0.0` as an exposure change riding in the release. It was the opposite: `from_env`'s fallback was *already* `0.0.0.0`, so every real install already bound all interfaces, and the commit only aligned the dataclass default used by directly-constructed configs. Shipping a "fix" for that would have been a real regression. Another described a whitespace-only `CIAO_WORKSPACE` as resolving to the cwd; it actually resolved to `<cwd>/"   "`, a directory *named* three spaces — same bug, different fix.
+  - **`--fix` applies edits and adds no tests.** Eleven fixes landed across nine files with zero test changes. Write regressions for the ones that are testable, and prove each is non-vacuous by reverting the fix and watching it fail — two of the tests written that way turned out to prove nothing (one never reached the changed line at all; another's fixture was not deep enough to trigger the bug) and were rewritten or deleted.
 - **Absolute repo_root.** Pass an absolute path — shell cwd persistence between tool calls is unreliable.
 
 ## After it ships

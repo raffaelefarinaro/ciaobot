@@ -253,10 +253,38 @@ def check_available_updates(workspace_root: Path) -> list[AvailableUpdate]:
     return updates
 
 
+# Every file :func:`apply_auto_updates` may rewrite, relative to the repo root.
+#
+# Exported because a caller that COMMITS the result has to stage all of them.
+# Three are independently version-bearing, so a release already stages them for
+# its own reasons and the dependency edit rides along inside the same file.
+# ``uv.lock`` carries no version string, so nothing staged it, and a release
+# committed the new pin in ``pyproject.toml`` with the old lock beside it —
+# which fails every ``uv --frozen`` step, including the bundled-runtime build
+# that only runs after the tag exists.
+AUTO_UPDATE_RELATIVE_PATHS: tuple[str, ...] = (
+    "pyproject.toml",
+    "web/package.json",
+    "web/package-lock.json",
+    "uv.lock",
+)
+
+
+def auto_update_paths(workspace_root: Path) -> list[Path]:
+    """The existing files :func:`apply_auto_updates` may have rewritten."""
+    root = Path(workspace_root)
+    return [root / rel for rel in AUTO_UPDATE_RELATIVE_PATHS if (root / rel).exists()]
+
+
 def apply_auto_updates(
     workspace_root: Path, updates: list[AvailableUpdate], *, reinstall: bool = True
 ) -> list[str]:
-    """Apply only the release workflow's explicitly auto-approved updates."""
+    """Apply only the release workflow's explicitly auto-approved updates.
+
+    Returns human-readable descriptions of what changed. The FILES it may have
+    written are :func:`auto_update_paths` — a caller that commits must stage
+    those, not infer them from this list.
+    """
     pyproject_path = workspace_root / "pyproject.toml"
     package_json_path = workspace_root / "web" / "package.json"
     package_lock_path = workspace_root / "web" / "package-lock.json"

@@ -282,3 +282,72 @@ def test_built_pwa_check_accepts_a_coherent_build(tmp_path: Path) -> None:
     )
 
     release_mod._check_built_pwa(tmp_path)
+
+
+def test_dependency_step_reports_the_files_it_wrote(tmp_path: Path, monkeypatch) -> None:
+    """The bump's PATHS reach the caller, not just its description.
+
+    Only the description used to come back, so the commit step never learned
+    that `uv.lock` had been rewritten and staged the new pin without it.
+    """
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("# lock\n", encoding="utf-8")
+
+    import ciao.dependency_updates as depmod
+
+    monkeypatch.setattr(
+        depmod, "apply_auto_updates", lambda *_a, **_k: ["pkg (Python: 1 -> 2)"]
+    )
+    update = type("U", (), {"auto": True})()
+
+    written = release_mod._apply_auto_dependency_updates(
+        tmp_path, [update], reinstall=False
+    )
+
+    assert (tmp_path / "uv.lock") in written
+
+
+def test_dependency_step_reports_nothing_when_no_bump_applied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No adopted bump means no extra paths to stage."""
+    import ciao.dependency_updates as depmod
+
+    monkeypatch.setattr(depmod, "apply_auto_updates", lambda *_a, **_k: [])
+    update = type("U", (), {"auto": True})()
+
+    assert release_mod._apply_auto_dependency_updates(
+        tmp_path, [update], reinstall=False
+    ) == []
+    # And a run with no auto candidates at all short-circuits the same way.
+    assert release_mod._apply_auto_dependency_updates(
+        tmp_path, [type("U", (), {"auto": False})()], reinstall=False
+    ) == []
+
+
+def test_release_commit_refuses_to_leave_a_tracked_file_behind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unstaged tracked file after the commit fails the release loudly.
+
+    This is the backstop for the class of bug above: the tagged commit must not
+    carry a dependency pin whose lock stayed in the working tree, because the
+    step that breaks on it runs only after the tag exists.
+    """
+    monkeypatch.setattr(
+        release_mod, "_git", lambda root, args, check=False: " M uv.lock"
+    )
+
+    with pytest.raises(release_mod.ReleaseError, match="left modified tracked files"):
+        release_mod._ensure_nothing_left_behind(tmp_path)
+
+
+def test_release_commit_ignores_untracked_files(tmp_path: Path, monkeypatch) -> None:
+    """Untracked output is not the release's problem.
+
+    The generated PWA bundle is gitignored, and a shared checkout may hold
+    another session's untracked work; only a modified TRACKED file means the
+    release wrote something it did not commit.
+    """
+    monkeypatch.setattr(release_mod, "_git", lambda root, args, check=False: "")
+    release_mod._ensure_nothing_left_behind(tmp_path)
