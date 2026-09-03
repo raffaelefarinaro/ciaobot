@@ -524,6 +524,7 @@ const copyStatus = ref('')
 // Which command the status belongs to: the install step can show two copy
 // buttons, and a shared status would report "Copied!" on both.
 const copiedCommand = ref('')
+let copyTimer: ReturnType<typeof setTimeout> | null = null
 const advancedOpen = ref(false)
 
 // Folder inspection: when the chosen workspace folder already contains
@@ -681,7 +682,7 @@ const providerInstruction = computed(() => {
       : 'Not installed yet. Run this in your Terminal to install it:'
   }
   if (provider.value === 'opencode' && setupStatus.value?.providers?.opencode?.auth === 'missing') {
-    return 'Install opencode if needed, then run `ciao auth opencode` and refresh this check:'
+    return 'Install opencode if needed, then run this in your Terminal and refresh this check:'
   }
   return 'To authorize, run this command in your Terminal:'
 })
@@ -734,9 +735,13 @@ async function copyCommand(text: string) {
   const copied = await writeClipboard(text)
   copiedCommand.value = text
   copyStatus.value = copied ? 'Copied!' : 'Failed'
-  setTimeout(() => {
+  // One timer, re-armed: an earlier button's pending revert would otherwise
+  // clear the status of the button just pressed.
+  if (copyTimer !== null) clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
     copyStatus.value = ''
     copiedCommand.value = ''
+    copyTimer = null
   }, 2000)
 }
 
@@ -837,6 +842,10 @@ onUnmounted(() => {
   if (pollInterval) {
     clearInterval(pollInterval)
     pollInterval = null
+  }
+  if (copyTimer !== null) {
+    clearTimeout(copyTimer)
+    copyTimer = null
   }
 })
 </script>

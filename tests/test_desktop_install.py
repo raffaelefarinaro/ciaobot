@@ -122,3 +122,45 @@ def test_uninstall_leaves_a_ciao_it_did_not_install_alone(tmp_path: Path) -> Non
         app_dir=tmp_path, shim_path=other_shim
     )
     assert other_shim.exists()
+
+
+def test_uninstall_keeps_the_shim_when_the_bundle_could_not_be_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed rmtree leaves the app installed, so removing the shim first
+    would take away the `ciao` command while what it points at still runs."""
+    bundle = _native_bundle(tmp_path)
+    shim = tmp_path / "bin" / "ciao"
+    shim.parent.mkdir()
+    shim.write_text(
+        f'#!/bin/sh\n{desktop_install.SHIM_MARKER}\nexec "{bundle}/Contents/Resources/ciao-runtime/bin/ciao" "$@"\n',
+        encoding="utf-8",
+    )
+
+    def boom(path):
+        raise OSError("Operation not permitted")
+
+    monkeypatch.setattr(desktop_install.shutil, "rmtree", boom)
+
+    with pytest.raises(desktop_install.InstallError, match="could not remove"):
+        desktop_install.uninstall_desktop_app(app_dir=tmp_path, shim_path=shim)
+
+    assert shim.exists()
+
+
+def test_uninstall_leaves_a_shim_for_a_prefix_named_bundle_alone(tmp_path: Path) -> None:
+    """`str(destination) in content` would also match a longer path that
+    merely starts with this bundle's path."""
+    _native_bundle(tmp_path)
+    other = tmp_path / f"{desktop_install.APP_BUNDLE_NAME}.previous"
+    shim = tmp_path / "bin" / "ciao"
+    shim.parent.mkdir()
+    shim.write_text(
+        f'#!/bin/sh\n{desktop_install.SHIM_MARKER}\nexec "{other}/Contents/Resources/ciao-runtime/bin/ciao" "$@"\n',
+        encoding="utf-8",
+    )
+
+    result = desktop_install.uninstall_desktop_app(app_dir=tmp_path, shim_path=shim)
+
+    assert "removed_shim" not in result
+    assert shim.exists()

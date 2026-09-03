@@ -525,8 +525,21 @@ if [ "$shim_installed" -eq 1 ]; then
             fi
             ;;
         *)
+            # macOS terminals start login shells: bash reads ~/.bash_profile,
+            # not ~/.bashrc, so naming the wrong file fixes only this shell.
             echo "Add ~/.local/bin to your PATH to use the 'ciao' command:"
-            echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+            case "${SHELL:-/bin/zsh}" in
+                */fish)
+                    echo "  fish_add_path \$HOME/.local/bin"
+                    ;;
+                *)
+                    case "${SHELL:-/bin/zsh}" in
+                        */bash) rc=~/.bash_profile ;;
+                        *) rc=~/.zshrc ;;
+                    esac
+                    echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $rc && source $rc"
+                    ;;
+            esac
             ;;
     esac
 fi

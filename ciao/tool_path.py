@@ -45,6 +45,47 @@ def common_tool_dirs() -> list[str]:
 
 
 @functools.lru_cache(maxsize=1)
+def terminal_path() -> str:
+    """PATH the user's own interactive login shell reports, or "".
+
+    Exactly what a command typed in Terminal would be resolved against — no
+    fallback directories, no inherited process PATH. Telling someone to run a
+    bare ``claude`` is only correct when *this* PATH resolves it, so the
+    augmented :func:`login_shell_path` (which appends ``~/.local/bin`` and
+    Homebrew whether or not the user's shell has them) cannot answer that
+    question. Cached for the process lifetime like the augmented form.
+    """
+    shell = os.environ.get("SHELL", "/bin/zsh")
+    # Without PATH the shell builds its own from /etc/profile (path_helper) and
+    # the user's rc files — which is the question being asked. Inheriting ours
+    # would answer it wrongly: the engine prepends common_tool_dirs() to its
+    # own PATH at startup (ciao/main.py), so ~/.local/bin would come back out
+    # of the probe as if the user's terminal had it.
+    env = {k: v for k, v in os.environ.items() if k != "PATH"}
+    try:
+        # -l login, -i interactive so nvm / rbenv / rc-file PATH edits apply.
+        result = subprocess.run(
+            [shell, "-lic", f'printf "{_START}%s{_END}" "$PATH"'],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            env=env,
+        )
+        out = result.stdout
+        if _START in out and _END in out:
+            return out.split(_START, 1)[1].split(_END, 1)[0]
+    except Exception:
+        pass
+    return ""
+
+
+def resolve_on_terminal_path(cmd: str) -> str | None:
+    """Absolute path to ``cmd`` as the user's terminal would resolve it, or None."""
+    path = terminal_path()
+    return shutil.which(cmd, path=path) if path else None
+
+
+@functools.lru_cache(maxsize=1)
 def login_shell_path() -> str:
     """PATH as seen by the user's interactive login shell.
 
@@ -54,21 +95,7 @@ def login_shell_path() -> str:
     installed into one of them.
     """
     current = os.environ.get("PATH", "")
-    shell = os.environ.get("SHELL", "/bin/zsh")
-    shell_path = ""
-    try:
-        # -l login, -i interactive so nvm / rbenv / rc-file PATH edits apply.
-        result = subprocess.run(
-            [shell, "-lic", f'printf "{_START}%s{_END}" "$PATH"'],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-        )
-        out = result.stdout
-        if _START in out and _END in out:
-            shell_path = out.split(_START, 1)[1].split(_END, 1)[0]
-    except Exception:
-        shell_path = ""
+    shell_path = terminal_path()
 
     ordered: list[str] = []
     seen: set[str] = set()

@@ -641,8 +641,8 @@ def claude_install_command() -> str:
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
-def claude_path_command() -> str:
-    """Shell line that puts Claude's install directory on the login PATH.
+def claude_path_command(directory: str = "") -> str:
+    """Shell line that puts ``directory`` on the login PATH.
 
     The documented installer drops ``claude`` into ``~/.local/bin``, which is
     not on a default macOS PATH, so the very next command in the user's
@@ -652,11 +652,50 @@ def claude_path_command() -> str:
     """
     if sys.platform == "win32":
         return ""
+    home = str(Path.home())
+    target = directory or str(Path.home() / ".local" / "bin")
+    if target == home or target.startswith(home + os.sep):
+        # Written into an rc file, so keep it portable across machines and
+        # readable to whoever opens that file later.
+        target = "$HOME" + target[len(home) :]
     # The engine usually runs under launchd, where SHELL is unset; zsh is the
     # macOS default and the shell the documented installer assumes.
     shell = os.path.basename(os.environ.get("SHELL", "") or "zsh")
-    rc = "~/.bashrc" if shell == "bash" else "~/.zshrc"
-    return f"""echo 'export PATH="$HOME/.local/bin:$PATH"' >> {rc} && source {rc}"""
+    if shell == "fish":
+        return f"fish_add_path {target}"
+    # macOS terminals start login shells, which read ~/.bash_profile — not
+    # ~/.bashrc, which would fix only the shell the user is sitting in.
+    rc = "~/.bash_profile" if shell == "bash" else "~/.zshrc"
+    return f"""echo 'export PATH="{target}:$PATH"' >> {rc} && source {rc}"""
+
+
+def claude_path_hint(cli_path: str) -> str:
+    """PATH line worth offering for ``cli_path``, or "" when none is.
+
+    Nothing to fix when the user's terminal already resolves ``claude``, and
+    nothing to suggest when the only binary is the one inside the app: its
+    directory does not belong on anybody's PATH, and ``claude_auth_command``
+    names that binary in full instead.
+    """
+    from ciao.providers.claude import get_bundled_claude_path
+    from ciao.tool_path import resolve_on_terminal_path
+
+    try:
+        if resolve_on_terminal_path("claude"):
+            return ""
+    except Exception:
+        return ""
+    if not cli_path:
+        # Not installed yet: point at where the documented installer puts it.
+        return claude_path_command()
+    try:
+        bundled = get_bundled_claude_path()
+    except Exception:
+        bundled = None
+    if bundled and cli_path == bundled:
+        return ""
+    directory = os.path.dirname(cli_path)
+    return claude_path_command(directory) if directory else ""
 
 
 def claude_auth_command(cli_path: str = "") -> str:
@@ -669,18 +708,22 @@ def claude_auth_command(cli_path: str = "") -> str:
     answers with a confusing "Unknown command 'auth'". Claude's own login
     command works in every install.
 
-    The bare word is only usable when the user's own shell can resolve it.
-    Ciaobot itself usually runs the ``claude`` bundled with the Agent SDK,
-    which is inside the app and on nobody's PATH, so when the login shell has
-    no ``claude`` of its own the binary is named by absolute path instead.
+    The bare word is only usable when the user's own terminal resolves it --
+    which is why this asks ``resolve_on_terminal_path`` rather than the
+    augmented lookup Ciaobot uses to *run* the CLI: that one adds
+    ``~/.local/bin`` and Homebrew whether or not the user's shell has them, so
+    it would answer "yes" for exactly the newly installed CLI whose directory
+    is still missing from PATH. Ciaobot itself usually runs the ``claude``
+    bundled with the Agent SDK, which is inside the app and on nobody's PATH;
+    that binary is named by absolute path instead.
     """
-    from ciao.tool_path import resolve_tool
+    from ciao.tool_path import resolve_on_terminal_path
 
     try:
-        on_login_path = resolve_tool("claude")
+        in_terminal = resolve_on_terminal_path("claude")
     except Exception:
-        on_login_path = None
-    if on_login_path:
+        in_terminal = None
+    if in_terminal:
         return "claude auth login"
     binary = cli_path or claude_cli_path()
     return f"{shlex.quote(binary)} auth login" if binary else "claude auth login"
@@ -771,7 +814,7 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             app_path=app_path,
-            path_command=claude_path_command(),
+            path_command=claude_path_hint(""),
         )
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
@@ -834,6 +877,7 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
+            path_command=claude_path_hint(binary),
         )
     app_path = claude_app_path()
     auth_command = claude_auth_command(binary)
@@ -853,6 +897,9 @@ def _claude_status(
         skills=claude_skills,
         mcps=claude_mcps,
         cli_path=binary,
+        # An installed CLI the terminal cannot find still needs the PATH line:
+        # the user is about to be handed a command to type into that terminal.
+        path_command=claude_path_hint(binary),
     )
 
 

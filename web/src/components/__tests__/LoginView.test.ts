@@ -413,6 +413,46 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.findAll('.command-row button')[1].text()).toBe('Copied!')
   })
 
+  it('does not let an earlier copy timer clear the button just pressed', async () => {
+    vi.useFakeTimers()
+    try {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      })
+      mockApiGet.mockResolvedValue({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {
+          claude: {
+            name: 'claude',
+            ok: false,
+            auth: 'not_installed',
+            command: 'curl -fsSL https://claude.ai/install.sh | bash',
+            detail: 'Claude Code is not installed on this machine.',
+            path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
+          },
+        },
+      })
+
+      const wrapper = await mountLoginView()
+      await wrapper.findAll('.command-row button')[0].trigger('click')
+      await flushPromises()
+      vi.advanceTimersByTime(1500)
+      await wrapper.findAll('.command-row button')[1].trigger('click')
+      await flushPromises()
+      vi.advanceTimersByTime(600)
+      await nextTick()
+
+      // The first press's revert must not fire while the second is showing.
+      expect(wrapper.findAll('.command-row button')[1].text()).toBe('Copied!')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('shows no PATH step when the provider CLI is already installed', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,

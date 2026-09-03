@@ -406,6 +406,7 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     """
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
     monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
     claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
@@ -448,7 +449,9 @@ def test_setup_status_offers_claudes_own_login_not_ciao_auth(tmp_path, monkeypat
     Ciaobot.app), so a wizard that told users to run `ciao auth claude` sent
     them to a command their shell could not resolve -- or, when some unrelated
     `ciao` was installed, to its "Unknown command 'auth'" error."""
-    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        "ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/local/bin/claude"
+    )
     config = _config(tmp_path)
 
     claude = setup_status(config, env={})["providers"]["claude"]
@@ -462,12 +465,70 @@ def test_setup_status_names_a_bundled_claude_by_path(tmp_path, monkeypatch) -> N
     `claude auth login` would fail for them too."""
     bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
-    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: None)
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["command"] == f"{bundled} auth login"
+
+
+def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
+    tmp_path, monkeypatch
+) -> None:
+    """The install step is not the only moment the PATH line is needed: once
+    `claude` exists in ~/.local/bin but the user's PATH still omits it, they
+    are about to be handed a command to type into that same terminal."""
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_cli_path",
+        lambda: str(Path.home() / ".local" / "bin" / "claude"),
+    )
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
+
+
+def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
+    """The CLI inside the app is not something to add to a user's PATH -- the
+    login command names it in full instead."""
+    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert "path_command" not in claude
+
+
+def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/local/bin/claude"
+    )
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert "path_command" not in claude
+
+
+def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> None:
+    """macOS terminals start login shells: bash reads ~/.bash_profile, and
+    ~/.bashrc would fix only the shell the user is sitting in."""
+    from ciao.setup_status import claude_path_command
+
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    assert claude_path_command().endswith(">> ~/.bash_profile && source ~/.bash_profile")
+    monkeypatch.setenv("SHELL", "/opt/homebrew/bin/fish")
+    assert claude_path_command() == "fish_add_path $HOME/.local/bin"
+    monkeypatch.delenv("SHELL")
+    assert "~/.zshrc" in claude_path_command()
 
 
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:

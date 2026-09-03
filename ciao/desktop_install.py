@@ -110,7 +110,10 @@ def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) 
         content = shim.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    if SHIM_MARKER not in content or str(destination) not in content:
+    engine = destination / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    # The full quoted exec target, not a substring of the path: a bundle
+    # directory can be the prefix of a longer one.
+    if SHIM_MARKER not in content or f'"{engine}"' not in content:
         return ""
     try:
         shim.unlink()
@@ -145,11 +148,14 @@ def uninstall_desktop_app(
         uid=uid,
         runner=runner,
     )
-    removed_shim = _remove_installer_shim(destination=destination, shim_path=shim_path)
     try:
         shutil.rmtree(destination)
     except OSError as exc:
         raise InstallError(f"could not remove {destination}: {exc}") from exc
+    # Only after the bundle is actually gone: a failed rmtree leaves the app
+    # installed, and deleting the shim first would take away the `ciao`
+    # command while the install it points at is still there.
+    removed_shim = _remove_installer_shim(destination=destination, shim_path=shim_path)
     result: dict[str, Any] = {
         "removed": True,
         "path": str(destination),
