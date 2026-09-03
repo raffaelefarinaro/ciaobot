@@ -163,7 +163,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
-| POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter, ≤15KB) |
+| POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter). A SKILL.md over the 15KB context budget imports with a note on `warnings`/`message` |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
 | WS | `/ws/events` | Global event socket |
 

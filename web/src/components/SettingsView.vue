@@ -1391,7 +1391,7 @@
             <div class="settings-field-grid">
               <div class="settings-field settings-field--wide">
                 <span class="ws-label">Upload zip</span>
-                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Max 15 KB SKILL.md, frontmatter <code>name</code> must match folder.</p>
+                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Frontmatter <code>name</code> must match folder. Over 15 KB imports with a warning — that file loads into context on every trigger.</p>
                 <input
                   ref="skillZipInput"
                   type="file"
@@ -1412,7 +1412,7 @@
               </button>
             </div>
             <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--fg3);">
-              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code>, ≤15 KB</li>
+              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code> (15 KB is a budget, not a gate)</li>
               <li>Discoverable immediately: <code>.claude/skills</code> + <code>.agents/skills</code> symlink</li>
               <li>Sync between operators = workspace git (no npx)</li>
             </ul>
