@@ -5889,6 +5889,43 @@ class ProjectChatManager:
         """Last announced running-background-subagent count per chat (>0 only)."""
         return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
 
+    @property
+    def background_run_counts(self) -> dict[str, int]:
+        """Live ``background_run_start`` count per chat (>0 only).
+
+        Read from the runner's registry, not a cached tally, so this survives
+        a restart: the runs themselves are persisted and re-supervised, and a
+        client reconnecting mid-run gets the real number.
+        """
+        runner = self._background_runner
+        if runner is None:
+            return {}
+        try:
+            return runner.active_counts()
+        except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
+            logger.exception("Background run counts unavailable")
+            return {}
+
+    def announce_background_runs(self, chat_id: str) -> None:
+        """Publish this chat's live background-run count to connected clients.
+
+        Called on both edges (a run starting, a run finishing). A background
+        run is deliberately non-blocking, so the chat's turn ends while the
+        command is still going; this event is the only thing that keeps the
+        chat from looking finished. Distinct from ``chat_subagents_ready``:
+        these runs have no transcript and no agent to open, only a count and
+        a log.
+        """
+        if not chat_id:
+            return
+        chat = self._chats.get(chat_id)
+        self._events.publish({
+            "type": "chat_background_runs",
+            "chat_id": chat_id,
+            "project_id": chat.project_id if chat is not None else "",
+            "running": self.background_run_counts.get(chat_id, 0),
+        })
+
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
         the chat so a scheduled retry re-seeds them instead of dropping them.
@@ -6946,12 +6983,14 @@ class ProjectChatManager:
                 # instead of leaving the chat stuck on "I'll compile once the
                 # agents report back".
                 chat_for_watcher = self._chats.get(chat_id)
+                subagent_watcher_started = False
                 if (
                     chat_for_watcher is not None
                     and chat_for_watcher.session_id
                     and capabilities_for(chat_for_watcher.provider).background_subagents
                 ):
                     self._start_subagent_watcher(chat_id, project_id)
+                    subagent_watcher_started = True
                     # Keep the SDK pipe drained while the client idles: a
                     # finishing background subagent triggers a CLI-initiated
                     # parent turn whose events would otherwise rot in the
@@ -6978,18 +7017,32 @@ class ProjectChatManager:
                         chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
-                    # Schedule the push with a small delay. If the user reads
-                    # the chat on any device in the window (via /api/chats/
-                    # {id}/read), the pending task is cancelled and no push
-                    # fires. New replies to the same chat cancel and restart
-                    # the timer (see _schedule_push).
-                    self._announce_result_ready(
-                        chat_id, project_id, title, snippet
+                    # A turn that ends on "I'll report back once the agents
+                    # finish" is not a result: the watcher started above will
+                    # nudge the synthesis turn and that reply carries the real
+                    # push. Only the announce is held back — the state above
+                    # (recents order, snippet, pending-retry clear) belongs to
+                    # every non-error turn, and withholding it left a retried
+                    # chat pinned at retry_status="pending" forever. Gated on
+                    # the watcher too, so a chat with no background subagents
+                    # at all (another provider, or a reply that merely says
+                    # "waiting on legal") still announces normally.
+                    interim = subagent_watcher_started and (
+                        self._is_interim_subagent_text(last_assistant_text)
                     )
-                    self._spawn_detached(
-                        self._maybe_archive_proposal_helper(chat_id),
-                        f"archive-proposal-helper-{chat_id}",
-                    )
+                    if not interim:
+                        # Schedule the push with a small delay. If the user reads
+                        # the chat on any device in the window (via /api/chats/
+                        # {id}/read), the pending task is cancelled and no push
+                        # fires. New replies to the same chat cancel and restart
+                        # the timer (see _schedule_push).
+                        self._announce_result_ready(
+                            chat_id, project_id, title, snippet
+                        )
+                        self._spawn_detached(
+                            self._maybe_archive_proposal_helper(chat_id),
+                            f"archive-proposal-helper-{chat_id}",
+                        )
 
         asyncio.create_task(_drive())
         return stream

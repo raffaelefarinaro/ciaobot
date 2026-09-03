@@ -489,11 +489,15 @@ class BackgroundRunner:
         store: BackgroundRunStore,
         *,
         workspace_root: Path,
+        agent_root: Callable[[str], Path] | None = None,
+        on_start: Callable[[BackgroundRun], None] | None = None,
         on_finish: Callable[[BackgroundRun, list[str]], None] | None = None,
         record_job_runs: bool = True,
     ) -> None:
         self._store = store
         self._workspace_root = Path(workspace_root)
+        self._agent_root = agent_root
+        self._on_start = on_start
         self._on_finish = on_finish
         self._record_job_runs = record_job_runs
         self._procs: dict[str, asyncio.subprocess.Process] = {}
@@ -570,6 +574,20 @@ class BackgroundRunner:
     def active_count(self, chat_id: str) -> int:
         return sum(1 for run in self.list_for_chat(chat_id) if not run.is_terminal())
 
+    def active_counts(self) -> dict[str, int]:
+        """Live run count per owning chat (>0 only).
+
+        Read straight off the registry rather than a cached tally, so a
+        client connecting mid-run paints the same number a restart replay
+        would.
+        """
+        counts: dict[str, int] = {}
+        for run in self._store.list():
+            if run.is_terminal() or not run.parent_chat_id:
+                continue
+            counts[run.parent_chat_id] = counts.get(run.parent_chat_id, 0) + 1
+        return counts
+
     def log_path(self, run_id: str) -> Path:
         return self._store.log_path(run_id)
 
@@ -577,6 +595,38 @@ class BackgroundRunner:
         return read_tail(self._store.log_path(run_id), lines)
 
     # ── start ─────────────────────────────────────────────────────────
+
+    def root_for(self, workspace: str) -> Path:
+        """Root a run in ``workspace`` is resolved against and confined to.
+
+        This must be the workspace's AGENT ROOT, not the install root the
+        runner was constructed with, and the difference is not cosmetic. A
+        chat runs with its agent root as cwd, so the relative paths a model
+        writes are relative to ``<install>/<workspace>``. Resolving them
+        against the install root missed by exactly one level on every
+        re-rooted install — ``memory-vault/automations/x.py`` became
+        ``<install>/memory-vault/...`` instead of ``<install>/work/
+        memory-vault/...`` and the run died with ENOENT — and, worse, it
+        pointed the containment check at the wrong boundary: a ``work`` run
+        could read and write every other workspace's files, ``personal``
+        included.
+
+        Falls back to the install root when the workspace is unnamed, does
+        not resolve to one folder, or has no directory yet. That is the
+        pre-re-rooting layout, where ``agent_root`` returns the install root
+        for every workspace anyway.
+        """
+        if not workspace or self._agent_root is None:
+            return self._workspace_root
+        try:
+            root = Path(self._agent_root(workspace))
+        except ValueError:
+            # An unusable workspace name names no root (stale reference, or a
+            # renamed workspace). The install root is the safe answer, not a
+            # crash inside a tool call.
+            logger.debug("Background run workspace %r names no agent root", workspace)
+            return self._workspace_root
+        return root if root.is_dir() else self._workspace_root
 
     async def start_run(
         self,
@@ -593,8 +643,11 @@ class BackgroundRunner:
         if not parent_chat_id:
             raise BackgroundRunError("chat_required", "A background run needs an owning chat.")
         argv = validate_cmd(cmd)
-        run_dir = resolve_cwd(self._workspace_root, cwd)
-        executable = resolve_executable(argv[0], run_dir, self._workspace_root)
+        # Both resolutions are anchored at the OWNING WORKSPACE's agent root,
+        # which is the chat's cwd and the boundary the run belongs inside.
+        root = self.root_for(workspace)
+        run_dir = resolve_cwd(root, cwd)
+        executable = resolve_executable(argv[0], run_dir, root)
         timeout = validate_timeout(timeout_s)
         clean_label = sanitize_label(label)
         active = self.active_count(parent_chat_id)
@@ -658,6 +711,15 @@ class BackgroundRunner:
             self._supervise(run_id, proc, log_path, timeout),
             name=f"background-run-{run_id}",
         )
+        # Announce the live run before returning: the tool result goes to the
+        # model, not to the PWA, so without this the chat goes idle with
+        # nothing anywhere saying work is still in flight. A failed announce
+        # must not fail the run that already started.
+        if self._on_start is not None:
+            try:
+                self._on_start(run)
+            except Exception:  # noqa: BLE001 — a live run outranks its indicator
+                logger.exception("Background run %s start announce failed", run_id)
         return run
 
     # ── cancel ────────────────────────────────────────────────────────

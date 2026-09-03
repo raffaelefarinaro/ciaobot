@@ -1049,6 +1049,19 @@
       </button>
     </div>
 
+    <!-- Running-agent links, revealed by expanding the dock's "N agent(s)
+         running" pill above. The pill itself sits inside a <button> (can't
+         nest a link there), so the actual links live in this sibling block,
+         same disclosure pattern as queued-messages/questions below. -->
+    <div v-if="dockExpanded && dockAgentsPillShown && dockRunningAgents.length" class="dock-agent-links">
+      <router-link
+        v-for="sub in dockRunningAgents"
+        :key="sub.agent_id"
+        class="dock-agent-link"
+        :to="subagentPath(chat.chat_id, sub.agent_id)"
+      >{{ sub.description || shortAgentId(sub.agent_id) }}</router-link>
+    </div>
+
     <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
     <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
       <div
@@ -1218,6 +1231,7 @@ import { useReentrySummaryPreference } from '../composables/useReentrySummaryPre
 import { useTypeToComment } from '../composables/useTypeToComment'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
+import { subagentPath, shortAgentId } from '../lib/subagentIds'
 
 /** The footer facts for one turn: when it landed, how long it took, which
  *  model answered and what it cost. Collected across the turn's assistant
@@ -1659,6 +1673,17 @@ const dockStripVisible = computed(() =>
     || store.currentQueued.length > 0)),
 )
 
+// Whether the strip carries the "N agents running" pill. The links block below
+// is that pill's disclosure, so both read the same condition — otherwise an
+// archived chat with lingering rows renders links no pill ever announced.
+const dockAgentsPillShown = computed(
+  () => store.activeBackgroundAgents > 0 && !chat.value?.archived,
+)
+
+const dockRunsPillShown = computed(
+  () => store.activeBackgroundRuns > 0 && !chat.value?.archived,
+)
+
 const dockDeferred = computed<DockItem[]>(() => {
   const items: DockItem[] = []
   const extraApprovals = pendingApprovals.value.length - 1
@@ -1672,12 +1697,28 @@ const dockDeferred = computed<DockItem[]>(() => {
     const n = store.currentQueued.length
     items.push({ key: 'queued', label: `${n} queued` })
   }
-  if (store.activeBackgroundAgents > 0 && !chat.value?.archived) {
+  if (dockAgentsPillShown.value) {
     const n = store.activeBackgroundAgents
     items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
   }
+  // Tracked `background_run_start` commands. A separate pill, not folded into
+  // the agents one: these have no transcript to open, so the count is all
+  // there is to show, and the wording has to stay honest about that. Shown
+  // even while the chat is idle — that quiet gap is exactly when the user
+  // has no other sign the command is still going.
+  if (dockRunsPillShown.value) {
+    const n = store.activeBackgroundRuns
+    items.push({ key: 'runs', label: `${n} background run${n === 1 ? '' : 's'}` })
+  }
   return items
 })
+
+// Backs the "N agent(s) running" dock pill's expanded state: the pill itself
+// only shows a count (it lives inside the strip's toggle button, which can't
+// nest a link), so expanding it reveals these as a separate block of links.
+const dockRunningAgents = computed(() =>
+  chat.value ? store.runningSubagentsFor(chat.value.chat_id) : [],
+)
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
@@ -6328,6 +6369,35 @@ details[open] > .activity-summary::before {
   color: var(--warning);
   background: none;
 }
+
+.dock-agent-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2);
+  padding-left: calc(var(--space-3) + var(--safe-left));
+  padding-right: calc(var(--space-3) + var(--safe-right));
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.dock-agent-link {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  /* Dispatch descriptions are free text and routinely a full sentence; kept on
+     one line, an unbounded chip pushes the composer into horizontal scroll on
+     a phone. Clip instead. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-agent-link:hover { text-decoration: underline; }
 
 .bg-agents-dot {
   width: 8px;

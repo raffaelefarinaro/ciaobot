@@ -605,7 +605,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # window, so a batch finishing together produces one turn.
     from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
 
+    def _background_started(run: BackgroundRun) -> None:
+        pcm.announce_background_runs(run.parent_chat_id)
+
     def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
+        # Drop the indicator now. The wake below is coalesced over a short
+        # window, so waiting for it would leave the chat claiming a run is
+        # live for seconds after it exited.
+        pcm.announce_background_runs(run.parent_chat_id)
         pcm.queue_background_wake(
             run.parent_chat_id,
             run_id=run.run_id,
@@ -620,6 +627,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     background_runner = BackgroundRunner(
         BackgroundRunStore(config.state_path.parent),
         workspace_root=config.workspace_root,
+        # A run resolves its cwd and relative cmd path against the owning
+        # workspace's agent root — the same directory its chat runs in. The
+        # install root is only the fallback for a pre-re-rooting layout; see
+        # BackgroundRunner.root_for.
+        agent_root=config.agent_root,
+        on_start=_background_started,
         on_finish=_background_finished,
     )
 

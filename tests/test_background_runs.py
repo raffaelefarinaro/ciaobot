@@ -222,6 +222,94 @@ def test_timeout_is_clamped_not_unbounded() -> None:
         validate_timeout("soon")
 
 
+# ── workspace rooting ─────────────────────────────────────────────────────
+
+
+def _rerooted_runner(tmp_path: Path, **kwargs) -> BackgroundRunner:
+    """Runner over a re-rooted install: ``<install>/work``, ``<install>/personal``."""
+    for name in ("work", "personal"):
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return BackgroundRunner(
+        BackgroundRunStore(runtime),
+        workspace_root=tmp_path,
+        agent_root=lambda name: tmp_path / name,
+        record_job_runs=False,
+        **kwargs,
+    )
+
+
+async def test_run_resolves_paths_against_the_owning_workspace_root(
+    tmp_path: Path,
+) -> None:
+    """The chat's cwd is its agent root, so a model's relative path means that.
+
+    Anchoring at the install root instead dropped the workspace segment and
+    every relative path in a re-rooted workspace failed with ENOENT.
+    """
+    runner = _rerooted_runner(tmp_path)
+    scripts = tmp_path / "work" / "automations"
+    scripts.mkdir(parents=True)
+    probe = scripts / "probe.sh"
+    probe.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
+    probe.chmod(probe.stat().st_mode | stat.S_IXUSR)
+
+    run = await runner.start_run(
+        parent_chat_id="chat-1",
+        workspace="work",
+        cmd=["./probe.sh"],
+        cwd="automations",
+    )
+    assert Path(run.cwd) == scripts.resolve()
+
+    final = await _await_terminal(runner, run.run_id)
+    assert final.status == "ok"
+    assert any(str(scripts.resolve()) in line for line in runner.tail(run.run_id))
+
+
+async def test_run_cannot_reach_another_workspace(tmp_path: Path) -> None:
+    """Containment follows the agent root, so `personal/` is out of reach.
+
+    Against the install root this escape resolved *inside* the boundary and
+    was allowed.
+    """
+    runner = _rerooted_runner(tmp_path)
+
+    with pytest.raises(BackgroundRunError) as excinfo:
+        await runner.start_run(
+            parent_chat_id="chat-1",
+            workspace="work",
+            cmd=["/bin/sh", "-c", "true"],
+            cwd="../personal",
+        )
+    assert excinfo.value.code == "cwd_forbidden"
+
+
+def test_workspace_root_falls_back_to_the_install_root(tmp_path: Path) -> None:
+    """Unnamed, unresolvable, and not-yet-created workspaces keep the old root."""
+
+    def resolver(name: str) -> Path:
+        if name == "missing":
+            return tmp_path / "missing"
+        raise ValueError("workspace name must identify one folder")
+
+    runner = _rerooted_runner(tmp_path)
+    assert runner.root_for("work") == tmp_path / "work"
+    # No resolver at all: the pre-re-rooting construction.
+    assert _runner(tmp_path).root_for("work") == tmp_path
+
+    scoped = BackgroundRunner(
+        BackgroundRunStore(tmp_path / ".runtime"),
+        workspace_root=tmp_path,
+        agent_root=resolver,
+        record_job_runs=False,
+    )
+    assert scoped.root_for("") == tmp_path
+    assert scoped.root_for("bad/name") == tmp_path
+    assert scoped.root_for("missing") == tmp_path
+
+
 # ── runner ────────────────────────────────────────────────────────────────
 
 
@@ -790,6 +878,60 @@ async def test_background_wake_queues_behind_a_live_turn(
 
     assert len(recorder.queued) == 1
     assert recorder.started == []
+
+
+async def test_live_runs_are_announced_and_snapshotted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run in flight has to be visible: the turn that started it has ended.
+
+    ``background_run_start`` is non-blocking by design, so without this event
+    the chat reads as finished while the command is still going and the only
+    trace anywhere is whatever the model happened to say.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Runs", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Owner")
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+    manager._background_runner = SimpleNamespace(
+        active_counts=lambda: {chat.chat_id: 2},
+    )
+
+    # The snapshot a reconnecting client gets, which must not depend on
+    # having seen the start event.
+    assert manager.background_run_counts == {chat.chat_id: 2}
+
+    manager.announce_background_runs(chat.chat_id)
+    events = [e for e in published if e.get("type") == "chat_background_runs"]
+    assert len(events) == 1
+    assert events[0]["running"] == 2
+    assert events[0]["project_id"] == project.project_id
+
+    # Finishing drops it back to zero, which is how the client clears the pill.
+    manager._background_runner = SimpleNamespace(active_counts=lambda: {})
+    manager.announce_background_runs(chat.chat_id)
+    events = [e for e in published if e.get("type") == "chat_background_runs"]
+    assert events[-1]["running"] == 0
+
+
+async def test_runner_announces_both_edges(tmp_path: Path) -> None:
+    """on_start fires with the run live; on_finish is the manager's own hook."""
+    started: list[tuple[str, dict[str, int]]] = []
+    runner = _rerooted_runner(tmp_path)
+    # Sampled inside the callback: the announce has to happen while the run is
+    # still countable, otherwise the client is told "0 running" for a live run.
+    runner._on_start = lambda run: started.append((run.run_id, runner.active_counts()))
+
+    run = await runner.start_run(
+        parent_chat_id="chat-1",
+        workspace="work",
+        cmd=["/bin/sh", "-c", "true"],
+    )
+    assert started == [(run.run_id, {"chat-1": 1})]
+
+    await _await_terminal(runner, run.run_id)
+    assert runner.active_counts() == {}
 
 
 async def test_background_wake_publishes_its_delivery(
