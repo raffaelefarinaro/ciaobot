@@ -68,7 +68,7 @@ vi.mock('../../lib/api', () => {
           name: 'claude',
           ok: true,
           auth: 'oauth',
-          command: 'ciao auth claude',
+          command: 'claude auth login',
           version: '2.1.205 (Claude Code)',
           account: 'person@example.com',
           protocol: 'Agent SDK ready',

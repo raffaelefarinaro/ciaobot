@@ -609,6 +609,8 @@ export interface ProviderConnection {
   skills?: string[]
   /** Docs page for installing the CLI, set when `auth === 'not_installed'`. */
   install_url?: string
+  /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
+  path_command?: string
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -987,6 +989,8 @@ export interface SetupProviderStatus {
   detail?: string
   /** Documentation page for installing the provider CLI (`auth: 'not_installed'`). */
   install_url?: string
+  /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
+  path_command?: string
   /** Desktop app found while the CLI is missing, so setup can say which step is left. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import json
@@ -189,6 +190,7 @@ def _provider(
     install_url: str = "",
     app_path: str = "",
     cli_path: str = "",
+    path_command: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -214,6 +216,8 @@ def _provider(
         row["app_path"] = app_path
     if cli_path:
         row["cli_path"] = cli_path
+    if path_command:
+        row["path_command"] = path_command
     return row
 
 
@@ -637,6 +641,94 @@ def claude_install_command() -> str:
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
+def claude_path_command(directory: str = "") -> str:
+    """Shell line that puts ``directory`` on the login PATH.
+
+    The documented installer drops ``claude`` into ``~/.local/bin``, which is
+    not on a default macOS PATH, so the very next command in the user's
+    terminal still reports "command not found". The installer prints this line
+    itself; repeating it here means the wizard can hand it over as a second
+    copyable step instead of leaving the user stuck one command short.
+    """
+    if sys.platform == "win32":
+        return ""
+    home = str(Path.home())
+    target = directory or str(Path.home() / ".local" / "bin")
+    if target == home or target.startswith(home + os.sep):
+        # Written into an rc file, so keep it portable across machines and
+        # readable to whoever opens that file later.
+        target = "$HOME" + target[len(home) :]
+    # The engine usually runs under launchd, where SHELL is unset; zsh is the
+    # macOS default and the shell the documented installer assumes.
+    shell = os.path.basename(os.environ.get("SHELL", "") or "zsh")
+    if shell == "fish":
+        return f"fish_add_path {target}"
+    # macOS terminals start login shells, which read ~/.bash_profile — not
+    # ~/.bashrc, which would fix only the shell the user is sitting in.
+    rc = "~/.bash_profile" if shell == "bash" else "~/.zshrc"
+    return f"""echo 'export PATH="{target}:$PATH"' >> {rc} && source {rc}"""
+
+
+def claude_path_hint(cli_path: str) -> str:
+    """PATH line worth offering for ``cli_path``, or "" when none is.
+
+    Nothing to fix when the user's terminal already resolves ``claude``, and
+    nothing to suggest when the only binary is the one inside the app: its
+    directory does not belong on anybody's PATH, and ``claude_auth_command``
+    names that binary in full instead.
+    """
+    from ciao.providers.claude import get_bundled_claude_path
+    from ciao.tool_path import resolve_on_terminal_path
+
+    try:
+        if resolve_on_terminal_path("claude"):
+            return ""
+    except Exception:
+        return ""
+    if not cli_path:
+        # Not installed yet: point at where the documented installer puts it.
+        return claude_path_command()
+    try:
+        bundled = get_bundled_claude_path()
+    except Exception:
+        bundled = None
+    if bundled and cli_path == bundled:
+        return ""
+    directory = os.path.dirname(cli_path)
+    return claude_path_command(directory) if directory else ""
+
+
+def claude_auth_command(cli_path: str = "") -> str:
+    """Terminal command that signs the user into Claude Code.
+
+    Deliberately not ``ciao auth claude``: an app install keeps the engine
+    inside ``Ciaobot.app`` and puts nothing named ``ciao`` on PATH, so that
+    command only ever worked from a dev checkout. In a normal install the
+    user's shell either finds nothing or finds an unrelated ``ciao`` and
+    answers with a confusing "Unknown command 'auth'". Claude's own login
+    command works in every install.
+
+    The bare word is only usable when the user's own terminal resolves it --
+    which is why this asks ``resolve_on_terminal_path`` rather than the
+    augmented lookup Ciaobot uses to *run* the CLI: that one adds
+    ``~/.local/bin`` and Homebrew whether or not the user's shell has them, so
+    it would answer "yes" for exactly the newly installed CLI whose directory
+    is still missing from PATH. Ciaobot itself usually runs the ``claude``
+    bundled with the Agent SDK, which is inside the app and on nobody's PATH;
+    that binary is named by absolute path instead.
+    """
+    from ciao.tool_path import resolve_on_terminal_path
+
+    try:
+        in_terminal = resolve_on_terminal_path("claude")
+    except Exception:
+        in_terminal = None
+    if in_terminal:
+        return "claude auth login"
+    binary = cli_path or claude_cli_path()
+    return f"{shlex.quote(binary)} auth login" if binary else "claude auth login"
+
+
 def claude_app_path() -> str:
     """Path to an installed Claude desktop app, or "".
 
@@ -722,13 +814,14 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             app_path=app_path,
+            path_command=claude_path_hint(""),
         )
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
             ok=True,
             auth="api_key",
-            command="ciao auth claude",
+            command=claude_auth_command(binary),
             detail="ANTHROPIC_API_KEY is set.",
             version=version,
             account="Anthropic API",
@@ -749,7 +842,7 @@ def _claude_status(
             name="claude",
             ok=True,
             auth="oauth",
-            command="ciao auth claude",
+            command=claude_auth_command(binary),
             detail=detail,
             version=version,
             account=account,
@@ -784,11 +877,13 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
+            path_command=claude_path_hint(binary),
         )
     app_path = claude_app_path()
+    auth_command = claude_auth_command(binary)
     detail = (
-        "Claude Desktop uses an app-private login. Sign in once via `ciao auth claude`; "
-        "no separate CLI install is needed."
+        "Claude Desktop uses an app-private login. Sign in once via "
+        f"`{auth_command}`; no separate CLI install is needed."
         if app_path
         else "Run Claude OAuth or set ANTHROPIC_API_KEY."
     )
@@ -796,12 +891,15 @@ def _claude_status(
         name="claude",
         ok=False,
         auth="missing",
-        command="ciao auth claude",
+        command=auth_command,
         detail=detail,
         version=version,
         skills=claude_skills,
         mcps=claude_mcps,
         cli_path=binary,
+        # An installed CLI the terminal cannot find still needs the PATH line:
+        # the user is about to be handed a command to type into that terminal.
+        path_command=claude_path_hint(binary),
     )
 
 
@@ -898,6 +996,17 @@ def setup_status(
     ``env`` is injectable for tests and lets the API route pass the live
     process environment without exposing secret values in the response.
     """
+    # Fresh terminal-PATH probe per call: the wizard polls this endpoint every
+    # 2s after the user edits their rc file, and a cached miss would keep
+    # showing the PATH hint after the terminal is fixed until engine restart.
+    # Within this call the short TTL still shares one probe across the up to 3
+    # ``resolve_on_terminal_path`` lookups.
+    try:
+        from ciao import tool_path as _tool_path
+
+        _tool_path.clear_terminal_path_cache()
+    except Exception:
+        pass
     source = env if env is not None else os.environ
     # ``Path.cwd()`` cannot be the getattr default: it is evaluated even when the
     # config carries an explicit workspace_root, and it raises once the cwd is gone.
