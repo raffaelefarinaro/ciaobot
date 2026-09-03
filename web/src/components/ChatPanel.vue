@@ -468,7 +468,7 @@
                 <span v-if="item.meta.timestamp">{{ formatTime(item.meta.timestamp) }}</span>
                 <span v-if="item.meta.duration_ms"> &middot; {{ formatDuration(item.meta.duration_ms) }}</span>
                 <span v-if="item.meta.effective_model"> &middot; {{ item.meta.effective_model }}</span>
-                <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.meta.usage)"></span></span>
+                <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group">&nbsp;| <span v-html="formatTokenUsage(item.meta.usage)"></span></span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
