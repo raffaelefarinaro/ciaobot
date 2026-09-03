@@ -2716,7 +2716,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean }
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
   const toChatMessage = (m: ServerRow) => ({
     role: m.role as 'user' | 'assistant' | 'system',
     content: m.content,
@@ -2749,6 +2749,14 @@ export const useProjectStore = defineStore('projects', () => {
     i: m.i,
     lazy: m.lazy,
     full_length: m.full_length,
+    // Turn footer facts. The provider session file carries none of these, so
+    // the server stitches them on from the durable transcript
+    // (`_overlay_transcript_metadata`). Dropping them here left every
+    // hydrated turn's footer with only the time and duration — no model, no
+    // context %.
+    usage: m.usage,
+    quota: m.quota,
+    effective_model: m.effective_model,
   })
 
   /** True for a trace row the client renders from streaming events. */
@@ -2801,10 +2809,10 @@ export const useProjectStore = defineStore('projects', () => {
       : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
         ? userPositions[0]
         : firstAppendPos
-    // `ServerRow` carries no token usage — that only ever reaches the client on
-    // the result event, which is exactly the row about to be dropped. Carry it
-    // (and the model that answered) onto the server row that closes the turn,
-    // or the footer would lose the turn's cost on every reload.
+    // A server row carries the turn's usage only once `record_turn` has run;
+    // for the turn that just streamed it may still be missing. Carry the live
+    // values (and the model that answered) onto the server row that closes the
+    // turn, or the footer would lose the turn's cost on that reconcile.
     const carried: Partial<ChatMessage> = {}
     const kept: ChatMessage[] = []
     for (let p = 0; p < merged.length; p++) {
@@ -2835,7 +2843,10 @@ export const useProjectStore = defineStore('projects', () => {
       for (let p = kept.length - 1; p >= 0; p--) {
         const row = kept[p]
         if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
-        kept[p] = { ...carried, ...row }
+        // Fill only the facts the row is actually missing. A plain spread let
+        // an explicitly-undefined key on the server row shadow the carried
+        // value and lose the turn's cost again.
+        kept[p] = mergeMessageFields(row, carried as ChatMessage)
         break
       }
     }
@@ -3009,7 +3020,11 @@ export const useProjectStore = defineStore('projects', () => {
             if (typeof abs !== 'number') continue
             const pos = posByIndex.get(abs)
             if (pos !== undefined) {
-              merged[pos] = item
+              // The server row is authoritative for content, but its footer
+              // facts land only once `record_turn` has written the turn to the
+              // durable transcript. Keep whatever the live stream already gave
+              // us for the fields the row is still missing.
+              merged[pos] = mergeMessageFields(item, merged[pos])
               continue
             }
             if (abs < cachedEnd) {
