@@ -2,7 +2,33 @@
   <div class="memory-map">
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
-    <ProposalReviewPanel v-if="mm.view === 'review'" />
+    <div v-if="mm.view === 'review'" class="mm-review-wrap">
+      <!-- One surface, two queues: agent proposals (additions) and stale-note
+           retirement live side by side so "decide things" has one address.
+           The tab state is shared (`mm.reviewTab`) so entry points elsewhere
+           — the sidebar's "Needs review" list, a stale note's detail panel —
+           can land directly on retirement. -->
+      <div class="mm-review-tabs" role="tablist" aria-label="Review">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="mm.reviewTab === 'proposals'"
+          class="mm-review-tab"
+          :class="{ active: mm.reviewTab === 'proposals' }"
+          @click="mm.reviewTab = 'proposals'"
+        >Proposals<span v-if="proposalCount" class="mm-review-count">{{ proposalCount }}</span></button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="mm.reviewTab === 'retirement'"
+          class="mm-review-tab"
+          :class="{ active: mm.reviewTab === 'retirement' }"
+          @click="mm.reviewTab = 'retirement'"
+        >Retirement<span v-if="retirementCount" class="mm-review-count">{{ retirementCount }}</span></button>
+      </div>
+      <ProposalReviewPanel v-if="mm.reviewTab === 'proposals'" />
+      <VaultReviewPanel v-else />
+    </div>
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
       <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
@@ -181,6 +207,12 @@
           <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
         </div>
         <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
+        <button
+          v-if="mm.selectedNode.stale"
+          type="button"
+          class="mm-detail-review-link"
+          @click="openRetirementReview"
+        >Review for retirement →</button>
         <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
 
         <div class="mm-detail-section mm-detail-preview">
@@ -248,7 +280,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
+import VaultReviewPanel from './VaultReviewPanel.vue'
 import { useProposalsStore } from '../stores/proposals'
+import { useVaultReviewStore } from '../stores/vaultReview'
 import { router } from '../router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -1192,6 +1226,26 @@ function onWheel(e: WheelEvent) {
 // itself lives in the sidebar next to the workspace toggle; this component only
 // mirrors the shared `mm.view` state, seeding it from the URL on mount.
 const proposals = useProposalsStore()
+const vaultReview = useVaultReviewStore()
+// Tab badges, scoped like the lists they count: the workspace toggle scopes
+// both queues, so a global tally would claim rows the tab will not show.
+const proposalCount = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+const retirementCount = computed(() => vaultReview.candidates.length + vaultReview.trashed.length)
+// A stale note's detail panel lands directly on the retirement queue.
+function openRetirementReview() {
+  mm.reviewTab = 'retirement'
+  mm.view = 'review'
+  if (router.currentRoute.value.path !== '/proposals') void router.push('/proposals')
+}
+// The badges need data even while the Retirement tab (which fetches on mount)
+// has never been opened. Joining the in-flight request when the panel mounts
+// keeps this to one GET.
+watch(() => mm.view, (view) => {
+  if (view === 'review') {
+    void proposals.ensureLoaded()
+    if (store.activeWorkspace) void vaultReview.fetch(store.activeWorkspace)
+  }
+})
 mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
@@ -1277,6 +1331,70 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
 }
+/* The Review surface holds two queues — agent proposals and stale-note
+   retirement — under one tab bar, matching ProposalReviewPanel's own
+   Queue/History underline style so switching sub-views reads the same way. */
+.mm-review-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mm-review-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex: none;
+}
+.mm-review-tab {
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: 600 var(--text-sm) var(--font);
+  white-space: nowrap;
+}
+.mm-review-tab:hover { color: var(--fg); background: var(--bg3); }
+.mm-review-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--fg);
+}
+.mm-review-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mm-review-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--text-xs) + var(--space-2));
+  min-height: calc(var(--text-xs) + var(--space-1));
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.mm-review-tab.active .mm-review-count { color: var(--fg); }
+/* A stale note's way into the retirement queue, next to its last-verified
+   line. A text button, not a pink bar: deciding happens in Review, not here. */
+.mm-detail-review-link {
+  background: none;
+  border: none;
+  padding: 0;
+  min-height: var(--touch);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+}
+.mm-detail-review-link:hover { text-decoration: underline; }
+.mm-detail-review-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mm-body {
   flex: 1;
   min-height: 0;

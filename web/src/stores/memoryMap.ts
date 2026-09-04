@@ -157,6 +157,13 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
   const view = ref<'graph' | 'list' | 'review'>('graph')
+  /**
+   * Which pane the Review surface shows: the agent-proposal queue or the
+   * stale-note retirement queue. Defaults to proposals; entry points that
+   * are about retiring a note (the sidebar's "Needs review" list, a stale
+   * note's detail panel) select retirement directly.
+   */
+  const reviewTab = ref<'proposals' | 'retirement'>('proposals')
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
@@ -630,7 +637,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
     pendingFocus,
-    hideOrphans, orphanFilter, colorMode, view,
+    hideOrphans, orphanFilter, colorMode, view, reviewTab,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
     clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,

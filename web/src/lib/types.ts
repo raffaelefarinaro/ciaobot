@@ -1200,3 +1200,48 @@ export interface ProposalHistoryResponse {
    * same page. Paging must stop on this, not on `truncated`. */
   at_max?: boolean
 }
+
+// ── Vault review (stale-note retirement) ─────────────────────────────────
+// Backed by `GET|POST /api/vault/review` (`ciao/vault_review.py`), not by the
+// proposal queue: candidates are hash-identified vault notes with explainable
+// detection signals, and dispositions land in the append-only
+// `Workspace/Vault-Review.jsonl` ledger rather than the proposal sidecars.
+
+/** Explainable detection evidence behind one retirement candidate. */
+export interface VaultReviewEvidence {
+  backlinks: string[]
+  outbound_links: string[]
+  bridge: boolean
+  duplicate_group: string[]
+  last_update: string
+  type: string
+  age_days: number | null
+}
+
+/** One stale-note retirement candidate from `GET /api/vault/review`. */
+export interface VaultReviewCandidate {
+  candidate_id: string
+  workspace: string
+  path: string
+  content_hash: string
+  signals: string[]
+  priority: number
+  evidence: VaultReviewEvidence
+  status: string
+  disposition: string
+  deferred_until: string
+}
+
+/** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */
+export interface VaultTrashedNote {
+  candidate_id: string
+  workspace: string
+  original_path: string
+  content_hash: string
+  trashed_at: string
+}
+
+export interface VaultReviewResponse {
+  candidates: VaultReviewCandidate[]
+  trashed?: VaultTrashedNote[]
+}

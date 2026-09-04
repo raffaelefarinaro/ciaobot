@@ -343,6 +343,47 @@ def restore_note(root: Path, candidate_id_value: str, *, actor: str = "user") ->
     return metadata
 
 
+def list_trashed(root: Path, *, workspace: str) -> list[dict[str, Any]]:
+    """Read-only inventory of the reversible trash for one workspace.
+
+    The trash view renders from this rather than from candidate generation:
+    a trashed note is no longer in the vault, so it can never be a
+    candidate again, and its only durable record is the ``.json`` sidecar
+    `trash_note` wrote next to it. Scoped to one workspace; anything that
+    is not a well-formed sidecar for a still-restorable note is skipped.
+    """
+    directory = trash_dir(root)
+    if not directory.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for metadata_path in sorted(directory.glob("*.json")):
+        if not _CANDIDATE_ID_RE.fullmatch(metadata_path.stem):
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("workspace") or "") != workspace:
+            continue
+        if str(metadata.get("candidate_id") or "") != metadata_path.stem:
+            continue
+        if not (directory / f"{metadata_path.stem}.md").is_file():
+            continue
+        items.append(
+            {
+                "candidate_id": metadata_path.stem,
+                "workspace": workspace,
+                "original_path": str(metadata.get("original_path") or ""),
+                "content_hash": str(metadata.get("content_hash") or ""),
+                "trashed_at": str(metadata.get("trashed_at") or ""),
+            }
+        )
+    items.sort(key=lambda item: item["trashed_at"])
+    return items
+
+
 def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, actor: str = "user") -> dict[str, Any]:
     _validate_candidate_id(candidate_id_value)
     if confirm != candidate_id_value:

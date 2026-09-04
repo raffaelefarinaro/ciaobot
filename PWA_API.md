@@ -77,7 +77,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
-| GET, POST | `/api/vault/review` | List explainable note-review candidates or record an explicit keep/link/defer/restore decision; trash and permanent deletion are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation |
+| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed` also lists the reversible trash inventory) or record an explicit keep/link/defer/restore decision; trash and permanent deletion are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
@@ -210,10 +210,21 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 # Detection is read-only and scoped to one logical workspace.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default"
 
+# The reversible trash inventory (what the Review → Retirement tab renders).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default&include=trashed"
+
 # Record a reversible decision. Permanent deletion is only available after trash.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"decide","candidate_id":"<candidate-id>","disposition":"keep"}'
+
+# Retire into the 30-day trash, then restore from it.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"trash","candidate_id":"<candidate-id>"}'
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"restore","candidate_id":"<candidate-id>"}'
 ```
 
 **Agent assets**
