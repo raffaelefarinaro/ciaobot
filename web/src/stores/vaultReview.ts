@@ -33,6 +33,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   const error = ref('')
   const loadedWorkspace = ref<string | null>(null)
   let fetchPromise: Promise<void> | null = null
+  let fetchWorkspace: string | null = null
   /** Ticket for the newest in-flight list request; older responses are dropped. */
   let fetchSeq = 0
 
@@ -51,12 +52,15 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
    * Load the queue for one workspace. `force` starts a fresh request even
    * when one is in flight — the refresh after a mutation must never join a
    * GET issued before its own POST, or the decided row stays queued as if
-   * nothing happened.
+   * nothing happened. A request for a different workspace never joins either:
+   * otherwise flipping workspaces mid-flight would leave the new scope
+   * showing the old scope's rows with no refetch until manual refresh.
    */
   async function fetch(workspace: string, opts?: { force?: boolean }): Promise<void> {
     if (!workspace) return
-    if (fetchPromise && !opts?.force) return fetchPromise
+    if (fetchPromise && !opts?.force && fetchWorkspace === workspace) return fetchPromise
     const seq = ++fetchSeq
+    fetchWorkspace = workspace
     const request = (async () => {
       loading.value = true
       error.value = ''

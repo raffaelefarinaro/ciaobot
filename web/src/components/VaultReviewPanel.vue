@@ -28,7 +28,7 @@ onMounted(() => {
   if (workspace.value) void store.fetch(workspace.value)
 })
 watch(workspace, (ws) => {
-  if (ws) void store.fetch(ws)
+  if (ws) void store.fetch(ws, { force: true })
 })
 
 function refresh() {
@@ -37,12 +37,16 @@ function refresh() {
 
 // "Later" needs a day count per row. Kept local: it is input state, not
 // server state, and it must survive a queue refresh while the user types.
-const deferDays = ref<Record<string, number>>({})
-function daysFor(id: string): number {
-  return deferDays.value[id] ?? 7
+// Stored raw so clearing the field stays empty while typing instead of
+// snapping back to 0; only coerced when the Later action runs.
+const deferDays = ref<Record<string, string>>({})
+function daysFor(id: string): string {
+  return deferDays.value[id] ?? '7'
 }
 function clampDays(id: string): number {
-  const n = Math.floor(Number(daysFor(id)))
+  const raw = (deferDays.value[id] ?? '7').trim()
+  if (!raw) return 7
+  const n = Math.floor(Number(raw))
   return Number.isFinite(n) ? Math.max(1, Math.min(90, n)) : 7
 }
 
@@ -233,7 +237,7 @@ function trashedDate(note: VaultTrashedNote): string {
             :disabled="store.isBusy(candidate.candidate_id)"
             @click="trashRow(candidate)"
           >Retire</button>
-          <label class="vr-defer">
+          <span class="vr-defer">
             <button
               type="button"
               class="btn-small btn-chip"
@@ -248,10 +252,10 @@ function trashedDate(note: VaultTrashedNote): string {
               aria-label="Snooze days"
               class="vr-defer-input"
               :disabled="store.isBusy(candidate.candidate_id)"
-              @input="deferDays[candidate.candidate_id] = Number(($event.target as HTMLInputElement).value)"
+              @input="deferDays[candidate.candidate_id] = ($event.target as HTMLInputElement).value"
             />
             <span class="vr-defer-unit">days</span>
-          </label>
+          </span>
           <button
             type="button"
             class="btn-small btn-chip"

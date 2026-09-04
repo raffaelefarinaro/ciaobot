@@ -1230,7 +1230,11 @@ const vaultReview = useVaultReviewStore()
 // Tab badges, scoped like the lists they count: the workspace toggle scopes
 // both queues, so a global tally would claim rows the tab will not show.
 const proposalCount = computed(() => proposals.scopedRows(store.activeWorkspace).length)
-const retirementCount = computed(() => vaultReview.candidates.length + vaultReview.trashed.length)
+const retirementCount = computed(() =>
+  vaultReview.loadedWorkspace === store.activeWorkspace
+    ? vaultReview.candidates.length + vaultReview.trashed.length
+    : 0,
+)
 // A stale note's detail panel lands directly on the retirement queue.
 function openRetirementReview() {
   mm.reviewTab = 'retirement'

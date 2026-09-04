@@ -4895,10 +4895,6 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user", defer_days=int(payload.get("defer_days", 7)))
         elif action == "trash":
             result = review.trash_note(root, item)
-        elif action == "restore":
-            result = review.restore_note(root, item.candidate_id)
-        elif action == "delete":
-            result = review.delete_permanently(root, item.candidate_id, confirm=str(payload.get("confirm", "")))
         else:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:
