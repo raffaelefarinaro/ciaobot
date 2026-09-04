@@ -2266,7 +2266,7 @@ class ProjectChatManager:
         try:
             active_root = self._vault_active_root(project.workspace).resolve()
             folder = (active_root / folder_name).resolve()
-        except OSError:
+        except (OSError, ValueError):
             return None
         # A symlinked project folder could otherwise point the write anywhere.
         if not folder.is_relative_to(active_root) or not folder.is_dir():
@@ -2949,6 +2949,14 @@ class ProjectChatManager:
                     "must match [A-Za-z0-9._-]+ with no path separators."
                 )
             project.vault_folder = vault_folder
+            # Recompute the canonical doc pointer from the new binding so it
+            # can't go stale after a rename (issue #421). vault_doc_path is
+            # otherwise only refreshed by the discovery pass in
+            # list_projects(), while get_project()/project_get serve the
+            # stored value directly. Clears to "" when the binding is
+            # cleared or no canonical doc exists under the new folder yet.
+            doc = self._project_doc_file(project)
+            project.vault_doc_path = self._display_path(doc) if doc is not None else ""
         # Mirror the context into the canonical doc's frontmatter so the two
         # can't drift. Deliberately after the vault_folder branch, so a call
         # that rebinds and re-describes in one go writes to the new doc.
