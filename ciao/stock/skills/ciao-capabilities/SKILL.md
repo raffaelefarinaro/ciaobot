@@ -12,7 +12,7 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 - **Specific question** ("can you schedule things?", "where do my archived chats go?") → answer from the relevant section only. Don't recite the whole catalog.
 - **Broad question** ("what can you do?") → give the one-paragraph pitch plus the capability areas below in a few lines each, then offer to go deeper on any of them.
 - **New user / onboarding** → offer the guided tour below.
-- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`skills/`, `subagents/`, `commands/`, and their `.claude/` / `.agents/skills/` mirrors).
+- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`skills/`, `subagents/`, `commands/`, and their `.claude/` mirrors).
 
 ## The one-paragraph pitch
 
@@ -84,7 +84,7 @@ The file workflow is designed around model collaboration: keep a Markdown docume
 
 ### 5. Skills, subagents, and commands (extensibility)
 
-- **Stock skills** ship with the app and are synced into both `.claude/skills/` and `.agents/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
+- **Stock skills** ship with the app and are synced into `.claude/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
 - **Visual plans**: ask for a plan, design direction, architecture review, UI flow, or approval artifact and Ciaobot writes a local Markdown plan with an optional self-contained HTML companion, including diagrams drawn as inline SVG. Markdown is the canonical, commentable, editable, restorable plan; HTML is an optional companion that answers a specific review question. Only one file is pinned at a time. Plan mode cannot produce a plan file — the skill explains that and offers an in-chat proposal instead. Routine working docs (notes, analyses) stay with the `workspace-authoring` skill.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
 - **Adding a skill**: place a folder `skills/<name>/SKILL.md` (or validated zip containing one top-level folder with `SKILL.md`) then run `ciao sync-skills`. Workspace git sync carries it to other operators. No GitHub fetch.

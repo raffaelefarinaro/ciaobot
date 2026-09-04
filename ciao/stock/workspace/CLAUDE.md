@@ -18,7 +18,7 @@ Useful local files:
 - `.runtime/job_runs.jsonl`: recent background automation runs, including failed jobs.
 - `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log`: macOS LaunchAgent service logs when present.
 - `.claude/agents/`, `.claude/commands/`, `.claude/skills/`: installed agent-facing assets.
-- `.agents/skills/`: shared skills and runtime-discovered Ciaobot assets.
+- `.agents/skills/`: legacy directory, no longer written by Ciaobot sync (supported runtimes still discover it natively).
 - `memory-vault/`: durable markdown memory, projects, logs, and references.
 
 File and project routing:

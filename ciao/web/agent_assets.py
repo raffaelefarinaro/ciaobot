@@ -467,11 +467,16 @@ def workspace_health(config: Any) -> dict:
                         "Run sync-skills.",
                     )
 
+        # `.agents/skills` is deliberately absent here: sync no longer writes
+        # to that directory (the Codex-era mirror was removed), so a broken
+        # link there is one sync-skills cannot repair or remove. Reporting it
+        # with a "Run sync-skills" remedy would produce a permanent,
+        # unfixable error; the sync cleanup above prunes Ciaobot's own
+        # leftovers instead.
         for link_dir, label in [
             (root / ".claude" / "agents", "agent"),
             (root / ".claude" / "commands", "command"),
             (root / ".claude" / "skills", "skill"),
-            (root / ".agents" / "skills", "provider skill"),
         ]:
             if not link_dir.exists():
                 continue
