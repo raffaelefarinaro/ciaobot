@@ -5,7 +5,7 @@ description: Build the current develop checkout into a self-contained Ciaobot.ap
 
 # Ciaobot develop install
 
-> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the runtime-discovered `.claude/skills/` and `.agents/skills/` catalogs. Don't move it into `ciao/stock/`.
+> Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the runtime-discovered `.claude/skills/` catalog. Don't move it into `ciao/stock/`.
 
 Replaces the end-user one-liner (`curl -fsSL .../install.sh | sh`) with the same outcome built from the **local `develop` checkout**: a self-contained `Ciaobot.app` with the current `ciao/` backend and PWA embedded, installed on this machine, preserving the existing workspace and password. Then watch the engine logs and report anything broken.
 

@@ -208,7 +208,7 @@ AGENTS.md                      Relative link to CLAUDE.md so supported runtimes 
 CIAO_CUSTOMIZATION.md          Local customization surface.
 skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` mirrors them into .claude/.
 .claude/{skills,agents,commands}/  Generated Claude symlinks/copies (packaged stock assets + user sources). Do not edit by hand.
-.agents/skills/                   Shared skill catalog discovered by supported runtimes. Locked packages installed by the upstream `skills` CLI are canonical here.
+.agents/skills/                   Legacy directory, no longer written by sync (the Codex-era mirror was removed; leftovers pointing into the workspace catalogs are pruned). Third-party tools may still place skills here; supported runtimes discover it natively.
 memory-vault/<workspace>/      Standard per-workspace durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/.
 memory-vault/Logs/Chats/       Global derived transcript archive. A sibling of the workspaces inside the vault root, not inside any one workspace. Stays global through the re-rooting release, which promotes it to <install>/Logs/ unmoved.
   .runtime/                      Local state: schedules.json, web_projects.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
