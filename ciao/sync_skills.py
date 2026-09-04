@@ -640,11 +640,26 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
     user's own ``.codex`` configuration or skills. Every removable artifact
     therefore carries one of the old Ciaobot markers; unmarked files are left
     untouched.
+
+    The one exception is ``.agents/skills`` symlinks pointing back into the
+    workspace's own skill catalogs (``skills/<name>`` or
+    ``.claude/skills/<name>``). Those are the shape the removed
+    ``codex_skills`` mirror (``_mirror_dir_symlinks(.claude/skills ->
+    .agents/skills)``) wrote; sync no longer maintains that directory, so a
+    leftover either drifts silently (a live link alongside skills sync never
+    refreshes) or becomes a broken link no sync run can repair. opencode
+    discovers ``.claude/skills`` natively, so removing them loses no
+    discovery. Real directories without the marker, and symlinks pointing
+    anywhere else (upstream ``skills``-CLI installs, user hand-links outside
+    the workspace catalogs), are left untouched.
     """
     pruned = 0
     wrapper_root = workspace / ".agents" / "skills"
     for entry in _iter_entries(wrapper_root):
-        if entry.is_dir() and (entry / CODEX_WRAPPER_MARKER).is_file():
+        if entry.is_dir() and not entry.is_symlink() and (entry / CODEX_WRAPPER_MARKER).is_file():
+            _remove_path(entry)
+            pruned += 1
+        elif _is_custom_skill_link(entry):
             _remove_path(entry)
             pruned += 1
 
