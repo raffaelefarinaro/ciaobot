@@ -2266,7 +2266,7 @@ class ProjectChatManager:
         try:
             active_root = self._vault_active_root(project.workspace).resolve()
             folder = (active_root / folder_name).resolve()
-        except OSError:
+        except (OSError, ValueError):
             return None
         # A symlinked project folder could otherwise point the write anywhere.
         if not folder.is_relative_to(active_root) or not folder.is_dir():
