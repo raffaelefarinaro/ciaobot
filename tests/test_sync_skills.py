@@ -190,18 +190,21 @@ def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None
     agents_skills.mkdir(parents=True)
     # Live Codex-era leftovers in both historical shapes.
     (agents_skills / "kept").symlink_to("../../skills/kept")
-    (agents_skills / "also-kept").symlink_to("../.claude/skills/also-kept")
+    (agents_skills / "also-kept").symlink_to("../../.claude/skills/also-kept")
     # Broken leftover: its skill is gone, so sync cannot relink it.
     (agents_skills / "stale").symlink_to("../../skills/stale")
     # User-owned content sync must never touch.
     _write(agents_skills / "upstream" / "SKILL.md", "# Upstream package\n")
     (agents_skills / "elsewhere").symlink_to("/tmp/somewhere-else")
+    # Foreign same-name links must survive: same basename and a /skills/
+    # segment, but outside this workspace's catalogs.
+    (agents_skills / "foreign").symlink_to("/tmp/skills/foreign")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     assert result.legacy_codex_pruned == 3
     remaining = {entry.name for entry in agents_skills.iterdir()}
-    assert remaining == {"upstream", "elsewhere"}
+    assert remaining == {"upstream", "elsewhere", "foreign"}
     assert (agents_skills / "upstream" / "SKILL.md").is_file()
     # The live skill itself still syncs into the maintained catalog.
     assert (workspace / ".claude" / "skills" / "kept").is_symlink()

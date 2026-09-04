@@ -129,14 +129,23 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _is_custom_skill_link(path: Path) -> bool:
+def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
     if not path.is_symlink():
         return False
     try:
-        target = os.readlink(path)
+        raw = os.readlink(path)
     except OSError:
         return False
-    return f"/skills/{path.name}" in target
+    if not path.name or path.name in (".", ".."):
+        return False
+    try:
+        resolved = (path.parent / raw).resolve()
+        ws = workspace.resolve()
+    except OSError:
+        return False
+    if resolved.name != path.name:
+        return False
+    return resolved.parent in {(ws / "skills"), (ws / ".claude" / "skills")}
 
 
 def _ensure_symlink(source: Path, link: Path, *, relative_to: Path | None = None) -> bool:
@@ -659,7 +668,7 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
         if entry.is_dir() and not entry.is_symlink() and (entry / CODEX_WRAPPER_MARKER).is_file():
             _remove_path(entry)
             pruned += 1
-        elif _is_custom_skill_link(entry):
+        elif _is_custom_skill_link(entry, workspace):
             _remove_path(entry)
             pruned += 1
 
