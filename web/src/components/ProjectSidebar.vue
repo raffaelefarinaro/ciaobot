@@ -697,6 +697,11 @@
             corrects, or removes them. They stay here until you or that run
             resolves them.
           </p>
+          <button
+            type="button"
+            class="mm-link mm-link--block"
+            @click="openRetirementReview()"
+          >Open retirement review →</button>
           <div class="mm-link-list">
             <div
               v-for="n in mm.staleNotes.slice(0, staleLimit)"
@@ -1340,6 +1345,12 @@ function setMemoryView(next: 'graph' | 'list' | 'review') {
   mm.view = next
   const target = next === 'review' ? '/proposals' : '/memory'
   if (route.path !== target) void router.push(target)
+}
+
+/** The "Needs review" list lands directly on the retirement queue. */
+function openRetirementReview() {
+  mm.reviewTab = 'retirement'
+  setMemoryView('review')
 }
 
 function promptTitle(prompt: string): string {
@@ -3307,6 +3318,9 @@ async function confirmDeleteChat(chatId: string) {
 .mm-sep { color: var(--fg3); font-size: var(--text-xs); }
 .mm-link--active { color: var(--fg); font-weight: 600; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
+/* A standalone entry point, not an inline action: full touch target. */
+.mm-link--block { display: inline-flex; align-items: center; min-height: var(--touch); margin-bottom: var(--space-1); }
+.mm-link--block:hover { text-decoration: underline; }
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }

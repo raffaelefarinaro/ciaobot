@@ -4861,7 +4861,15 @@ async def vault_review(request: Request) -> JSONResponse:
             )
         )
     if request.method == "GET":
-        return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
+        review_body: dict[str, Any] = {"candidates": [item.as_dict() for item in candidates]}
+        # The trash view renders the reversible trash, which candidate
+        # generation can never return: a trashed note is no longer in the
+        # vault. Same read-only contract as the candidate listing itself.
+        if "trashed" in {part.strip() for part in request.query_params.get("include", "").split(",")}:
+            review_body["trashed"] = await asyncio.to_thread(
+                functools.partial(review.list_trashed, root, workspace=workspace)
+            )
+        return JSONResponse(review_body)
 
     candidate_id_value = str(payload.get("candidate_id", "") or "")
     if action in {"restore", "delete"}:
@@ -4887,10 +4895,6 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user", defer_days=int(payload.get("defer_days", 7)))
         elif action == "trash":
             result = review.trash_note(root, item)
-        elif action == "restore":
-            result = review.restore_note(root, item.candidate_id)
-        elif action == "delete":
-            result = review.delete_permanently(root, item.candidate_id, confirm=str(payload.get("confirm", "")))
         else:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:
