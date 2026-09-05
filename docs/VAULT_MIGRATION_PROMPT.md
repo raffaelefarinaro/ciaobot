@@ -106,7 +106,7 @@ on input it cannot classify, or when you want to decide the mapping yourself.
 > ```
 > ciao workspace-reroot --mark-migrated   # records the layout; verifies it first
 > ciao workspace-reroot --repair          # per-root INDEX.md, VOCABULARY.md, search index
-> ciao sync-skills                        # per-root .claude/ and .agents/ catalogs
+> ciao sync-skills                        # per-root .claude/ and .opencode/ catalogs
 > ```
 > The first command is not optional and must come first: `agent_root()` answers
 > "per-root" only when a receipt says so, and `--repair` refuses without one. It
