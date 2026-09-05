@@ -1820,3 +1820,196 @@ def test_the_interim_pattern_still_decides_whether_to_park() -> None:
     assert not ProjectChatManager._is_interim_subagent_text(
         "Done — all three agents reported; the changelog is updated."
     )
+
+
+# ── the drain owns the park once a nudge lands ───────────────────────────────
+
+
+class _FakeProvider:
+    """Drives `_drain_between_turns` with a scripted event sequence."""
+
+    can_drain = True
+
+    def __init__(self, events: list) -> None:
+        self._events = events
+
+    async def drain_events(self):
+        for event in self._events:
+            yield event
+
+
+def _result_event(text: str, *, is_error: bool = False):
+    from ciao.models import ResultEvent
+
+    return ResultEvent(type="result", result=text, is_error=is_error)
+
+
+@pytest.mark.asyncio
+async def test_the_drain_announces_the_synthesis_reply_and_drops_the_park(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([
+        _result_event("All three agents reported. The changelog is updated."),
+    ])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    # Exactly one announce, and it carries the synthesis reply — not the
+    # parked "I'll report back" snippet.
+    assert len(calls) == 1
+    assert calls[0][3] != "interim snippet"
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_reply_that_errors_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """The hole left by discarding the park at the nudge.
+
+    `nudged=True` used to mean "the drain will announce", but the drain only
+    announces a non-error, non-stub reply. An errored synthesis reply then left
+    the chat with no notification at all — the same silent completion the
+    handoff exists to remove.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([_result_event("boom", is_error=True)])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_banner_only_nudge_reply_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """`_is_worth_announcing_nudge_reply` rejects a short stub, so the drain
+    stays silent — which means the parked announce has to go out."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([_result_event("ok.")])
+    assert pcm._is_worth_announcing_nudge_reply("ok.") is False
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_drain_that_never_gets_a_reply_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """The CLI can drop after the steer and never produce a ResultEvent."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_drain_leaves_the_park_to_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """The next user turn cancels the drain and supersedes the interim
+    announce, so releasing it here would push a stale non-answer."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    class _Blocking:
+        can_drain = True
+
+        async def drain_events(self):
+            await asyncio.sleep(3600)
+            yield  # pragma: no cover
+
+    pcm._providers["chat-1"] = _Blocking()
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+
+    task = asyncio.create_task(pcm._drain_between_turns("chat-1", "proj-1"))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == []
+    assert "chat-1" in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_a_landed_nudge_hands_the_park_on_rather_than_dropping_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The watcher must NOT discard when the nudge lands.
+
+    Discarding there assumed the drain would announce, but the drain only
+    announces a non-error, non-stub reply that actually arrives. The park has
+    to survive the nudge and be released (or discarded) by the drain, which is
+    the only code that knows which of those happened.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("nudge-handoff", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="nudge-handoff-test")
+    chat.session_id = "sess-nudge-handoff"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-handoff.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_h", "agent-h"),
+    ]
+    completions = iter([_completion_record("agent-h")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "interim")
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    # Not announced here — the drain owns it now — and, crucially, not dropped.
+    assert calls == []
+    assert chat.chat_id in pcm._parked_result_announce

@@ -7041,6 +7041,17 @@ class ProjectChatManager:
                 # the last_activity_at bump that reorders recents and the
                 # pending-retry clear below. The banner heuristic belongs to the
                 # synthesis-nudge drain, which nobody asked for.
+                # A new turn ended, so any announce parked by an earlier turn
+                # of this chat is stale: this turn either announces for itself
+                # below or parks its own entry. Without the clear, an interim
+                # turn 1 followed by an ordinary turn 2 left turn 1's entry in
+                # place for turn 2's watcher to flush — a push carrying the
+                # "I'll report back once the agents finish" snippet, which is
+                # precisely what parking exists to avoid. Safe here: the
+                # superseded watcher was cancelled just above and its `finally`
+                # only releases the entry while it is still the registered
+                # watcher.
+                self._discard_result_announce(chat_id)
                 if not had_error and last_assistant_text.strip():
                     snippet = self._result_snippet(last_assistant_text)
                     chat_now = self._chats.get(chat_id)
@@ -7369,22 +7380,33 @@ class ProjectChatManager:
         # result while its synthesis nudge was still pending. The chat's newest
         # watcher is the only one entitled to release the chat's parked entry;
         # the superseded turn's entry was already overwritten by that park.
+        handed_to_drain = False
         try:
-            await self._watch_subagent_completion_inner(chat_id, project_id)
+            handed_to_drain = await self._watch_subagent_completion_inner(
+                chat_id, project_id
+            )
         finally:
-            current = self._pending_subagent_watchers.get(chat_id)
-            if current is None or current is asyncio.current_task():
-                self._flush_result_announce(chat_id)
+            # `handed_to_drain` means a nudge landed and the between-turns
+            # drain now owns the release — it is the only code that learns
+            # whether a synthesis reply actually arrived and was worth
+            # announcing. Flushing here would push the interim non-answer
+            # alongside it.
+            if not handed_to_drain:
+                current = self._pending_subagent_watchers.get(chat_id)
+                if current is None or current is asyncio.current_task():
+                    self._flush_result_announce(chat_id)
 
     async def _watch_subagent_completion_inner(
         self, chat_id: str, project_id: str
-    ) -> None:
+    ) -> bool:
+        """Returns True when a nudge landed and the drain owns the parked announce."""
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
-            return
+            return False
         if chat.provider == "opencode":
+            # opencode has no nudge path, so nothing can take the park from us.
             await self._watch_opencode_subagent_completion(chat_id, project_id)
-            return
+            return False
         # This watcher looks the file up exactly once; a miss here is final
         # (the loop below would never run), so force the cross-cwd fallback
         # past the shared cache's rescan rate limit — see subagent_tracking.
@@ -7395,7 +7417,7 @@ class ProjectChatManager:
             force_refresh=True,
         )
         if path is None:
-            return
+            return False
 
         last_count = -1
         last_size = -1
@@ -7414,6 +7436,9 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
+        # Set once a nudge lands: from then on the between-turns drain owns the
+        # parked announce, and this watcher must not release it.
+        handed_to_drain = False
         task_wake_sent = False
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
@@ -7493,14 +7518,18 @@ class ProjectChatManager:
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
                         if nudged:
-                            # The drain will publish the synthesis reply and
-                            # announce it; two announces for one turn would
-                            # double-push. Every other outcome — including the
-                            # question stand-down — leaves the parked announce
-                            # for the finally to flush.
-                            self._discard_result_announce(chat_id)
+                            handed_to_drain = True
                         else:
                             self._flush_result_announce(chat_id)
+                        # A landed nudge does NOT discard the park: it only
+                        # hands ownership to the between-turns drain, which
+                        # announces the synthesis reply *if* one arrives and is
+                        # worth announcing. The drain discards it then, and
+                        # flushes it on every other outcome — an error result, a
+                        # banner-only stub, a CLI that never replies after the
+                        # steer, or a drain that raises. Discarding here instead
+                        # re-created the silent completion this whole handoff
+                        # exists to remove, just one step further along.
                     if count != last_count or (ready_to_nudge and nudged):
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
@@ -7540,6 +7569,7 @@ class ProjectChatManager:
                     # and will publish the real count on its first tick.
                     self._publish_subagent_count(chat_id, project_id, 0)
             self._background_agents_last.pop(chat_id, None)
+        return handed_to_drain
 
     async def _watch_opencode_subagent_completion(
         self, chat_id: str, project_id: str
@@ -8052,6 +8082,9 @@ class ProjectChatManager:
         if provider_service is None:
             return
         stream: ChatStream | None = None
+        # Cancellation means the next user turn took over; it owns the parked
+        # announce from there. Every other exit releases it (see the finally).
+        cancelled = False
 
         def close_stream(had_error: bool) -> None:
             nonlocal stream
@@ -8121,6 +8154,10 @@ class ProjectChatManager:
                             chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
+                        # This reply IS the announce the parked entry was
+                        # waiting for, so drop the parked one rather than
+                        # push twice for the same turn.
+                        self._discard_result_announce(chat_id)
                         self._announce_result_ready(
                             chat_id, project_id, title, snippet
                         )
@@ -8129,11 +8166,22 @@ class ProjectChatManager:
                             f"archive-proposal-helper-{chat_id}",
                         )
         except asyncio.CancelledError:
+            # The next user turn cancelled this drain. That turn's own
+            # turn-done handling clears the park (it supersedes the interim
+            # one), so releasing it here would push a stale non-answer.
+            cancelled = True
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app
             logger.exception("Between-turns drain failed for chat %s", chat_id)
         finally:
             close_stream(False)
+            # Exhaustive release. Reaching here without having announced means
+            # the synthesis reply never came, errored, or was a banner-only
+            # stub — every one of which used to leave the chat with no
+            # notification at all. `_flush_result_announce` is a no-op when the
+            # drain already discarded the entry, or when nothing was parked.
+            if not cancelled:
+                self._flush_result_announce(chat_id)
 
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent

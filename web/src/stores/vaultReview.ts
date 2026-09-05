@@ -125,6 +125,11 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         // switched scopes while the POST was in flight, and a late response
         // must not repaint the new scope with the old one's rows.
         if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+          // Take a fresh list ticket so a GET issued before this POST landed
+          // cannot repaint the pre-mutation queue over it — the decided row
+          // would come back as if nothing had happened. The old code got this
+          // for free from the `fetch(..., { force: true })` it no longer runs.
+          ++fetchSeq
           candidates.value = data.candidates
           trashed.value = data.trashed ?? []
           loadedWorkspace.value = workspace

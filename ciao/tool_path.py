@@ -74,8 +74,18 @@ def _rc_fingerprint() -> tuple[object, ...]:
     ``~/.zshrc`` invalidates too. ``$SHELL`` is included because changing it
     changes which of these files are read at all.
     """
-    marks: list[object] = [os.environ.get("SHELL", "")]
+    zdotdir = os.environ.get("ZDOTDIR", "")
+    marks: list[object] = [os.environ.get("SHELL", ""), zdotdir]
     paths = [Path(p).expanduser() for p in _RC_CANDIDATES]
+    # With ZDOTDIR set, zsh reads $ZDOTDIR/.zshrc and friends INSTEAD of the
+    # ~/.z* files above, so without these the fingerprint is blind to the only
+    # file such a user would ever edit: the wizard's PATH hint would then never
+    # clear until the engine restarts.
+    if zdotdir:
+        paths.extend(
+            Path(zdotdir).expanduser() / name
+            for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin")
+        )
     # /etc/paths.d/* is a directory of fragments; each one contributes.
     paths.extend(sorted(Path("/etc/paths.d").glob("*")) if Path("/etc/paths.d").is_dir() else [])
     for path in paths:

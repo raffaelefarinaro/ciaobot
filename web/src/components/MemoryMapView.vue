@@ -15,8 +15,22 @@
         id-prefix="mm-review"
         class="mm-review-tabs"
       />
-      <ProposalReviewPanel v-if="mm.reviewTab === 'proposals'" />
-      <VaultReviewPanel v-else />
+      <!-- TabBar points every tab at `<id-prefix>-panel-<key>` via
+           aria-controls, so those panels have to exist. Both components are
+           single-root, so these attributes fall through onto their root
+           element and change no layout. -->
+      <ProposalReviewPanel
+        v-if="mm.reviewTab === 'proposals'"
+        id="mm-review-panel-proposals"
+        role="tabpanel"
+        aria-labelledby="mm-review-tab-proposals"
+      />
+      <VaultReviewPanel
+        v-else
+        id="mm-review-panel-retirement"
+        role="tabpanel"
+        aria-labelledby="mm-review-tab-retirement"
+      />
     </div>
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">

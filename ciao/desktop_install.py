@@ -114,7 +114,10 @@ def shim_exec_target(content: str) -> Path | None:
     match = _SHIM_EXEC_RE.search(content)
     if match is None:
         return None
-    return Path(match.group("target"))
+    # `expanduser` so a `CIAO_APP_DIR` that kept its literal `~` compares as a
+    # path too: `resolve()` alone would turn "~/Applications/..." into a
+    # cwd-relative path and never match the bundle.
+    return Path(match.group("target")).expanduser()
 
 
 def _same_file(left: Path, right: Path) -> bool:

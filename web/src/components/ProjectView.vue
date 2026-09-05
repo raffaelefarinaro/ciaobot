@@ -875,6 +875,13 @@ watch(() => props.projectId, async () => {
   color: var(--fg3);
 }
 
+/* The overview panel's own children are the cards, and .project-view spaces its
+   children with a flex gap — so the panel repeats that column layout. */
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
 
 .card {
   background: var(--bg2);
@@ -1102,7 +1109,7 @@ watch(() => props.projectId, async () => {
    visible ring too — a focusable region with no ring is a lost keyboard user. */
 .automation-row:focus-visible,
 .tab-panel:focus-visible,
-.automation-card:focus-visible,
+.automation-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .automation-row-main,
 .automation-row-meta {
   display: flex;
