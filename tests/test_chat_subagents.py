@@ -2471,3 +2471,127 @@ async def test_stopping_the_drain_releases_the_park(tmp_path: Path) -> None:
 
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
     assert pcm._parked_announce_token("chat-1") is None
+
+
+@pytest.mark.asyncio
+async def test_stop_racing_a_user_send_leaves_the_park_to_that_turn(
+    tmp_path: Path,
+) -> None:
+    """Stop, then a send: the release must not land inside the new turn.
+
+    ``stop_chat`` awaits the drain teardown before releasing, and that await
+    is exactly where a user send gets in — it cancels the drain and registers
+    its own foreground stream. Releasing afterwards would push "I'll report
+    back once the agents finish" mid-turn; the new turn discards the park and
+    announces for itself when it ends.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    background = ChatStream(background=True)
+    pcm._broker.register("chat-1", background)
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    async def fake_drain() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # What start_stream does when a user send lands on a background
+            # stream, interleaved with the drain's own unwind.
+            pcm._broker.clear("chat-1", background)
+            pcm._broker.register("chat-1", ChatStream(prompt_text="and now?"))
+            raise
+
+    pcm._between_turn_drains["chat-1"] = asyncio.create_task(fake_drain())
+    await asyncio.sleep(0)
+    pcm._arm_parked_announce_deadline("chat-1", token)
+
+    assert await pcm.stop_chat("chat-1") is True
+
+    assert calls == []
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_stays_quiet_during_a_live_user_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The deadline is the third release site and needs the same guard.
+
+    Cancelling it with the drain is the primary defence, but `start_stream`
+    defers that cancel to the turn task when no background stream was
+    registered. A fire in that window must not push the interim non-answer
+    into the turn that is already running.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._broker.register("chat-1", ChatStream(prompt_text="and now?"))
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await pcm._release_parked_announce_after_deadline("chat-1", token)
+
+    assert calls == []
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+def test_the_release_itself_refuses_during_a_live_turn(tmp_path: Path) -> None:
+    """The guard lives in `_flush_result_announce`, not at its call sites.
+
+    There are five sites — the watcher's `finally`, its in-loop decline branch,
+    the drain, the deadline, and Stop — and each was fixed for this separately,
+    one review round at a time, because a stale park pushed mid-turn presents
+    differently from each. Pinning it on the shared release is what stops the
+    sixth site repeating it.
+
+    The entry stays parked rather than being popped: the live turn discards it
+    and announces for itself at turn-done.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    foreground = ChatStream(background=False)
+    pcm._broker.register("chat-1", foreground)
+    try:
+        assert pcm._flush_result_announce("chat-1") is False
+        assert pcm._flush_result_announce("chat-1", token) is False
+        assert calls == []
+        # Not consumed — the live turn still owns it.
+        assert pcm._parked_announce_token("chat-1") == token
+    finally:
+        pcm._broker.clear("chat-1", foreground)
+
+    # Once that turn is gone the same call releases normally.
+    assert pcm._flush_result_announce("chat-1", token) is True
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]
+
+
+def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> None:
+    """The drain's own stream is background; it must not block its own release."""
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    background = ChatStream(background=True)
+    pcm._broker.register("chat-1", background)
+    try:
+        assert pcm._foreground_turn_active("chat-1") is False
+        assert pcm._flush_result_announce("chat-1") is True
+    finally:
+        pcm._broker.clear("chat-1", background)
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]

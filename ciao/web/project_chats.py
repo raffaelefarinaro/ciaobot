@@ -7373,11 +7373,22 @@ class ProjectChatManager:
         self._take_parked_announce(chat_id, token)
 
     def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
-        """Announce a parked result. Returns True when one was actually parked.
+        """Announce a parked result. Returns True when one was actually announced.
 
         Idempotent by construction — the entry is popped — so it is safe to
         call from a `finally` that may run after an explicit flush.
+
+        Refuses while a foreground turn owns the chat, and that check lives
+        HERE rather than at the call sites. There are five of them — the
+        watcher's `finally`, its in-loop decline branch, the drain, the
+        deadline, and Stop — and each was fixed for this separately, one
+        review round at a time, because a stale park pushed mid-turn looks
+        different from each. A live turn always discards this entry and
+        announces for itself at its turn-done, so staying quiet loses nothing;
+        the entry is deliberately left in place for it rather than popped.
         """
+        if self._foreground_turn_active(chat_id):
+            return False
         parked = self._take_parked_announce(chat_id, token)
         if parked is None:
             return False
@@ -7445,6 +7456,18 @@ class ProjectChatManager:
             # deadline cannot cancel the very task that is running it.
             if self._parked_announce_deadlines.get(chat_id) is asyncio.current_task():
                 self._parked_announce_deadlines.pop(chat_id, None)
+        # Cancelling the deadline alongside the drain is the primary defence
+        # against firing mid-turn, but it is not airtight: `start_stream` only
+        # cancels the drain when a background stream was already registered
+        # (most drains sit idle and register none), so on that path the cancel
+        # waits for the turn task's own `_await_between_turns_drain`. A fire in
+        # that window would push the interim non-answer into a live turn.
+        #
+        # `_flush_result_announce` refuses that on its own now; returning early
+        # keeps the log line below honest about what actually happened, and
+        # leaves the entry parked for the live turn to discard.
+        if self._foreground_turn_active(chat_id):
+            return
         if self._flush_result_announce(chat_id, token):
             logger.info(
                 "Synthesis reply for chat %s did not arrive within %ss; "
@@ -7524,7 +7547,7 @@ class ProjectChatManager:
             # back once the agents finish" push landing mid-turn. That turn's
             # own turn-done handling discards this entry and announces for
             # itself, so nothing is lost by staying quiet.
-            if not handed_to_drain and not self._foreground_turn_active(chat_id):
+            if not handed_to_drain:
                 current = self._pending_subagent_watchers.get(chat_id)
                 if current is None or current is asyncio.current_task():
                     self._flush_result_announce(chat_id)
@@ -7686,9 +7709,7 @@ class ProjectChatManager:
                             # question, the user answered it) announces for
                             # itself.
                             current = self._pending_subagent_watchers.get(chat_id)
-                            if (
-                                current is None or current is asyncio.current_task()
-                            ) and not self._foreground_turn_active(chat_id):
+                            if current is None or current is asyncio.current_task():
                                 self._flush_result_announce(
                                     chat_id, self._parked_announce_token(chat_id)
                                 )
@@ -7821,8 +7842,7 @@ class ProjectChatManager:
         drain = self._between_turn_drains.get(chat_id)
         if drain is None or drain.done():
             return NUDGE_SUPERSEDED
-        existing = self._broker.get(chat_id)
-        if existing is not None and not existing.background:
+        if self._foreground_turn_active(chat_id):
             return NUDGE_SUPERSEDED
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -8368,11 +8388,9 @@ class ProjectChatManager:
             #
             # NOT exhaustive over the failure space, and deliberately so: a
             # live-but-silent CLI never ends `drain_events()` at all (it stays
-            # suspended on the queue), so that case reaches the `cancelled`
-            # path when the next user turn arrives and still ends in silence.
-            # Closing it needs a bounded wait on the drain — a behaviour change
-            # with its own trade-off about how long to hold a chat "working".
-            # Tracked in issue #437; do not read this block as covering it.
+            # suspended on the queue), so this block never runs for it. That
+            # case is covered instead by the deadline armed when the nudge
+            # handed the park over (`_arm_parked_announce_deadline`, #437).
             if not cancelled:
                 self._flush_result_announce(chat_id)
 
@@ -8591,6 +8609,13 @@ class ProjectChatManager:
                 # nobody is left to release it. Flush here or the chat keeps
                 # its interim message with no unread badge, no push and no
                 # archive proposal (issue #437).
+                #
+                # A no-op if a user turn started while we were awaiting the
+                # drain above — Stop followed straight by a send is an ordinary
+                # sequence, and the send cancels the drain and registers its own
+                # stream at that await point. `_flush_result_announce` refuses
+                # during a live turn, which discards the park and announces for
+                # itself when it ends.
                 self._flush_result_announce(chat_id)
                 return True
         provider = self._providers.get(chat_id)
