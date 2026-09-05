@@ -77,7 +77,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
-| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed` also lists the reversible trash inventory) or record an explicit keep/link/defer/restore decision; trash and permanent deletion are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation |
+| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed` also lists the reversible trash inventory) or record an explicit keep/link/defer/restore decision; trash and permanent deletion are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. A successful POST answers `{ok, result, candidates, trashed}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
@@ -214,6 +214,8 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?w
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default&include=trashed"
 
 # Record a reversible decision. Permanent deletion is only available after trash.
+# The response carries the refreshed `candidates` and `trashed` lists, so render
+# from those rather than issuing another GET.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"decide","candidate_id":"<candidate-id>","disposition":"keep"}'

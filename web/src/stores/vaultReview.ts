@@ -101,13 +101,52 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     }
   }
 
-  /** Run one mutation and refresh the queue it changes. */
+  /**
+   * Run one mutation and adopt the queue the server rebuilt for it.
+   *
+   * The POST already regenerates the queue — the readable projection is
+   * pending-only and has to reflect the mutation — and now returns it, so this
+   * no longer re-GETs. That mattered: `generate_candidates` reads every note in
+   * the vault three times, so a follow-up fetch made a single row click cost a
+   * whole extra scan of the vault (~0.37s and ~3500 file reads on a 1178-note
+   * vault). Falls back to a fetch if an older engine answers without the
+   * snapshot, so a stale PWA against a new engine (or the reverse) still
+   * refreshes.
+   */
   async function mutate(workspace: string, id: string, body: Record<string, unknown>): Promise<boolean> {
     setBusy(id, true)
     error.value = ''
     try {
-      await api.post<{ ok: boolean }>(reviewUrl(workspace, false), body)
-      await fetch(workspace, { force: true })
+      const data = await api.post<VaultReviewResponse & { ok: boolean }>(
+        reviewUrl(workspace, false), body,
+      )
+      if (data && Array.isArray(data.candidates)) {
+        // Only adopt it for the workspace we asked about: the user may have
+        // switched scopes while the POST was in flight, and a late response
+        // must not repaint the new scope with the old one's rows.
+        if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+          // Take a fresh list ticket so a GET issued before this POST landed
+          // cannot repaint the pre-mutation queue over it — the decided row
+          // would come back as if nothing had happened. The old code got this
+          // for free from the `fetch(..., { force: true })` it no longer runs.
+          //
+          // Only a GET for *this* scope: a fetch the user triggered by
+          // switching workspaces must still land, or the new scope would sit
+          // on the old one's rows with nothing left to refetch it. And clear
+          // `loading` here — the orphaned request's own `finally` is gated on
+          // still holding the ticket, so nobody else ever would, and the
+          // panel's refresh button would stay disabled reading "loading…".
+          if (fetchPromise && fetchWorkspace === workspace) {
+            ++fetchSeq
+            loading.value = false
+          }
+          candidates.value = data.candidates
+          trashed.value = data.trashed ?? []
+          loadedWorkspace.value = workspace
+        }
+      } else {
+        await fetch(workspace, { force: true })
+      }
       return true
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Action failed'

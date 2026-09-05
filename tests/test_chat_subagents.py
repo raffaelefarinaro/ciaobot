@@ -1675,64 +1675,923 @@ async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
     assert len(calls) == 1
 
 
-# ── the interim announce gate ────────────────────────────────────────────────
+# ── the parked result announce ───────────────────────────────────────────────
+#
+# The announce for a turn that ends on "I'll report back" is PARKED, not
+# dropped. Exactly one owner releases it: the watcher flushes on every path
+# where the nudge does not speak, and a landed nudge discards it because the
+# reply it produces announces for itself. The predicate this replaced tried to
+# predict the nudge's decision and silently lost the announce for every reason
+# it did not know about.
 
 
-def _withhold(text: str, *, pending_question: bool = False) -> bool:
-    from ciao.web.project_chats import ProjectChatManager
+def _announce_spy(pcm) -> list[tuple]:
+    """Record announces, and keep detached work from reaching the real vault.
 
-    return ProjectChatManager._withhold_interim_announce(
-        text,
-        nudge_can_reannounce=True,
-        has_pending_question=pending_question,
-    )
-
-
-def test_interim_announce_is_withheld_for_a_plain_report_back_turn() -> None:
-    """The normal case: the nudge will fire, so the announce waits for it."""
-    assert _withhold("Dispatched three agents; I'll report back once they finish.")
-
-
-def test_interim_announce_fires_when_the_turn_ends_on_a_prose_question() -> None:
-    """Regression: withholding here dropped the notification entirely.
-
-    `_nudge_synthesis_after_subagents` stands down on
-    `SessionSubagentState.awaiting_user_answer`, which is the prose heuristic
-    `ends_with_user_question` — not `pending_question`. A turn that matches an
-    interim pattern *and* ends on a prose question is therefore refused by the
-    nudge, so nothing announces in the withheld announce's place: no push, no
-    unread badge, no archive proposal, permanently.
+    Only the archive-proposal helper is swallowed — everything else spawned
+    this way is scheduled for real, or a stub here would silently disable the
+    behaviour under test (the parked-announce deadline is spawned exactly like
+    that helper).
     """
-    text = (
-        "Dispatched the agents, still waiting on their results "
-        "— want me to check the changelog too?"
+    calls: list[tuple] = []
+    pcm._announce_result_ready = lambda *a: calls.append(a)  # type: ignore[method-assign]
+
+    def spawn(coro, name: str):
+        if name.startswith("archive-proposal-helper"):
+            coro.close()
+            return None
+        return asyncio.create_task(coro, name=name)
+
+    pcm._spawn_detached = spawn  # type: ignore[method-assign]
+    return calls
+
+
+def test_a_parked_announce_is_released_when_no_nudge_speaks(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    assert calls == []
+
+    assert pcm._flush_result_announce("chat-1") is True
+    assert calls == [("chat-1", "proj-1", "Title", "snippet")]
+
+
+def test_flushing_is_idempotent(tmp_path: Path) -> None:
+    """The watcher's `finally` can run after an explicit flush on the same path."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    assert pcm._flush_result_announce("chat-1") is True
+    assert pcm._flush_result_announce("chat-1") is False
+    assert len(calls) == 1
+
+
+def test_a_landed_nudge_discards_the_parked_announce(tmp_path: Path) -> None:
+    """Otherwise the turn pushes twice: once here, once for the synthesis reply."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    pcm._discard_result_announce("chat-1")
+    assert pcm._flush_result_announce("chat-1") is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_watcher_releases_the_announce_when_it_cannot_find_the_session(
+    tmp_path: Path,
+) -> None:
+    """The failure #430 was filed for.
+
+    `find_parent_session_file` returning None makes the watcher return before
+    its loop ever runs, so no nudge can ever fire. The old predicate could not
+    see that: it dropped the announce and the chat completed in total silence —
+    no push, no unread badge, no archive proposal, and nothing logged.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Runs", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Owner")
+    chat.session_id = "session-with-no-file-on-disk"
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "snippet")
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == [(chat.chat_id, project.project_id, "Title", "snippet")]
+
+
+@pytest.mark.asyncio
+async def test_watcher_releases_the_announce_when_it_raises(tmp_path: Path) -> None:
+    """An exception is just another path where no nudge will speak."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    async def boom(
+        chat_id: str, project_id: str, handed_to_drain: list[bool]
+    ) -> None:
+        raise RuntimeError("watcher blew up")
+
+    pcm._watch_subagent_completion_inner = boom  # type: ignore[method-assign]
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+
+    with pytest.raises(RuntimeError):
+        await pcm._watch_subagent_completion("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_watcher_does_not_release_the_next_turns_announce(
+    tmp_path: Path,
+) -> None:
+    """`_start_subagent_watcher` cancels and replaces; cancellation is async.
+
+    So a superseded watcher's `finally` can run *after* the next turn has
+    parked its own announce. Flushing there would push a result while its
+    synthesis nudge was still pending, which is the double-push the parking is
+    meant to avoid.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    started = asyncio.Event()
+
+    async def blocks(
+        chat_id: str, project_id: str, handed_to_drain: list[bool]
+    ) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    pcm._watch_subagent_completion_inner = blocks  # type: ignore[method-assign]
+    old = asyncio.create_task(pcm._watch_subagent_completion("chat-1", "proj-1"))
+    pcm._pending_subagent_watchers["chat-1"] = old
+    await started.wait()
+
+    # A new turn supersedes it and parks its own announce before the cancelled
+    # task's finally has had a chance to run.
+    newer = asyncio.create_task(asyncio.sleep(3600))
+    pcm._pending_subagent_watchers["chat-1"] = newer
+    old.cancel()
+    pcm._park_result_announce("chat-1", "proj-1", "Newer", "newer snippet")
+    with pytest.raises(asyncio.CancelledError):
+        await old
+
+    assert calls == []
+    newer.cancel()
+
+    # The registered watcher still owns the release.
+    assert pcm._flush_result_announce("chat-1") is True
+    assert calls == [("chat-1", "proj-1", "Newer", "newer snippet")]
+
+
+def test_the_interim_pattern_still_decides_whether_to_park() -> None:
+    """Parking is gated on the prose heuristic, which is safe to be broad:
+    a false positive only defers the announce to the watcher, which always
+    releases it. A real result is announced immediately."""
+    from ciao.web.project_chats import ProjectChatManager
+
+    assert ProjectChatManager._is_interim_subagent_text(
+        "Dispatched three agents; I'll report back once they finish."
     )
-    from ciao.subagent_tracking import ends_with_user_question
-    from ciao.web.project_chats import ProjectChatManager
-
-    # Both halves of the trap must hold, or the test proves nothing.
-    assert ProjectChatManager._is_interim_subagent_text(text)
-    assert ends_with_user_question(text)
-
-    assert _withhold(text) is False
+    assert not ProjectChatManager._is_interim_subagent_text(
+        "Done — all three agents reported; the changelog is updated."
+    )
 
 
-def test_interim_announce_fires_on_an_explicit_pending_question() -> None:
-    assert _withhold("Waiting on the agents.", pending_question=True) is False
+# ── the drain owns the park once a nudge lands ───────────────────────────────
 
 
-def test_interim_announce_fires_when_the_nudge_cannot_reannounce() -> None:
-    from ciao.web.project_chats import ProjectChatManager
+class _FakeProvider:
+    """Drives `_drain_between_turns` with a scripted event sequence."""
 
-    assert (
-        ProjectChatManager._withhold_interim_announce(
-            "I'll report back once the agents finish.",
-            nudge_can_reannounce=False,
-            has_pending_question=False,
+    can_drain = True
+
+    def __init__(self, events: list) -> None:
+        self._events = events
+
+    async def drain_events(self):
+        for event in self._events:
+            yield event
+
+
+def _result_event(text: str, *, is_error: bool = False):
+    from ciao.models import ResultEvent
+
+    return ResultEvent(type="result", result=text, is_error=is_error)
+
+
+@pytest.mark.asyncio
+async def test_the_drain_announces_the_synthesis_reply_and_drops_the_park(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([
+        _result_event("All three agents reported. The changelog is updated."),
+    ])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    # Exactly one announce, and it carries the synthesis reply — not the
+    # parked "I'll report back" snippet.
+    assert len(calls) == 1
+    assert calls[0][3] != "interim snippet"
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_reply_that_errors_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """The hole left by discarding the park at the nudge.
+
+    `nudged=True` used to mean "the drain will announce", but the drain only
+    announces a non-error, non-stub reply. An errored synthesis reply then left
+    the chat with no notification at all — the same silent completion the
+    handoff exists to remove.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([_result_event("boom", is_error=True)])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_banner_only_nudge_reply_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """`_is_worth_announcing_nudge_reply` rejects a short stub, so the drain
+    stays silent — which means the parked announce has to go out."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([_result_event("ok.")])
+    assert pcm._is_worth_announcing_nudge_reply("ok.") is False
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_drain_that_never_gets_a_reply_still_releases_the_park(
+    tmp_path: Path,
+) -> None:
+    """The CLI can drop after the steer and never produce a ResultEvent."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._providers["chat-1"] = _FakeProvider([])
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+    await pcm._drain_between_turns("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_drain_leaves_the_park_to_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """The next user turn cancels the drain and supersedes the interim
+    announce, so releasing it here would push a stale non-answer."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    class _Blocking:
+        can_drain = True
+
+        async def drain_events(self):
+            await asyncio.sleep(3600)
+            yield  # pragma: no cover
+
+    pcm._providers["chat-1"] = _Blocking()
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim snippet")
+
+    task = asyncio.create_task(pcm._drain_between_turns("chat-1", "proj-1"))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == []
+    assert "chat-1" in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_a_landed_nudge_hands_the_park_on_rather_than_dropping_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The watcher must NOT discard when the nudge lands.
+
+    Discarding there assumed the drain would announce, but the drain only
+    announces a non-error, non-stub reply that actually arrives. The park has
+    to survive the nudge and be released (or discarded) by the drain, which is
+    the only code that knows which of those happened.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("nudge-handoff", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="nudge-handoff-test")
+    chat.session_id = "sess-nudge-handoff"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-handoff.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_h", "agent-h"),
+    ]
+    completions = iter([_completion_record("agent-h")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
         )
-        is False
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
     )
 
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
 
-def test_a_real_result_is_never_withheld() -> None:
-    assert _withhold("Done — all three agents reported; the changelog is updated.") is False
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "interim")
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    # Not announced here — the drain owns it now — and, crucially, not dropped.
+    assert calls == []
+    assert chat.chat_id in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_the_handoff_survives_the_watcher_raising_after_the_nudge(
+    tmp_path: Path,
+) -> None:
+    """The handoff is a box, not a return value, for exactly this reason.
+
+    The watcher keeps polling after a nudge lands whenever CLI-owned tasks are
+    still tracked, so it can still raise. A lost return value would send the
+    outer `finally` down the flush path while the drain was still going to
+    announce the synthesis reply — two pushes for one turn, the interim
+    "I'll report back" among them.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    async def nudges_then_raises(chat_id, project_id, handed_to_drain):
+        handed_to_drain.append(True)
+        raise RuntimeError("a later tick blew up")
+
+    pcm._watch_subagent_completion_inner = nudges_then_raises  # type: ignore[method-assign]
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    with pytest.raises(RuntimeError):
+        await pcm._watch_subagent_completion("chat-1", "proj-1")
+
+    assert calls == []
+    assert "chat-1" in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_a_failed_nudge_is_not_retried_while_cli_tasks_hold_the_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One nudge attempt per watcher, whatever the outcome.
+
+    Every exit path but the CLI-task one breaks straight after the nudge, so a
+    *failed* nudge only ever got retried there — and that retry was harmful
+    twice over. The failed attempt has already flushed the parked interim
+    announce, so a later success hands the drain a turn that announces again:
+    two pushes for one turn, the "I'll report back" non-answer among them. And
+    while the nudge keeps failing — a parent that ended on a question never
+    stops failing — every 3s tick re-ran `last_activity_at = now` + `_save()`
+    and another steer, for the watcher's full hour.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("nudge-once", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="nudge-once-test")
+    chat.session_id = "sess-nudge-once-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-once-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    # CLI alive: no wake fires, so the tracked Monitor task keeps the loop
+    # ticking instead of letting it break after the first nudge.
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
+
+    attempts: list[bool] = []
+
+    async def failing_nudge(chat_id: str, *, awaiting_user_answer: bool = False) -> bool:
+        attempts.append(awaiting_user_answer)
+        return False
+
+    monkeypatch.setattr(pcm, "_nudge_synthesis_after_subagents", failing_nudge)
+
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "interim")
+
+    ticks = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        ticks["n"] += 1
+        if ticks["n"] > 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    except KeyboardInterrupt:
+        pass
+
+    assert ticks["n"] > 1, "the tracked CLI task should have kept the loop alive"
+    assert attempts == [False]
+    # The single failed attempt released the park, exactly once.
+    assert calls == [(chat.chat_id, project.project_id, "Title", "interim")]
+
+
+# ── the parked-announce deadline (#437) ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_releases_an_announce_the_drain_never_will(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live CLI that never answers the nudge ends the drain in no way at all.
+
+    `drain_events()` only finishes on transport death or a parse error, so the
+    drain stays suspended and its release never runs; the eventual cancel by
+    the next user turn deliberately does not flush. Without the deadline the
+    chat sits on "I'll report back once the agents finish" with no push, no
+    unread badge and no archive proposal.
+    """
+    from ciao.web import project_chats as pc
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    monkeypatch.setattr(pc, "_PARKED_ANNOUNCE_DEADLINE_SECONDS", 0.01)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+    await asyncio.sleep(0.05)
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_is_a_no_op_once_the_drain_has_announced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The normal case: the synthesis reply arrives and announces for itself."""
+    from ciao.web import project_chats as pc
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    monkeypatch.setattr(pc, "_PARKED_ANNOUNCE_DEADLINE_SECONDS", 0.01)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+    pcm._discard_result_announce("chat-1")
+    await asyncio.sleep(0.05)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_never_fires_a_later_turns_announce(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Token-scoped, because the slot is per chat and turns reuse it.
+
+    Turn 1 hands off and arms a deadline; turn 2 parks its own entry in the
+    same slot. An untokened deadline would push turn 2's announce early, ahead
+    of its own still-pending synthesis reply.
+    """
+    from ciao.web import project_chats as pc
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    monkeypatch.setattr(pc, "_PARKED_ANNOUNCE_DEADLINE_SECONDS", 0.01)
+
+    first = pcm._park_result_announce("chat-1", "proj-1", "Title", "turn one")
+    pcm._arm_parked_announce_deadline("chat-1", first)
+    second = pcm._park_result_announce("chat-1", "proj-1", "Title", "turn two")
+    assert second != first
+    await asyncio.sleep(0.05)
+
+    assert calls == []
+    assert pcm._parked_announce_token("chat-1") == second
+
+
+def test_a_token_scoped_release_leaves_a_newer_entry_alone(tmp_path: Path) -> None:
+    from ciao.web.project_chats import ProjectChatManager  # noqa: F401
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    stale = pcm._park_result_announce("chat-1", "proj-1", "Title", "turn one")
+    fresh = pcm._park_result_announce("chat-1", "proj-1", "Title", "turn two")
+
+    assert pcm._flush_result_announce("chat-1", stale) is False
+    assert calls == []
+    assert pcm._flush_result_announce("chat-1", fresh) is True
+    assert calls == [("chat-1", "proj-1", "Title", "turn two")]
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_dies_with_the_drain_it_backstops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A new user turn voids the deadline, token or no token.
+
+    The token only proves the *entry* is still the one that was parked, and it
+    still is: the next user turn cancels the drain but does not clear the park
+    until its own turn ends. A turn that outruns the deadline would therefore
+    let it fire mid-turn and push the "I'll report back once the agents finish"
+    non-answer that the drain's cancelled path deliberately refuses to send.
+    """
+    from ciao.web import project_chats as pc
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    monkeypatch.setattr(pc, "_PARKED_ANNOUNCE_DEADLINE_SECONDS", 0.01)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+    # The next user turn: start_stream cancels the drain, _drive awaits it.
+    await pcm._await_between_turns_drain("chat-1")
+    await asyncio.sleep(0.05)
+
+    assert calls == []
+    # Still parked — the superseding turn's own turn-done handling clears it.
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+# ── a superseding user turn is not a declined nudge ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_user_turn_taking_over_reports_supersession(
+    tmp_path: Path,
+) -> None:
+    """`_nudge_synthesis_after_subagents` declines for two unlike reasons.
+
+    A missing/finished drain (or a live foreground stream) means a USER TURN
+    took the chat over, not that nothing will ever announce.
+
+    This pins the REPORTED OUTCOME only. That is deliberately not the same as
+    proving no announce fires — the first version of this change returned
+    SUPERSEDED correctly and still pushed, because the loop broke straight into
+    the watcher's outer `finally`, which flushed anyway. The end-to-end
+    guarantee lives in
+    `test_a_live_user_turn_keeps_the_watchers_finally_quiet`.
+    """
+    from ciao.web.project_chats import NUDGE_SUPERSEDED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("supersede", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="supersede-test")
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("must not steer into a live user turn")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    # No between-turns drain registered: exactly what a user send leaves behind.
+    assert (
+        await pcm._nudge_synthesis_after_subagents(chat.chat_id)
+    ) == NUDGE_SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_no_way_to_steer_is_declined_not_superseded(tmp_path: Path) -> None:
+    """The other half: nothing will ever announce, so the park must be released."""
+    from ciao.web.project_chats import NUDGE_DECLINED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("declined", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="declined-test")
+
+    class NoSteerProvider:
+        can_drain = True
+
+    pcm._providers[chat.chat_id] = NoSteerProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+    try:
+        assert (
+            await pcm._nudge_synthesis_after_subagents(chat.chat_id)
+        ) == NUDGE_DECLINED
+    finally:
+        running_drain.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_parent_ending_on_a_question_is_declined(tmp_path: Path) -> None:
+    """Answering is the user's move and no nudge will fire, so the announce
+    has to go out — that was the v0.16.0 bug, kept covered here."""
+    from ciao.web.project_chats import NUDGE_DECLINED
+
+    pcm = _make_manager(tmp_path)
+    assert (
+        await pcm._nudge_synthesis_after_subagents(
+            "chat-1", awaiting_user_answer=True
+        )
+    ) == NUDGE_DECLINED
+
+
+@pytest.mark.asyncio
+async def test_a_live_user_turn_keeps_the_watchers_finally_quiet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A superseded nudge breaks the watcher loop straight into its `finally`.
+
+    Without the foreground-turn check there, the flush the NUDGE_SUPERSEDED
+    path declines to do happens a moment later anyway — pushing "I'll report
+    back once the agents finish" into the middle of the user's turn. That turn
+    discards the park and announces for itself when it ends.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("supersede-watch", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="supersede-watch-test")
+    chat.session_id = "sess-supersede-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-supersede-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    completions = iter([_completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("must not steer into a live user turn")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    # A user send: no between-turns drain left, a live foreground stream.
+    pcm._broker.register(chat.chat_id, ChatStream(prompt_text="what now?"))
+    calls = _announce_spy(pcm)
+    token = pcm._park_result_announce(
+        chat.chat_id, project.project_id, "Title", "interim"
+    )
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == []
+    assert pcm._parked_announce_token(chat.chat_id) == token
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_with_no_turn_to_supersede_it_still_releases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half: a drain that is simply gone (Stop, a drain that ended)
+    with no user turn in flight must still release the park — nothing else
+    would, and the chat would complete in silence."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("no-drain", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="no-drain-test")
+    chat.session_id = "sess-no-drain-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-no-drain-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    completions = iter([_completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("no drain to capture the reply")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "interim")
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == [(chat.chat_id, project.project_id, "Title", "interim")]
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_drain_releases_the_park(tmp_path: Path) -> None:
+    """Stop ends the drain and cancels the deadline backstopping it.
+
+    The drain's cancelled path leaves the park "to the next turn", but Stop
+    starts no next turn, so without an explicit release the chat keeps its
+    interim message with no unread badge, no push and no archive proposal.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    stream = ChatStream(background=True)
+    pcm._broker.register("chat-1", stream)
+    drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains["chat-1"] = drain  # type: ignore[assignment]
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+
+    assert await pcm.stop_chat("chat-1") is True
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]
+    assert pcm._parked_announce_token("chat-1") is None
+
+
+@pytest.mark.asyncio
+async def test_stop_racing_a_user_send_leaves_the_park_to_that_turn(
+    tmp_path: Path,
+) -> None:
+    """Stop, then a send: the release must not land inside the new turn.
+
+    ``stop_chat`` awaits the drain teardown before releasing, and that await
+    is exactly where a user send gets in — it cancels the drain and registers
+    its own foreground stream. Releasing afterwards would push "I'll report
+    back once the agents finish" mid-turn; the new turn discards the park and
+    announces for itself when it ends.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    background = ChatStream(background=True)
+    pcm._broker.register("chat-1", background)
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    async def fake_drain() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # What start_stream does when a user send lands on a background
+            # stream, interleaved with the drain's own unwind.
+            pcm._broker.clear("chat-1", background)
+            pcm._broker.register("chat-1", ChatStream(prompt_text="and now?"))
+            raise
+
+    pcm._between_turn_drains["chat-1"] = asyncio.create_task(fake_drain())
+    await asyncio.sleep(0)
+    pcm._arm_parked_announce_deadline("chat-1", token)
+
+    assert await pcm.stop_chat("chat-1") is True
+
+    assert calls == []
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_stays_quiet_during_a_live_user_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The deadline is the third release site and needs the same guard.
+
+    Cancelling it with the drain is the primary defence, but `start_stream`
+    defers that cancel to the turn task when no background stream was
+    registered. A fire in that window must not push the interim non-answer
+    into the turn that is already running.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._broker.register("chat-1", ChatStream(prompt_text="and now?"))
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await pcm._release_parked_announce_after_deadline("chat-1", token)
+
+    assert calls == []
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+def test_the_release_itself_refuses_during_a_live_turn(tmp_path: Path) -> None:
+    """The guard lives in `_flush_result_announce`, not at its call sites.
+
+    There are five sites — the watcher's `finally`, its in-loop decline branch,
+    the drain, the deadline, and Stop — and each was fixed for this separately,
+    one review round at a time, because a stale park pushed mid-turn presents
+    differently from each. Pinning it on the shared release is what stops the
+    sixth site repeating it.
+
+    The entry stays parked rather than being popped: the live turn discards it
+    and announces for itself at turn-done.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    foreground = ChatStream(background=False)
+    pcm._broker.register("chat-1", foreground)
+    try:
+        assert pcm._flush_result_announce("chat-1") is False
+        assert pcm._flush_result_announce("chat-1", token) is False
+        assert calls == []
+        # Not consumed — the live turn still owns it.
+        assert pcm._parked_announce_token("chat-1") == token
+    finally:
+        pcm._broker.clear("chat-1", foreground)
+
+    # Once that turn is gone the same call releases normally.
+    assert pcm._flush_result_announce("chat-1", token) is True
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]
+
+
+def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> None:
+    """The drain's own stream is background; it must not block its own release."""
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    background = ChatStream(background=True)
+    pcm._broker.register("chat-1", background)
+    try:
+        assert pcm._foreground_turn_active("chat-1") is False
+        assert pcm._flush_result_announce("chat-1") is True
+    finally:
+        pcm._broker.clear("chat-1", background)
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]

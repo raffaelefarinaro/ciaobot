@@ -320,3 +320,59 @@ def test_uninstall_leaves_another_installs_agents_alone_when_the_bundle_is_gone(
     assert calls == []
     assert desktop_plist.exists()
     assert server_plist.exists()
+
+
+def _shim(engine: Path, *, marker: str | None = None) -> str:
+    """A shim body in exactly the shape `scripts/install.sh` writes."""
+    return (
+        "#!/bin/sh\n"
+        f"{desktop_install.SHIM_MARKER if marker is None else marker}\n"
+        f'exec "{engine}" "$@"\n'
+    )
+
+
+def test_shim_target_survives_quoting_and_path_variance(tmp_path: Path) -> None:
+    """Identity is a resolved path comparison, not a substring match.
+
+    A doubled slash (`CIAO_APP_DIR=~/Applications/`) used to orphan the shim,
+    which is why a slash-collapsing helper existed. Parsing the exec target and
+    resolving it makes that class of variance — doubled slashes, `.` segments,
+    a symlinked Applications dir — stop mattering at once.
+    """
+    bundle = _native_bundle(tmp_path)
+    engine = bundle / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    shim = tmp_path / "bin" / "ciao"
+    shim.parent.mkdir()
+    doubled = str(engine).replace("/Ciaobot.app", "//Ciaobot.app", 1)
+    shim.write_text(_shim(Path(doubled)), encoding="utf-8")
+
+    result = desktop_install.uninstall_desktop_app(app_dir=tmp_path, shim_path=shim)
+
+    assert result["removed_shim"] == str(shim)
+    assert not shim.exists()
+
+
+def test_shim_target_is_not_matched_by_a_prefix_bundle(tmp_path: Path) -> None:
+    """`Ciaobot.app` is a path prefix of nothing else, but the check must not
+    rely on that: a resolved comparison is per-path-segment by construction."""
+    _native_bundle(tmp_path)
+    other = tmp_path / "elsewhere" / desktop_install.APP_BUNDLE_NAME
+    shim = tmp_path / "bin" / "ciao"
+    shim.parent.mkdir()
+    shim.write_text(
+        _shim(other / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"),
+        encoding="utf-8",
+    )
+
+    assert "removed_shim" not in desktop_install.uninstall_desktop_app(
+        app_dir=tmp_path, shim_path=shim
+    )
+    assert shim.exists()
+
+
+def test_shim_exec_target_requires_the_marker(tmp_path: Path) -> None:
+    """A `ciao` with our exec line but no marker is not ours to delete."""
+    engine = tmp_path / "x" / "ciao"
+    assert desktop_install.shim_exec_target(_shim(engine)) == engine
+    assert desktop_install.shim_exec_target(_shim(engine, marker="# someone else")) is None
+    assert desktop_install.shim_exec_target("#!/bin/sh\necho hi\n") is None

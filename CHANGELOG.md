@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.16.1 - 2026-09-05
+
+### Changed
+- Merge pull request #436 from raffaelefarinaro/chore/sync-develop-v0.16.0 (`add97fec`)
+- perf(setup): stop spawning a login shell on every wizard poll (#432) (`4f8960e1`)
+- perf(vault): one row decision no longer costs three vault scans (#431) (`fa9cb822`)
+- refactor(web): one TabBar, and one age ladder (#433) (`47b0c987`)
+
+### Fixed
+- fix(desktop): identify the ciao shim by resolved path, not substring (#434) (`343ce3fc`)
+- fix(chat): hand the result announce back, stop predicting the nudge (#430) (`153b7fc4`)
+- fix: release-gate review findings on the five issue fixes (`6d67b9d9`)
+- fix: second-pass review findings, with the tests the fixes needed (`656972bc`)
+- fix(chat): bound how long a result announce can stay parked (#437) (`9267c6cd`)
+- fix(chat): cancel the deadline with its drain, and stop conflating decline with supersession (`f7749b96`)
+- fix(chat): make supersession actually stay quiet, and release on Stop (`7d12fc71`)
+- fix(chat): put the live-turn guard in the release, not at each call site (`d1c2f8fe`)
+
+### Maintenance
+- docs(chat): stop overstating what the drain's release covers (`e6ff55d2`)
+- docs(chat): drop the dead guard and stop overstating the trade-off (`0862117e`)
+- docs: record what v0.16.1 changed in the module map (`09ab6e53`)
+
 ## v0.16.0 - 2026-09-05
 
 ### Added

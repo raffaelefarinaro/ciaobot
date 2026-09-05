@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import TabBar, { type TabSpec } from './TabBar.vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -175,8 +176,8 @@ const REVIEW_TABS = [
   { key: 'queue' as const, label: 'Queue' },
   { key: 'history' as const, label: 'History' },
 ]
-const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
-
+// Must match TabBar's `id-prefix="pr"` scheme: the tabs live in that component
+// and point at these panels via aria-controls.
 function tabId(key: string): string {
   return `pr-tab-${key}`
 }
@@ -185,32 +186,18 @@ function panelId(key: string): string {
   return `pr-panel-${key}`
 }
 
+const reviewTabs = computed<TabSpec<'queue' | 'history'>[]>(() =>
+  REVIEW_TABS.map(tab => ({
+    ...tab,
+    // Only History carries a count, and it stays hidden while the ledger loads
+    // — a badge rendered before the fetch read "History 0" on a full ledger.
+    count: tab.key === 'history' ? historyCount.value : undefined,
+  })),
+)
+
 function switchTab(key: 'queue' | 'history') {
   store.view = key
   if (key === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
-}
-
-// Roving tabindex, mirroring ProjectView's project-tabs pattern: the bar is a
-// single Tab stop and Left/Right/Home/End move (and switch) between the two.
-function onReviewTabKeydown(event: KeyboardEvent): void {
-  if (!TAB_KEYS.includes(event.key)) return
-  const current = event.currentTarget as HTMLElement | null
-  const bar = current?.parentElement
-  if (!current || !bar) return
-  const tabs = Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'))
-  const index = tabs.indexOf(current)
-  if (index < 0) return
-  event.preventDefault()
-  let next = index
-  if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
-  else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
-  else if (event.key === 'Home') next = 0
-  else next = tabs.length - 1
-  const target = tabs[next]
-  const key = target?.dataset.tab as 'queue' | 'history' | undefined
-  if (!key) return
-  switchTab(key)
-  target.focus()
 }
 
 // Null until the ledger has loaded, and the badge is hidden while it is: a
@@ -675,26 +662,14 @@ watch(
   <div class="proposal-review">
     <header class="pr-head">
       <!-- A tablist, not a nav landmark: this switches sub-views in place. -->
-      <div class="pr-tabs" role="tablist" aria-label="Proposal review">
-        <button
-          v-for="tab in REVIEW_TABS"
-          :key="tab.key"
-          :id="tabId(tab.key)"
-          type="button"
-          class="pr-tab"
-          :class="{ active: store.view === tab.key }"
-          role="tab"
-          :aria-selected="store.view === tab.key"
-          :aria-controls="panelId(tab.key)"
-          :tabindex="store.view === tab.key ? 0 : -1"
-          :data-tab="tab.key"
-          @click="switchTab(tab.key)"
-          @keydown="onReviewTabKeydown"
-        >
-          {{ tab.label }}
-          <span v-if="tab.key === 'history' && historyCount !== null" class="pr-tab-count">{{ historyCount }}</span>
-        </button>
-      </div>
+      <TabBar
+        :model-value="store.view"
+        :tabs="reviewTabs"
+        label="Proposal review"
+        id-prefix="pr"
+        class="pr-tabs"
+        @update:model-value="switchTab"
+      />
       <p v-if="store.view === 'queue'" class="pr-summary">
         <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
         <button
@@ -965,47 +940,10 @@ watch(
 
 /* Queue / History tablist, matching ProjectView's project-tabs underline
    style so switching sub-views reads the same way across the app. */
+/* Layout only — the tab styling lives in TabBar. */
 .pr-tabs {
-  display: flex;
-  gap: var(--space-1);
-  border-bottom: 1px solid var(--border);
   margin-bottom: var(--space-2);
-  overflow-x: auto;
 }
-
-.pr-tab {
-  min-height: var(--touch);
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: 600 var(--text-sm) var(--font);
-  white-space: nowrap;
-}
-.pr-tab:hover { color: var(--fg); background: var(--bg3); }
-.pr-tab.active {
-  border-bottom-color: var(--accent);
-  color: var(--fg);
-}
-.pr-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.pr-tab-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: calc(var(--text-xs) + var(--space-2));
-  min-height: calc(var(--text-xs) + var(--space-1));
-  margin-left: var(--space-1);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-.pr-tab.active .pr-tab-count { color: var(--fg); }
 
 /* The batch bar appears only with a selection, so it never occupies space while
    reading. It is sticky, so it must be OPAQUE and above the rows: it used to

@@ -120,9 +120,10 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Normalize for the shim identity check: a trailing slash would otherwise be
-# embedded verbatim (".../Applications//Ciaobot.app/...") while uninstall
-# computes the single-slash form and misses, orphaning the shim.
+# Keep paths tidy: a trailing slash would be embedded verbatim throughout
+# (".../Applications//Ciaobot.app/..."). Uninstall no longer depends on this —
+# it parses the shim's exec target and compares resolved paths — but every
+# message and plist this script writes is nicer without the doubled slash.
 app_dir=${app_dir%/}
 [ -n "$app_dir" ] || app_dir="/"
 

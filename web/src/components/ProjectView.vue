@@ -57,29 +57,12 @@
       <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
     </p>
 
-    <!-- A tablist, not a nav landmark: these switch panels in place rather than
-         navigating. role="tab" is only meaningful inside role="tablist", and
-         each tab owns the panel it names via aria-controls/aria-labelledby. -->
-    <div class="project-tabs" role="tablist" aria-label="Project sections">
-      <button
-        v-for="tab in projectTabs"
-        :key="tab.key"
-        :id="tabId(tab.key)"
-        type="button"
-        class="project-tab"
-        :class="{ active: activeTab === tab.key }"
-        role="tab"
-        :aria-selected="activeTab === tab.key"
-        :aria-controls="panelId(tab.key)"
-        :tabindex="activeTab === tab.key ? 0 : -1"
-        :data-tab="tab.key"
-        @click="activeTab = tab.key"
-        @keydown="onTabKeydown"
-      >
-        {{ tab.label }}
-        <span v-if="tab.count !== undefined" class="tab-count">{{ tab.count }}</span>
-      </button>
-    </div>
+    <TabBar
+      v-model="activeTab"
+      :tabs="projectTabs"
+      label="Project sections"
+      :id-prefix="uid"
+    />
 
     <!-- The overview panel needs a real element to carry role="tabpanel", and
          .project-view lays its children out with a flex gap — so this wrapper
@@ -340,6 +323,7 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
+import TabBar, { type TabSpec } from './TabBar.vue'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { postprocessFailed, postprocessLabel, postprocessSummary } from '../lib/postprocessView'
@@ -370,41 +354,17 @@ type ProjectTab = 'overview' | 'schedules'
 const activeTab = ref<ProjectTab>('overview')
 
 // Unique per mounted instance so the tab/panel id pairs stay valid even if two
-// project views are ever alive at once.
+// project views are ever alive at once. Handed to TabBar as its id-prefix, so
+// these two helpers must keep matching its `<prefix>-tab-`/`<prefix>-panel-`
+// scheme — the tabs it renders point at the panels below via aria-controls.
 const uid = useId()
 const tabId = (key: ProjectTab) => `${uid}-tab-${key}`
 const panelId = (key: ProjectTab) => `${uid}-panel-${key}`
 
-const projectTabs = computed(() => [
-  { key: 'overview' as const, label: 'Overview' },
-  { key: 'schedules' as const, label: 'Automations', count: scheduleCount.value },
+const projectTabs = computed<TabSpec<ProjectTab>[]>(() => [
+  { key: 'overview', label: 'Overview' },
+  { key: 'schedules', label: 'Automations', count: scheduleCount.value },
 ])
-
-const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
-
-// Roving tabindex: the bar is a single Tab stop and Left/Right/Home/End move
-// between tabs, per the ARIA tabs pattern. Selection follows focus because the
-// panels are cheap to render. Mirrors the arrow roaming in HomeRecentChats.
-function onTabKeydown(event: KeyboardEvent): void {
-  if (!TAB_KEYS.includes(event.key)) return
-  const current = event.currentTarget as HTMLElement | null
-  const bar = current?.parentElement
-  if (!current || !bar) return
-  const tabs = Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'))
-  const index = tabs.indexOf(current)
-  if (index < 0) return
-  event.preventDefault()
-  let next = index
-  if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
-  else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
-  else if (event.key === 'Home') next = 0
-  else next = tabs.length - 1
-  const target = tabs[next]
-  const key = target?.dataset.tab as ProjectTab | undefined
-  if (!key) return
-  activeTab.value = key
-  target.focus()
-}
 
 watch(project, (p) => {
   if (p && p.workspace && p.workspace !== store.activeWorkspace) {
@@ -915,14 +875,6 @@ watch(() => props.projectId, async () => {
   color: var(--fg3);
 }
 
-.project-tabs {
-  display: flex;
-  gap: var(--space-1);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 0;
-  overflow-x: auto;
-}
-
 /* The overview panel's own children are the cards, and .project-view spaces its
    children with a flex gap — so the panel repeats that column layout. */
 .tab-panel {
@@ -930,43 +882,6 @@ watch(() => props.projectId, async () => {
   flex-direction: column;
   gap: var(--space-4);
 }
-
-.project-tab {
-  min-height: var(--touch);
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: 600 var(--text-sm) var(--font);
-  white-space: nowrap;
-}
-.project-tab:hover { color: var(--fg); background: var(--bg3); }
-.project-tab.active {
-  border-bottom-color: var(--accent);
-  color: var(--fg);
-}
-.tab-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Sized from the type token rather than a fixed 18px box, so the pill grows
-     with the Appearance font scale instead of clipping the digit. */
-  min-width: calc(var(--text-xs) + var(--space-2));
-  min-height: calc(var(--text-xs) + var(--space-1));
-  margin-left: var(--space-1);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-/* Active is carried by the underline and the text colour. The pill stays
-   unfilled on purpose: a solid fill is reserved for "needs the user"
-   (Rule S1), and --fg on --accent2 is ~1.9:1 in the light theme. */
-.project-tab.active .tab-count { color: var(--fg); }
 
 .card {
   background: var(--bg2);
@@ -1194,8 +1109,7 @@ watch(() => props.projectId, async () => {
    visible ring too — a focusable region with no ring is a lost keyboard user. */
 .automation-row:focus-visible,
 .tab-panel:focus-visible,
-.automation-card:focus-visible,
-.project-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.automation-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .automation-row-main,
 .automation-row-meta {
   display: flex;

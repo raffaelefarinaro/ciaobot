@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -98,11 +99,38 @@ def _remove_installer_launch_agents(
 SHIM_MARKER = "# Ciaobot shim (managed by the Ciaobot installer)"
 
 
-def _collapse_slashes(value: str) -> str:
-    """Collapse duplicate ``/`` so a trailing-slash install dir matches."""
-    while "//" in value:
-        value = value.replace("//", "/")
-    return value
+# The line `scripts/install.sh` writes as the shim body:
+#     exec "/path/to/Ciaobot.app/.../bin/ciao" "$@"
+# Parsed rather than substring-matched, so quoting, a doubled slash from a
+# trailing-slash CIAO_APP_DIR, a symlinked Applications dir and a `~` all stop
+# mattering — the captured path is resolved and compared as a path.
+_SHIM_EXEC_RE = re.compile(r'^exec\s+"(?P<target>.+)"\s+"\$@"\s*$', re.MULTILINE)
+
+
+def shim_exec_target(content: str) -> Path | None:
+    """The engine path a shim execs into, or None if it is not one of ours."""
+    if SHIM_MARKER not in content:
+        return None
+    match = _SHIM_EXEC_RE.search(content)
+    if match is None:
+        return None
+    # `expanduser` so a `CIAO_APP_DIR` that kept its literal `~` compares as a
+    # path too: `resolve()` alone would turn "~/Applications/..." into a
+    # cwd-relative path and never match the bundle.
+    return Path(match.group("target")).expanduser()
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    """Compare two paths by identity, tolerating either one not existing.
+
+    ``resolve()`` is what makes a symlinked ``~/Applications`` or a doubled
+    slash compare equal. It is also why this cannot use ``samefile``: the
+    uninstall runs when the bundle is already gone.
+    """
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
 
 
 def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) -> str:
@@ -117,13 +145,11 @@ def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) 
         content = shim.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+    target = shim_exec_target(content)
+    if target is None:
+        return ""
     engine = destination / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
-    # The full quoted exec target, not a substring of the path: a bundle
-    # directory can be the prefix of a longer one. Slash-collapsed on both
-    # sides: the installer used to embed ``$app_dir`` verbatim, so
-    # ``CIAO_APP_DIR=~/Applications/`` (trailing slash) wrote a ``//`` the
-    # exact-string match below would miss, orphaning the shim.
-    if SHIM_MARKER not in content or _collapse_slashes(f'"{engine}"') not in _collapse_slashes(content):
+    if not _same_file(target, engine):
         return ""
     try:
         shim.unlink()

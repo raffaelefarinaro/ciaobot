@@ -996,17 +996,11 @@ def setup_status(
     ``env`` is injectable for tests and lets the API route pass the live
     process environment without exposing secret values in the response.
     """
-    # Fresh terminal-PATH probe per call: the wizard polls this endpoint every
-    # 2s after the user edits their rc file, and a cached miss would keep
-    # showing the PATH hint after the terminal is fixed until engine restart.
-    # Within this call the short TTL still shares one probe across the up to 3
-    # ``resolve_on_terminal_path`` lookups.
-    try:
-        from ciao import tool_path as _tool_path
-
-        _tool_path.clear_terminal_path_cache()
-    except Exception:
-        pass
+    # No cache-clear here any more. This endpoint is polled every 2s by the
+    # wizard, and clearing forced a fresh ~0.74s login shell on every one of
+    # those polls. `tool_path.terminal_path` now invalidates on the mtimes of
+    # the files a login shell reads, so the answer still refreshes the moment
+    # the user saves their rc file — without a spawn when nothing changed.
     source = env if env is not None else os.environ
     # ``Path.cwd()`` cannot be the getattr default: it is evaluated even when the
     # config carries an explicit workspace_root, and it raises once the cwd is gone.

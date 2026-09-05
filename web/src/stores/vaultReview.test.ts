@@ -159,6 +159,105 @@ describe('vaultReview store', () => {
     })
   })
 
+  it('adopts the queue the POST returns instead of re-scanning the vault', async () => {
+    // The endpoint regenerates the queue anyway (the readable projection is
+    // pending-only), and each generation reads every note in the vault three
+    // times. Re-GETting after every decision made one click cost a whole extra
+    // scan.
+    get.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+    expect(get).toHaveBeenCalledTimes(1)
+
+    post.mockResolvedValue({
+      ok: true,
+      result: {},
+      candidates: [candidate({ candidate_id: 'after-the-decision' })],
+      trashed: [trashed()],
+    })
+    expect(await store.decide('personal', 'abc123abc123abc123abc123', 'keep')).toBe(true)
+
+    expect(get).toHaveBeenCalledTimes(1)   // no follow-up scan
+    expect(store.candidates.map(c => c.candidate_id)).toEqual(['after-the-decision'])
+    expect(store.trashed).toHaveLength(1)
+  })
+
+  it('falls back to a fetch when the engine answers without a snapshot', async () => {
+    // A PWA newer than its engine (or a cached shell after an update) must
+    // still refresh rather than silently showing a stale queue.
+    get.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+    get.mockClear()
+
+    post.mockResolvedValue({ ok: true, result: {} })
+    expect(await store.decide('personal', 'abc123abc123abc123abc123', 'keep')).toBe(true)
+
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not strand the spinner when it orphans an in-flight GET', async () => {
+    // Bumping the ticket stops a slower GET repainting the pre-mutation queue,
+    // but that GET's own `finally` only clears `loading` while it still holds
+    // the ticket — so whoever bumps it owns the reset. Without this the
+    // refresh button stays disabled reading "loading…" for the life of the
+    // store.
+    const store = useVaultReviewStore()
+    let releaseGet!: (v: unknown) => void
+    get.mockReturnValueOnce(new Promise(resolve => { releaseGet = resolve }))
+    const inFlight = store.fetch('personal')
+    expect(store.loading).toBe(true)
+
+    post.mockResolvedValue({
+      ok: true, result: {},
+      candidates: [candidate({ candidate_id: 'after' })], trashed: [],
+    })
+    await store.decide('personal', 'abc123abc123abc123abc123', 'keep')
+
+    releaseGet({ candidates: [candidate()], trashed: [] })
+    await inFlight
+
+    expect(store.loading).toBe(false)
+    // And the stale GET did not repaint over the decision.
+    expect(store.candidates.map(c => c.candidate_id)).toEqual(['after'])
+  })
+
+  it('leaves a workspace-switch fetch alone', async () => {
+    // A GET for a DIFFERENT scope is the user changing workspaces; killing its
+    // ticket would leave the new scope on the old rows with `loadedWorkspace`
+    // already set, so `ensureLoaded` would never refetch it.
+    const store = useVaultReviewStore()
+    let releaseGet!: (v: unknown) => void
+    get.mockReturnValueOnce(new Promise(resolve => { releaseGet = resolve }))
+    const switching = store.fetch('work')
+
+    post.mockResolvedValue({ ok: true, result: {}, candidates: [], trashed: [] })
+    await store.decide('personal', 'abc123abc123abc123abc123', 'keep')
+
+    releaseGet({ candidates: [candidate({ candidate_id: 'work-row' })], trashed: [] })
+    await switching
+
+    expect(store.loadedWorkspace).toBe('work')
+    expect(store.candidates.map(c => c.candidate_id)).toEqual(['work-row'])
+  })
+
+  it('ignores a late snapshot for a workspace the user has left', async () => {
+    get.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('work')
+
+    post.mockResolvedValue({
+      ok: true,
+      result: {},
+      candidates: [candidate({ candidate_id: 'personal-row' })],
+      trashed: [],
+    })
+    await store.decide('personal', 'abc123abc123abc123abc123', 'keep')
+
+    expect(store.loadedWorkspace).toBe('work')
+    expect(store.candidates.map(c => c.candidate_id)).not.toContain('personal-row')
+  })
+
   it('reports a failed mutation without throwing', async () => {
     post.mockRejectedValue(new Error('candidate changed or no longer exists'))
     const store = useVaultReviewStore()

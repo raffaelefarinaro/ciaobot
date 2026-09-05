@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+from pathlib import Path
 
 from ciao import tool_path
 
@@ -121,3 +122,107 @@ def test_resolve_on_terminal_path_returns_none_when_the_probe_fails(monkeypatch)
     monkeypatch.setattr(tool_path, "terminal_path", lambda: "")
     assert tool_path.resolve_on_terminal_path("sh") is None
     _clear_cache()
+
+
+# ── terminal PATH: cache, invalidation, single-flight ────────────────────────
+
+
+def _probe_counter(monkeypatch, value: str = "/usr/bin:/opt/homebrew/bin"):
+    """Replace the login-shell spawn with a counter."""
+    calls: list[int] = []
+
+    def fake_probe() -> str:
+        calls.append(1)
+        return value
+
+    monkeypatch.setattr(tool_path, "_probe_terminal_path", fake_probe)
+    tool_path.clear_terminal_path_cache()
+    return calls
+
+
+def test_terminal_path_does_not_respawn_a_shell_when_nothing_changed(
+    tmp_path, monkeypatch
+):
+    """The wizard polls every 2s; each poll used to cost a ~0.74s login shell."""
+    calls = _probe_counter(monkeypatch)
+
+    assert tool_path.terminal_path() == "/usr/bin:/opt/homebrew/bin"
+    for _ in range(20):
+        tool_path.terminal_path()
+
+    assert len(calls) == 1
+
+
+def test_terminal_path_reprobes_when_an_rc_file_is_saved(tmp_path, monkeypatch):
+    """The behaviour the old per-call cache-clear existed to guarantee.
+
+    A user who adds ~/.local/bin to their rc file must see the wizard's PATH
+    hint clear on the next poll, without an engine restart.
+    """
+    home = tmp_path / "home"
+    (home / ".config" / "fish").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls = _probe_counter(monkeypatch)
+
+    tool_path.terminal_path()
+    tool_path.terminal_path()
+    assert len(calls) == 1
+
+    # Creating a previously absent rc file counts, not just touching one.
+    (home / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n', encoding="utf-8")
+    tool_path.terminal_path()
+    assert len(calls) == 2
+
+    # And a later edit to it.
+    os.utime(home / ".zshrc", (0, 0))
+    tool_path.terminal_path()
+    assert len(calls) == 3
+
+
+def test_terminal_path_reprobes_when_the_shell_changes(monkeypatch):
+    """$SHELL decides which rc files are read at all."""
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    calls = _probe_counter(monkeypatch)
+
+    tool_path.terminal_path()
+    tool_path.terminal_path()
+    assert len(calls) == 1
+
+    monkeypatch.setenv("SHELL", "/opt/homebrew/bin/fish")
+    tool_path.terminal_path()
+    assert len(calls) == 2
+
+
+def test_concurrent_probes_share_one_shell(monkeypatch):
+    """Single-flight: an rc file slower than the poll interval used to make
+    every overlapping poll spawn its own login shell."""
+    import threading as _threading
+
+    started = _threading.Event()
+    release = _threading.Event()
+    calls: list[int] = []
+
+    def slow_probe() -> str:
+        calls.append(1)
+        started.set()
+        release.wait(5)
+        return "/usr/bin"
+
+    monkeypatch.setattr(tool_path, "_probe_terminal_path", slow_probe)
+    tool_path.clear_terminal_path_cache()
+
+    results: list[str] = []
+    threads = [
+        _threading.Thread(target=lambda: results.append(tool_path.terminal_path()))
+        for _ in range(5)
+    ]
+    for t in threads:
+        t.start()
+    assert started.wait(5)
+    release.set()
+    for t in threads:
+        t.join(5)
+
+    assert len(calls) == 1
+    assert results == ["/usr/bin"] * 5
