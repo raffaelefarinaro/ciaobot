@@ -93,18 +93,83 @@ def _remove_installer_launch_agents(
     return removed
 
 
+# Line the one-line installer writes into ~/.local/bin/ciao so both sides can
+# tell its shim apart from a `ciao` belonging to some other project.
+SHIM_MARKER = "# Ciaobot shim (managed by the Ciaobot installer)"
+
+
+def _collapse_slashes(value: str) -> str:
+    """Collapse duplicate ``/`` so a trailing-slash install dir matches."""
+    while "//" in value:
+        value = value.replace("//", "/")
+    return value
+
+
+def _remove_installer_shim(*, destination: Path, shim_path: Path | None = None) -> str:
+    """Delete the installer's ``ciao`` shim when it points at this bundle.
+
+    Only a file carrying the installer's marker *and* naming this bundle is
+    touched: an unrelated ``ciao`` in ``~/.local/bin`` belongs to its owner,
+    and a shim naming a different bundle belongs to that install.
+    """
+    shim = shim_path or (Path.home() / ".local" / "bin" / "ciao")
+    try:
+        content = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    engine = destination / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    # The full quoted exec target, not a substring of the path: a bundle
+    # directory can be the prefix of a longer one. Slash-collapsed on both
+    # sides: the installer used to embed ``$app_dir`` verbatim, so
+    # ``CIAO_APP_DIR=~/Applications/`` (trailing slash) wrote a ``//`` the
+    # exact-string match below would miss, orphaning the shim.
+    if SHIM_MARKER not in content or _collapse_slashes(f'"{engine}"') not in _collapse_slashes(content):
+        return ""
+    try:
+        shim.unlink()
+    except OSError:
+        return ""
+    return str(shim)
+
+
 def uninstall_desktop_app(
     *,
     app_dir: Path,
     launch_agents_dir: Path | None = None,
     uid: int | None = None,
     runner: Callable[..., Any] = subprocess.run,
+    shim_path: Path | None = None,
 ) -> dict[str, Any]:
     """Remove a Ciaobot.app bundle without deleting a browser-installed PWA."""
 
     destination = Path(app_dir).expanduser() / APP_BUNDLE_NAME
     if not destination.exists():
-        return {"removed": False, "path": str(destination)}
+        # The bundle is already gone (dragged to the Trash by hand), but what
+        # points INTO it may not be. Left behind, the shim keeps `ciao` on
+        # PATH so every invocation dies with "no such file", and the launch
+        # agents keep launchd respawning a missing executable (and a later
+        # reinstall inherits the stale plists). Both identity checks still
+        # apply — only a marked shim and plists naming THIS bundle go — and
+        # neither needs the bundle to exist to make that comparison.
+        # `removed_agents` is present on both branches (empty list when there
+        # was nothing to boot out): `--json` consumers index it, and making
+        # the key conditional would KeyError on exactly the orphan case.
+        missing: dict[str, Any] = {
+            "removed": False,
+            "path": str(destination),
+            "removed_agents": _remove_installer_launch_agents(
+                destination=destination,
+                launch_agents_dir=launch_agents_dir,
+                uid=uid,
+                runner=runner,
+            ),
+        }
+        orphan_shim = _remove_installer_shim(
+            destination=destination, shim_path=shim_path
+        )
+        if orphan_shim:
+            missing["removed_shim"] = orphan_shim
+        return missing
     if not (
         destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME
     ).is_file():
@@ -122,8 +187,15 @@ def uninstall_desktop_app(
         shutil.rmtree(destination)
     except OSError as exc:
         raise InstallError(f"could not remove {destination}: {exc}") from exc
-    return {
+    # Only after the bundle is actually gone: a failed rmtree leaves the app
+    # installed, and deleting the shim first would take away the `ciao`
+    # command while the install it points at is still there.
+    removed_shim = _remove_installer_shim(destination=destination, shim_path=shim_path)
+    result: dict[str, Any] = {
         "removed": True,
         "path": str(destination),
         "removed_agents": removed_agents,
     }
+    if removed_shim:
+        result["removed_shim"] = removed_shim
+    return result

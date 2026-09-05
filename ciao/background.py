@@ -242,6 +242,8 @@ def resolve_cwd(workspace_root: Path, cwd: str) -> Path:
     root = Path(workspace_root).resolve()
     raw = (cwd or "").strip()
     if not raw:
+        if not root.is_dir():
+            raise BackgroundRunError("cwd_not_found", "workspace root is not a directory.")
         return root
     if "\x00" in raw:
         raise BackgroundRunError("invalid_cwd", "cwd may not contain NUL.")
@@ -489,11 +491,15 @@ class BackgroundRunner:
         store: BackgroundRunStore,
         *,
         workspace_root: Path,
+        agent_root: Callable[[str], Path] | None = None,
+        on_start: Callable[[BackgroundRun], None] | None = None,
         on_finish: Callable[[BackgroundRun, list[str]], None] | None = None,
         record_job_runs: bool = True,
     ) -> None:
         self._store = store
         self._workspace_root = Path(workspace_root)
+        self._agent_root = agent_root
+        self._on_start = on_start
         self._on_finish = on_finish
         self._record_job_runs = record_job_runs
         self._procs: dict[str, asyncio.subprocess.Process] = {}
@@ -568,7 +574,26 @@ class BackgroundRunner:
         return [run for run in self._store.list() if run.parent_chat_id == chat_id]
 
     def active_count(self, chat_id: str) -> int:
-        return sum(1 for run in self.list_for_chat(chat_id) if not run.is_terminal())
+        """Live run count for one chat, by the same rule as :meth:`active_counts`.
+
+        Derived rather than re-scanned so the pill and the start/finish limit
+        check cannot disagree about what counts as active.
+        """
+        return self.active_counts().get(chat_id, 0)
+
+    def active_counts(self) -> dict[str, int]:
+        """Live run count per owning chat (>0 only).
+
+        Read straight off the registry rather than a cached tally, so a
+        client connecting mid-run paints the same number a restart replay
+        would.
+        """
+        counts: dict[str, int] = {}
+        for run in self._store.list():
+            if run.is_terminal() or not run.parent_chat_id:
+                continue
+            counts[run.parent_chat_id] = counts.get(run.parent_chat_id, 0) + 1
+        return counts
 
     def log_path(self, run_id: str) -> Path:
         return self._store.log_path(run_id)
@@ -577,6 +602,52 @@ class BackgroundRunner:
         return read_tail(self._store.log_path(run_id), lines)
 
     # ── start ─────────────────────────────────────────────────────────
+
+    def root_for(self, workspace: str) -> Path:
+        """Root a run in ``workspace`` is resolved against and confined to.
+
+        This must be the workspace's AGENT ROOT, not the install root the
+        runner was constructed with, and the difference is not cosmetic. A
+        chat runs with its agent root as cwd, so the relative paths a model
+        writes are relative to ``<install>/<workspace>``. Resolving them
+        against the install root missed by exactly one level on every
+        re-rooted install — ``memory-vault/automations/x.py`` became
+        ``<install>/memory-vault/...`` instead of ``<install>/work/
+        memory-vault/...`` and the run died with ENOENT — and, worse, it
+        pointed the containment check at the wrong boundary: a ``work`` run
+        could read and write every other workspace's files, ``personal``
+        included.
+
+        The install root is used only where it is the honest answer: a runner
+        built without a resolver, and a run with no owning workspace at all.
+        Both are the pre-re-rooting layout, where ``agent_root`` returns the
+        install root for every workspace anyway.
+
+        Anything else fails closed. A name that resolves to no folder, or to
+        a folder that is not there, is a stale or renamed workspace — and
+        answering the install root for it would silently widen both the cwd
+        and the containment boundary back to the whole install, which is the
+        cross-workspace escape this method exists to close. Refusing is also
+        the better tool result: the run could not have found its files under
+        the wrong root anyway.
+        """
+        if not workspace or self._agent_root is None:
+            return self._workspace_root
+        try:
+            root = Path(self._agent_root(workspace))
+        except BackgroundRunError:
+            raise
+        except Exception as exc:
+            raise BackgroundRunError(
+                "workspace_unavailable",
+                f"Workspace '{workspace}' names no agent root.",
+            ) from exc
+        if not root.is_dir():
+            raise BackgroundRunError(
+                "workspace_unavailable",
+                f"Workspace '{workspace}' has no directory at {root}.",
+            )
+        return root
 
     async def start_run(
         self,
@@ -593,8 +664,11 @@ class BackgroundRunner:
         if not parent_chat_id:
             raise BackgroundRunError("chat_required", "A background run needs an owning chat.")
         argv = validate_cmd(cmd)
-        run_dir = resolve_cwd(self._workspace_root, cwd)
-        executable = resolve_executable(argv[0], run_dir, self._workspace_root)
+        # Both resolutions are anchored at the OWNING WORKSPACE's agent root,
+        # which is the chat's cwd and the boundary the run belongs inside.
+        root = self.root_for(workspace)
+        run_dir = resolve_cwd(root, cwd)
+        executable = resolve_executable(argv[0], run_dir, root)
         timeout = validate_timeout(timeout_s)
         clean_label = sanitize_label(label)
         active = self.active_count(parent_chat_id)
@@ -658,6 +732,15 @@ class BackgroundRunner:
             self._supervise(run_id, proc, log_path, timeout),
             name=f"background-run-{run_id}",
         )
+        # Announce the live run before returning: the tool result goes to the
+        # model, not to the PWA, so without this the chat goes idle with
+        # nothing anywhere saying work is still in flight. A failed announce
+        # must not fail the run that already started.
+        if self._on_start is not None:
+            try:
+                self._on_start(run)
+            except Exception:  # noqa: BLE001 — a live run outranks its indicator
+                logger.exception("Background run %s start announce failed", run_id)
         return run
 
     # ── cancel ────────────────────────────────────────────────────────

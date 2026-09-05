@@ -17,8 +17,24 @@ Project shape:
 
 Verification:
 - Run focused tests for the changed behavior.
-- Run `pytest tests/` before claiming backend work is complete.
-- Run `cd web && npm run build` after frontend changes.
+- Run every gate CI blocks on before pushing, not just the tests. CI's
+  blocking steps are, in order:
+  1. `mypy ciao` — easy to forget and it fails the whole job. Watch for
+     `no-any-return`: several attributes (`ProjectChatManager._background_runner`,
+     for one) are typed `Any` because they are wired after construction, so
+     returning a call on one straight out of a typed function is an error.
+     Annotate the local instead.
+  2. `pytest tests/` — the full suite, before claiming backend work is
+     complete. A fake object in an unrelated test can break on a new
+     attribute (adding a field to the `/ws/events` snapshot broke
+     `tests/test_ws_auth.py`, whose `SimpleNamespace` stub had no such
+     attribute), so a green focused run proves nothing about the suite.
+  3. `cd web && npm test` — the full frontend suite. Needs Node >= 20.19;
+     `npx vitest` on an older Node silently skips component files while
+     printing green.
+  4. `cd web && npm run build` after frontend changes.
+  `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
+  Lint is still worth running — it just will not fail the build for you.
 - Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else
   compiles the Rust shell, the Swift native sidecar, or assembles `Ciaobot.app`,
   so those break in CI rather than locally. Use `--fast` to skip the bundle step

@@ -240,6 +240,13 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
+  // Per-chat count of live `background_run_start` command runs. Driven by
+  // `chat_background_runs` over /ws/events and re-seeded from the snapshot.
+  // Separate from `backgroundAgents`: a background run has no transcript and
+  // nothing to open, so it gets a count-only indicator. Without it the chat
+  // goes fully idle the moment the turn ends, with nothing saying a command
+  // is still going — the tool is non-blocking by design.
+  const backgroundRuns = ref<Record<string, number>>({})
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -715,6 +722,10 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
+  const activeBackgroundRuns = computed(() =>
+    backgroundRuns.value[activeChatId.value || ''] || 0
+  )
+
   // Paused while the read-only subagent view is open for this chat: that
   // view already polls its single transcript on a 4s timer, so the store's
   // full-chat poll (every subagent, every transcript, re-parsed) would run
@@ -804,6 +815,15 @@ export const useProjectStore = defineStore('projects', () => {
     || Object.values(backgroundAgents.value).some(n => n > 0),
   )
 
+  // The UI-facing "is anything happening?" — deliberately NOT `anyChatWorking`,
+  // which is the poll gate above. A background run is the assistant working and
+  // must light the nav item, but it is not a subagent, so folding it into the
+  // gate would poll /api/subagents/running for rows that cannot exist.
+  const anyChatBusy = computed(() =>
+    anyChatWorking.value
+    || Object.values(backgroundRuns.value).some(n => n > 0),
+  )
+
   // The server keeps a row "running" until the agent's transcript goes idle,
   // which lags the parent turn by up to FINISHED_AGENT_IDLE_SECONDS (60s). So
   // one refresh on the falling edge was not enough: whatever it still listed
@@ -891,6 +911,10 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
+  function chatHasBackgroundRuns(chatId: string): boolean {
+    return (backgroundRuns.value[chatId] || 0) > 0
+  }
+
   // Subagents this chat has working right now, from /api/subagents/running.
   // Sidebar rows and the per-row "working" signal read this; it is deliberately
   // separate from `subagents` (full transcripts, active chat only) because the
@@ -901,6 +925,22 @@ export const useProjectStore = defineStore('projects', () => {
 
   function chatHasRunningSubagents(chatId: string): boolean {
     return runningSubagentsFor(chatId).length > 0
+  }
+
+  /**
+   * Is this chat doing anything right now?
+   *
+   * One definition for every "working" surface. Each consumer used to OR the
+   * sources by hand, so adding one meant finding them all — and the last
+   * addition (background runs) reached the home lanes but not the project
+   * header, which is why the two disagreed for a chat whose only activity was
+   * a running subagent. Add new activity sources here, not at the call sites.
+   */
+  function chatIsWorking(chatId: string): boolean {
+    return isChatStreaming(chatId)
+      || chatHasBackgroundAgents(chatId)
+      || chatHasBackgroundRuns(chatId)
+      || chatHasRunningSubagents(chatId)
   }
 
   // ── Post-archive pipeline ────────────────────────────────────────────────
@@ -2716,7 +2756,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean }
+  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
   const toChatMessage = (m: ServerRow) => ({
     role: m.role as 'user' | 'assistant' | 'system',
     content: m.content,
@@ -2749,6 +2789,14 @@ export const useProjectStore = defineStore('projects', () => {
     i: m.i,
     lazy: m.lazy,
     full_length: m.full_length,
+    // Turn footer facts. The provider session file carries none of these, so
+    // the server stitches them on from the durable transcript
+    // (`_overlay_transcript_metadata`). Dropping them here left every
+    // hydrated turn's footer with only the time and duration — no model, no
+    // context %.
+    usage: m.usage,
+    quota: m.quota,
+    effective_model: m.effective_model,
   })
 
   /** True for a trace row the client renders from streaming events. */
@@ -2801,10 +2849,10 @@ export const useProjectStore = defineStore('projects', () => {
       : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
         ? userPositions[0]
         : firstAppendPos
-    // `ServerRow` carries no token usage — that only ever reaches the client on
-    // the result event, which is exactly the row about to be dropped. Carry it
-    // (and the model that answered) onto the server row that closes the turn,
-    // or the footer would lose the turn's cost on every reload.
+    // A server row carries the turn's usage only once `record_turn` has run;
+    // for the turn that just streamed it may still be missing. Carry the live
+    // values (and the model that answered) onto the server row that closes the
+    // turn, or the footer would lose the turn's cost on that reconcile.
     const carried: Partial<ChatMessage> = {}
     const kept: ChatMessage[] = []
     for (let p = 0; p < merged.length; p++) {
@@ -2835,7 +2883,10 @@ export const useProjectStore = defineStore('projects', () => {
       for (let p = kept.length - 1; p >= 0; p--) {
         const row = kept[p]
         if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
-        kept[p] = { ...carried, ...row }
+        // Fill only the facts the row is actually missing. A plain spread let
+        // an explicitly-undefined key on the server row shadow the carried
+        // value and lose the turn's cost again.
+        kept[p] = mergeMessageFields(row, carried as ChatMessage)
         break
       }
     }
@@ -3009,7 +3060,11 @@ export const useProjectStore = defineStore('projects', () => {
             if (typeof abs !== 'number') continue
             const pos = posByIndex.get(abs)
             if (pos !== undefined) {
-              merged[pos] = item
+              // The server row is authoritative for content, but its footer
+              // facts land only once `record_turn` has written the turn to the
+              // durable transcript. Keep whatever the live stream already gave
+              // us for the fields the row is still missing.
+              merged[pos] = mergeMessageFields(item, merged[pos])
               continue
             }
             if (abs < cachedEnd) {
@@ -3950,6 +4005,13 @@ export const useProjectStore = defineStore('projects', () => {
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
+        // Same, for tracked command runs. Authoritative for the same reason,
+        // and it matters more here: a run outlives the turn that started it,
+        // so the snapshot is how a client learns about one that was already
+        // going when it connected. (A server restart does not carry runs
+        // over — the runner resolves them as orphans — so an empty map after
+        // one is the truth, not a gap.)
+        backgroundRuns.value = { ...(msg.background_runs || {}) }
         // Post-archive pipelines still in flight. Authoritative like the counts
         // above: a chat the server no longer lists as running has settled, so
         // clear a stale 'running' rather than leaving it pulsing forever.
@@ -4063,6 +4125,17 @@ export const useProjectStore = defineStore('projects', () => {
         // the Activity view (which fires a visibilitychange).
         if (msg.chat_id === activeChatId.value) {
           void reconcileAfterResult(msg.chat_id)
+        }
+        break
+      }
+      case 'chat_background_runs': {
+        // Count-only: there is no transcript to pull and no agent row to
+        // refresh, unlike `chat_subagents_ready`. The finishing run delivers
+        // its own wake turn, which arrives as a normal chat result.
+        if (msg.running > 0) {
+          backgroundRuns.value[msg.chat_id] = msg.running
+        } else {
+          delete backgroundRuns.value[msg.chat_id]
         }
         break
       }
@@ -5848,13 +5921,13 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, runningSubagentsFor, chatHasRunningSubagents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,

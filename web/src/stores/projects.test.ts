@@ -2132,6 +2132,36 @@ describe('optimistic user bubble reconciliation', () => {
     expect(last.duration_ms).toBe(23000)
   })
 
+  test('loadMessages keeps the server turn footer facts on a cold hydrate', async () => {
+    // The provider session file carries no usage/model, so the server stitches
+    // both on from the durable transcript. The row mapper used to drop them,
+    // which left every reloaded turn's footer with just the time and duration
+    // — no model, no context %.
+    const store = useProjectStore()
+    const chatId = 'chat-cold-hydrate'
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'why are links missing?', sent_at: '2026-09-03T09:33:00Z', turn_index: 0 },
+        {
+          i: 1,
+          role: 'assistant',
+          content: 'Because the mapper dropped them.',
+          sent_at: '2026-09-03T09:34:00Z',
+          duration_ms: 47000,
+          effective_model: 'claude-opus-5',
+          usage: { input_tokens: '10007', output_tokens: '92', context_pct: '13.2%' },
+        },
+      ],
+      total: 2, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const last = store.messages[chatId][store.messages[chatId].length - 1]
+    expect(last.effective_model).toBe('claude-opus-5')
+    expect(last.usage).toEqual({ input_tokens: '10007', output_tokens: '92', context_pct: '13.2%' })
+  })
+
   test('loadMessages keeps the live copy while the server window has no settled reply for it', async () => {
     // Half-persisted turn: the window has the first part but not the row that
     // closes it, so the client's copy is still the only complete rendering.
@@ -2791,6 +2821,46 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
+  })
+
+  test('tracked background runs get their own count, cleared at zero', () => {
+    const store = useProjectStore()
+    const chatId = 'c-run'
+    store.activeChatId = chatId
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const fire = (running: number) =>
+      sock.onmessage?.({
+        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', running }),
+      })
+
+    fire(1)
+    expect(store.activeBackgroundRuns).toBe(1)
+    expect(store.chatHasBackgroundRuns(chatId)).toBe(true)
+    fire(2)
+    expect(store.activeBackgroundRuns).toBe(2)
+    fire(0)
+    expect(store.backgroundRuns[chatId]).toBeUndefined()
+    expect(store.chatHasBackgroundRuns(chatId)).toBe(false)
+    // Background agents are a separate signal; a run must not light that pill.
+    expect(store.activeBackgroundAgents).toBe(0)
+  })
+
+  test('the snapshot re-seeds run counts for a client that missed the start', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.backgroundRuns['c-stale'] = 3
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        background_runs: { 'c-live': 1 },
+      }),
+    })
+    expect(store.backgroundRuns['c-stale']).toBeUndefined()
+    expect(store.backgroundRuns['c-live']).toBe(1)
   })
 })
 

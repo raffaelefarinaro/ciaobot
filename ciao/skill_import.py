@@ -73,15 +73,26 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     return data
 
 
-def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
+def validate_skill_zip(
+    zip_bytes: bytes, *, warnings: list[str] | None = None
+) -> tuple[str | None, list[str]]:
     """Validate a skill zip archive.
 
     Returns (skill_name, errors). If errors is non-empty the zip is invalid.
     Checks: zip integrity, zip-slip, exactly one top-level folder, SKILL.md
-    exists, frontmatter name/description present, SKILL.md size ≤ MAX_SKILL_BYTES,
-    folder name matches frontmatter name, folder name is a valid non-dot skill
-    directory name, and decompressed contents stay within the per-file and
-    total size caps.
+    exists, frontmatter name/description present, folder name matches
+    frontmatter name, folder name is a valid non-dot skill directory name, and
+    decompressed contents stay within the per-file and total size caps.
+
+    ``MAX_SKILL_BYTES`` is a context budget, not a validity rule: a SKILL.md
+    over it is imported and a note appended to ``warnings`` (when a list is
+    supplied) rather than rejected. Owners import skills they wrote or were
+    handed, and refusing the file left them nothing to do but edit someone
+    else's document to get it in. The budget still has teeth where it is
+    actually spent — ``os_audit`` flags the skill as over budget and the
+    evolution pass writes a split-it-up proposal instead of an edit. The hard
+    ceiling on SKILL.md stays ``MAX_SKILL_ASSET_BYTES``, applied to every
+    member above.
     """
     errors: list[str] = []
     if not zip_bytes:
@@ -155,8 +166,13 @@ def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
             data = zf.read(skill_md_path)
         except KeyError:
             return None, [f"Missing {skill_folder}/SKILL.md."]
-        if len(data) > MAX_SKILL_BYTES:
-            return None, [f"SKILL.md exceeds {MAX_SKILL_BYTES} bytes (cap {MAX_SKILL_BYTES})."]
+        if len(data) > MAX_SKILL_BYTES and warnings is not None:
+            warnings.append(
+                f"SKILL.md is {len(data):,} bytes, over the "
+                f"{MAX_SKILL_BYTES:,}-byte context budget — it loads into "
+                "context every time the skill triggers. Consider moving the "
+                "detail into sibling files the skill reads on demand."
+            )
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -183,15 +199,24 @@ def validate_skill_zip(zip_bytes: bytes) -> tuple[str | None, list[str]]:
             pass
 
 
-def extract_skill_zip(zip_bytes: bytes, dest_root: Path, *, overwrite: bool = False) -> tuple[str | None, list[str]]:
+def extract_skill_zip(
+    zip_bytes: bytes,
+    dest_root: Path,
+    *,
+    overwrite: bool = False,
+    warnings: list[str] | None = None,
+) -> tuple[str | None, list[str]]:
     """Validate and extract zip to skills/<name>/.
 
     Returns (skill_name, errors). On success extracts to dest_root/<name>/ .
     Extraction is transactional: members are written to a temporary directory
     and the target is replaced atomically only after every member succeeds, so
     a truncated or corrupt member never leaves a partially installed skill.
+
+    ``warnings``, when supplied, collects the non-blocking notes described in
+    ``validate_skill_zip`` so the caller can surface them alongside success.
     """
-    name, errors = validate_skill_zip(zip_bytes)
+    name, errors = validate_skill_zip(zip_bytes, warnings=warnings)
     if errors or not name:
         return None, errors
     # Serialize same-name imports: the existence check and the final

@@ -1346,9 +1346,10 @@ class CiaoMcpService:
                     single string is rejected: there is no shell, so nothing
                     would split it. For shell features, run
                     ["bash", "-lc", "..."] explicitly and own that choice.
-                cwd: Directory for the run, relative to the workspace root.
-                    Defaults to the workspace root. Paths outside it are
-                    rejected.
+                cwd: Directory for the run, relative to THIS chat's workspace
+                    root — the same directory your own shell commands run in,
+                    so a path that works in Bash works here unchanged.
+                    Defaults to that root. Paths outside it are rejected.
                 env: Extra environment variables. Loader hooks (LD_PRELOAD and
                     friends) and Ciaobot's own session token are rejected.
                 timeout_s: Wall-clock ceiling; the process tree is terminated

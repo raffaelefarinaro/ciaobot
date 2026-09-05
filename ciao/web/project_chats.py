@@ -2266,7 +2266,7 @@ class ProjectChatManager:
         try:
             active_root = self._vault_active_root(project.workspace).resolve()
             folder = (active_root / folder_name).resolve()
-        except OSError:
+        except (OSError, ValueError):
             return None
         # A symlinked project folder could otherwise point the write anywhere.
         if not folder.is_relative_to(active_root) or not folder.is_dir():
@@ -2949,6 +2949,14 @@ class ProjectChatManager:
                     "must match [A-Za-z0-9._-]+ with no path separators."
                 )
             project.vault_folder = vault_folder
+            # Recompute the canonical doc pointer from the new binding so it
+            # can't go stale after a rename (issue #421). vault_doc_path is
+            # otherwise only refreshed by the discovery pass in
+            # list_projects(), while get_project()/project_get serve the
+            # stored value directly. Clears to "" when the binding is
+            # cleared or no canonical doc exists under the new folder yet.
+            doc = self._project_doc_file(project)
+            project.vault_doc_path = self._display_path(doc) if doc is not None else ""
         # Mirror the context into the canonical doc's frontmatter so the two
         # can't drift. Deliberately after the vault_folder branch, so a call
         # that rebinds and re-describes in one go writes to the new doc.
@@ -5889,6 +5897,49 @@ class ProjectChatManager:
         """Last announced running-background-subagent count per chat (>0 only)."""
         return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
 
+    @property
+    def background_run_counts(self) -> dict[str, int]:
+        """Live ``background_run_start`` count per chat (>0 only).
+
+        Read from the runner's registry, not a cached tally, so a client
+        reconnecting mid-run gets the real number rather than whatever it had
+        when its socket dropped. (A restart does not carry runs over:
+        ``BackgroundRunner.start`` resolves every non-terminal run as an
+        orphan before the server serves, so the registry is already honest by
+        the time any client can read this.)
+        """
+        runner = self._background_runner
+        if runner is None:
+            return {}
+        try:
+            # ``_background_runner`` is typed Any (wired after construction),
+            # so the annotation is what keeps this a dict[str, int].
+            counts: dict[str, int] = runner.active_counts()
+        except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
+            logger.exception("Background run counts unavailable")
+            return {}
+        return counts
+
+    def announce_background_runs(self, chat_id: str) -> None:
+        """Publish this chat's live background-run count to connected clients.
+
+        Called on both edges (a run starting, a run finishing). A background
+        run is deliberately non-blocking, so the chat's turn ends while the
+        command is still going; this event is the only thing that keeps the
+        chat from looking finished. Distinct from ``chat_subagents_ready``:
+        these runs have no transcript and no agent to open, only a count and
+        a log.
+        """
+        if not chat_id:
+            return
+        chat = self._chats.get(chat_id)
+        self._events.publish({
+            "type": "chat_background_runs",
+            "chat_id": chat_id,
+            "project_id": chat.project_id if chat is not None else "",
+            "running": self.background_run_counts.get(chat_id, 0),
+        })
+
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
         the chat so a scheduled retry re-seeds them instead of dropping them.
@@ -6171,12 +6222,45 @@ class ProjectChatManager:
         died before producing a report, so anything the run was supposed to do
         with the results (write the log, commit) did not happen. Used by
         :meth:`dispatch_schedule` to keep such a run visible instead of
-        auto-archiving a stub (the 2026-08-30 daily-log failure).
+        auto-archiving a stub (the 2026-08-30 daily-log failure), and by the
+        turn-done branch to hold the result announce back until the synthesis
+        nudge produces the real reply.
+
+        The patterns are deliberately broad ("waiting on ..."), so a caller
+        that suppresses anything on the strength of this must be certain
+        something else will fire in its place.
         """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if not flat:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
+    @staticmethod
+    def _withhold_interim_announce(
+        text: str,
+        *,
+        nudge_can_reannounce: bool,
+        has_pending_question: bool,
+    ) -> bool:
+        """True when the result announce should wait for the synthesis nudge.
+
+        Withholding is only safe when the nudge will actually fire in the
+        announce's place, so this mirrors every stand-down reason in
+        :meth:`_nudge_synthesis_after_subagents`. Both question signals count:
+        ``pending_question`` is an explicit AskUserQuestion payload, while the
+        watcher stands the nudge down on the *prose* heuristic
+        (``SessionSubagentState.awaiting_user_answer``). A turn that both
+        matches an interim pattern and ends on a prose question is refused by
+        the nudge, so gating on ``pending_question`` alone dropped its push,
+        unread badge and archive proposal outright.
+        """
+        if not nudge_can_reannounce:
+            return False
+        if has_pending_question:
+            return False
+        if subagent_tracking.ends_with_user_question(text):
+            return False
+        return ProjectChatManager._is_interim_subagent_text(text)
 
     def start_stream(
         self,
@@ -6946,6 +7030,14 @@ class ProjectChatManager:
                 # instead of leaving the chat stuck on "I'll compile once the
                 # agents report back".
                 chat_for_watcher = self._chats.get(chat_id)
+                # True only when a synthesis nudge can actually re-announce
+                # this chat's result later. Holding the announce back is safe
+                # ONLY then: the nudge's reply carries the real push. The
+                # opencode watcher has no nudge path at all, so gating on the
+                # watcher alone dropped the push, the unread badge and the
+                # archive proposal outright for any opencode reply that merely
+                # said "waiting on ...".
+                nudge_can_reannounce = False
                 if (
                     chat_for_watcher is not None
                     and chat_for_watcher.session_id
@@ -6960,6 +7052,7 @@ class ProjectChatManager:
                     # a live view of that follow-up turn.
                     if chat_for_watcher.provider == "claude":
                         self._start_between_turns_drain(chat_id, project_id)
+                        nudge_can_reannounce = True
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
@@ -6978,18 +7071,53 @@ class ProjectChatManager:
                         chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
-                    # Schedule the push with a small delay. If the user reads
-                    # the chat on any device in the window (via /api/chats/
-                    # {id}/read), the pending task is cancelled and no push
-                    # fires. New replies to the same chat cancel and restart
-                    # the timer (see _schedule_push).
-                    self._announce_result_ready(
-                        chat_id, project_id, title, snippet
+                    # A turn that ends on "I'll report back once the agents
+                    # finish" is not a result: the drain started above will
+                    # nudge the synthesis turn and that reply carries the real
+                    # push. Only the announce is held back — the state above
+                    # (recents order, snippet, pending-retry clear) belongs to
+                    # every non-error turn, and withholding it left a retried
+                    # chat pinned at retry_status="pending" forever.
+                    #
+                    # Held back only when something will announce in its place:
+                    # the nudge needs the between-turns drain (claude), and it
+                    # stands down when the turn ended on a question for the
+                    # user (see _nudge_synthesis_after_subagents), which would
+                    # otherwise leave that question with no notification at
+                    # all. `_INTERIM_SUBAGENT_PATTERNS` is broad on purpose
+                    # ("waiting on ..."), so every case where the nudge cannot
+                    # fire has to announce normally.
+                    #
+                    # Both question signals have to be checked, not just the
+                    # explicit one: the watcher stands the nudge down on
+                    # `SessionSubagentState.awaiting_user_answer`, which is the
+                    # *prose* heuristic below, while `pending_question` is only
+                    # set by an explicit AskUserQuestion payload. A reply like
+                    # "…still waiting on the agents — want me to check the
+                    # changelog too?" matches an interim pattern, carries no
+                    # pending_question, and is refused by the nudge, so gating
+                    # on pending_question alone dropped its push, unread badge
+                    # and archive proposal outright.
+                    interim = self._withhold_interim_announce(
+                        last_assistant_text,
+                        nudge_can_reannounce=nudge_can_reannounce,
+                        has_pending_question=bool(
+                            chat_now is not None and chat_now.pending_question
+                        ),
                     )
-                    self._spawn_detached(
-                        self._maybe_archive_proposal_helper(chat_id),
-                        f"archive-proposal-helper-{chat_id}",
-                    )
+                    if not interim:
+                        # Schedule the push with a small delay. If the user reads
+                        # the chat on any device in the window (via /api/chats/
+                        # {id}/read), the pending task is cancelled and no push
+                        # fires. New replies to the same chat cancel and restart
+                        # the timer (see _schedule_push).
+                        self._announce_result_ready(
+                            chat_id, project_id, title, snippet
+                        )
+                        self._spawn_detached(
+                            self._maybe_archive_proposal_helper(chat_id),
+                            f"archive-proposal-helper-{chat_id}",
+                        )
 
         asyncio.create_task(_drive())
         return stream

@@ -314,3 +314,96 @@ def test_installer_verifier_is_outside_the_tauri_package() -> None:
     assert (verifier / "Cargo.toml").is_file()
     assert (verifier / "src" / "main.rs").is_file()
     assert not (tauri_bins / "ciaobot-installer-verify.rs").exists()
+
+
+def _shim_block() -> str:
+    """The installer's ``ciao`` shim logic, runnable on its own.
+
+    The surrounding script downloads and verifies a signed release, so the
+    block is exercised in isolation with ``engine`` supplied by the caller.
+    """
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    start = script.index('shim_dir="$HOME/.local/bin"')
+    end = script.index('\nplist="$HOME/Library/LaunchAgents', start)
+    return script[start:end]
+
+
+def _run_shim_block(home: Path, engine: Path) -> subprocess.CompletedProcess[str]:
+    program = f'engine="{engine}"\n' + _shim_block() + '\necho "shim_installed=$shim_installed"\n'
+    return subprocess.run(
+        ["sh", "-c", program],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(home)},
+        check=False,
+    )
+
+
+def test_installer_puts_ciao_on_path_as_a_shim_not_a_symlink(tmp_path: Path) -> None:
+    """The engine lives inside Ciaobot.app, so without this a terminal has no
+    `ciao` at all and every documented `ciao ...` command fails -- with
+    "command not found", or with an unrelated `ciao`'s error message.
+
+    A symlink would not do: the bundled launcher derives its runtime root from
+    `dirname "$0"`, which resolves to the link's own directory.
+    """
+    engine = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    engine.parent.mkdir(parents=True)
+    engine.write_text('#!/bin/sh\necho "engine ran: $*"\n', encoding="utf-8")
+    engine.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = _run_shim_block(home, engine)
+    assert result.returncode == 0, result.stderr
+    assert "shim_installed=1" in result.stdout
+
+    shim = home / ".local" / "bin" / "ciao"
+    assert shim.is_file() and not shim.is_symlink()
+    assert os.access(shim, os.X_OK)
+    forwarded = subprocess.run(
+        [str(shim), "auth", "claude"], capture_output=True, text=True, check=False
+    )
+    assert forwarded.stdout.strip() == "engine ran: auth claude"
+
+
+def test_installer_replaces_its_own_shim_but_not_a_foreign_ciao(tmp_path: Path) -> None:
+    """`ciao` is a common enough name to collide (Ciao Prolog ships one), and
+    clobbering someone else's binary is not the installer's call. Its own
+    marker is what makes replacement on update safe."""
+    engine = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    engine.parent.mkdir(parents=True)
+    engine.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    engine.chmod(0o755)
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    foreign = bin_dir / "ciao"
+    foreign.write_text("#!/bin/sh\necho other project\n", encoding="utf-8")
+
+    result = _run_shim_block(home, engine)
+    assert result.returncode == 0, result.stderr
+    assert "shim_installed=0" in result.stdout
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho other project\n"
+    assert "leaving it alone" in result.stderr
+
+    # A shim the installer wrote itself is replaced, so updates re-point it at
+    # the new bundle instead of failing shut.
+    foreign.unlink()
+    assert "shim_installed=1" in _run_shim_block(home, engine).stdout
+    assert "shim_installed=1" in _run_shim_block(home, engine).stdout
+    assert str(engine) in (bin_dir / "ciao").read_text(encoding="utf-8")
+
+
+def test_uninstall_and_the_installer_agree_on_the_shim_marker() -> None:
+    """The marker is how uninstall recognises a shim it may delete.
+
+    `scripts/install.sh` writes it and `ciao/desktop_install.py` matches it,
+    with nothing but this test tying the two literals together. If they drift,
+    uninstall silently stops recognising every shim already on disk and leaves
+    a dead `ciao` on PATH — the exact failure the marker exists to prevent.
+    """
+    from ciao import desktop_install
+
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert desktop_install.SHIM_MARKER in script

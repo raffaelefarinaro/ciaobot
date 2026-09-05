@@ -380,12 +380,13 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
+  | { type: 'chat_background_runs'; chat_id: string; project_id: string; running: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
@@ -609,6 +610,8 @@ export interface ProviderConnection {
   skills?: string[]
   /** Docs page for installing the CLI, set when `auth === 'not_installed'`. */
   install_url?: string
+  /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
+  path_command?: string
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -987,6 +990,8 @@ export interface SetupProviderStatus {
   detail?: string
   /** Documentation page for installing the provider CLI (`auth: 'not_installed'`). */
   install_url?: string
+  /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
+  path_command?: string
   /** Desktop app found while the CLI is missing, so setup can say which step is left. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -1194,4 +1199,49 @@ export interface ProposalHistoryResponse {
   /** The request asked for more than the cap, so a wider limit returns the
    * same page. Paging must stop on this, not on `truncated`. */
   at_max?: boolean
+}
+
+// ── Vault review (stale-note retirement) ─────────────────────────────────
+// Backed by `GET|POST /api/vault/review` (`ciao/vault_review.py`), not by the
+// proposal queue: candidates are hash-identified vault notes with explainable
+// detection signals, and dispositions land in the append-only
+// `Workspace/Vault-Review.jsonl` ledger rather than the proposal sidecars.
+
+/** Explainable detection evidence behind one retirement candidate. */
+export interface VaultReviewEvidence {
+  backlinks: string[]
+  outbound_links: string[]
+  bridge: boolean
+  duplicate_group: string[]
+  last_update: string
+  type: string
+  age_days: number | null
+}
+
+/** One stale-note retirement candidate from `GET /api/vault/review`. */
+export interface VaultReviewCandidate {
+  candidate_id: string
+  workspace: string
+  path: string
+  content_hash: string
+  signals: string[]
+  priority: number
+  evidence: VaultReviewEvidence
+  status: string
+  disposition: string
+  deferred_until: string
+}
+
+/** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */
+export interface VaultTrashedNote {
+  candidate_id: string
+  workspace: string
+  original_path: string
+  content_hash: string
+  trashed_at: string
+}
+
+export interface VaultReviewResponse {
+  candidates: VaultReviewCandidate[]
+  trashed?: VaultTrashedNote[]
 }

@@ -420,6 +420,38 @@ def _ensure_clean(root: Path, *, allow_dirty: bool) -> None:
         )
 
 
+def _ensure_nothing_left_behind(root: Path, *, allow_dirty: bool = False) -> None:
+    """Fail if the release commit left a tracked file it should have staged.
+
+    The commit stages an explicit list, which is right in a shared checkout but
+    silently drops anything the list forgot. That is not a tidiness problem: the
+    file it forgot was `uv.lock`, so the tagged commit carried `pyproject.toml`'s
+    new dependency pin next to the old lock, and every `uv --frozen` step fails
+    on that pair — including the bundled-runtime build, which runs only AFTER
+    the tag and GitHub release exist.
+
+    Untracked files are ignored on purpose: the generated PWA bundle is
+    gitignored, and another session may have its own untracked work in a shared
+    checkout. Only a MODIFIED TRACKED file means the release itself wrote
+    something it did not commit.
+
+    Skipped under ``--allow-dirty``: there the tree was already modified before
+    the release started, so a leftover proves nothing about what the release
+    wrote — and raising here fires AFTER the release commit is made, aborting
+    the run with a commit already on the branch.
+    """
+    if allow_dirty:
+        return
+    leftover = _git(root, ["status", "--porcelain", "--untracked-files=no"])
+    if leftover:
+        raise ReleaseError(
+            "release commit left modified tracked files behind; the release "
+            "would ship an inconsistent tree:\n"
+            + leftover
+            + "\nStage them into the release commit and re-run."
+        )
+
+
 def _resolve_source_ref(root: Path, source: str) -> str:
     # Prefer the freshly-fetched remote branch over a same-named local branch.
     # _checkout_release_branch fetches origin/<source> right before this; a
@@ -602,18 +634,33 @@ def _print_dependency_updates(updates: list) -> None:
         )
 
 
-def _apply_auto_dependency_updates(root: Path, updates: list, *, reinstall: bool) -> None:
+def _apply_auto_dependency_updates(
+    root: Path, updates: list, *, reinstall: bool
+) -> list[Path]:
+    """Adopt the auto-approved dependency bumps; return the files they wrote.
+
+    The paths matter as much as the bump. They used to be dropped, and the
+    commit step stages only what it is handed, so `uv.lock` was regenerated and
+    never staged: the release committed `pyproject.toml`'s new pin next to the
+    OLD lock. That combination fails every `uv --frozen` step, and the one that
+    matters most — `scripts/build-bundled-runtime.sh` in publish.yml — runs only
+    after the tag and GitHub release already exist, so recovering costs a
+    version bump. `pyproject.toml`, `web/package.json` and `web/package-lock.json`
+    hid the bug by being version-bearing already.
+    """
     if not any(getattr(u, "auto", False) for u in updates):
-        return
+        return []
     try:
-        from ciao.dependency_updates import apply_auto_updates
+        from ciao.dependency_updates import apply_auto_updates, auto_update_paths
 
         applied = apply_auto_updates(root, updates, reinstall=reinstall)
     except Exception as exc:  # noqa: BLE001 - never block a release on this
         print(f"Auto dependency update skipped: {exc}")
-        return
-    if applied:
-        print(f"Auto-updated dependencies: {', '.join(applied)}")
+        return []
+    if not applied:
+        return []
+    print(f"Auto-updated dependencies: {', '.join(applied)}")
+    return auto_update_paths(root)
 
 
 def _stock_skills_dir(root: Path) -> Path:
@@ -869,9 +916,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not args.skip_dep_check:
-        _apply_auto_dependency_updates(
-            root, dep_updates, reinstall=not args.skip_checks
-        )
+        touched = [
+            *touched,
+            *_apply_auto_dependency_updates(
+                root, dep_updates, reinstall=not args.skip_checks
+            ),
+        ]
 
     if not args.skip_gws_skills:
         touched = [*touched, *_refresh_stock_gws_skills(root)]
@@ -879,8 +929,12 @@ def main(argv: list[str] | None = None) -> int:
     checks = [] if args.skip_checks else _run_checks(root, skip_frontend=args.skip_frontend)
 
     if args.commit:
-        _run(["git", "add", *[str(path.relative_to(root)) for path in touched]], cwd=root)
+        # Deduplicated, order preserved: the dependency step reports files the
+        # version bump already listed.
+        staged = list(dict.fromkeys(str(path.relative_to(root)) for path in touched))
+        _run(["git", "add", *staged], cwd=root)
         _run(["git", "commit", "-m", f"release: prepare v{version}"], cwd=root)
+        _ensure_nothing_left_behind(root, allow_dirty=args.allow_dirty)
 
     if args.push:
         _run(["git", "push", "-u", "origin", branch], cwd=root)

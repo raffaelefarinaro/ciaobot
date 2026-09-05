@@ -689,12 +689,23 @@
                     <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
                       {{ conn.detail }}
                       Install it with <code>{{ conn.command }}</code>
+                      <template v-if="conn.path_command">
+                        , then put it on your PATH with
+                        <code>{{ conn.path_command }}</code>
+                      </template>
                       <a
                         v-if="conn.install_url"
                         :href="conn.install_url"
                         target="_blank"
                         rel="noopener noreferrer"
                       >installation guide ↗</a>
+                    </p>
+                    <p
+                      v-if="conn.auth !== 'not_installed' && conn.path_command"
+                      class="hint hint--compact"
+                    >
+                      Your terminal cannot find this CLI yet — put it on your PATH with
+                      <code>{{ conn.path_command }}</code>
                     </p>
                   </div>
                   <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
@@ -1391,7 +1402,7 @@
             <div class="settings-field-grid">
               <div class="settings-field settings-field--wide">
                 <span class="ws-label">Upload zip</span>
-                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Max 15 KB SKILL.md, frontmatter <code>name</code> must match folder.</p>
+                <p class="hint hint--compact">Single zip with one top-level folder containing <code>SKILL.md</code>. Frontmatter <code>name</code> must match folder. Over 15 KB imports with a warning — that file loads into context on every trigger.</p>
                 <input
                   ref="skillZipInput"
                   type="file"
@@ -1412,8 +1423,8 @@
               </button>
             </div>
             <ul class="check" style="margin-top: 8px; padding-left: 16px; font-size: 12px; color: var(--fg3);">
-              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code>, ≤15 KB</li>
-              <li>Discoverable immediately: <code>.claude/skills</code> + <code>.agents/skills</code> symlink</li>
+              <li>Validation: zip-slip, one <code>SKILL.md</code>, frontmatter <code>name/description</code> (15 KB is a budget, not a gate)</li>
+              <li>Discoverable immediately: <code>.claude/skills</code> symlink</li>
               <li>Sync between operators = workspace git (no npx)</li>
             </ul>
             <div v-if="addSkillResult" class="action-result" :class="{ '--error': addSkillError }" role="alert">{{ addSkillResult }}</div>

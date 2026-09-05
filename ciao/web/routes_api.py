@@ -3947,6 +3947,24 @@ async def chat_subagents(request: Request) -> JSONResponse:
             continue
 
         rendered = _render_subagent_messages(msgs)
+        if not rendered and wanted_agent_id:
+            # An empty read is a miss, not an empty transcript. On installs
+            # whose CLI writes the nested "<session>/subagents/*.jsonl" layout,
+            # ``list_subagents`` returns [] and ``get_subagent_messages``
+            # answers any id with [] rather than raising. The unfiltered path
+            # survives that (no ids -> empty result -> local fallback), but the
+            # narrowed one skips discovery and asks for the id directly, so it
+            # built a row with no messages and that non-empty ``result``
+            # suppressed the very fallback that does find the transcript. The
+            # read-only subagent view then showed "No captured turns" for every
+            # Claude subagent while the in-chat panel had the full thread.
+            #
+            # Only the narrowed path skips: on the unfiltered one an empty
+            # render is usually a just-dispatched agent that has not written
+            # its first message yet, and dropping it would make its row
+            # flicker out of the in-chat panel. There the all-empty case
+            # already reaches the local fallback via the `not result` check.
+            continue
         result.append({"agent_id": agent_id, "messages": rendered})
 
     if not result:
@@ -4843,7 +4861,15 @@ async def vault_review(request: Request) -> JSONResponse:
             )
         )
     if request.method == "GET":
-        return JSONResponse({"candidates": [item.as_dict() for item in candidates]})
+        review_body: dict[str, Any] = {"candidates": [item.as_dict() for item in candidates]}
+        # The trash view renders the reversible trash, which candidate
+        # generation can never return: a trashed note is no longer in the
+        # vault. Same read-only contract as the candidate listing itself.
+        if "trashed" in {part.strip() for part in request.query_params.get("include", "").split(",")}:
+            review_body["trashed"] = await asyncio.to_thread(
+                functools.partial(review.list_trashed, root, workspace=workspace)
+            )
+        return JSONResponse(review_body)
 
     candidate_id_value = str(payload.get("candidate_id", "") or "")
     if action in {"restore", "delete"}:
@@ -4869,10 +4895,6 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user", defer_days=int(payload.get("defer_days", 7)))
         elif action == "trash":
             result = review.trash_note(root, item)
-        elif action == "restore":
-            result = review.restore_note(root, item.candidate_id)
-        elif action == "delete":
-            result = review.delete_permanently(root, item.candidate_id, confirm=str(payload.get("confirm", "")))
         else:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:
@@ -7180,13 +7202,20 @@ async def admin_add_skill(request: Request) -> JSONResponse:
     )
 
 
+def _with_warnings(message: str, warnings: list[str]) -> str:
+    """Append non-blocking import notes to a success message."""
+    return " ".join([message, *warnings]) if warnings else message
+
+
 async def skill_import(request: Request) -> JSONResponse:
     """Import a skill from a validated zip archive.
 
     Accepts multipart/form-data with a ``file`` field containing the zip.
     Validates zip-slip, exactly one top-level folder with SKILL.md,
-    frontmatter name/description, size ≤ 15KB, and name equals folder.
-    On success extracts to ``skills/<name>/`` and syncs the catalog.
+    frontmatter name/description, and name equals folder. On success extracts
+    to ``skills/<name>/`` and syncs the catalog. A SKILL.md over the 15 KB
+    context budget imports with a warning on ``message``/``warnings`` rather
+    than being rejected.
     """
     config = request.app.state.config
     # Reject oversized bodies before multipart parsing. `request.form()` fully
@@ -7280,7 +7309,8 @@ async def skill_import(request: Request) -> JSONResponse:
     if not force and request.query_params.get("force", "").lower() in {"1", "true", "yes"}:
         force = True
 
-    # Read upload with size limit (zip + slack). Allow up to 5MB, but validator will enforce 15KB SKILL.md
+    # Read upload with size limit (zip + slack). The 15 KB SKILL.md budget is
+    # a warning, not a gate — see ciao/skill_import.validate_skill_zip.
     try:
         data = await _read_upload_limited(upload, max_zip_bytes)
     except ValueError:
@@ -7298,7 +7328,15 @@ async def skill_import(request: Request) -> JSONResponse:
     from ciao.skill_import import extract_skill_zip
 
     dest_skills.mkdir(parents=True, exist_ok=True)
-    name, errors = await asyncio.to_thread(extract_skill_zip, data, dest_skills, overwrite=force)
+    # Non-blocking notes (currently: SKILL.md over the context budget). The
+    # import still happens; the note rides along on the success message so the
+    # owner learns what it costs without being stopped at the door.
+    warnings: list[str] = []
+    name, errors = await asyncio.to_thread(
+        functools.partial(
+            extract_skill_zip, data, dest_skills, overwrite=force, warnings=warnings
+        )
+    )
     if errors:
         return JSONResponse({"ok": False, "error": "; ".join(errors)}, status_code=400)
     assert name is not None
@@ -7313,10 +7351,25 @@ async def skill_import(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001 — sync failure should not hide successful import
         logger.warning("skill import sync failed for %s: %s", dest_skills, exc)
         return JSONResponse(
-            {"ok": True, "name": name, "message": f"Skill '{name}' imported (sync warning: {exc})."},
+            {
+                "ok": True,
+                "name": name,
+                "warnings": warnings,
+                "message": _with_warnings(
+                    f"Skill '{name}' imported (sync warning: {exc}).", warnings
+                ),
+            },
             status_code=200,
         )
-    return JSONResponse({"ok": True, "name": name, "message": f"Skill '{name}' added — available to all operators after next sync."})
+    return JSONResponse({
+        "ok": True,
+        "name": name,
+        "warnings": warnings,
+        "message": _with_warnings(
+            f"Skill '{name}' added — available to all operators after next sync.",
+            warnings,
+        ),
+    })
 
 
 

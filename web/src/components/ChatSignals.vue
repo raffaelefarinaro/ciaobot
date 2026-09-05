@@ -27,6 +27,20 @@
       <span class="activity-spinner" aria-hidden="true" />
       <span v-if="density === 'card' && agentCount > 1" class="chat-signal-count">{{ agentCount }}</span>
     </span>
+    <!-- Ranked below agents: both mean "still going", but an agent has a
+         transcript to open and a run has only a count and a log, so when a
+         chat has both the agent is the more useful thing to point at. Its own
+         state rather than folded into `agents`, because that label counts
+         agents and a background run is not one. -->
+    <span
+      v-else-if="primarySignal === 'runs'"
+      class="chat-signal chat-signal--runs"
+      :title="runsTitle"
+      :aria-label="runsTitle"
+    >
+      <span class="activity-spinner" aria-hidden="true" />
+      <span v-if="density === 'card' && runCount > 1" class="chat-signal-count">{{ runCount }}</span>
+    </span>
     <span
       v-else-if="primarySignal === 'retry'"
       class="chat-signal chat-signal--retry"
@@ -94,6 +108,12 @@ const agentCount = computed(() => Math.max(
 const agentsTitle = computed(() =>
   agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,
 )
+// Tracked background command runs. Wording mirrors the ChatPanel dock pill
+// ("N background runs") so the same activity is not named two ways.
+const runCount = computed(() => Number(store.backgroundRuns[props.chatId] || 0))
+const runsTitle = computed(() =>
+  runCount.value === 1 ? '1 background run' : `${runCount.value} background runs`,
+)
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
@@ -105,10 +125,11 @@ const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying
 
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'working' | 'agents' | 'retry' | 'tidying' | null>(() => {
+const primarySignal = computed<'needs' | 'working' | 'agents' | 'runs' | 'retry' | 'tidying' | null>(() => {
   if (needsInput.value) return 'needs'
   if (working.value) return 'working'
   if (agentCount.value > 0) return 'agents'
+  if (runCount.value > 0) return 'runs'
   if (props.density === 'row' && retryPending.value) return 'retry'
   if (tidying.value) return 'tidying'
   return null
@@ -202,7 +223,8 @@ const intervalTitle = computed(() => {
    already said working. Kept in sync with .activity-spinner in ChatPanel.vue —
    if that changes, change this. */
 .chat-signal--working,
-.chat-signal--agents {
+.chat-signal--agents,
+.chat-signal--runs {
   gap: var(--space-1);
 }
 
@@ -228,7 +250,7 @@ const intervalTitle = computed(() => {
   pointer-events: none;
 }
 
-/* Only shown for more than one agent, where the number is the whole point. */
+/* Only shown for more than one agent or run, where the number is the point. */
 .chat-signal-count {
   color: var(--accent);
   font-family: var(--font-mono);

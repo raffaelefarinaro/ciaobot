@@ -542,3 +542,84 @@ async def test_push_branch_auth_failure_unaffected_by_conflict_fallback(tmp_path
     assert "authentication failed" in detail.lower()
     assert is_diverged_backup(detail) is False
 
+
+
+# ── network timeouts ─────────────────────────────────────────────────────────
+
+
+def _network_git_call_timeouts(module_path: Path) -> list[tuple[str, str]]:
+    """Every ``_git(..., "push"|"fetch"|"pull", ...)`` call and its timeout arg.
+
+    Read from the source rather than exercised at runtime: the failure being
+    guarded against is a *hung* remote, which no unit test can produce without
+    actually waiting for the ceiling it is checking.
+    """
+    import ast
+
+    calls: list[tuple[str, str]] = []
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "_git"):
+            continue
+        verbs = [
+            a.value
+            for a in node.args
+            if isinstance(a, ast.Constant) and isinstance(a.value, str)
+        ]
+        if not any(v in {"push", "fetch", "pull"} for v in verbs):
+            continue
+        timeout = next(
+            (ast.unparse(kw.value) for kw in node.keywords if kw.arg == "timeout"),
+            None,
+        )
+        calls.append((verbs[0], timeout or "<none>"))
+    return calls
+
+
+def test_network_git_calls_use_the_shared_ceiling() -> None:
+    """A 10s ceiling made a momentary network stall look like a sync failure.
+
+    Pin every network git call in the background sync module to
+    ``GIT_NETWORK_TIMEOUT`` so a new call site cannot quietly reintroduce a
+    tighter one. (``ciao.git_sync`` is deliberately excluded — it runs before
+    the server binds and keeps its own shorter ceiling; see
+    ``test_startup_sync_keeps_its_own_shorter_ceiling``.)
+    """
+    import ciao.local_session
+
+    assert ciao.local_session.GIT_NETWORK_TIMEOUT == 60.0
+
+    calls = _network_git_call_timeouts(Path(ciao.local_session.__file__))
+    assert calls, "no network git calls found in ciao.local_session"
+    for verb, timeout in calls:
+        assert timeout == "GIT_NETWORK_TIMEOUT", (
+            f"ciao.local_session: git {verb} uses timeout={timeout}"
+        )
+
+
+def test_startup_sync_keeps_its_own_shorter_ceiling() -> None:
+    """Startup sync is awaited before the server binds, so it is not a loop.
+
+    Giving it the 60s background ceiling would make an unreachable remote hold
+    a cold start for a minute on a blank app. Pinned so a future "share the
+    constant" tidy-up cannot quietly 6x the worst-case boot.
+
+    Note the cost, spelled out in ``ciao.git_sync``: nothing else pulls on its
+    own (the backup loop only pushes, and fetch/merges solely on a rejected
+    push), so a pull killed at this ceiling leaves the checkout behind until
+    the next boot or an explicit "Sync with Remote". Raise it rather than
+    tighten it if real pulls start timing out.
+    """
+    import ciao.git_sync
+
+    assert ciao.git_sync.GIT_STARTUP_TIMEOUT == 10.0
+
+    calls = _network_git_call_timeouts(Path(ciao.git_sync.__file__))
+    assert calls, "no network git calls found in ciao.git_sync"
+    for verb, timeout in calls:
+        assert timeout == "GIT_STARTUP_TIMEOUT", (
+            f"ciao.git_sync: git {verb} uses timeout={timeout}"
+        )

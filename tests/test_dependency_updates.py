@@ -178,3 +178,31 @@ def test_install_updated_packages_falls_back_to_current_python(tmp_path: Path, m
 
     assert ok is True
     assert calls[0][0][:3] == [sys.executable, "-m", "pip"]
+
+
+def test_auto_update_paths_names_the_lock_the_commit_step_must_stage(
+    tmp_path: Path,
+) -> None:
+    """`uv.lock` is the file a release forgot, so it must be reported.
+
+    The other three are independently version-bearing, so a release stages them
+    for its own reasons and the dependency edit rides along inside the same
+    file. `uv.lock` carries no version string — nothing staged it, and the
+    tagged commit carried the new pin beside the old lock, which fails every
+    `uv --frozen` step including the post-tag bundled-runtime build.
+    """
+    _write_update_tree(tmp_path)
+    (tmp_path / "uv.lock").write_text("# lock\n", encoding="utf-8")
+
+    names = {p.name for p in depupdates.auto_update_paths(tmp_path)}
+
+    assert "uv.lock" in names
+    assert {"pyproject.toml", "package.json"} <= names
+
+
+def test_auto_update_paths_skips_files_that_do_not_exist(tmp_path: Path) -> None:
+    """A repo without a lock must not hand the commit step a missing path."""
+    _write_update_tree(tmp_path)
+    assert not (tmp_path / "uv.lock").exists()
+
+    assert all(p.exists() for p in depupdates.auto_update_paths(tmp_path))

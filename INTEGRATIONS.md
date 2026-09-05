@@ -6,6 +6,27 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## CLI Tools
 
+### The `ciao` command
+
+The installed app keeps the engine inside
+`Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao`, so the installer also
+writes a shim at `~/.local/bin/ciao` that forwards to it — that is what makes
+the `ciao ...` commands in this document work in a terminal. Two cases need a
+manual step, and the installer says which one applies:
+
+- `~/.local/bin` is not on your `PATH`: add it. The setup wizard shows the
+  exact copyable line for your shell; the variants are:
+  - zsh (default): `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc`
+  - bash (login shells read `~/.bash_profile`, not `~/.bashrc`):
+    `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile`
+  - fish: `fish_add_path $HOME/.local/bin`.
+- Another `ciao` already exists (the name collides with Ciao Prolog, among
+  others): the installer never overwrites it, so call Ciaobot's engine by its
+  full path instead.
+
+Provider logins do not depend on the shim: the setup wizard hands out each
+provider's own login command (`claude auth login`, `opencode auth login`).
+
 ## opencode
 
 ```bash

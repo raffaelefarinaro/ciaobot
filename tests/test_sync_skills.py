@@ -175,6 +175,41 @@ def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
     assert claude_link.resolve() == canonical.resolve()
 
 
+def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None:
+    """Codex-era `.agents/skills` symlinks are pruned; user content is kept.
+
+    The removed `codex_skills` mirror wrote `.agents/skills/<name>` symlinks
+    back into the workspace catalogs and sync no longer maintains them, so
+    leftovers — live or broken — are removed and counted. Real directories
+    (upstream `skills`-CLI installs, user skills) and symlinks pointing
+    anywhere else are left untouched.
+    """
+    workspace = tmp_path / "workspace"
+    _write(workspace / "skills" / "kept" / "SKILL.md", "# Kept\n")
+    agents_skills = workspace / ".agents" / "skills"
+    agents_skills.mkdir(parents=True)
+    # Live Codex-era leftovers in both historical shapes.
+    (agents_skills / "kept").symlink_to("../../skills/kept")
+    (agents_skills / "also-kept").symlink_to("../../.claude/skills/also-kept")
+    # Broken leftover: its skill is gone, so sync cannot relink it.
+    (agents_skills / "stale").symlink_to("../../skills/stale")
+    # User-owned content sync must never touch.
+    _write(agents_skills / "upstream" / "SKILL.md", "# Upstream package\n")
+    (agents_skills / "elsewhere").symlink_to("/tmp/somewhere-else")
+    # Foreign same-name links must survive: same basename and a /skills/
+    # segment, but outside this workspace's catalogs.
+    (agents_skills / "foreign").symlink_to("/tmp/skills/foreign")
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.legacy_codex_pruned == 3
+    remaining = {entry.name for entry in agents_skills.iterdir()}
+    assert remaining == {"upstream", "elsewhere", "foreign"}
+    assert (agents_skills / "upstream" / "SKILL.md").is_file()
+    # The live skill itself still syncs into the maintained catalog.
+    assert (workspace / ".claude" / "skills" / "kept").is_symlink()
+
+
 def test_sync_workspace_skills_prunes_orphaned_custom_links(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "kept" / "SKILL.md")

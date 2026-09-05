@@ -7,7 +7,13 @@ from ciao import tool_path
 
 
 def _clear_cache():
-    tool_path.login_shell_path.cache_clear()
+    # `login_shell_path` memoizes for the process lifetime with lru_cache;
+    # `terminal_path` keeps its own TTL cache behind a module-level clear.
+    # A monkeypatched replacement carries neither, hence the getattr.
+    clear = getattr(tool_path.login_shell_path, "cache_clear", None)
+    if clear is not None:
+        clear()
+    tool_path.clear_terminal_path_cache()
 
 
 def test_resolve_tool_finds_binary_on_login_shell_path(tmp_path, monkeypatch):
@@ -57,4 +63,61 @@ def test_login_shell_path_survives_shell_probe_failure(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     result = tool_path.login_shell_path()
     assert "/usr/bin" in result.split(os.pathsep)
+    _clear_cache()
+
+
+def test_terminal_path_does_not_inherit_our_own_path(tmp_path, monkeypatch):
+    """The engine prepends common_tool_dirs() to its own PATH at startup
+    (ciao/main.py). Handing that to the probe would make ~/.local/bin come
+    back as if the user's terminal had it, and setup would then tell them to
+    type a bare command their shell cannot resolve."""
+    _clear_cache()
+    captured: dict[str, object] = {}
+
+    class _Result:
+        returncode = 0
+        stdout = f"{tool_path._START}/usr/bin{tool_path._END}"
+        stderr = ""
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _Result()
+
+    monkeypatch.setattr(tool_path.subprocess, "run", fake_run)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert tool_path.terminal_path() == "/usr/bin"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "PATH" not in env
+    # Everything else the rc files may need is still there.
+    assert env["HOME"] == str(tmp_path)
+    _clear_cache()
+
+
+def test_resolve_on_terminal_path_ignores_the_fallback_dirs(tmp_path, monkeypatch):
+    """`resolve_tool` searches ~/.local/bin and Homebrew whether or not the
+    user's shell has them; the terminal-only lookup must not."""
+    _clear_cache()
+    fallback = tmp_path / "local-bin"
+    fallback.mkdir()
+    fake = fallback / "claude"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [str(fallback)])
+    monkeypatch.setattr(tool_path, "terminal_path", lambda: "/usr/bin:/bin")
+    # Keep the host's own PATH (which may hold a real `claude`) out of it.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    assert tool_path.resolve_on_terminal_path("claude") is None
+    assert tool_path.resolve_tool("claude") == str(fake)
+    _clear_cache()
+
+
+def test_resolve_on_terminal_path_returns_none_when_the_probe_fails(monkeypatch):
+    _clear_cache()
+    monkeypatch.setattr(tool_path, "terminal_path", lambda: "")
+    assert tool_path.resolve_on_terminal_path("sh") is None
     _clear_cache()

@@ -17,6 +17,7 @@ from ciao.web.agent_assets import (
     os_audit_endpoint,
     update_command_endpoint,
     update_subagent_endpoint,
+    workspace_health,
     workspace_health_endpoint,
     workspace_health_fix_endpoint,
 )
@@ -338,3 +339,28 @@ def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> 
     # ...and the endpoint returns the fresh (now clean) report.
     assert after["status"] == "ok"
     assert not any(c["status"] != "ok" for c in after["checks"])
+
+
+def test_workspace_health_ignores_broken_agents_skills_links(tmp_path: Path) -> None:
+    """`.agents/skills` is unmanaged since the Codex removal: sync neither
+    writes nor prunes it, so a broken link there must not surface as an
+    error with a "Run sync-skills" remedy sync cannot honor."""
+    agents_skills = tmp_path / ".agents" / "skills"
+    agents_skills.mkdir(parents=True)
+    (agents_skills / "stale").symlink_to("../../skills/gone")
+
+    data = workspace_health(_config(tmp_path))
+
+    assert not any(
+        check["id"].startswith("broken-provider skill-") for check in data["checks"]
+    )
+
+
+def test_workspace_health_still_reports_broken_claude_skill_links(tmp_path: Path) -> None:
+    claude_skills = tmp_path / ".claude" / "skills"
+    claude_skills.mkdir(parents=True)
+    (claude_skills / "stale").symlink_to("../../skills/gone")
+
+    data = workspace_health(_config(tmp_path))
+
+    assert any(check["id"] == "broken-skill-stale" for check in data["checks"])

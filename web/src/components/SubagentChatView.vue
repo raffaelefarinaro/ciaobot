@@ -134,7 +134,12 @@ async function refresh(): Promise<void> {
     // whole set — which covers ids the narrow fetch cannot resolve on its own
     // (an opencode child, or a stale link to an agent the parent never named).
     await store.loadSubagent(props.chatId, props.agentId)
-    if (!subagent.value) await store.loadSubagents(props.chatId)
+    // A row with no messages counts as a miss too, not just a missing row: a
+    // host that answers the narrowed fetch with an empty transcript would
+    // otherwise pin "No captured turns" here forever, because the row exists.
+    // Off the poll timer, so an agent that genuinely has no turns costs one
+    // extra fetch per visit, not one every four seconds.
+    if (!subagent.value?.messages.length) await store.loadSubagents(props.chatId)
   } finally {
     loading.value = false
   }

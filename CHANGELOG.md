@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.16.0 - 2026-09-05
+
+### Added
+- feat(skills): warn instead of rejecting an oversized SKILL.md on import (`9f625395`)
+- feat(memory): attended retirement UI for stale vault notes (`9322d372`)
+
+### Changed
+- Merge pull request #419 from raffaelefarinaro/chore/sync-develop-v0.15.0 (`ecbffd0f`)
+- Merge pull request #422 from raffaelefarinaro/raffaelefarinaro/claudecontext (`24f27230`)
+- Merge pull request #423 from raffaelefarinaro/fix/subagent-transcript-and-skill-size-cap (`e0cf42db`)
+- Merge pull request #426 from raffaelefarinaro/raffaelefarinaro/onboarding (`c7a924a6`)
+- Merge pull request #425 from raffaelefarinaro/raffaelefarinaro/background-run-workspace-root-and-indicator (`931546d6`)
+- Merge pull request #428 from raffaelefarinaro/raffaelefarinaro/issue-424-orphaned-agents-skills (`8fd61b10`)
+- Merge pull request #427 from raffaelefarinaro/raffaelefarinaro/issue-417-vault-review-ui (`97ec71e8`)
+- merge develop into issue-421-vault-doc-path-stale (`b38c55d9`)
+- Merge pull request #429 from raffaelefarinaro/raffaelefarinaro/issue-421-vault-doc-path-stale (`e2a8c0ec`)
+- refactor: release-gate cleanup pass (`d2ca9494`)
+
+### Fixed
+- fix(release): stage the dependency lock, and record the v0.15.0 lessons (`5844e7f4`)
+- fix(subagents): fall back to local transcripts on an empty SDK read (`6f142d30`)
+- fix(chat): keep the model and context % on hydrated turn footers (`46cb2cfc`)
+- fix(subagents): only skip an empty render on the narrowed fetch (`9c9a946e`)
+- fix(background): root runs in the owning workspace, and show them in the chat (`0bc6b277`)
+- fix(background): fail closed on a missing workspace root; scope the interim announce gate (`16cf3f91`)
+- fix(setup): hand out runnable commands and put `ciao` on PATH (`841c9eef`)
+- fix(chat): keep background_run_counts typed for mypy (`439ef619`)
+- fix(setup): base the PATH advice on the user's real terminal PATH (`d53c3752`)
+- fix(setup): refresh terminal PATH per poll, show path_command in Settings, tolerate trailing-slash shim (`5b9fe8a2`)
+- fix(background): harden workspace rooting and dock agent links (`364b356b`)
+- fix(sync): prune orphaned .agents/skills symlinks, drop unfixable health check (`f878d18a`)
+- fix(projects): recompute vault_doc_path on vault_folder update (`60a1e6e6`)
+- fix(sync): scope .agents/skills prune to workspace catalogs (`117000ff`)
+- fix(memory): scope retirement badge, harden workspace fetch, clean review panel (`92b710f5`)
+- fix(projects): tolerate invalid vault root when resolving project doc (`86308d13`)
+- fix(sync): raise the git network ceiling to 60s (`479c1efc`)
+- fix: release-gate review findings (`21651fd1`)
+- fix: second-pass review findings on the release-gate changes (`41832c3a`)
+- fix: third-pass review findings on the uninstall orphan path (`9d76366d`)
+- fix(chat): signal a background run in the row, not just the dock (`6ca1899c`)
+
+### Maintenance
+- docs(agents): list every blocking CI gate, not just the tests (`c71b10a6`)
+- docs: stop claiming sync writes .agents/skills (`e2226af7`)
+
 ## v0.15.0 - 2026-09-03
 
 ### Added

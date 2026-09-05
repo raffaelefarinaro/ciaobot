@@ -215,6 +215,33 @@ def test_permanent_delete_restores_backlinks_when_audit_fails(
     assert (tmp_path / "Workspace" / ".vault-trash" / f"{candidate.candidate_id}.md").is_file()
 
 
+def test_list_trashed_is_scoped_and_tracks_restore(tmp_path: Path) -> None:
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal")[0]
+
+    assert review.list_trashed(tmp_path, workspace="personal") == []
+
+    trash_note(tmp_path, candidate)
+    (listed,) = review.list_trashed(tmp_path, workspace="personal")
+    assert listed["candidate_id"] == candidate.candidate_id
+    assert listed["original_path"] == candidate.path
+    assert listed["content_hash"] == candidate.content_hash
+    assert listed["trashed_at"]
+    # Another workspace's trash view stays empty.
+    assert review.list_trashed(tmp_path, workspace="work") == []
+
+    restore_note(tmp_path, candidate.candidate_id)
+    assert review.list_trashed(tmp_path, workspace="personal") == []
+
+
+def test_list_trashed_skips_malformed_sidecars(tmp_path: Path) -> None:
+    trash = tmp_path / "Workspace" / ".vault-trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    (trash / "not-a-candidate.json").write_text("{}", encoding="utf-8")
+    (trash / "0123456789abcdef01234567.json").write_text("not json", encoding="utf-8")
+    assert review.list_trashed(tmp_path, workspace="personal") == []
+
+
 def test_an_earlier_unattended_turn_does_not_block_a_later_attended_trash(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

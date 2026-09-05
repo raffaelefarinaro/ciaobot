@@ -155,7 +155,13 @@ def build_foreground_bash_hook():
                     "additionalContext": (
                         "Ciaobot kept this Bash command in the foreground because "
                         "background shell processes stop when the SDK turn ends. "
-                        "Wait for the tool result before replying."
+                        "Wait for the tool result before replying. If you expect "
+                        "this to take minutes, cancel it and use the "
+                        "`background_run_start` MCP tool instead: a foreground "
+                        "Bash command that outlives its timeout is moved to the "
+                        "CLI's own background tracking, which this hook cannot "
+                        "intercept and whose result is frequently never "
+                        "delivered to the chat."
                     ),
                 }
             }

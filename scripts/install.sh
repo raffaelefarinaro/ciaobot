@@ -120,6 +120,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Normalize for the shim identity check: a trailing slash would otherwise be
+# embedded verbatim (".../Applications//Ciaobot.app/...") while uninstall
+# computes the single-slash form and misses, orphaning the shim.
+app_dir=${app_dir%/}
+[ -n "$app_dir" ] || app_dir="/"
+
 for command in curl tar shasum mktemp mkdir mv find sw_vers awk uname id launchctl pgrep sed grep sysctl; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
@@ -365,6 +371,40 @@ stage=
 installer_done
 
 engine="$destination/Contents/Resources/ciao-runtime/bin/ciao"
+
+# The engine lives inside the app bundle, so a terminal has no `ciao` at all
+# unless the install puts one there -- yet the docs, the setup wizard and every
+# support answer hand out bare `ciao ...` commands. Users who had an unrelated
+# `ciao` on PATH got its error message instead ("Unknown command 'auth'"), and
+# users who had none got "command not found".
+#
+# A shim, not a symlink: the bundled launcher derives its runtime root from
+# `dirname "$0"`, which through a symlink resolves to the link's directory and
+# breaks. Never overwrite a `ciao` we did not write -- it may be someone's own
+# tool -- so the marker line is what makes replacement safe on updates.
+shim_dir="$HOME/.local/bin"
+shim="$shim_dir/ciao"
+shim_marker="# Ciaobot shim (managed by the Ciaobot installer)"
+shim_installed=0
+if { [ -e "$shim" ] || [ -L "$shim" ]; } && ! grep -qF "$shim_marker" "$shim" 2>/dev/null; then
+    echo "Ciaobot installer: $shim exists and was not created by Ciaobot; leaving it alone" >&2
+    echo "Ciaobot installer: run the CLI as $engine" >&2
+elif mkdir -p "$shim_dir" 2>/dev/null; then
+    shim_tmp="$shim.tmp.$$"
+    if {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' "$shim_marker"
+        printf 'exec "%s" "$@"\n' "$engine"
+    } > "$shim_tmp" 2>/dev/null && chmod 755 "$shim_tmp" && mv "$shim_tmp" "$shim"; then
+        shim_installed=1
+    else
+        rm -f "$shim_tmp"
+        echo "Ciaobot installer: could not create $shim" >&2
+    fi
+else
+    echo "Ciaobot installer: could not create $shim_dir" >&2
+fi
+
 plist="$HOME/Library/LaunchAgents/com.ciao.server.plist"
 desktop_plist="$HOME/Library/LaunchAgents/Ciaobot.plist"
 workspace=
@@ -476,4 +516,36 @@ if [ -n "$workspace" ]; then
     echo "Workspace: $workspace"
 else
     echo "Workspace: first-run onboarding will ask where to create or adopt one"
+fi
+if [ "$shim_installed" -eq 1 ]; then
+    # Installing the shim is not enough on its own: ~/.local/bin is not on a
+    # default macOS PATH, and when it is, an unrelated `ciao` earlier in the
+    # PATH still wins. Say which of the two happened instead of leaving the
+    # user to discover it through a confusing error.
+    case ":${PATH:-}:" in
+        *":$shim_dir:"*)
+            resolved=$(command -v ciao || true)
+            if [ -n "$resolved" ] && [ "$resolved" != "$shim" ]; then
+                echo "Note: another 'ciao' comes first on your PATH ($resolved)."
+                echo "      Run Ciaobot's CLI as $shim"
+            fi
+            ;;
+        *)
+            # macOS terminals start login shells: bash reads ~/.bash_profile,
+            # not ~/.bashrc, so naming the wrong file fixes only this shell.
+            echo "Add ~/.local/bin to your PATH to use the 'ciao' command:"
+            case "${SHELL:-/bin/zsh}" in
+                */fish)
+                    echo "  fish_add_path \$HOME/.local/bin"
+                    ;;
+                *)
+                    case "${SHELL:-/bin/zsh}" in
+                        */bash) rc=~/.bash_profile ;;
+                        *) rc=~/.zshrc ;;
+                    esac
+                    echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $rc && source $rc"
+                    ;;
+            esac
+            ;;
+    esac
 fi
