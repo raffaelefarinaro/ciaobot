@@ -129,7 +129,17 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           // cannot repaint the pre-mutation queue over it — the decided row
           // would come back as if nothing had happened. The old code got this
           // for free from the `fetch(..., { force: true })` it no longer runs.
-          ++fetchSeq
+          //
+          // Only a GET for *this* scope: a fetch the user triggered by
+          // switching workspaces must still land, or the new scope would sit
+          // on the old one's rows with nothing left to refetch it. And clear
+          // `loading` here — the orphaned request's own `finally` is gated on
+          // still holding the ticket, so nobody else ever would, and the
+          // panel's refresh button would stay disabled reading "loading…".
+          if (fetchPromise && fetchWorkspace === workspace) {
+            ++fetchSeq
+            loading.value = false
+          }
           candidates.value = data.candidates
           trashed.value = data.trashed ?? []
           loadedWorkspace.value = workspace

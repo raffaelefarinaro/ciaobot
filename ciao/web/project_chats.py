@@ -7380,13 +7380,18 @@ class ProjectChatManager:
         # result while its synthesis nudge was still pending. The chat's newest
         # watcher is the only one entitled to release the chat's parked entry;
         # the superseded turn's entry was already overwritten by that park.
-        handed_to_drain = False
+        # A box rather than a return value: the handoff has to survive the
+        # inner watcher raising *after* the nudge landed (a publish callback
+        # that throws, a bad JSONL line on the next tick). A lost return value
+        # would send this finally down the flush path while the drain is still
+        # going to announce the synthesis reply — two pushes for one turn.
+        handed_to_drain: list[bool] = []
         try:
-            handed_to_drain = await self._watch_subagent_completion_inner(
-                chat_id, project_id
+            await self._watch_subagent_completion_inner(
+                chat_id, project_id, handed_to_drain
             )
         finally:
-            # `handed_to_drain` means a nudge landed and the between-turns
+            # A non-empty box means a nudge landed and the between-turns
             # drain now owns the release — it is the only code that learns
             # whether a synthesis reply actually arrived and was worth
             # announcing. Flushing here would push the interim non-answer
@@ -7397,16 +7402,16 @@ class ProjectChatManager:
                     self._flush_result_announce(chat_id)
 
     async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str
-    ) -> bool:
-        """Returns True when a nudge landed and the drain owns the parked announce."""
+        self, chat_id: str, project_id: str, handed_to_drain: list[bool]
+    ) -> None:
+        """Appends to ``handed_to_drain`` once the drain owns the parked announce."""
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
-            return False
+            return
         if chat.provider == "opencode":
             # opencode has no nudge path, so nothing can take the park from us.
             await self._watch_opencode_subagent_completion(chat_id, project_id)
-            return False
+            return
         # This watcher looks the file up exactly once; a miss here is final
         # (the loop below would never run), so force the cross-cwd fallback
         # past the shared cache's rescan rate limit — see subagent_tracking.
@@ -7417,7 +7422,7 @@ class ProjectChatManager:
             force_refresh=True,
         )
         if path is None:
-            return False
+            return
 
         last_count = -1
         last_size = -1
@@ -7436,9 +7441,6 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
-        # Set once a nudge lands: from then on the between-turns drain owns the
-        # parked announce, and this watcher must not release it.
-        handed_to_drain = False
         task_wake_sent = False
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
@@ -7518,7 +7520,9 @@ class ProjectChatManager:
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
                         if nudged:
-                            handed_to_drain = True
+                            # Recorded on the caller's box immediately, so an
+                            # exception on a later tick cannot lose the handoff.
+                            handed_to_drain.append(True)
                         else:
                             self._flush_result_announce(chat_id)
                         # A landed nudge does NOT discard the park: it only
@@ -7569,7 +7573,6 @@ class ProjectChatManager:
                     # and will publish the real count on its first tick.
                     self._publish_subagent_count(chat_id, project_id, 0)
             self._background_agents_last.pop(chat_id, None)
-        return handed_to_drain
 
     async def _watch_opencode_subagent_completion(
         self, chat_id: str, project_id: str

@@ -1754,7 +1754,9 @@ async def test_watcher_releases_the_announce_when_it_raises(tmp_path: Path) -> N
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
 
-    async def boom(chat_id: str, project_id: str) -> None:
+    async def boom(
+        chat_id: str, project_id: str, handed_to_drain: list[bool]
+    ) -> None:
         raise RuntimeError("watcher blew up")
 
     pcm._watch_subagent_completion_inner = boom  # type: ignore[method-assign]
@@ -1782,7 +1784,9 @@ async def test_a_superseded_watcher_does_not_release_the_next_turns_announce(
 
     started = asyncio.Event()
 
-    async def blocks(chat_id: str, project_id: str) -> None:
+    async def blocks(
+        chat_id: str, project_id: str, handed_to_drain: list[bool]
+    ) -> None:
         started.set()
         await asyncio.sleep(3600)
 
@@ -2013,3 +2017,32 @@ async def test_a_landed_nudge_hands_the_park_on_rather_than_dropping_it(
     # Not announced here — the drain owns it now — and, crucially, not dropped.
     assert calls == []
     assert chat.chat_id in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_the_handoff_survives_the_watcher_raising_after_the_nudge(
+    tmp_path: Path,
+) -> None:
+    """The handoff is a box, not a return value, for exactly this reason.
+
+    The watcher keeps polling after a nudge lands whenever CLI-owned tasks are
+    still tracked, so it can still raise. A lost return value would send the
+    outer `finally` down the flush path while the drain was still going to
+    announce the synthesis reply — two pushes for one turn, the interim
+    "I'll report back" among them.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    async def nudges_then_raises(chat_id, project_id, handed_to_drain):
+        handed_to_drain.append(True)
+        raise RuntimeError("a later tick blew up")
+
+    pcm._watch_subagent_completion_inner = nudges_then_raises  # type: ignore[method-assign]
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+
+    with pytest.raises(RuntimeError):
+        await pcm._watch_subagent_completion("chat-1", "proj-1")
+
+    assert calls == []
+    assert "chat-1" in pcm._parked_result_announce
