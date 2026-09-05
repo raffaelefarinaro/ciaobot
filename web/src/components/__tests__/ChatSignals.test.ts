@@ -19,6 +19,7 @@ function seed() {
   }] as unknown as typeof store.chats
   store.projectStreaming = {}
   store.backgroundAgents = {}
+  store.backgroundRuns = {}
   const taskStore = useTaskStore()
   taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return { store, taskStore }
@@ -47,6 +48,37 @@ describe('ChatSignals', () => {
     expect(working.find('.chat-signal--working .activity-spinner').exists()).toBe(true)
     expect(working.text()).toBe('')
     expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
+  })
+
+  it('signals a tracked background run in the row, not just the dock', () => {
+    // The release that added background runs wired the indicator into the
+    // project header, the home lanes and the ChatPanel dock but not this
+    // component — so the most-seen surface, the sidebar row, showed nothing at
+    // all for a chat whose only activity was a run.
+    const { store } = seed()
+    store.backgroundRuns = { 'chat-1': 1 }
+    const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(one.find('.chat-signal--runs').exists()).toBe(true)
+    expect(one.find('.chat-signal--runs .activity-spinner').exists()).toBe(true)
+    expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('1 background run')
+    // One run needs no number, the same rule the agents chip follows.
+    expect(one.find('.chat-signal-count').exists()).toBe(false)
+
+    store.backgroundRuns = { 'chat-1': 3 }
+    const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(many.find('.chat-signal-count').text()).toBe('3')
+    expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('3 background runs')
+  })
+
+  it('prefers the agents chip over runs when a chat has both', () => {
+    // An agent has a transcript to open; a run has only a count and a log, so
+    // the agent is the more useful thing to point at.
+    const { store } = seed()
+    store.backgroundAgents = { 'chat-1': 1 }
+    store.backgroundRuns = { 'chat-1': 2 }
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(wrapper.find('.chat-signal--agents').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--runs').exists()).toBe(false)
   })
 
   it('shows a count only when more than one agent is running', () => {

@@ -815,6 +815,15 @@ export const useProjectStore = defineStore('projects', () => {
     || Object.values(backgroundAgents.value).some(n => n > 0),
   )
 
+  // The UI-facing "is anything happening?" — deliberately NOT `anyChatWorking`,
+  // which is the poll gate above. A background run is the assistant working and
+  // must light the nav item, but it is not a subagent, so folding it into the
+  // gate would poll /api/subagents/running for rows that cannot exist.
+  const anyChatBusy = computed(() =>
+    anyChatWorking.value
+    || Object.values(backgroundRuns.value).some(n => n > 0),
+  )
+
   // The server keeps a row "running" until the agent's transcript goes idle,
   // which lags the parent turn by up to FINISHED_AGENT_IDLE_SECONDS (60s). So
   // one refresh on the falling edge was not enough: whatever it still listed
@@ -5918,7 +5927,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,

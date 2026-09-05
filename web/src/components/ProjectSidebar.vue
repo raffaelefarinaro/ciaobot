@@ -1496,11 +1496,9 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-const isAnyChatWorking = computed(() => {
-  return Object.values(store.streaming).some(Boolean) ||
-         Object.values(store.projectStreaming).some(Boolean) ||
-         Object.values(store.backgroundAgents).some(val => val > 0)
-})
+// One definition, in the store: this used to OR the sources by hand and so
+// missed background runs entirely when they were added.
+const isAnyChatWorking = computed(() => store.anyChatBusy)
 
 const hasAutomationWarning = computed(() => {
   return taskStore.schedules.some(s => {
