@@ -39,6 +39,7 @@
 - fix: release-gate review findings (`21651fd1`)
 - fix: second-pass review findings on the release-gate changes (`41832c3a`)
 - fix: third-pass review findings on the uninstall orphan path (`9d76366d`)
+- fix(chat): signal a background run in the row, not just the dock (`6ca1899c`)
 
 ### Maintenance
 - docs(agents): list every blocking CI gate, not just the tests (`c71b10a6`)
