@@ -14,7 +14,14 @@ from pathlib import Path
 # app. It deliberately does not use `local_session.GIT_NETWORK_TIMEOUT` (60s):
 # that ceiling is right for the background loops, which can afford to wait out
 # a slow remote because nothing is blocked on them. Here an unreachable remote
-# must give up fast — the next backup tick syncs anyway.
+# must give up fast.
+#
+# The trade is real and worth stating: nothing else pulls on its own. The
+# branch-backup loop only PUSHES, and fetch/merges solely when a push comes
+# back non-fast-forward, so a startup pull killed at this ceiling means the
+# checkout does not see the remote's new commits until the next boot or an
+# explicit Settings → "Sync with Remote". Raise this rather than tighten it if
+# real pulls start timing out.
 GIT_STARTUP_TIMEOUT = 10.0
 
 logger = logging.getLogger(__name__)

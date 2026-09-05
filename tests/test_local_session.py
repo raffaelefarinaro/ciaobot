@@ -582,8 +582,11 @@ def _network_git_call_timeouts(module_path: Path) -> list[tuple[str, str]]:
 def test_network_git_calls_use_the_shared_ceiling() -> None:
     """A 10s ceiling made a momentary network stall look like a sync failure.
 
-    Pin every network git call in both sync modules to ``GIT_NETWORK_TIMEOUT``
-    so a new call site cannot quietly reintroduce a tighter one.
+    Pin every network git call in the background sync module to
+    ``GIT_NETWORK_TIMEOUT`` so a new call site cannot quietly reintroduce a
+    tighter one. (``ciao.git_sync`` is deliberately excluded — it runs before
+    the server binds and keeps its own shorter ceiling; see
+    ``test_startup_sync_keeps_its_own_shorter_ceiling``.)
     """
     import ciao.local_session
 

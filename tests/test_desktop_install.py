@@ -205,3 +205,51 @@ def test_uninstall_leaves_a_foreign_shim_alone_when_the_bundle_is_gone(
     assert result["removed"] is False
     assert "removed_shim" not in result
     assert foreign.exists()
+
+
+def test_uninstall_removes_orphaned_launch_agents_when_the_bundle_is_gone(
+    tmp_path: Path,
+) -> None:
+    """Trashing the bundle by hand orphans the launch agents too.
+
+    Without this, `~/Library/LaunchAgents/Ciaobot.plist` and
+    `com.ciao.server.plist` survive the uninstall, launchd keeps respawning a
+    binary that no longer exists, and a later reinstall inherits the stale
+    plists. The identity check needs no bundle on disk: both sides name the
+    same path.
+    """
+    bundle = tmp_path / desktop_install.APP_BUNDLE_NAME  # never created
+    engine = bundle / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    desktop_plist = agents / "Ciaobot.plist"
+    server_plist = agents / "com.ciao.server.plist"
+    foreign_plist = agents / "com.other.app.plist"
+    with desktop_plist.open("wb") as stream:
+        plistlib.dump(
+            {"ProgramArguments": [
+                str(bundle / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME)
+            ]},
+            stream,
+        )
+    with server_plist.open("wb") as stream:
+        plistlib.dump({"ProgramArguments": [str(engine), "run"]}, stream)
+    with foreign_plist.open("wb") as stream:
+        plistlib.dump({"ProgramArguments": ["/usr/bin/true"]}, stream)
+
+    def runner(args: list[str], **kwargs):
+        return desktop_install.subprocess.CompletedProcess(args, 0, "", "")
+
+    result = desktop_install.uninstall_desktop_app(
+        app_dir=tmp_path,
+        launch_agents_dir=agents,
+        uid=501,
+        runner=runner,
+    )
+
+    assert result["removed"] is False
+    assert result["removed_agents"] == [str(desktop_plist), str(server_plist)]
+    assert not desktop_plist.exists()
+    assert not server_plist.exists()
+    # A plist belonging to something else is never touched.
+    assert foreign_plist.exists()

@@ -1242,15 +1242,21 @@ function openRetirementReview() {
 // `immediate` matters: `mm.view` lives in the store, so remounting this
 // component while it already reads 'review' (arriving at /proposals from a
 // page that unmounted us, after the sidebar set the view) makes the seeding
-// assignment below a no-op and the watcher would never fire — leaving both
-// tab badges at 0 until the user clicks Retirement.
+// assignment a no-op and a plain watcher would never fire — leaving both tab
+// badges at 0 until the user clicks Retirement.
+//
+// The seeding runs FIRST so `immediate` sees the view this mount will
+// actually show. Registering the watcher first instead fires it against the
+// previous mount's leftover 'review' (landing on /memory by URL or the back
+// button), paying for both of the app's heaviest reads a line before the
+// seeding switches to 'graph'.
+mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
     if (store.activeWorkspace) void vaultReview.ensureLoaded(store.activeWorkspace)
   }
 }, { immediate: true })
-mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
 type SortKey = 'title' | 'type' | 'degree' | 'age'

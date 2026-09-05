@@ -65,12 +65,15 @@ interface ExcerptState {
 }
 const excerpts = ref<Record<string, ExcerptState>>({})
 const EXCERPT_LIMIT = 1200
-// The codes `/api/workspace-file` actually distinguishes; anything else falls
-// through to the raw status.
+// The codes `/api/workspace-file` actually returns (404 missing, 413 over the
+// size cap, 415 not an allowlisted extension); anything else falls through to
+// the raw status. Deliberately no 403: the endpoint never sends one, and the
+// only 403 in the app is the auth middleware's "forbidden origin", which is
+// not a fact about this file.
 const EXCERPT_ERRORS: Record<number, string> = {
-  403: 'Cannot preview this file.',
   404: 'File not found — it may have been moved.',
   413: 'File too large to preview.',
+  415: 'Cannot preview this file type.',
 }
 
 async function ensureExcerpt(candidate: VaultReviewCandidate) {

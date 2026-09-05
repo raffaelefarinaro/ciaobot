@@ -144,11 +144,22 @@ def uninstall_desktop_app(
 
     destination = Path(app_dir).expanduser() / APP_BUNDLE_NAME
     if not destination.exists():
-        # The bundle is already gone (dragged to the Trash by hand), but the
-        # shim that execs into it may not be: left behind, `ciao` stays on
-        # PATH and every invocation dies with "no such file". The identity
-        # check still applies, so only a marked shim naming THIS bundle goes.
+        # The bundle is already gone (dragged to the Trash by hand), but what
+        # points INTO it may not be. Left behind, the shim keeps `ciao` on
+        # PATH so every invocation dies with "no such file", and the launch
+        # agents keep launchd respawning a missing executable (and a later
+        # reinstall inherits the stale plists). Both identity checks still
+        # apply — only a marked shim and plists naming THIS bundle go — and
+        # neither needs the bundle to exist to make that comparison.
         missing: dict[str, Any] = {"removed": False, "path": str(destination)}
+        orphan_agents = _remove_installer_launch_agents(
+            destination=destination,
+            launch_agents_dir=launch_agents_dir,
+            uid=uid,
+            runner=runner,
+        )
+        if orphan_agents:
+            missing["removed_agents"] = orphan_agents
         orphan_shim = _remove_installer_shim(
             destination=destination, shim_path=shim_path
         )
