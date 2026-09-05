@@ -160,6 +160,20 @@ _RETRY_STATUSES = {"pending", "stopped", ""}
 # to the nudge drain, never to a reply the user asked for: see
 # ProjectChatManager._is_worth_announcing_nudge_reply.
 _NUDGE_ANNOUNCE_MIN_CHARS = 4
+
+# How long a result announce may stay parked once the synthesis nudge has been
+# delivered and the between-turns drain owns it. The drain releases the entry on
+# every way its event stream can end; this covers the one way it cannot see — a
+# CLI that is alive and simply never answers (issue #437).
+#
+# The trade-off runs both ways and neither end is free: too short and a
+# genuinely slow synthesis turn gets the interim "I'll report back" push moments
+# before its own real one; too long and a notification the user needed arrives
+# after it stopped being useful. Five minutes is well past any synthesis turn
+# observed in practice (they follow subagents that have already finished, so the
+# parent only has to write a report) while still being inside the window where
+# someone might act on the result.
+_PARKED_ANNOUNCE_DEADLINE_SECONDS = 300.0
 # Patterns an unattended parent emits while still waiting on its background
 # subagents. A run that ended on one of these never synthesized its agents'
 # results — the follow-up turn died before producing a report — so the run is
@@ -1334,7 +1348,11 @@ class ProjectChatManager:
         # Result announces parked while the synthesis nudge decides whether it
         # will speak instead. See `_park_result_announce`. chat_id ->
         # (project_id, title, snippet).
-        self._parked_result_announce: dict[str, tuple[str, str, str]] = {}
+        self._parked_result_announce: dict[str, tuple[int, str, str, str]] = {}
+        # Monotonic id per park, so a late releaser (the deadline task, a
+        # superseded watcher) can prove the entry it is about to act on is
+        # still the one it parked.
+        self._parked_announce_seq = 0
         # CLI-task wakes already delivered this process, as (chat_id,
         # task_id). Bounds redelivery to once per process lifetime: if the
         # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
@@ -7308,30 +7326,87 @@ class ProjectChatManager:
 
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
-    ) -> None:
-        """Hold this turn's announce until the nudge decides whether to speak."""
-        self._parked_result_announce[chat_id] = (project_id, title, snippet)
+    ) -> int:
+        """Hold this turn's announce until the nudge decides whether to speak.
 
-    def _discard_result_announce(self, chat_id: str) -> None:
-        """The nudge landed; its reply will announce instead of this."""
-        self._parked_result_announce.pop(chat_id, None)
+        Returns a token identifying THIS park. Anything that releases an entry
+        later — the deadline below, a watcher's finally — passes it back, so a
+        late owner can never act on a newer turn's entry that happens to sit in
+        the same per-chat slot.
+        """
+        self._parked_announce_seq += 1
+        token = self._parked_announce_seq
+        self._parked_result_announce[chat_id] = (token, project_id, title, snippet)
+        return token
 
-    def _flush_result_announce(self, chat_id: str) -> bool:
+    def _parked_announce_token(self, chat_id: str) -> int | None:
+        parked = self._parked_result_announce.get(chat_id)
+        return None if parked is None else parked[0]
+
+    def _take_parked_announce(
+        self, chat_id: str, token: int | None
+    ) -> tuple[int, str, str, str] | None:
+        """Pop the parked entry when *token* still identifies it."""
+        parked = self._parked_result_announce.get(chat_id)
+        if parked is None:
+            return None
+        if token is not None and parked[0] != token:
+            return None
+        return self._parked_result_announce.pop(chat_id)
+
+    def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
+        """The nudge's reply announced instead; drop this entry."""
+        self._take_parked_announce(chat_id, token)
+
+    def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
         """Announce a parked result. Returns True when one was actually parked.
 
         Idempotent by construction — the entry is popped — so it is safe to
         call from a `finally` that may run after an explicit flush.
         """
-        parked = self._parked_result_announce.pop(chat_id, None)
+        parked = self._take_parked_announce(chat_id, token)
         if parked is None:
             return False
-        project_id, title, snippet = parked
+        _token, project_id, title, snippet = parked
         self._announce_result_ready(chat_id, project_id, title, snippet)
         self._spawn_detached(
             self._maybe_archive_proposal_helper(chat_id),
             f"archive-proposal-helper-{chat_id}",
         )
         return True
+
+    def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None:
+        """Release a handed-off announce if the synthesis reply never arrives.
+
+        The drain owns the parked entry once a nudge lands, and releases it on
+        every way `drain_events()` can END. But a CLI that is alive and simply
+        never answers the nudge ends it in no way at all: the drain stays
+        suspended on the queue until the next user turn cancels it, and that
+        path deliberately does not flush (the new turn supersedes the interim
+        announce). Without a deadline the chat sits on "I'll report back once
+        the agents finish" with no push, no unread badge and no archive
+        proposal until the user happens to open it (issue #437).
+
+        Token-scoped, so a fire that lands after the drain announced, after a
+        later turn parked its own entry, or after anything else released this
+        one is a no-op.
+        """
+        self._spawn_detached(
+            self._release_parked_announce_after_deadline(chat_id, token),
+            f"parked-announce-deadline-{chat_id}",
+        )
+
+    async def _release_parked_announce_after_deadline(
+        self, chat_id: str, token: int
+    ) -> None:
+        await asyncio.sleep(_PARKED_ANNOUNCE_DEADLINE_SECONDS)
+        if self._flush_result_announce(chat_id, token):
+            logger.info(
+                "Synthesis reply for chat %s did not arrive within %ss; "
+                "announcing the interim result instead",
+                chat_id,
+                _PARKED_ANNOUNCE_DEADLINE_SECONDS,
+            )
 
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
         """Replace any existing subagent watcher for this chat with a new one."""
@@ -7441,6 +7516,16 @@ class ProjectChatManager:
         # clients only once, with the zero-count publish it belongs to.
         held_ticks = 0
         nudged = False
+        # One attempt per watcher, outcome regardless. Every exit path but the
+        # CLI-task one breaks right after the nudge, so a *failed* nudge got a
+        # retry only there — and that retry was harmful twice over: the failed
+        # attempt already flushed the parked interim announce, so a later
+        # success handed the drain a turn that would announce again (two pushes
+        # for one turn, the interim non-answer among them), and while the nudge
+        # kept failing — a parent that ended on a question never stops failing —
+        # every 3s tick re-ran `last_activity_at = now` + `_save()` and another
+        # steer attempt for the watcher's full hour.
+        nudge_attempted = False
         task_wake_sent = False
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
@@ -7487,7 +7572,9 @@ class ProjectChatManager:
                     held_ticks = 0
                 grace_expired = pending and held_ticks > 2
                 ready_to_nudge = (
-                    count == 0 and not nudged and (not pending or grace_expired)
+                    count == 0
+                    and not nudge_attempted
+                    and (not pending or grace_expired)
                 )
                 if count != last_count or ready_to_nudge:
                     if ready_to_nudge:
@@ -7515,6 +7602,7 @@ class ProjectChatManager:
                         # The question hold stays absolute (inside the
                         # nudge call); only the notification hold above
                         # carries the bounded grace.
+                        nudge_attempted = True
                         nudged = await self._nudge_synthesis_after_subagents(
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
@@ -7523,6 +7611,16 @@ class ProjectChatManager:
                             # Recorded on the caller's box immediately, so an
                             # exception on a later tick cannot lose the handoff.
                             handed_to_drain.append(True)
+                            # The drain releases the park on every way it can
+                            # END, but a live CLI that simply never answers the
+                            # nudge ends it in no way at all. Arm a deadline so
+                            # that chat cannot sit on the interim message
+                            # forever (issue #437).
+                            parked_token = self._parked_announce_token(chat_id)
+                            if parked_token is not None:
+                                self._arm_parked_announce_deadline(
+                                    chat_id, parked_token
+                                )
                         else:
                             self._flush_result_announce(chat_id)
                         # A landed nudge does NOT discard the park: it only
