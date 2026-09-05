@@ -133,12 +133,21 @@ instead of its own marks.
 **Rule L2.1** — If two surfaces render the same fact, that fact gets a component.
 No exceptions for "it's only a dot".
 
+`TabBar` is the case for taking that rule seriously about *behaviour*, not just
+pixels. Three bars had grown up independently (project sections, proposal
+review, memory-map review). The newest copied the CSS and left the roving
+tabindex behind, so it was reachable but not operable from the keyboard — and it
+renders directly above one of the others, where any drift shows side by side. A
+shared component is what makes an accessibility contract impossible to drop by
+copy-paste.
+
 Existing and wanted:
 
 | Component | Owns | Status |
 |---|---|---|
 | `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 5 call sites** |
 | `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
+| `TabBar` | a tablist: tab styling, count pills, and the roving-tabindex keyboard contract | **exists, all 3 call sites** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
 | `CountTile` | one number + label, urgency-ordered (project stats, lane summary) | wanted — pattern now used in 2 places |
 | `KeyBadge` | the `1`–`9` workspace shortcut badge | wanted — currently drawn in 3 places |

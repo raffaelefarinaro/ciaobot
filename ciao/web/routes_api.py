@@ -4877,16 +4877,7 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
         except (ValueError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        await asyncio.to_thread(
-            functools.partial(
-                review.generate_candidates,
-                root,
-                workspace=workspace,
-                max_candidates=50,
-                write_queue=True,
-            )
-        )
-        return JSONResponse({"ok": True, "result": result})
+        return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
     item = next((candidate for candidate in candidates if candidate.candidate_id == candidate_id_value), None)
     if item is None:
         return JSONResponse({"error": "candidate not found or changed"}, status_code=409)
@@ -4901,7 +4892,23 @@ async def vault_review(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
     # The projection is pending-only and must reflect the successful mutation,
     # not the pre-action candidate list.
-    await asyncio.to_thread(
+    return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
+
+
+async def _vault_review_snapshot(root: Path, workspace: str) -> dict[str, Any]:
+    """Regenerate the queue after a mutation and hand it back to the caller.
+
+    The regeneration is not optional — the readable `Workspace/Vault-Review.md`
+    projection is pending-only and has to reflect the mutation. Returning its
+    result is what lets the client skip a third scan: `generate_candidates`
+    reads every note in the vault three times (scan, validate, per-entry
+    read_bytes), so a client that re-GETs after every decision made one row
+    click cost ~3x that. The trash inventory rides along because `restore` and
+    `delete` change it and the panel renders both lists.
+    """
+    from ciao import vault_review as review
+
+    candidates = await asyncio.to_thread(
         functools.partial(
             review.generate_candidates,
             root,
@@ -4910,7 +4917,10 @@ async def vault_review(request: Request) -> JSONResponse:
             write_queue=True,
         )
     )
-    return JSONResponse({"ok": True, "result": result})
+    trashed = await asyncio.to_thread(
+        functools.partial(review.list_trashed, root, workspace=workspace)
+    )
+    return {"candidates": [item.as_dict() for item in candidates], "trashed": trashed}
 
 
 async def vault_delete_note(request: Request) -> JSONResponse:

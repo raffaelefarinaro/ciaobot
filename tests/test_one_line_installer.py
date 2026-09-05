@@ -395,6 +395,44 @@ def test_installer_replaces_its_own_shim_but_not_a_foreign_ciao(tmp_path: Path) 
     assert str(engine) in (bin_dir / "ciao").read_text(encoding="utf-8")
 
 
+def test_uninstall_parses_the_shim_the_installer_actually_writes(tmp_path) -> None:
+    """Run install.sh's own shim-writing lines and parse the result.
+
+    The marker assertion below pins one literal; this pins the whole format.
+    `shim_exec_target` matches `exec "<path>" "$@"`, and that line lives in
+    shell, so nothing but this test connects the writer to the reader — a
+    change to either side would otherwise orphan every installed shim silently
+    (uninstall stops recognising them and leaves a dead `ciao` on PATH).
+    """
+    import re
+    import subprocess
+
+    from ciao import desktop_install
+
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    block = re.search(r'if \{\n(?:\s*printf .*\n)+\s*\} > "\$shim_tmp"', script)
+    assert block is not None, "install.sh's shim-writing block moved; update this test"
+    printfs = "\n".join(
+        line.strip()
+        for line in block.group(0).splitlines()
+        if line.strip().startswith("printf")
+    )
+
+    engine = (
+        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    )
+    written = subprocess.run(
+        ["sh", "-s", desktop_install.SHIM_MARKER, str(engine)],
+        input=f'shim_marker="$1"\nengine="$2"\n{printfs}\n',
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert desktop_install.SHIM_MARKER in written
+    assert desktop_install.shim_exec_target(written) == engine
+
+
 def test_uninstall_and_the_installer_agree_on_the_shim_marker() -> None:
     """The marker is how uninstall recognises a shim it may delete.
 

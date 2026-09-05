@@ -15,6 +15,8 @@ const SIGNAL_LABELS: Record<string, string> = {
 }
 
 /** One signal in words the UI can show. */
+import { formatAgeDays } from './relativeTime'
+
 export function signalLabel(signal: string): string {
   return SIGNAL_LABELS[signal] ?? signal.replace(/_/g, ' ')
 }
@@ -38,11 +40,9 @@ export function candidateLeaf(path: string): string {
  */
 export function verificationLabel(ageDays: number | null, lastUpdate: string): string {
   if (typeof ageDays === 'number' && Number.isFinite(ageDays)) {
-    if (ageDays < 1) return 'verified today'
-    if (ageDays < 30) return `unverified for ${ageDays}d`
-    if (ageDays < 365) return `unverified for ${Math.floor(ageDays / 30)}mo`
-    const years = ageDays / 365
-    return `unverified for ${years >= 2 ? Math.floor(years) : years.toFixed(1)}y`
+    // Same ladder the Memory Map renders this note's age with, one tab away.
+    const age = formatAgeDays(ageDays)
+    return age === 'today' ? 'verified today' : `unverified for ${age}`
   }
   return lastUpdate ? `last verified ${lastUpdate}` : 'never verified'
 }

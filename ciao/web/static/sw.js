@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ciaobot-v0.16.0'
+const CACHE_NAME = 'ciaobot-v0.16.1'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
