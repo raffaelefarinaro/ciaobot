@@ -7,11 +7,13 @@ from ciao import tool_path
 
 
 def _clear_cache():
-    # Tolerant of monkeypatched replacements, which carry no cache.
-    for name in ("login_shell_path", "terminal_path"):
-        clear = getattr(getattr(tool_path, name), "cache_clear", None)
-        if clear is not None:
-            clear()
+    # `login_shell_path` memoizes for the process lifetime with lru_cache;
+    # `terminal_path` keeps its own TTL cache behind a module-level clear.
+    # A monkeypatched replacement carries neither, hence the getattr.
+    clear = getattr(tool_path.login_shell_path, "cache_clear", None)
+    if clear is not None:
+        clear()
+    tool_path.clear_terminal_path_cache()
 
 
 def test_resolve_tool_finds_binary_on_login_shell_path(tmp_path, monkeypatch):

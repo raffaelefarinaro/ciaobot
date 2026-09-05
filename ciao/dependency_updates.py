@@ -285,10 +285,12 @@ def apply_auto_updates(
     written are :func:`auto_update_paths` — a caller that commits must stage
     those, not infer them from this list.
     """
-    pyproject_path = workspace_root / "pyproject.toml"
-    package_json_path = workspace_root / "web" / "package.json"
-    package_lock_path = workspace_root / "web" / "package-lock.json"
-    uv_lock_path = workspace_root / "uv.lock"
+    # Unpacked from the same tuple the committing caller stages, so a fifth
+    # manifest cannot be added to one list and forgotten in the other — which
+    # is exactly how `uv.lock` came to be written but never staged.
+    pyproject_path, package_json_path, package_lock_path, uv_lock_path = (
+        workspace_root / rel for rel in AUTO_UPDATE_RELATIVE_PATHS
+    )
     originals = (
         pyproject_path.read_text(encoding="utf-8"),
         package_json_path.read_text(encoding="utf-8"),

@@ -9,7 +9,13 @@ import asyncio
 import logging
 from pathlib import Path
 
-from ciao.local_session import GIT_NETWORK_TIMEOUT
+# Startup sync is awaited inline in `_run_server_locked`, BEFORE the server
+# binds, so its ceiling is the user's worst-case cold start staring at a blank
+# app. It deliberately does not use `local_session.GIT_NETWORK_TIMEOUT` (60s):
+# that ceiling is right for the background loops, which can afford to wait out
+# a slow remote because nothing is blocked on them. Here an unreachable remote
+# must give up fast — the next backup tick syncs anyway.
+GIT_STARTUP_TIMEOUT = 10.0
 
 logger = logging.getLogger(__name__)
 
@@ -264,9 +270,8 @@ async def sync_workspace(workspace: Path) -> str | None:
         logger.info("Startup sync: branch has no upstream yet; skipping pull.")
         return None
 
-    # Pull (merge-based, handles merge commits cleanly) under the shared
-    # network ceiling: a slow remote must not fail startup sync outright.
-    rc, pull_out, pull_err = await _git(workspace, "pull", timeout=GIT_NETWORK_TIMEOUT)
+    # Pull (merge-based, handles merge commits cleanly).
+    rc, pull_out, pull_err = await _git(workspace, "pull", timeout=GIT_STARTUP_TIMEOUT)
 
     if rc != 0:
         logger.warning("Startup sync: pull failed: %s", pull_err)

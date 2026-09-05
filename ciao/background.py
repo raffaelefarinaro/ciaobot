@@ -574,7 +574,12 @@ class BackgroundRunner:
         return [run for run in self._store.list() if run.parent_chat_id == chat_id]
 
     def active_count(self, chat_id: str) -> int:
-        return sum(1 for run in self.list_for_chat(chat_id) if not run.is_terminal())
+        """Live run count for one chat, by the same rule as :meth:`active_counts`.
+
+        Derived rather than re-scanned so the pill and the start/finish limit
+        check cannot disagree about what counts as active.
+        """
+        return self.active_counts().get(chat_id, 0)
 
     def active_counts(self) -> dict[str, int]:
         """Live run count per owning chat (>0 only).

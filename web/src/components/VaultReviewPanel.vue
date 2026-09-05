@@ -6,6 +6,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import type { VaultReviewCandidate, VaultTrashedNote } from '../lib/types'
 import { candidateLeaf, signalReasons, verificationLabel } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
+import { parseFrontmatter } from '../lib/markdownFrontmatter'
 
 const store = useVaultReviewStore()
 const projectStore = useProjectStore()
@@ -25,7 +26,10 @@ watch(
 )
 
 onMounted(() => {
-  if (workspace.value) void store.fetch(workspace.value)
+  // `ensureLoaded`, not `fetch`: the panel is a `v-if` sibling of the
+  // proposals panel, so every tab flip remounts it and a plain fetch would
+  // rescan the whole vault each time.
+  if (workspace.value) void store.ensureLoaded(workspace.value)
 })
 watch(workspace, (ws) => {
   if (ws) void store.fetch(ws, { force: true })
@@ -61,6 +65,13 @@ interface ExcerptState {
 }
 const excerpts = ref<Record<string, ExcerptState>>({})
 const EXCERPT_LIMIT = 1200
+// The codes `/api/workspace-file` actually distinguishes; anything else falls
+// through to the raw status.
+const EXCERPT_ERRORS: Record<number, string> = {
+  403: 'Cannot preview this file.',
+  404: 'File not found — it may have been moved.',
+  413: 'File too large to preview.',
+}
 
 async function ensureExcerpt(candidate: VaultReviewCandidate) {
   const id = candidate.candidate_id
@@ -77,20 +88,15 @@ async function ensureExcerpt(candidate: VaultReviewCandidate) {
     if (!resp.ok) {
       excerpts.value[id] = {
         loading: false,
-        error: resp.status === 404 ? 'File not found — it may have been moved.' : `Could not load (HTTP ${resp.status}).`,
+        error: EXCERPT_ERRORS[resp.status] || `Could not load (HTTP ${resp.status}).`,
         text: '',
       }
       return
     }
-    let text = await resp.text()
-    if (text.startsWith('---')) {
-      const end = text.indexOf('\n---', 3)
-      if (end !== -1) {
-        const after = text.indexOf('\n', end + 4)
-        if (after !== -1) text = text.slice(after + 1)
-      }
-    }
-    text = text.trimStart()
+    // Shared splitter, not a local `startsWith('---')` scan: it handles a BOM,
+    // CRLF line endings and a missing closing fence, which a hand-rolled copy
+    // silently renders as raw YAML.
+    const text = parseFrontmatter(await resp.text()).body.trimStart()
     excerpts.value[id] = {
       loading: false,
       error: '',
@@ -140,7 +146,7 @@ async function restoreRow(note: VaultTrashedNote) {
 }
 
 async function deleteRow(note: VaultTrashedNote) {
-  const title = note.original_path.split('/').pop() || note.original_path
+  const title = candidateLeaf(note.original_path)
   if (!await askConfirm(
     `Permanently delete "${title}"? The trash copy is removed and every link to it is rewritten. This cannot be undone.`,
     { title: 'Delete forever', confirmLabel: 'Delete forever', destructive: true },

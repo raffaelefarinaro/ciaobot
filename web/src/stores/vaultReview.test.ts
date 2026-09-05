@@ -64,6 +64,28 @@ describe('vaultReview store', () => {
     expect(store.loadedWorkspace).toBe('personal')
   })
 
+  it('ensureLoaded skips the request when the workspace is already loaded', async () => {
+    // The endpoint scans every note in the vault three times, and the two
+    // callers fire on every mount and every Memory Map view change. `fetch`
+    // only joins an in-flight request, so without this guard each tab flip
+    // paid for a full rescan.
+    get.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+
+    await store.ensureLoaded('personal')
+    expect(get).toHaveBeenCalledTimes(1)
+
+    await store.ensureLoaded('personal')
+    expect(get).toHaveBeenCalledTimes(1)
+
+    // A different workspace is a different queue, and an explicit refresh
+    // still forces a real request.
+    await store.ensureLoaded('work')
+    expect(get).toHaveBeenCalledTimes(2)
+    await store.fetch('work', { force: true })
+    expect(get).toHaveBeenCalledTimes(3)
+  })
+
   it('drops a stale response when the workspace changed mid-flight', async () => {
     let release!: () => void
     get.mockImplementationOnce(

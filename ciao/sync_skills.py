@@ -136,8 +136,6 @@ def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
         raw = os.readlink(path)
     except OSError:
         return False
-    if not path.name or path.name in (".", ".."):
-        return False
     try:
         resolved = (path.parent / raw).resolve()
         ws = workspace.resolve()

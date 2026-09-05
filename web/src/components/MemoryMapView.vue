@@ -292,6 +292,7 @@ import {
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
+import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
 import {
   COOLING_DURATION_MS,
@@ -502,17 +503,10 @@ watch(() => mm.selectedId, async (id) => {
       previewContent.value = ''
       return
     }
-    let text = await resp.text()
     // Strip YAML frontmatter for a cleaner preview — the description/tags
-    // already surface frontmatter above, so showing raw `---` is noise.
-    if (text.startsWith('---')) {
-      const end = text.indexOf('\n---', 3)
-      if (end !== -1) {
-        const after = text.indexOf('\n', end + 4)
-        if (after !== -1) text = text.slice(after + 1)
-      }
-    }
-    previewContent.value = text.trimStart()
+    // already surface frontmatter above, so showing raw `---` is noise. The
+    // shared splitter also handles a BOM, CRLF, and a missing closing fence.
+    previewContent.value = parseFrontmatter(await resp.text()).body.trimStart()
   } catch (e) {
     if (token !== previewToken) return
     previewError.value = e instanceof Error ? e.message : String(e)
@@ -1253,7 +1247,7 @@ function openRetirementReview() {
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
-    if (store.activeWorkspace) void vaultReview.fetch(store.activeWorkspace)
+    if (store.activeWorkspace) void vaultReview.ensureLoaded(store.activeWorkspace)
   }
 }, { immediate: true })
 mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'

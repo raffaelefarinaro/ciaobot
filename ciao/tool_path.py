@@ -114,10 +114,6 @@ def terminal_path() -> str:
     return value
 
 
-# Back-compat for callers/tests that clear the old lru_cache.
-terminal_path.cache_clear = clear_terminal_path_cache  # type: ignore[attr-defined]
-
-
 def resolve_on_terminal_path(cmd: str) -> str | None:
     """Absolute path to ``cmd`` as the user's terminal would resolve it, or None."""
     path = terminal_path()

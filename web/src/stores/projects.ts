@@ -918,6 +918,22 @@ export const useProjectStore = defineStore('projects', () => {
     return runningSubagentsFor(chatId).length > 0
   }
 
+  /**
+   * Is this chat doing anything right now?
+   *
+   * One definition for every "working" surface. Each consumer used to OR the
+   * sources by hand, so adding one meant finding them all — and the last
+   * addition (background runs) reached the home lanes but not the project
+   * header, which is why the two disagreed for a chat whose only activity was
+   * a running subagent. Add new activity sources here, not at the call sites.
+   */
+  function chatIsWorking(chatId: string): boolean {
+    return isChatStreaming(chatId)
+      || chatHasBackgroundAgents(chatId)
+      || chatHasBackgroundRuns(chatId)
+      || chatHasRunningSubagents(chatId)
+  }
+
   // ── Post-archive pipeline ────────────────────────────────────────────────
   // Archiving a chat starts insights extraction, a project-doc fold, a
   // trajectory and memory proposals. The state lives on the chat itself (so an
@@ -5902,7 +5918,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,

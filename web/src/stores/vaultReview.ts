@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { api } from '../lib/api'
 import type {
   VaultReviewCandidate,
@@ -29,7 +29,6 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   const trashed = ref<VaultTrashedNote[]>([])
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
-  const busy = computed(() => busyIds.value.size > 0)
   const error = ref('')
   const loadedWorkspace = ref<string | null>(null)
   let fetchPromise: Promise<void> | null = null
@@ -46,6 +45,23 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     if (on) next.add(id)
     else next.delete(id)
     busyIds.value = next
+  }
+
+  /**
+   * Load the queue for one workspace unless it is already loaded.
+   *
+   * `fetch` only joins an *in-flight* request, so callers that fire on every
+   * mount or view change (the Retirement badge watcher, the panel's own
+   * `onMounted`) re-ran the heaviest read in the app each time — the endpoint
+   * scans every note in the vault three times. The two panels are `v-if`
+   * siblings, so flipping tabs remounts and refetches. Mirrors
+   * `proposals.ensureLoaded()`; the refresh button and the workspace watch
+   * still force a real request.
+   */
+  async function ensureLoaded(workspace: string): Promise<void> {
+    if (!workspace) return
+    if (loadedWorkspace.value === workspace) return
+    await fetch(workspace)
   }
 
   /**
@@ -137,13 +153,11 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     candidates,
     trashed,
     loading,
-    busy,
-    busyIds,
     isBusy,
-    setBusy,
     error,
     loadedWorkspace,
     fetch,
+    ensureLoaded,
     decide,
     trash,
     restore,

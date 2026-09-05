@@ -468,10 +468,7 @@ const archivedChats = computed(() =>
 const totalUnread = computed(() => store.projectUnread(props.projectId))
 const needsInputCount = computed(() => store.projectNeedsInput(props.projectId))
 const workingCount = computed(() =>
-  activeChats.value.filter(c =>
-    store.isChatStreaming(c.chat_id) || store.chatHasBackgroundAgents(c.chat_id)
-    || store.chatHasBackgroundRuns(c.chat_id),
-  ).length,
+  activeChats.value.filter(c => store.chatIsWorking(c.chat_id)).length,
 )
 
 // Hue follows the project's workspace so the marks here read the same as the

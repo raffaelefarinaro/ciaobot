@@ -393,3 +393,17 @@ def test_installer_replaces_its_own_shim_but_not_a_foreign_ciao(tmp_path: Path) 
     assert "shim_installed=1" in _run_shim_block(home, engine).stdout
     assert "shim_installed=1" in _run_shim_block(home, engine).stdout
     assert str(engine) in (bin_dir / "ciao").read_text(encoding="utf-8")
+
+
+def test_uninstall_and_the_installer_agree_on_the_shim_marker() -> None:
+    """The marker is how uninstall recognises a shim it may delete.
+
+    `scripts/install.sh` writes it and `ciao/desktop_install.py` matches it,
+    with nothing but this test tying the two literals together. If they drift,
+    uninstall silently stops recognising every shim already on disk and leaves
+    a dead `ciao` on PATH — the exact failure the marker exists to prevent.
+    """
+    from ciao import desktop_install
+
+    script = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert desktop_install.SHIM_MARKER in script
