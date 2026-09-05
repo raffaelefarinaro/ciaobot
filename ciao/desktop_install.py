@@ -151,15 +151,19 @@ def uninstall_desktop_app(
         # reinstall inherits the stale plists). Both identity checks still
         # apply — only a marked shim and plists naming THIS bundle go — and
         # neither needs the bundle to exist to make that comparison.
-        missing: dict[str, Any] = {"removed": False, "path": str(destination)}
-        orphan_agents = _remove_installer_launch_agents(
-            destination=destination,
-            launch_agents_dir=launch_agents_dir,
-            uid=uid,
-            runner=runner,
-        )
-        if orphan_agents:
-            missing["removed_agents"] = orphan_agents
+        # `removed_agents` is present on both branches (empty list when there
+        # was nothing to boot out): `--json` consumers index it, and making
+        # the key conditional would KeyError on exactly the orphan case.
+        missing: dict[str, Any] = {
+            "removed": False,
+            "path": str(destination),
+            "removed_agents": _remove_installer_launch_agents(
+                destination=destination,
+                launch_agents_dir=launch_agents_dir,
+                uid=uid,
+                runner=runner,
+            ),
+        }
         orphan_shim = _remove_installer_shim(
             destination=destination, shim_path=shim_path
         )

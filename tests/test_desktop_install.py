@@ -78,6 +78,7 @@ def test_uninstall_reports_an_empty_directory(tmp_path: Path) -> None:
     assert desktop_install.uninstall_desktop_app(app_dir=tmp_path) == {
         "removed": False,
         "path": str(tmp_path / desktop_install.APP_BUNDLE_NAME),
+        "removed_agents": [],
     }
 
 
@@ -253,3 +254,69 @@ def test_uninstall_removes_orphaned_launch_agents_when_the_bundle_is_gone(
     assert not server_plist.exists()
     # A plist belonging to something else is never touched.
     assert foreign_plist.exists()
+
+
+def test_uninstall_leaves_another_installs_agents_alone_when_the_bundle_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The orphan path is exactly where a mis-scoped comparison would bite.
+
+    A filename-only check would pass every test above — the loop only ever
+    reads `Ciaobot.plist` and `com.ciao.server.plist`, so a plist under any
+    *other* name is skipped for free and proves nothing. What has to hold is
+    that agents carrying those two names but pointing at a DIFFERENT bundle
+    survive: with `~/Applications/Ciaobot.app` dragged to the Trash while an
+    older `/Applications` install is still running, dropping the path
+    comparison would boot out and delete the live install's agents.
+    """
+    other_bundle = tmp_path / "elsewhere" / desktop_install.APP_BUNDLE_NAME
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    desktop_plist = agents / "Ciaobot.plist"
+    server_plist = agents / "com.ciao.server.plist"
+    with desktop_plist.open("wb") as stream:
+        plistlib.dump(
+            {"ProgramArguments": [
+                str(
+                    other_bundle
+                    / "Contents"
+                    / "MacOS"
+                    / desktop_build.APP_EXECUTABLE_NAME
+                )
+            ]},
+            stream,
+        )
+    with server_plist.open("wb") as stream:
+        plistlib.dump(
+            {"ProgramArguments": [
+                str(
+                    other_bundle
+                    / "Contents"
+                    / "Resources"
+                    / "ciao-runtime"
+                    / "bin"
+                    / "ciao"
+                ),
+                "run",
+            ]},
+            stream,
+        )
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **kwargs):
+        calls.append(args)
+        return desktop_install.subprocess.CompletedProcess(args, 0, "", "")
+
+    result = desktop_install.uninstall_desktop_app(
+        app_dir=tmp_path,  # tmp_path/Ciaobot.app was never created
+        launch_agents_dir=agents,
+        uid=501,
+        runner=runner,
+    )
+
+    assert result["removed"] is False
+    assert result["removed_agents"] == []
+    # Neither booted out nor deleted: they belong to the other install.
+    assert calls == []
+    assert desktop_plist.exists()
+    assert server_plist.exists()

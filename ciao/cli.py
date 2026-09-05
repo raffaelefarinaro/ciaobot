@@ -3295,6 +3295,12 @@ def _desktop_command(args: argparse.Namespace) -> int:
             if result["removed"]
             else f"Nothing to remove at {result['path']}"
         ]
+        # Named explicitly: when the bundle was already dragged to the Trash
+        # the headline reads "Nothing to remove", yet this run may still have
+        # booted out and deleted launchd plists. Staying silent about that
+        # tells the user nothing happened when something did.
+        for agent in result.get("removed_agents") or []:
+            lines.append(f"Removed {agent}")
         if result.get("removed_shim"):
             lines.append(f"Removed {result['removed_shim']}")
         return report(result, lines)

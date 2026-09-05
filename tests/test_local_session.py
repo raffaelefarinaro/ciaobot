@@ -604,9 +604,14 @@ def test_startup_sync_keeps_its_own_shorter_ceiling() -> None:
     """Startup sync is awaited before the server binds, so it is not a loop.
 
     Giving it the 60s background ceiling would make an unreachable remote hold
-    a cold start for a minute on a blank app; the next backup tick syncs
-    anyway. Pinned so a future "share the constant" tidy-up cannot quietly
-    6x the worst-case boot.
+    a cold start for a minute on a blank app. Pinned so a future "share the
+    constant" tidy-up cannot quietly 6x the worst-case boot.
+
+    Note the cost, spelled out in ``ciao.git_sync``: nothing else pulls on its
+    own (the backup loop only pushes, and fetch/merges solely on a rejected
+    push), so a pull killed at this ceiling leaves the checkout behind until
+    the next boot or an explicit "Sync with Remote". Raise it rather than
+    tighten it if real pulls start timing out.
     """
     import ciao.git_sync
 
