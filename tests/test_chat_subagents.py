@@ -2214,3 +2214,104 @@ def test_a_token_scoped_release_leaves_a_newer_entry_alone(tmp_path: Path) -> No
     assert calls == []
     assert pcm._flush_result_announce("chat-1", fresh) is True
     assert calls == [("chat-1", "proj-1", "Title", "turn two")]
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_dies_with_the_drain_it_backstops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A new user turn voids the deadline, token or no token.
+
+    The token only proves the *entry* is still the one that was parked, and it
+    still is: the next user turn cancels the drain but does not clear the park
+    until its own turn ends. A turn that outruns the deadline would therefore
+    let it fire mid-turn and push the "I'll report back once the agents finish"
+    non-answer that the drain's cancelled path deliberately refuses to send.
+    """
+    from ciao.web import project_chats as pc
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+    monkeypatch.setattr(pc, "_PARKED_ANNOUNCE_DEADLINE_SECONDS", 0.01)
+
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+    # The next user turn: start_stream cancels the drain, _drive awaits it.
+    await pcm._await_between_turns_drain("chat-1")
+    await asyncio.sleep(0.05)
+
+    assert calls == []
+    # Still parked — the superseding turn's own turn-done handling clears it.
+    assert pcm._parked_announce_token("chat-1") == token
+
+
+# ── a superseding user turn is not a declined nudge ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_user_turn_taking_over_does_not_release_the_park(
+    tmp_path: Path,
+) -> None:
+    """`_nudge_synthesis_after_subagents` returns False for two different
+    reasons, and the watcher must not treat them alike.
+
+    A missing/finished drain (or a live foreground stream) means a USER TURN
+    took the chat over. That turn announces its own result and clears the park
+    when it ends, so releasing here pushes "I'll report back once the agents
+    finish" into the middle of it — the same stale non-answer the drain's
+    cancelled path refuses to send.
+    """
+    from ciao.web.project_chats import NUDGE_SUPERSEDED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("supersede", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="supersede-test")
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("must not steer into a live user turn")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    # No between-turns drain registered: exactly what a user send leaves behind.
+    assert (
+        await pcm._nudge_synthesis_after_subagents(chat.chat_id)
+    ) == NUDGE_SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_no_way_to_steer_is_declined_not_superseded(tmp_path: Path) -> None:
+    """The other half: nothing will ever announce, so the park must be released."""
+    from ciao.web.project_chats import NUDGE_DECLINED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("declined", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="declined-test")
+
+    class NoSteerProvider:
+        can_drain = True
+
+    pcm._providers[chat.chat_id] = NoSteerProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+    try:
+        assert (
+            await pcm._nudge_synthesis_after_subagents(chat.chat_id)
+        ) == NUDGE_DECLINED
+    finally:
+        running_drain.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_parent_ending_on_a_question_is_declined(tmp_path: Path) -> None:
+    """Answering is the user's move and no nudge will fire, so the announce
+    has to go out — that was the v0.16.0 bug, kept covered here."""
+    from ciao.web.project_chats import NUDGE_DECLINED
+
+    pcm = _make_manager(tmp_path)
+    assert (
+        await pcm._nudge_synthesis_after_subagents(
+            "chat-1", awaiting_user_answer=True
+        )
+    ) == NUDGE_DECLINED

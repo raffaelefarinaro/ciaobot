@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -174,6 +174,15 @@ _NUDGE_ANNOUNCE_MIN_CHARS = 4
 # parent only has to write a report) while still being inside the window where
 # someone might act on the result.
 _PARKED_ANNOUNCE_DEADLINE_SECONDS = 300.0
+
+# Why the synthesis nudge did or did not go out. The caller has to tell
+# "nothing will ever announce for this turn" (release the parked announce)
+# apart from "a user turn took over" (say nothing — that turn announces for
+# itself, and pushing here would deliver the interim non-answer mid-turn).
+NudgeOutcome = Literal["sent", "superseded", "declined"]
+NUDGE_SENT: NudgeOutcome = "sent"
+NUDGE_SUPERSEDED: NudgeOutcome = "superseded"
+NUDGE_DECLINED: NudgeOutcome = "declined"
 # Patterns an unattended parent emits while still waiting on its background
 # subagents. A run that ended on one of these never synthesized its agents'
 # results — the follow-up turn died before producing a report — so the run is
@@ -1347,12 +1356,17 @@ class ProjectChatManager:
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
         # Result announces parked while the synthesis nudge decides whether it
         # will speak instead. See `_park_result_announce`. chat_id ->
-        # (project_id, title, snippet).
+        # (token, project_id, title, snippet).
         self._parked_result_announce: dict[str, tuple[int, str, str, str]] = {}
         # Monotonic id per park, so a late releaser (the deadline task, a
         # superseded watcher) can prove the entry it is about to act on is
         # still the one it parked.
         self._parked_announce_seq = 0
+        # Per-chat deadline task armed once the drain owns a parked announce.
+        # Held so the drain going away (a new user turn, delete, archive) can
+        # cancel it: the deadline's whole premise is "the drain still owns this
+        # and will never release it", and that premise dies with the drain.
+        self._parked_announce_deadlines: dict[str, asyncio.Task] = {}
         # CLI-task wakes already delivered this process, as (chat_id,
         # task_id). Bounds redelivery to once per process lifetime: if the
         # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
@@ -7390,16 +7404,37 @@ class ProjectChatManager:
         Token-scoped, so a fire that lands after the drain announced, after a
         later turn parked its own entry, or after anything else released this
         one is a no-op.
+
+        Also cancelled outright when the drain it is backstopping goes away
+        (`_cancel_between_turns_drain` / `_await_between_turns_drain`). A token
+        alone is not enough there: a new user turn cancels the drain but does
+        not clear the park until *its own* turn ends, so a turn that outruns
+        the deadline would otherwise let this fire mid-turn and push the very
+        "I'll report back once the agents finish" non-answer the drain's
+        cancelled path refuses to send.
         """
-        self._spawn_detached(
+        self._cancel_parked_announce_deadline(chat_id)
+        self._parked_announce_deadlines[chat_id] = self._spawn_detached(
             self._release_parked_announce_after_deadline(chat_id, token),
             f"parked-announce-deadline-{chat_id}",
         )
 
+    def _cancel_parked_announce_deadline(self, chat_id: str) -> None:
+        """Drop the deadline armed for this chat, if any."""
+        task = self._parked_announce_deadlines.pop(chat_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
     async def _release_parked_announce_after_deadline(
         self, chat_id: str, token: int
     ) -> None:
-        await asyncio.sleep(_PARKED_ANNOUNCE_DEADLINE_SECONDS)
+        try:
+            await asyncio.sleep(_PARKED_ANNOUNCE_DEADLINE_SECONDS)
+        finally:
+            # Deregister before announcing so a release path that cancels the
+            # deadline cannot cancel the very task that is running it.
+            if self._parked_announce_deadlines.get(chat_id) is asyncio.current_task():
+                self._parked_announce_deadlines.pop(chat_id, None)
         if self._flush_result_announce(chat_id, token):
             logger.info(
                 "Synthesis reply for chat %s did not arrive within %ss; "
@@ -7603,10 +7638,11 @@ class ProjectChatManager:
                         # nudge call); only the notification hold above
                         # carries the bounded grace.
                         nudge_attempted = True
-                        nudged = await self._nudge_synthesis_after_subagents(
+                        outcome = await self._nudge_synthesis_after_subagents(
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
+                        nudged = outcome == NUDGE_SENT
                         if nudged:
                             # Recorded on the caller's box immediately, so an
                             # exception on a later tick cannot lose the handoff.
@@ -7621,8 +7657,23 @@ class ProjectChatManager:
                                 self._arm_parked_announce_deadline(
                                     chat_id, parked_token
                                 )
-                        else:
-                            self._flush_result_announce(chat_id)
+                        elif outcome == NUDGE_DECLINED:
+                            # Nothing will ever announce for this turn — the
+                            # parent ended on a question, or there is no way to
+                            # steer it — so release the parked announce.
+                            # Token- and identity-scoped like the outer
+                            # `finally`: a superseded watcher must not release
+                            # an entry a newer turn parked in the same slot.
+                            current = self._pending_subagent_watchers.get(chat_id)
+                            if current is None or current is asyncio.current_task():
+                                self._flush_result_announce(
+                                    chat_id, self._parked_announce_token(chat_id)
+                                )
+                        # NUDGE_SUPERSEDED falls through deliberately: a user
+                        # turn took the chat over and will announce its own
+                        # result and clear the park when it ends. Flushing here
+                        # would push the interim non-answer mid-turn.
+                        #
                         # A landed nudge does NOT discard the park: it only
                         # hands ownership to the between-turns drain, which
                         # announces the synthesis reply *if* one arrives and is
@@ -7711,7 +7762,7 @@ class ProjectChatManager:
 
     async def _nudge_synthesis_after_subagents(
         self, chat_id: str, awaiting_user_answer: bool = False
-    ) -> bool:
+    ) -> NudgeOutcome:
         """Ask the parent to post a final report once its subagents finish.
 
         A background ``Agent`` dispatch ends the parent turn immediately and
@@ -7733,21 +7784,26 @@ class ProjectChatManager:
         panel refresh it triggers.
         """
         if awaiting_user_answer:
-            return False
+            return NUDGE_DECLINED
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:
-            return False
+            return NUDGE_DECLINED
         # A user send since the turn ended cancels the drain; don't inject into
         # a live user turn or a chat with no drain to capture the reply.
+        #
+        # SUPERSEDED, not declined: this is a user turn taking the chat over,
+        # and it will announce its own result and clear the park when it ends.
+        # Releasing the parked announce here would push "I'll report back once
+        # the agents finish" into the middle of that turn.
         drain = self._between_turn_drains.get(chat_id)
         if drain is None or drain.done():
-            return False
+            return NUDGE_SUPERSEDED
         existing = self._broker.get(chat_id)
         if existing is not None and not existing.background:
-            return False
+            return NUDGE_SUPERSEDED
         chat = self._chats.get(chat_id)
         if chat is None:
-            return False
+            return NUDGE_DECLINED
         prefix = self._build_prompt_prefix(chat)
         full_prompt = (
             prefix + _SUBAGENT_SYNTHESIS_NUDGE
@@ -7777,13 +7833,13 @@ class ProjectChatManager:
                 if impl is not None:
                     steer = getattr(impl, "steer", None)
             if not callable(steer):
-                return False
-            return bool(await steer(request))
+                return NUDGE_DECLINED
+            return NUDGE_SENT if await steer(request) else NUDGE_DECLINED
         except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
             logger.exception(
                 "Subagent synthesis nudge failed for chat %s", chat_id
             )
-            return False
+            return NUDGE_DECLINED
 
     def _cli_owner_alive(self, chat_id: str) -> bool:
         """True while the chat's CLI subprocess (if any) is still connected.
@@ -8140,12 +8196,16 @@ class ProjectChatManager:
 
     def _cancel_between_turns_drain(self, chat_id: str) -> None:
         """Fire-and-forget cancel; pair with _await_between_turns_drain."""
+        # The parked-announce deadline exists only to release an entry the
+        # drain owns and will never release itself. No drain, no premise.
+        self._cancel_parked_announce_deadline(chat_id)
         task = self._between_turn_drains.get(chat_id)
         if task is not None and not task.done():
             task.cancel()
 
     async def _await_between_turns_drain(self, chat_id: str) -> None:
         """Wait until any drain task for this chat has fully unwound."""
+        self._cancel_parked_announce_deadline(chat_id)
         task = self._between_turn_drains.pop(chat_id, None)
         if task is None:
             return
