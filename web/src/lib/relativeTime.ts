@@ -56,3 +56,25 @@ export function formatRelative(
 
   return unit(Math.max(1, Math.floor(days / 30)), 'mo')
 }
+
+
+/**
+ * Compact age in days as "today" / "5d" / "7mo" / "2y".
+ *
+ * The one ladder for "how old is this note". The Memory Map's row/detail age
+ * and the retirement queue's verification label had grown independent copies
+ * of these thresholds — down to the `years >= 2 ? floor : toFixed(1)` rule —
+ * while rendering the same note one tab apart, so a change to either left them
+ * disagreeing about it.
+ *
+ * Distinct from `formatRelative` above, which takes an ISO string and uses
+ * week buckets for activity timestamps; this takes a day count.
+ */
+export function formatAgeDays(days: number): string {
+  if (!Number.isFinite(days)) return ''
+  if (days < 1) return 'today'
+  if (days < 30) return `${days}d`
+  if (days < 365) return `${Math.floor(days / 30)}mo`
+  const years = days / 365
+  return `${years >= 2 ? Math.floor(years) : years.toFixed(1)}y`
+}

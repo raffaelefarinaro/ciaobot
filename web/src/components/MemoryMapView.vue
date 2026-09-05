@@ -8,24 +8,13 @@
            The tab state is shared (`mm.reviewTab`) so entry points elsewhere
            — the sidebar's "Needs review" list, a stale note's detail panel —
            can land directly on retirement. -->
-      <div class="mm-review-tabs" role="tablist" aria-label="Review">
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="mm.reviewTab === 'proposals'"
-          class="mm-review-tab"
-          :class="{ active: mm.reviewTab === 'proposals' }"
-          @click="mm.reviewTab = 'proposals'"
-        >Proposals<span v-if="proposalCount" class="mm-review-count">{{ proposalCount }}</span></button>
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="mm.reviewTab === 'retirement'"
-          class="mm-review-tab"
-          :class="{ active: mm.reviewTab === 'retirement' }"
-          @click="mm.reviewTab = 'retirement'"
-        >Retirement<span v-if="retirementCount" class="mm-review-count">{{ retirementCount }}</span></button>
-      </div>
+      <TabBar
+        v-model="mm.reviewTab"
+        :tabs="reviewTabs"
+        label="Review"
+        id-prefix="mm-review"
+        class="mm-review-tabs"
+      />
       <ProposalReviewPanel v-if="mm.reviewTab === 'proposals'" />
       <VaultReviewPanel v-else />
     </div>
@@ -293,6 +282,7 @@ import {
 import { askConfirm } from '../lib/confirm'
 import { isLightTheme } from '../lib/theme'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
+import TabBar, { type TabSpec } from './TabBar.vue'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
 import {
   COOLING_DURATION_MS,
@@ -1229,6 +1219,12 @@ const retirementCount = computed(() =>
     ? vaultReview.candidates.length + vaultReview.trashed.length
     : 0,
 )
+const reviewTabs = computed<TabSpec<'proposals' | 'retirement'>[]>(() => [
+  // `|| undefined` rather than 0: a zero pill on an empty queue is noise.
+  { key: 'proposals', label: 'Proposals', count: proposalCount.value || undefined },
+  { key: 'retirement', label: 'Retirement', count: retirementCount.value || undefined },
+])
+
 // A stale note's detail panel lands directly on the retirement queue.
 function openRetirementReview() {
   mm.reviewTab = 'retirement'
@@ -1350,46 +1346,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
 }
+/* Layout only. The tab styling itself lives in TabBar, which this bar renders
+   through — it sits directly above ProposalReviewPanel's own bar, so a copied
+   ruleset here would visibly desync two adjacent rows of identical tabs. */
 .mm-review-tabs {
-  display: flex;
-  gap: var(--space-1);
   padding: 0 var(--space-4);
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
   flex: none;
 }
-.mm-review-tab {
-  min-height: var(--touch);
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: 600 var(--text-sm) var(--font);
-  white-space: nowrap;
-}
-.mm-review-tab:hover { color: var(--fg); background: var(--bg3); }
-.mm-review-tab.active {
-  border-bottom-color: var(--accent);
-  color: var(--fg);
-}
-.mm-review-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.mm-review-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: calc(var(--text-xs) + var(--space-2));
-  min-height: calc(var(--text-xs) + var(--space-1));
-  margin-left: var(--space-1);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-.mm-review-tab.active .mm-review-count { color: var(--fg); }
 /* A stale note's way into the retirement queue, next to its last-verified
    line. A text button, not a pink bar: deciding happens in Review, not here. */
 .mm-detail-review-link {

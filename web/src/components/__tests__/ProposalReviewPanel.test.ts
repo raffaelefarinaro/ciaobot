@@ -706,7 +706,7 @@ describe('Queue / History tabs', () => {
     await flushPromises()
 
     expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
-    expect(wrapper.find('.pr-tab-count').text()).toBe('1')
+    expect(wrapper.find('.tab-bar-count').text()).toBe('1')
     expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
     wrapper.unmount()
   })
@@ -735,12 +735,12 @@ describe('Queue / History tabs', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').text()).toBe('500')
+    expect(wrapper.find('.tab-bar-count').text()).toBe('500')
 
     // Under a filter the visible count is the honest number.
     useProposalsStore().kindFilter = 'skill'
     await nextTick()
-    expect(wrapper.find('.pr-tab-count').text()).toBe('0')
+    expect(wrapper.find('.tab-bar-count').text()).toBe('0')
     wrapper.unmount()
   })
 
@@ -775,7 +775,7 @@ describe('Queue / History tabs', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.pr-tab-count').exists()).toBe(false)
+    expect(wrapper.find('.tab-bar-count').exists()).toBe(false)
     wrapper.unmount()
   })
 })

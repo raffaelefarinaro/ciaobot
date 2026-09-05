@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { analyzeVault, type Cluster } from '../lib/vaultAnalysis'
+import { formatAgeDays } from '../lib/relativeTime'
 import { useProjectStore } from './projects'
 
 export interface MemoryGraphNode {
@@ -285,12 +286,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function ageLabelOf(n: MemoryGraphNode): string {
     if (n.ageDays === null && !n.updated && !n.mtime) return ''
     const days = n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
-    if (!Number.isFinite(days)) return ''
-    if (days < 1) return 'today'
-    if (days < 30) return `${days}d`
-    if (days < 365) return `${Math.floor(days / 30)}mo`
-    const years = days / 365
-    return `${years >= 2 ? Math.floor(years) : years.toFixed(1)}y`
+    return formatAgeDays(days)
   }
 
   const pathIds = computed<Set<string>>(() => {
