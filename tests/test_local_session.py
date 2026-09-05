@@ -542,3 +542,58 @@ async def test_push_branch_auth_failure_unaffected_by_conflict_fallback(tmp_path
     assert "authentication failed" in detail.lower()
     assert is_diverged_backup(detail) is False
 
+
+
+# ── network timeouts ─────────────────────────────────────────────────────────
+
+
+def _network_git_call_timeouts(module_path: Path) -> list[tuple[str, str]]:
+    """Every ``_git(..., "push"|"fetch"|"pull", ...)`` call and its timeout arg.
+
+    Read from the source rather than exercised at runtime: the failure being
+    guarded against is a *hung* remote, which no unit test can produce without
+    actually waiting for the ceiling it is checking.
+    """
+    import ast
+
+    calls: list[tuple[str, str]] = []
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "_git"):
+            continue
+        verbs = [
+            a.value
+            for a in node.args
+            if isinstance(a, ast.Constant) and isinstance(a.value, str)
+        ]
+        if not any(v in {"push", "fetch", "pull"} for v in verbs):
+            continue
+        timeout = next(
+            (ast.unparse(kw.value) for kw in node.keywords if kw.arg == "timeout"),
+            None,
+        )
+        calls.append((verbs[0], timeout or "<none>"))
+    return calls
+
+
+def test_network_git_calls_use_the_shared_ceiling() -> None:
+    """A 10s ceiling made a momentary network stall look like a sync failure.
+
+    Pin every network git call in both sync modules to ``GIT_NETWORK_TIMEOUT``
+    so a new call site cannot quietly reintroduce a tighter one.
+    """
+    import ciao.git_sync
+    import ciao.local_session
+
+    assert ciao.local_session.GIT_NETWORK_TIMEOUT == 60.0
+
+    for module in (ciao.local_session, ciao.git_sync):
+        calls = _network_git_call_timeouts(Path(module.__file__))
+        assert calls, f"no network git calls found in {module.__name__}"
+        for verb, timeout in calls:
+            assert timeout == "GIT_NETWORK_TIMEOUT", (
+                f"{module.__name__}: git {verb} uses timeout={timeout}"
+            )

@@ -9,6 +9,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from ciao.local_session import GIT_NETWORK_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 # The one list of paths a workspace snapshot must never pick up. `cli.py`
@@ -262,8 +264,9 @@ async def sync_workspace(workspace: Path) -> str | None:
         logger.info("Startup sync: branch has no upstream yet; skipping pull.")
         return None
 
-    # Pull (merge-based, handles merge commits cleanly) with a 10s timeout
-    rc, pull_out, pull_err = await _git(workspace, "pull", timeout=10.0)
+    # Pull (merge-based, handles merge commits cleanly) under the shared
+    # network ceiling: a slow remote must not fail startup sync outright.
+    rc, pull_out, pull_err = await _git(workspace, "pull", timeout=GIT_NETWORK_TIMEOUT)
 
     if rc != 0:
         logger.warning("Startup sync: pull failed: %s", pull_err)

@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 BACKUP_PUSH_INTERVAL = 30  # seconds between background backup pushes
 
+# Network git operations (push/fetch/pull) get a generous ceiling. 10s proved
+# too tight: a momentary network stall (e.g. DNS resolution over flaky Wi-Fi,
+# 2026-09-05 02:26) kills the push with "git command timed out". The next
+# 30s tick self-heals, but each false error row lands in the triage report.
+# 60s bounds the wait without letting a hung remote stall the loop.
+GIT_NETWORK_TIMEOUT = 60.0
+
 # Workspace roots holding user data rather than app source.
 _VAULT_ROOT = "memory-vault"
 _SECRETS_ROOT = "secrets"
@@ -232,7 +239,7 @@ async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
         return False, f"could not resolve HEAD sha for backup ref: {full_err or full_out}"
     ref = backup_ref_name(branch, short)
     rc, out, err = await _git(
-        workspace, "push", "origin", f"{full}:refs/heads/{ref}", timeout=10.0
+        workspace, "push", "origin", f"{full}:refs/heads/{ref}", timeout=GIT_NETWORK_TIMEOUT
     )
     if rc != 0:
         return False, err or out
@@ -252,7 +259,7 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     a human resolves it later; the fallback only guarantees local state made
     it off-device.
     """
-    rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=10.0)
+    rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=GIT_NETWORK_TIMEOUT)
     if rc != 0:
         detail = err or out
         nff_markers = (
@@ -268,7 +275,7 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
                 branch,
                 branch,
             )
-            await _git(workspace, "fetch", "origin", timeout=10.0)
+            await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
             rc_m, out_m, err_m = await _git(
                 workspace, "merge", "--no-edit", f"origin/{branch}"
             )
@@ -306,7 +313,7 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
                     f"backup-ref fallback also failed: {bdetail}",
                 )
             rc2, out2, err2 = await _git(
-                workspace, "push", "-u", "origin", branch, timeout=10.0
+                workspace, "push", "-u", "origin", branch, timeout=GIT_NETWORK_TIMEOUT
             )
             if rc2 != 0:
                 return False, err2 or out2
@@ -342,13 +349,13 @@ async def sync_branch(workspace: Path, *, branch: str) -> dict:
     conflict chat dispatched by the route layer can resolve it.
     """
     await commit_pending(workspace, branch=branch)
-    await _git(workspace, "fetch", "origin", timeout=10.0)
+    await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
     # Pull only when the branch already exists on origin; a fresh branch has
     # nothing to merge and a bare pull would fail on missing upstream.
     rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
     if rc_ref == 0:
         rc_pull, _, _ = await _git(
-            workspace, "pull", "--no-rebase", "origin", branch, timeout=10.0
+            workspace, "pull", "--no-rebase", "origin", branch, timeout=GIT_NETWORK_TIMEOUT
         )
         if rc_pull != 0:
             return {"ok": True, "merged": False, "conflict": True, "branch": branch}
@@ -372,7 +379,7 @@ async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     almost always dirty), then *merges* ``origin/<branch>`` rather than
     resetting, so local commits are never discarded.
     """
-    rc, _, err = await _git(workspace, "fetch", "origin", timeout=10.0)
+    rc, _, err = await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
     if rc != 0:
         return False, f"fetch failed: {err}"
     await commit_pending(workspace, branch=branch)
