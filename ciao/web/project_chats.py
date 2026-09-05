@@ -7389,6 +7389,16 @@ class ProjectChatManager:
         )
         return True
 
+    def _foreground_turn_active(self, chat_id: str) -> bool:
+        """True while a user-driven turn owns this chat.
+
+        Such a turn always ends by discarding the parked entry and announcing
+        (or parking) its own, so anything holding a stale park must stay quiet
+        while it runs rather than push an interim non-answer mid-turn.
+        """
+        stream = self._broker.get(chat_id)
+        return stream is not None and not stream.background
+
     def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None:
         """Release a handed-off announce if the synthesis reply never arrives.
 
@@ -7506,7 +7516,15 @@ class ProjectChatManager:
             # whether a synthesis reply actually arrived and was worth
             # announcing. Flushing here would push the interim non-answer
             # alongside it.
-            if not handed_to_drain:
+            #
+            # A live foreground turn owns it for the same reason: the nudge
+            # returning NUDGE_SUPERSEDED breaks the loop straight into this
+            # `finally`, so without the check the very flush that path
+            # declines to do happens here a moment later — the "I'll report
+            # back once the agents finish" push landing mid-turn. That turn's
+            # own turn-done handling discards this entry and announces for
+            # itself, so nothing is lost by staying quiet.
+            if not handed_to_drain and not self._foreground_turn_active(chat_id):
                 current = self._pending_subagent_watchers.get(chat_id)
                 if current is None or current is asyncio.current_task():
                     self._flush_result_announce(chat_id)
@@ -7663,9 +7681,14 @@ class ProjectChatManager:
                             # steer it — so release the parked announce.
                             # Token- and identity-scoped like the outer
                             # `finally`: a superseded watcher must not release
-                            # an entry a newer turn parked in the same slot.
+                            # an entry a newer turn parked in the same slot,
+                            # and a live foreground turn (the parent asked a
+                            # question, the user answered it) announces for
+                            # itself.
                             current = self._pending_subagent_watchers.get(chat_id)
-                            if current is None or current is asyncio.current_task():
+                            if (
+                                current is None or current is asyncio.current_task()
+                            ) and not self._foreground_turn_active(chat_id):
                                 self._flush_result_announce(
                                     chat_id, self._parked_announce_token(chat_id)
                                 )
@@ -8562,6 +8585,13 @@ class ProjectChatManager:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).
                 await self._await_between_turns_drain(chat_id)
+                # The drain's cancelled path leaves the park to "the next
+                # turn", and the deadline that used to backstop it was just
+                # cancelled with the drain — but Stop starts no next turn, so
+                # nobody is left to release it. Flush here or the chat keeps
+                # its interim message with no unread badge, no push and no
+                # archive proposal (issue #437).
+                self._flush_result_announce(chat_id)
                 return True
         provider = self._providers.get(chat_id)
         if provider is None:

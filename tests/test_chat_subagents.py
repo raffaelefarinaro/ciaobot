@@ -2249,17 +2249,20 @@ async def test_the_deadline_dies_with_the_drain_it_backstops(
 
 
 @pytest.mark.asyncio
-async def test_a_user_turn_taking_over_does_not_release_the_park(
+async def test_a_user_turn_taking_over_reports_supersession(
     tmp_path: Path,
 ) -> None:
-    """`_nudge_synthesis_after_subagents` returns False for two different
-    reasons, and the watcher must not treat them alike.
+    """`_nudge_synthesis_after_subagents` declines for two unlike reasons.
 
     A missing/finished drain (or a live foreground stream) means a USER TURN
-    took the chat over. That turn announces its own result and clears the park
-    when it ends, so releasing here pushes "I'll report back once the agents
-    finish" into the middle of it — the same stale non-answer the drain's
-    cancelled path refuses to send.
+    took the chat over, not that nothing will ever announce.
+
+    This pins the REPORTED OUTCOME only. That is deliberately not the same as
+    proving no announce fires — the first version of this change returned
+    SUPERSEDED correctly and still pushed, because the loop broke straight into
+    the watcher's outer `finally`, which flushed anyway. The end-to-end
+    guarantee lives in
+    `test_a_live_user_turn_keeps_the_watchers_finally_quiet`.
     """
     from ciao.web.project_chats import NUDGE_SUPERSEDED
 
@@ -2315,3 +2318,156 @@ async def test_a_parent_ending_on_a_question_is_declined(tmp_path: Path) -> None
             "chat-1", awaiting_user_answer=True
         )
     ) == NUDGE_DECLINED
+
+
+@pytest.mark.asyncio
+async def test_a_live_user_turn_keeps_the_watchers_finally_quiet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A superseded nudge breaks the watcher loop straight into its `finally`.
+
+    Without the foreground-turn check there, the flush the NUDGE_SUPERSEDED
+    path declines to do happens a moment later anyway — pushing "I'll report
+    back once the agents finish" into the middle of the user's turn. That turn
+    discards the park and announces for itself when it ends.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("supersede-watch", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="supersede-watch-test")
+    chat.session_id = "sess-supersede-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-supersede-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    completions = iter([_completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("must not steer into a live user turn")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    # A user send: no between-turns drain left, a live foreground stream.
+    pcm._broker.register(chat.chat_id, ChatStream(prompt_text="what now?"))
+    calls = _announce_spy(pcm)
+    token = pcm._park_result_announce(
+        chat.chat_id, project.project_id, "Title", "interim"
+    )
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == []
+    assert pcm._parked_announce_token(chat.chat_id) == token
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_with_no_turn_to_supersede_it_still_releases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half: a drain that is simply gone (Stop, a drain that ended)
+    with no user turn in flight must still release the park — nothing else
+    would, and the chat would complete in silence."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("no-drain", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="no-drain-test")
+    chat.session_id = "sess-no-drain-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-no-drain-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    completions = iter([_completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:  # pragma: no cover
+            raise AssertionError("no drain to capture the reply")
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    calls = _announce_spy(pcm)
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "interim")
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == [(chat.chat_id, project.project_id, "Title", "interim")]
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_drain_releases_the_park(tmp_path: Path) -> None:
+    """Stop ends the drain and cancels the deadline backstopping it.
+
+    The drain's cancelled path leaves the park "to the next turn", but Stop
+    starts no next turn, so without an explicit release the chat keeps its
+    interim message with no unread badge, no push and no archive proposal.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    stream = ChatStream(background=True)
+    pcm._broker.register("chat-1", stream)
+    drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains["chat-1"] = drain  # type: ignore[assignment]
+    token = pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
+    pcm._arm_parked_announce_deadline("chat-1", token)
+
+    assert await pcm.stop_chat("chat-1") is True
+
+    assert calls == [("chat-1", "proj-1", "Title", "interim")]
+    assert pcm._parked_announce_token("chat-1") is None
