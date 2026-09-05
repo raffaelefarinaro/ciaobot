@@ -1675,64 +1675,148 @@ async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
     assert len(calls) == 1
 
 
-# ── the interim announce gate ────────────────────────────────────────────────
+# ── the parked result announce ───────────────────────────────────────────────
+#
+# The announce for a turn that ends on "I'll report back" is PARKED, not
+# dropped. Exactly one owner releases it: the watcher flushes on every path
+# where the nudge does not speak, and a landed nudge discards it because the
+# reply it produces announces for itself. The predicate this replaced tried to
+# predict the nudge's decision and silently lost the announce for every reason
+# it did not know about.
 
 
-def _withhold(text: str, *, pending_question: bool = False) -> bool:
-    from ciao.web.project_chats import ProjectChatManager
-
-    return ProjectChatManager._withhold_interim_announce(
-        text,
-        nudge_can_reannounce=True,
-        has_pending_question=pending_question,
-    )
+def _announce_spy(pcm) -> list[tuple]:
+    calls: list[tuple] = []
+    pcm._announce_result_ready = lambda *a: calls.append(a)  # type: ignore[method-assign]
+    pcm._spawn_detached = lambda coro, name: coro.close()  # type: ignore[method-assign]
+    return calls
 
 
-def test_interim_announce_is_withheld_for_a_plain_report_back_turn() -> None:
-    """The normal case: the nudge will fire, so the announce waits for it."""
-    assert _withhold("Dispatched three agents; I'll report back once they finish.")
+def test_a_parked_announce_is_released_when_no_nudge_speaks(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    assert calls == []
+
+    assert pcm._flush_result_announce("chat-1") is True
+    assert calls == [("chat-1", "proj-1", "Title", "snippet")]
 
 
-def test_interim_announce_fires_when_the_turn_ends_on_a_prose_question() -> None:
-    """Regression: withholding here dropped the notification entirely.
+def test_flushing_is_idempotent(tmp_path: Path) -> None:
+    """The watcher's `finally` can run after an explicit flush on the same path."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
 
-    `_nudge_synthesis_after_subagents` stands down on
-    `SessionSubagentState.awaiting_user_answer`, which is the prose heuristic
-    `ends_with_user_question` — not `pending_question`. A turn that matches an
-    interim pattern *and* ends on a prose question is therefore refused by the
-    nudge, so nothing announces in the withheld announce's place: no push, no
-    unread badge, no archive proposal, permanently.
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    assert pcm._flush_result_announce("chat-1") is True
+    assert pcm._flush_result_announce("chat-1") is False
+    assert len(calls) == 1
+
+
+def test_a_landed_nudge_discards_the_parked_announce(tmp_path: Path) -> None:
+    """Otherwise the turn pushes twice: once here, once for the synthesis reply."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+    pcm._discard_result_announce("chat-1")
+    assert pcm._flush_result_announce("chat-1") is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_watcher_releases_the_announce_when_it_cannot_find_the_session(
+    tmp_path: Path,
+) -> None:
+    """The failure #430 was filed for.
+
+    `find_parent_session_file` returning None makes the watcher return before
+    its loop ever runs, so no nudge can ever fire. The old predicate could not
+    see that: it dropped the announce and the chat completed in total silence —
+    no push, no unread badge, no archive proposal, and nothing logged.
     """
-    text = (
-        "Dispatched the agents, still waiting on their results "
-        "— want me to check the changelog too?"
-    )
-    from ciao.subagent_tracking import ends_with_user_question
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Runs", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Owner")
+    chat.session_id = "session-with-no-file-on-disk"
+    calls = _announce_spy(pcm)
+
+    pcm._park_result_announce(chat.chat_id, project.project_id, "Title", "snippet")
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    assert calls == [(chat.chat_id, project.project_id, "Title", "snippet")]
+
+
+@pytest.mark.asyncio
+async def test_watcher_releases_the_announce_when_it_raises(tmp_path: Path) -> None:
+    """An exception is just another path where no nudge will speak."""
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    async def boom(chat_id: str, project_id: str) -> None:
+        raise RuntimeError("watcher blew up")
+
+    pcm._watch_subagent_completion_inner = boom  # type: ignore[method-assign]
+    pcm._park_result_announce("chat-1", "proj-1", "Title", "snippet")
+
+    with pytest.raises(RuntimeError):
+        await pcm._watch_subagent_completion("chat-1", "proj-1")
+
+    assert calls == [("chat-1", "proj-1", "Title", "snippet")]
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_watcher_does_not_release_the_next_turns_announce(
+    tmp_path: Path,
+) -> None:
+    """`_start_subagent_watcher` cancels and replaces; cancellation is async.
+
+    So a superseded watcher's `finally` can run *after* the next turn has
+    parked its own announce. Flushing there would push a result while its
+    synthesis nudge was still pending, which is the double-push the parking is
+    meant to avoid.
+    """
+    pcm = _make_manager(tmp_path)
+    calls = _announce_spy(pcm)
+
+    started = asyncio.Event()
+
+    async def blocks(chat_id: str, project_id: str) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    pcm._watch_subagent_completion_inner = blocks  # type: ignore[method-assign]
+    old = asyncio.create_task(pcm._watch_subagent_completion("chat-1", "proj-1"))
+    pcm._pending_subagent_watchers["chat-1"] = old
+    await started.wait()
+
+    # A new turn supersedes it and parks its own announce before the cancelled
+    # task's finally has had a chance to run.
+    newer = asyncio.create_task(asyncio.sleep(3600))
+    pcm._pending_subagent_watchers["chat-1"] = newer
+    old.cancel()
+    pcm._park_result_announce("chat-1", "proj-1", "Newer", "newer snippet")
+    with pytest.raises(asyncio.CancelledError):
+        await old
+
+    assert calls == []
+    newer.cancel()
+
+    # The registered watcher still owns the release.
+    assert pcm._flush_result_announce("chat-1") is True
+    assert calls == [("chat-1", "proj-1", "Newer", "newer snippet")]
+
+
+def test_the_interim_pattern_still_decides_whether_to_park() -> None:
+    """Parking is gated on the prose heuristic, which is safe to be broad:
+    a false positive only defers the announce to the watcher, which always
+    releases it. A real result is announced immediately."""
     from ciao.web.project_chats import ProjectChatManager
 
-    # Both halves of the trap must hold, or the test proves nothing.
-    assert ProjectChatManager._is_interim_subagent_text(text)
-    assert ends_with_user_question(text)
-
-    assert _withhold(text) is False
-
-
-def test_interim_announce_fires_on_an_explicit_pending_question() -> None:
-    assert _withhold("Waiting on the agents.", pending_question=True) is False
-
-
-def test_interim_announce_fires_when_the_nudge_cannot_reannounce() -> None:
-    from ciao.web.project_chats import ProjectChatManager
-
-    assert (
-        ProjectChatManager._withhold_interim_announce(
-            "I'll report back once the agents finish.",
-            nudge_can_reannounce=False,
-            has_pending_question=False,
-        )
-        is False
+    assert ProjectChatManager._is_interim_subagent_text(
+        "Dispatched three agents; I'll report back once they finish."
     )
-
-
-def test_a_real_result_is_never_withheld() -> None:
-    assert _withhold("Done — all three agents reported; the changelog is updated.") is False
+    assert not ProjectChatManager._is_interim_subagent_text(
+        "Done — all three agents reported; the changelog is updated."
+    )

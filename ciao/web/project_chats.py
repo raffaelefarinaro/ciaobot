@@ -1331,6 +1331,10 @@ class ProjectChatManager:
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # Result announces parked while the synthesis nudge decides whether it
+        # will speak instead. See `_park_result_announce`. chat_id ->
+        # (project_id, title, snippet).
+        self._parked_result_announce: dict[str, tuple[str, str, str]] = {}
         # CLI-task wakes already delivered this process, as (chat_id,
         # task_id). Bounds redelivery to once per process lifetime: if the
         # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
@@ -6223,44 +6227,20 @@ class ProjectChatManager:
         with the results (write the log, commit) did not happen. Used by
         :meth:`dispatch_schedule` to keep such a run visible instead of
         auto-archiving a stub (the 2026-08-30 daily-log failure), and by the
-        turn-done branch to hold the result announce back until the synthesis
-        nudge produces the real reply.
+        turn-done branch to decide whether to PARK the result announce for the
+        synthesis nudge.
 
-        The patterns are deliberately broad ("waiting on ..."), so a caller
-        that suppresses anything on the strength of this must be certain
-        something else will fire in its place.
+        The patterns are deliberately broad ("waiting on ..."), which is safe
+        for parking (a false positive only defers the announce to the watcher,
+        which always releases it) but not for suppressing: a caller that drops
+        anything on the strength of this must be certain something else will
+        fire in its place. Nothing does that any more — see
+        :meth:`_park_result_announce`.
         """
         flat = " ".join((text or "").strip().splitlines()).strip()
         if not flat:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
-
-    @staticmethod
-    def _withhold_interim_announce(
-        text: str,
-        *,
-        nudge_can_reannounce: bool,
-        has_pending_question: bool,
-    ) -> bool:
-        """True when the result announce should wait for the synthesis nudge.
-
-        Withholding is only safe when the nudge will actually fire in the
-        announce's place, so this mirrors every stand-down reason in
-        :meth:`_nudge_synthesis_after_subagents`. Both question signals count:
-        ``pending_question`` is an explicit AskUserQuestion payload, while the
-        watcher stands the nudge down on the *prose* heuristic
-        (``SessionSubagentState.awaiting_user_answer``). A turn that both
-        matches an interim pattern and ends on a prose question is refused by
-        the nudge, so gating on ``pending_question`` alone dropped its push,
-        unread badge and archive proposal outright.
-        """
-        if not nudge_can_reannounce:
-            return False
-        if has_pending_question:
-            return False
-        if subagent_tracking.ends_with_user_question(text):
-            return False
-        return ProjectChatManager._is_interim_subagent_text(text)
 
     def start_stream(
         self,
@@ -7079,33 +7059,19 @@ class ProjectChatManager:
                     # every non-error turn, and withholding it left a retried
                     # chat pinned at retry_status="pending" forever.
                     #
-                    # Held back only when something will announce in its place:
-                    # the nudge needs the between-turns drain (claude), and it
-                    # stands down when the turn ended on a question for the
-                    # user (see _nudge_synthesis_after_subagents), which would
-                    # otherwise leave that question with no notification at
-                    # all. `_INTERIM_SUBAGENT_PATTERNS` is broad on purpose
-                    # ("waiting on ..."), so every case where the nudge cannot
-                    # fire has to announce normally.
-                    #
-                    # Both question signals have to be checked, not just the
-                    # explicit one: the watcher stands the nudge down on
-                    # `SessionSubagentState.awaiting_user_answer`, which is the
-                    # *prose* heuristic below, while `pending_question` is only
-                    # set by an explicit AskUserQuestion payload. A reply like
-                    # "…still waiting on the agents — want me to check the
-                    # changelog too?" matches an interim pattern, carries no
-                    # pending_question, and is refused by the nudge, so gating
-                    # on pending_question alone dropped its push, unread badge
-                    # and archive proposal outright.
-                    interim = self._withhold_interim_announce(
-                        last_assistant_text,
-                        nudge_can_reannounce=nudge_can_reannounce,
-                        has_pending_question=bool(
-                            chat_now is not None and chat_now.pending_question
-                        ),
+                    # Parked, never dropped. The watcher owns the release: it
+                    # flushes on every path where the nudge does not speak, and
+                    # discards once a nudge lands. See _park_result_announce
+                    # for why predicting the nudge's decision here was wrong.
+                    interim = (
+                        nudge_can_reannounce
+                        and self._is_interim_subagent_text(last_assistant_text)
                     )
-                    if not interim:
+                    if interim:
+                        self._park_result_announce(
+                            chat_id, project_id, title, snippet
+                        )
+                    else:
                         # Schedule the push with a small delay. If the user reads
                         # the chat on any device in the window (via /api/chats/
                         # {id}/read), the pending task is cancelled and no push
@@ -7311,6 +7277,51 @@ class ProjectChatManager:
             if current is not None and current.done():
                 self._pending_push.pop(chat_id, None)
 
+    # ── the result announce, and who owns it ─────────────────────────────
+    #
+    # A turn that ends on "I'll report back once the agents finish" is not a
+    # result, so announcing it pushes a non-answer. The synthesis nudge will
+    # produce the real reply and that reply carries its own announce — but the
+    # nudge has many reasons to stand down (no parent session file, no live
+    # provider, no between-turns drain, a non-background stream, steer missing
+    # or refusing, the parent ending on a question for the user, an exception).
+    #
+    # This used to be handled by *predicting* those reasons at the turn-done
+    # site and dropping the announce when the prediction said the nudge would
+    # fire. Every reason the predicate did not know about became a chat that
+    # completed in silence — no push, no unread badge, no archive proposal —
+    # and nothing errored, so it was invisible. Instead: park the announce, and
+    # let exactly one owner release it. The watcher flushes it on every exit
+    # path it has; a successful nudge discards it, because the reply it
+    # produces announces for itself.
+
+    def _park_result_announce(
+        self, chat_id: str, project_id: str, title: str, snippet: str
+    ) -> None:
+        """Hold this turn's announce until the nudge decides whether to speak."""
+        self._parked_result_announce[chat_id] = (project_id, title, snippet)
+
+    def _discard_result_announce(self, chat_id: str) -> None:
+        """The nudge landed; its reply will announce instead of this."""
+        self._parked_result_announce.pop(chat_id, None)
+
+    def _flush_result_announce(self, chat_id: str) -> bool:
+        """Announce a parked result. Returns True when one was actually parked.
+
+        Idempotent by construction — the entry is popped — so it is safe to
+        call from a `finally` that may run after an explicit flush.
+        """
+        parked = self._parked_result_announce.pop(chat_id, None)
+        if parked is None:
+            return False
+        project_id, title, snippet = parked
+        self._announce_result_ready(chat_id, project_id, title, snippet)
+        self._spawn_detached(
+            self._maybe_archive_proposal_helper(chat_id),
+            f"archive-proposal-helper-{chat_id}",
+        )
+        return True
+
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
         """Replace any existing subagent watcher for this chat with a new one."""
         old = self._pending_subagent_watchers.get(chat_id)
@@ -7347,6 +7358,27 @@ class ProjectChatManager:
         Emits ``chat_subagents_ready`` whenever the running count changes and
         schedules a delayed push when the last one completes.
         """
+        # Every `return` below is a path where no nudge will ever fire, so the
+        # parked announce has to go out or the chat completes in silence. The
+        # finally is the backstop for all of them, including an exception.
+        #
+        # Guarded on still being the registered watcher: `_start_subagent_watcher`
+        # cancels and replaces the previous one, and cancellation is delivered
+        # asynchronously, so a superseded watcher's finally can run *after* the
+        # next turn has parked its own announce. Flushing there would push a
+        # result while its synthesis nudge was still pending. The chat's newest
+        # watcher is the only one entitled to release the chat's parked entry;
+        # the superseded turn's entry was already overwritten by that park.
+        try:
+            await self._watch_subagent_completion_inner(chat_id, project_id)
+        finally:
+            current = self._pending_subagent_watchers.get(chat_id)
+            if current is None or current is asyncio.current_task():
+                self._flush_result_announce(chat_id)
+
+    async def _watch_subagent_completion_inner(
+        self, chat_id: str, project_id: str
+    ) -> None:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return
@@ -7460,6 +7492,15 @@ class ProjectChatManager:
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
                         )
+                        if nudged:
+                            # The drain will publish the synthesis reply and
+                            # announce it; two announces for one turn would
+                            # double-push. Every other outcome — including the
+                            # question stand-down — leaves the parked announce
+                            # for the finally to flush.
+                            self._discard_result_announce(chat_id)
+                        else:
+                            self._flush_result_announce(chat_id)
                     if count != last_count or (ready_to_nudge and nudged):
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count
