@@ -371,8 +371,11 @@ async def ws_events(websocket: WebSocket) -> None:
             # (and clear a count left stale by a missed event during a gap).
             "background_agents": pcm.background_agent_counts,
             # Same idea for tracked background command runs. These outlive the
-            # turn that started them *and* a server restart, so a reconnecting
-            # client must be told about them or the chat reads as finished.
+            # turn that started them, so a client that connects (or reconnects
+            # after a gap) must be told about them or the chat reads as
+            # finished. A restart does not carry them over — the runner
+            # resolves non-terminal runs as orphans on start — so this only
+            # ever reports runs the live process is actually supervising.
             "background_runs": pcm.background_run_counts,
             # Chats whose post-archive pipeline is mid-flight. A client that
             # connects between the start and finish events would otherwise show

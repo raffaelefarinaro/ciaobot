@@ -64,7 +64,11 @@ const EXCERPT_LIMIT = 1200
 
 async function ensureExcerpt(candidate: VaultReviewCandidate) {
   const id = candidate.candidate_id
-  if (excerpts.value[id]) return
+  // A cached success (or an in-flight load) is reused; a cached FAILURE is
+  // not, or a single transient error would pin "Could not load" on the row
+  // for the life of the panel with no way to retry but a full refresh.
+  const cached = excerpts.value[id]
+  if (cached && !cached.error) return
   excerpts.value[id] = { loading: true, error: '', text: '' }
   try {
     const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate.path)}`, {

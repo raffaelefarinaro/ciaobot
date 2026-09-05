@@ -351,3 +351,23 @@ def test_release_commit_ignores_untracked_files(tmp_path: Path, monkeypatch) -> 
     """
     monkeypatch.setattr(release_mod, "_git", lambda root, args, check=False: "")
     release_mod._ensure_nothing_left_behind(tmp_path)
+
+
+def test_release_commit_guard_is_skipped_under_allow_dirty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """--allow-dirty starts from a modified tree, so a leftover proves nothing.
+
+    The guard runs *after* `git commit`, so raising on the user's own
+    pre-existing edits would abort the run with the release commit already on
+    the branch — the worst moment to fail.
+    """
+    monkeypatch.setattr(
+        release_mod, "_git", lambda root, args, check=False: " M ciao/config.py"
+    )
+    release_mod._ensure_nothing_left_behind(tmp_path, allow_dirty=True)
+
+    # Without the flag the same tree still fails: the guard is skipped, not
+    # weakened.
+    with pytest.raises(release_mod.ReleaseError, match="left modified tracked files"):
+        release_mod._ensure_nothing_left_behind(tmp_path, allow_dirty=False)

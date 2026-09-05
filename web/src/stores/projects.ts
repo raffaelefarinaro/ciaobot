@@ -3981,9 +3981,11 @@ export const useProjectStore = defineStore('projects', () => {
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
         // Same, for tracked command runs. Authoritative for the same reason,
-        // and it matters more here: runs are persisted and re-supervised
-        // across a server restart, so the snapshot is how a client learns
-        // about one that started before it connected.
+        // and it matters more here: a run outlives the turn that started it,
+        // so the snapshot is how a client learns about one that was already
+        // going when it connected. (A server restart does not carry runs
+        // over — the runner resolves them as orphans — so an empty map after
+        // one is the truth, not a gap.)
         backgroundRuns.value = { ...(msg.background_runs || {}) }
         // Post-archive pipelines still in flight. Authoritative like the counts
         // above: a chat the server no longer lists as running has settled, so

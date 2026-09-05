@@ -1673,3 +1673,66 @@ async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
     # The startup sweep after a crash must also skip the already-woken task.
     assert pcm.sweep_orphaned_cli_tasks() == 0
     assert len(calls) == 1
+
+
+# ── the interim announce gate ────────────────────────────────────────────────
+
+
+def _withhold(text: str, *, pending_question: bool = False) -> bool:
+    from ciao.web.project_chats import ProjectChatManager
+
+    return ProjectChatManager._withhold_interim_announce(
+        text,
+        nudge_can_reannounce=True,
+        has_pending_question=pending_question,
+    )
+
+
+def test_interim_announce_is_withheld_for_a_plain_report_back_turn() -> None:
+    """The normal case: the nudge will fire, so the announce waits for it."""
+    assert _withhold("Dispatched three agents; I'll report back once they finish.")
+
+
+def test_interim_announce_fires_when_the_turn_ends_on_a_prose_question() -> None:
+    """Regression: withholding here dropped the notification entirely.
+
+    `_nudge_synthesis_after_subagents` stands down on
+    `SessionSubagentState.awaiting_user_answer`, which is the prose heuristic
+    `ends_with_user_question` — not `pending_question`. A turn that matches an
+    interim pattern *and* ends on a prose question is therefore refused by the
+    nudge, so nothing announces in the withheld announce's place: no push, no
+    unread badge, no archive proposal, permanently.
+    """
+    text = (
+        "Dispatched the agents, still waiting on their results "
+        "— want me to check the changelog too?"
+    )
+    from ciao.subagent_tracking import ends_with_user_question
+    from ciao.web.project_chats import ProjectChatManager
+
+    # Both halves of the trap must hold, or the test proves nothing.
+    assert ProjectChatManager._is_interim_subagent_text(text)
+    assert ends_with_user_question(text)
+
+    assert _withhold(text) is False
+
+
+def test_interim_announce_fires_on_an_explicit_pending_question() -> None:
+    assert _withhold("Waiting on the agents.", pending_question=True) is False
+
+
+def test_interim_announce_fires_when_the_nudge_cannot_reannounce() -> None:
+    from ciao.web.project_chats import ProjectChatManager
+
+    assert (
+        ProjectChatManager._withhold_interim_announce(
+            "I'll report back once the agents finish.",
+            nudge_can_reannounce=False,
+            has_pending_question=False,
+        )
+        is False
+    )
+
+
+def test_a_real_result_is_never_withheld() -> None:
+    assert _withhold("Done — all three agents reported; the changelog is updated.") is False

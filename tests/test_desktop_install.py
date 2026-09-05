@@ -164,3 +164,44 @@ def test_uninstall_leaves_a_shim_for_a_prefix_named_bundle_alone(tmp_path: Path)
 
     assert "removed_shim" not in result
     assert shim.exists()
+
+
+def test_uninstall_removes_an_orphaned_shim_when_the_bundle_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    """Dragging Ciaobot.app to the Trash leaves the shim behind.
+
+    The uninstall used to return early on a missing bundle without touching
+    ~/.local/bin, so `ciao` stayed on PATH exec'ing into a deleted bundle and
+    every invocation died with "no such file" — with nothing left to clean it
+    up, since the uninstall now has no bundle to key off.
+    """
+    bundle = tmp_path / desktop_install.APP_BUNDLE_NAME  # never created
+    shim = tmp_path / "bin" / "ciao"
+    shim.parent.mkdir()
+    shim.write_text(
+        f'#!/bin/sh\n{desktop_install.SHIM_MARKER}\n'
+        f'exec "{bundle}/Contents/Resources/ciao-runtime/bin/ciao" "$@"\n',
+        encoding="utf-8",
+    )
+
+    result = desktop_install.uninstall_desktop_app(app_dir=tmp_path, shim_path=shim)
+
+    assert result["removed"] is False
+    assert result["removed_shim"] == str(shim)
+    assert not shim.exists()
+
+
+def test_uninstall_leaves_a_foreign_shim_alone_when_the_bundle_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The identity check still applies on the bundle-missing path."""
+    foreign = tmp_path / "bin" / "ciao"
+    foreign.parent.mkdir()
+    foreign.write_text("#!/bin/sh\necho other project\n", encoding="utf-8")
+
+    result = desktop_install.uninstall_desktop_app(app_dir=tmp_path, shim_path=foreign)
+
+    assert result["removed"] is False
+    assert "removed_shim" not in result
+    assert foreign.exists()

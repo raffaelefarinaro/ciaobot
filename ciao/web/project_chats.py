@@ -5901,9 +5901,12 @@ class ProjectChatManager:
     def background_run_counts(self) -> dict[str, int]:
         """Live ``background_run_start`` count per chat (>0 only).
 
-        Read from the runner's registry, not a cached tally, so this survives
-        a restart: the runs themselves are persisted and re-supervised, and a
-        client reconnecting mid-run gets the real number.
+        Read from the runner's registry, not a cached tally, so a client
+        reconnecting mid-run gets the real number rather than whatever it had
+        when its socket dropped. (A restart does not carry runs over:
+        ``BackgroundRunner.start`` resolves every non-terminal run as an
+        orphan before the server serves, so the registry is already honest by
+        the time any client can read this.)
         """
         runner = self._background_runner
         if runner is None:
@@ -6231,6 +6234,33 @@ class ProjectChatManager:
         if not flat:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
+    @staticmethod
+    def _withhold_interim_announce(
+        text: str,
+        *,
+        nudge_can_reannounce: bool,
+        has_pending_question: bool,
+    ) -> bool:
+        """True when the result announce should wait for the synthesis nudge.
+
+        Withholding is only safe when the nudge will actually fire in the
+        announce's place, so this mirrors every stand-down reason in
+        :meth:`_nudge_synthesis_after_subagents`. Both question signals count:
+        ``pending_question`` is an explicit AskUserQuestion payload, while the
+        watcher stands the nudge down on the *prose* heuristic
+        (``SessionSubagentState.awaiting_user_answer``). A turn that both
+        matches an interim pattern and ends on a prose question is refused by
+        the nudge, so gating on ``pending_question`` alone dropped its push,
+        unread badge and archive proposal outright.
+        """
+        if not nudge_can_reannounce:
+            return False
+        if has_pending_question:
+            return False
+        if subagent_tracking.ends_with_user_question(text):
+            return False
+        return ProjectChatManager._is_interim_subagent_text(text)
 
     def start_stream(
         self,
@@ -7057,10 +7087,23 @@ class ProjectChatManager:
                     # all. `_INTERIM_SUBAGENT_PATTERNS` is broad on purpose
                     # ("waiting on ..."), so every case where the nudge cannot
                     # fire has to announce normally.
-                    interim = (
-                        nudge_can_reannounce
-                        and not (chat_now is not None and chat_now.pending_question)
-                        and self._is_interim_subagent_text(last_assistant_text)
+                    #
+                    # Both question signals have to be checked, not just the
+                    # explicit one: the watcher stands the nudge down on
+                    # `SessionSubagentState.awaiting_user_answer`, which is the
+                    # *prose* heuristic below, while `pending_question` is only
+                    # set by an explicit AskUserQuestion payload. A reply like
+                    # "…still waiting on the agents — want me to check the
+                    # changelog too?" matches an interim pattern, carries no
+                    # pending_question, and is refused by the nudge, so gating
+                    # on pending_question alone dropped its push, unread badge
+                    # and archive proposal outright.
+                    interim = self._withhold_interim_announce(
+                        last_assistant_text,
+                        nudge_can_reannounce=nudge_can_reannounce,
+                        has_pending_question=bool(
+                            chat_now is not None and chat_now.pending_question
+                        ),
                     )
                     if not interim:
                         # Schedule the push with a small delay. If the user reads

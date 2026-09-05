@@ -1244,12 +1244,18 @@ function openRetirementReview() {
 // The badges need data even while the Retirement tab (which fetches on mount)
 // has never been opened. Joining the in-flight request when the panel mounts
 // keeps this to one GET.
+//
+// `immediate` matters: `mm.view` lives in the store, so remounting this
+// component while it already reads 'review' (arriving at /proposals from a
+// page that unmounted us, after the sidebar set the view) makes the seeding
+// assignment below a no-op and the watcher would never fire — leaving both
+// tab badges at 0 until the user clicks Retirement.
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
     if (store.activeWorkspace) void vaultReview.fetch(store.activeWorkspace)
   }
-})
+}, { immediate: true })
 mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)

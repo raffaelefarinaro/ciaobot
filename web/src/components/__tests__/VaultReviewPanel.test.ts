@@ -50,6 +50,14 @@ function trashed(overrides: Partial<VaultTrashedNote> = {}): VaultTrashedNote {
   }
 }
 
+/** Drain both the microtask queue and jsdom's queued DOM tasks. */
+async function settle() {
+  for (let i = 0; i < 3; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await flushPromises()
+  }
+}
+
 function buttonByText(wrapper: ReturnType<typeof mount>, text: string) {
   const found = wrapper.findAll('button').find(b => b.text() === text)
   if (!found) throw new Error(`button "${text}" not found`)
@@ -147,6 +155,44 @@ describe('VaultReviewPanel', () => {
       candidate_id: 'def456def456def456def456',
       confirm: 'def456def456def456def456',
     })
+    wrapper.unmount()
+  })
+
+  it('retries an excerpt that failed, instead of pinning the error', async () => {
+    // A cached FAILURE used to be treated like a cached success, so one
+    // transient 500 pinned "Could not load" on the row for the life of the
+    // panel — the only way out was a full refresh.
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 })
+      .mockResolvedValueOnce({ ok: true, text: async () => 'the note body' })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const details = wrapper.find('details.vr-excerpt')
+    const el = details.element as HTMLDetailsElement
+    // jsdom queues its own `toggle` when `open` flips, so drain the task
+    // queue and count from a clean slate rather than racing it.
+    el.open = true
+    await settle()
+    expect(wrapper.text()).toContain('Could not load (HTTP 500)')
+    fetchMock.mockClear()
+
+    // Reopening a row whose excerpt FAILED must retry.
+    await details.trigger('toggle')
+    await settle()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('the note body')
+    expect(wrapper.text()).not.toContain('Could not load')
+
+    // Reopening one that SUCCEEDED must not.
+    await details.trigger('toggle')
+    await settle()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    vi.unstubAllGlobals()
     wrapper.unmount()
   })
 

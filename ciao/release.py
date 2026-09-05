@@ -420,7 +420,7 @@ def _ensure_clean(root: Path, *, allow_dirty: bool) -> None:
         )
 
 
-def _ensure_nothing_left_behind(root: Path) -> None:
+def _ensure_nothing_left_behind(root: Path, *, allow_dirty: bool = False) -> None:
     """Fail if the release commit left a tracked file it should have staged.
 
     The commit stages an explicit list, which is right in a shared checkout but
@@ -434,7 +434,14 @@ def _ensure_nothing_left_behind(root: Path) -> None:
     gitignored, and another session may have its own untracked work in a shared
     checkout. Only a MODIFIED TRACKED file means the release itself wrote
     something it did not commit.
+
+    Skipped under ``--allow-dirty``: there the tree was already modified before
+    the release started, so a leftover proves nothing about what the release
+    wrote — and raising here fires AFTER the release commit is made, aborting
+    the run with a commit already on the branch.
     """
+    if allow_dirty:
+        return
     leftover = _git(root, ["status", "--porcelain", "--untracked-files=no"])
     if leftover:
         raise ReleaseError(
@@ -927,7 +934,7 @@ def main(argv: list[str] | None = None) -> int:
         staged = list(dict.fromkeys(str(path.relative_to(root)) for path in touched))
         _run(["git", "add", *staged], cwd=root)
         _run(["git", "commit", "-m", f"release: prepare v{version}"], cwd=root)
-        _ensure_nothing_left_behind(root)
+        _ensure_nothing_left_behind(root, allow_dirty=args.allow_dirty)
 
     if args.push:
         _run(["git", "push", "-u", "origin", branch], cwd=root)

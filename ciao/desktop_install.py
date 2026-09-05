@@ -144,7 +144,17 @@ def uninstall_desktop_app(
 
     destination = Path(app_dir).expanduser() / APP_BUNDLE_NAME
     if not destination.exists():
-        return {"removed": False, "path": str(destination)}
+        # The bundle is already gone (dragged to the Trash by hand), but the
+        # shim that execs into it may not be: left behind, `ciao` stays on
+        # PATH and every invocation dies with "no such file". The identity
+        # check still applies, so only a marked shim naming THIS bundle goes.
+        missing: dict[str, Any] = {"removed": False, "path": str(destination)}
+        orphan_shim = _remove_installer_shim(
+            destination=destination, shim_path=shim_path
+        )
+        if orphan_shim:
+            missing["removed_shim"] = orphan_shim
+        return missing
     if not (
         destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME
     ).is_file():
