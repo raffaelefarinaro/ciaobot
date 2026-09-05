@@ -8178,11 +8178,20 @@ class ProjectChatManager:
             logger.exception("Between-turns drain failed for chat %s", chat_id)
         finally:
             close_stream(False)
-            # Exhaustive release. Reaching here without having announced means
-            # the synthesis reply never came, errored, or was a banner-only
-            # stub — every one of which used to leave the chat with no
-            # notification at all. `_flush_result_announce` is a no-op when the
-            # drain already discarded the entry, or when nothing was parked.
+            # Release on every way this drain can END: a synthesis reply that
+            # errored, one that was a banner-only stub, an exception, or the
+            # event stream closing without a result. Each used to leave the
+            # chat with no notification at all. `_flush_result_announce` is a
+            # no-op when the drain already discarded the entry, or when nothing
+            # was parked.
+            #
+            # NOT exhaustive over the failure space, and deliberately so: a
+            # live-but-silent CLI never ends `drain_events()` at all (it stays
+            # suspended on the queue), so that case reaches the `cancelled`
+            # path when the next user turn arrives and still ends in silence.
+            # Closing it needs a bounded wait on the drain — a behaviour change
+            # with its own trade-off about how long to hold a chat "working".
+            # Tracked in issue #437; do not read this block as covering it.
             if not cancelled:
                 self._flush_result_announce(chat_id)
 
