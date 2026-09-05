@@ -7383,9 +7383,12 @@ class ProjectChatManager:
         watcher's `finally`, its in-loop decline branch, the drain, the
         deadline, and Stop — and each was fixed for this separately, one
         review round at a time, because a stale park pushed mid-turn looks
-        different from each. A live turn always discards this entry and
-        announces for itself at its turn-done, so staying quiet loses nothing;
-        the entry is deliberately left in place for it rather than popped.
+        different from each. A live turn always discards this entry at its
+        turn-done and announces its own result in its place, so the entry is
+        deliberately left there for it rather than popped. (A turn that ends
+        in an error or with no text announces nothing, but the user who sent
+        it is present and sees that failure directly — quieter than pushing an
+        older turn's interim non-answer at them mid-turn.)
         """
         if self._foreground_turn_active(chat_id):
             return False
@@ -7463,11 +7466,9 @@ class ProjectChatManager:
         # waits for the turn task's own `_await_between_turns_drain`. A fire in
         # that window would push the interim non-answer into a live turn.
         #
-        # `_flush_result_announce` refuses that on its own now; returning early
-        # keeps the log line below honest about what actually happened, and
-        # leaves the entry parked for the live turn to discard.
-        if self._foreground_turn_active(chat_id):
-            return
+        # No guard needed here: `_flush_result_announce` refuses during a live
+        # turn, leaving the entry parked for that turn to discard, and returns
+        # False — so the log line below stays honest without one.
         if self._flush_result_announce(chat_id, token):
             logger.info(
                 "Synthesis reply for chat %s did not arrive within %ss; "
