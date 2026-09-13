@@ -9083,7 +9083,19 @@ class ProjectChatManager:
 
                 verdict = extract_json(text)
                 if verdict is None:
-                    raise ValueError("classifier returned no parseable JSON")
+                    # Expected degradation, not a fault: the conservative
+                    # default below already handles it, so a full traceback in
+                    # server_errors.log only pollutes the triage report.
+                    run.status = "error"
+                    run.error = "classifier returned no parseable JSON"
+                    head = (text or "").strip()[:200]
+                    logger.warning(
+                        "Schedule attention classifier returned no parseable "
+                        "JSON with model %s; keeping chat visible (output head: %r)",
+                        model,
+                        head,
+                    )
+                    return True
                 needs_user = bool(verdict.get("needs_user", True))
                 run.extra["needs_user"] = needs_user
                 reason = str(verdict.get("reason", "")).strip()
