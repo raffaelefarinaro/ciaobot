@@ -206,12 +206,13 @@
             </button>
           </div>
 
-          <!-- Archived chats whose insights extraction failed. Unlike tidy-up
-               (which is background work that never needs the user), a failed
-               extraction is a recovery case: the row carries a retry button
-               that re-runs it. -->
+          <!-- Archived chats whose post-archive pipeline still has unfinished
+               steps — typically a crash or a failed extraction. Unlike tidy-up
+               (which is background work that never needs the user), a partial
+               completion is a recovery case: the row carries a retry button
+               that resumes every unfinished stage. -->
           <div v-if="lane.failedChats.length" class="home-tier home-tier--failed">
-            <div class="home-tier-label"><span>insights failed</span></div>
+            <div class="home-tier-label"><span>unfinished steps</span></div>
             <div
               v-for="chat in lane.failedChats"
               :key="`failed-${chat.chat_id}`"
@@ -222,12 +223,14 @@
                 <span class="home-chat-title">{{ chat.title }}</span>
               </span>
               <span class="home-chat-meta">
-                <span class="home-chat-tidy-note home-chat-tidy-note--failed">insights failed</span>
+                <span class="home-chat-tidy-note home-chat-tidy-note--failed">
+                  {{ failedNote(chat) }}
+                </span>
                 <button
                   type="button"
                   class="home-chat-retry"
                   :disabled="retryingChats[chat.chat_id]"
-                  :aria-label="`Retry extracting insights for ${chat.title}`"
+                  :aria-label="`Retry unfinished post-archive steps for ${chat.title}`"
                   @click.stop="retryInsightsFor(chat.chat_id)"
                 >{{ retryingChats[chat.chat_id] ? '…' : 'retry' }}</button>
                 <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
@@ -245,7 +248,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import { postprocessLabel } from '../lib/postprocessView'
+import { postprocessErroredSteps, postprocessLabel, postprocessUnfinished, stepNoun } from '../lib/postprocessView'
 import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -497,9 +500,24 @@ function laneStatusText(lane: HomeLane): string {
   const tidying = laneTidyCount(lane) + laneArchivingCount(lane)
   if (tidying) sentences.push(`${tidying} chat${tidying === 1 ? '' : 's'} tidying up`)
   const failed = laneInsightsFailedCount(lane)
-  if (failed) sentences.push(`${failed} insights extraction${failed === 1 ? '' : 's'} failed`)
+  if (failed) sentences.push(`${failed} chat${failed === 1 ? '' : 's'} with unfinished steps`)
   return sentences.join('. ') + '.'
 }
+
+function failedNote(chat: ChatInfo): string {
+  const pp = store.chatPostprocess(chat.chat_id)
+  const unfinished = postprocessUnfinished(pp)
+  if (unfinished.length) {
+    return `${unfinished.map(stepNoun).join(', ')} not finished`
+  }
+  // Legacy records (written before the manifest) carry only per-step statuses.
+  const errored = postprocessErroredSteps(pp)
+  if (errored.length) {
+    return `${errored.map(stepNoun).join(', ')} failed`
+  }
+  return 'unfinished steps'
+}
+
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
   if (!workspace || workspace === 'unknown') return null

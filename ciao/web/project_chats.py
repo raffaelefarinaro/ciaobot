@@ -1434,6 +1434,12 @@ class ProjectChatManager:
         # `postprocess["state"] == "running"` on the chat, kept as a set so the
         # /ws/events connect snapshot and the home-screen count are O(1) reads.
         self._postprocessing: set[str] = set()
+        # Persisted per-archive pipeline manifests (ciao/archive_jobs.py), so a
+        # crash between stages can be resumed by stage instead of re-running
+        # model extraction. Keyed by chat id; the on-disk manifest is the
+        # durable copy and this map is only a read cache for the same process.
+        self._archive_jobs: dict[str, Any] = {}
+        self._runtime_root = Path(config.state_path).parent
         # The loop the manager was constructed on, so job-run events arriving
         # from a worker thread can be marshalled back onto it before touching
         # EventsHub (whose asyncio.Queue wants the loop thread).
@@ -3940,6 +3946,11 @@ class ProjectChatManager:
         # Archive intentionally keeps them: archived chats are read-only but
         # their history viewer should still work.
         self._snapshots.delete_chat(chat_id)
+        # Deleting an archived chat must cancel/tombstone its pending archive
+        # job: a running task would otherwise finish and write derived memory
+        # for a chat that no longer exists, and a startup resume could revive
+        # it. The tombstone is durable even if the in-process task is mid-write.
+        self._cancel_archive_job(chat_id)
         self._save(reason="user_chat_delete")
         self._events.publish({
             "type": "chat_deleted",
@@ -4243,7 +4254,17 @@ class ProjectChatManager:
         if chat is None:
             return
         state = dict(chat.postprocess or {})
-        state["state"] = "done"
+        # Settle to the manifest's own outcome: a job that still has failed
+        # stages is "incomplete" (retryable), one that needs a config/human
+        # change is "blocked", and only an all-settled job is "done". Without
+        # this a partly-failed pipeline would report success and hide its
+        # retry affordance.
+        job = self._archive_jobs.get(chat_id)
+        job_state = getattr(job, "state", "") if job is not None else ""
+        if job_state in ("incomplete", "blocked"):
+            state["state"] = job_state
+        else:
+            state["state"] = "done"
         state["step"] = ""
         state["updated_at"] = _now_iso()
         chat.postprocess = state
@@ -4260,13 +4281,19 @@ class ProjectChatManager:
             self._end_postprocess(chat_id)
 
     def retry_insights(self, chat_id: str) -> str:
-        """Kick off a text-mode insights retry for an archived chat.
+        """Resume the unfinished post-archive stages for an archived chat.
 
-        Returns a job status string: ``"started"`` when the retry task is
-        launched, ``"running"`` when this chat's pipeline is already live
-        (nothing is re-launched), or ``"not_found"`` / ``"not_archived"`` /
-        ``"no_archive"`` / ``"already_has"`` for the non-starts. Used by the
-        ``/api/chats/{chat_id}/retry-insights`` route.
+        An archive that already carries insights but whose project fold,
+        trajectory or memory writes never landed is exactly the case this
+        repairs (see ``ciao/archive_jobs.py``). Returns ``"started"`` when a
+        resume task is launched, ``"running"`` when the chat's pipeline is
+        already live, ``"complete"`` when nothing is left to do, ``"blocked"``
+        when the job needs a config/human change, or ``"not_found"`` /
+        ``"not_archived"`` / ``"no_archive"`` for the non-starts. Used by
+        ``/api/chats/{chat_id}/retry-insights``.
+
+        The method name is kept for route/back-compat; PWA_API.md documents it
+        as "retry unfinished steps".
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -4278,47 +4305,422 @@ class ProjectChatManager:
         if chat_id in self._postprocessing:
             return "running"
 
+        archive_path = self._archive_path_for_chat(chat)
+        if not archive_path.exists():
+            return "no_archive"
+
+        job, inputs = self._resume_job(chat_id, archive_path)
+        if job is None or inputs is None:
+            return "no_archive"
+        if job.tombstoned:
+            return "complete"
+        if not job.resumable():
+            # No stage is *automatically* eligible. An explicit user retry is a
+            # deliberate action, so it clears a block and a max-attempts
+            # exhaustion once; if nothing is actually unfinished, report it.
+            if not job.unfinished():
+                return "complete"
+            job.reset_failed(include_blocked=True)
+        self._launch_job(chat_id, job, inputs)
+        return "started"
+
+    def retry_archive_steps(self, chat_id: str) -> dict[str, Any]:
+        """Retry every unfinished stage and report the manifest to the caller.
+
+        The richer sibling of :meth:`retry_insights` used by the postprocess
+        UI: same launch path, but it returns the current manifest view so the
+        archived-chat panel can render partial completion immediately.
+        """
+        status = self.retry_insights(chat_id)
+        return {"status": status, "job": self.archive_job_view(chat_id)}
+
+    def archive_job_view(self, chat_id: str) -> dict[str, Any] | None:
+        """The persisted manifest for a chat, projected for the PWA, or None."""
+        from ciao.archive_jobs import load_job, manifest_view, new_job_id
+
+        chat = self._chats.get(chat_id)
+        if chat is None or not chat.archive_path:
+            return None
+        job = self._archive_jobs.get(chat_id)
+        if job is None:
+            job = load_job(
+                self._runtime_root, new_job_id(chat_id, chat.archive_path)
+            )
+        if job is None:
+            return None
+        return manifest_view(job)
+
+    def _cancel_archive_job(self, chat_id: str) -> None:
+        """Tombstone a deleted chat's archive job and stop its live task.
+
+        Called on explicit delete. The tombstone is the durable half: it is
+        written even when the manifest does not exist yet, and ``save_job``
+        refuses to clear it, so a task that finishes after this point (or a
+        startup resume on the next boot) cannot recreate work for the chat.
+        """
+        from ciao.archive_jobs import load_job, tombstone_job
+
+        chat = self._chats.get(chat_id)
+        job = self._archive_jobs.pop(chat_id, None)
+        if job is None and chat is not None and chat.archive_path:
+            from ciao.archive_jobs import new_job_id
+
+            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
+        if job is not None:
+            job.tombstoned = True
+            job.state = "tombstoned"
+            job.blocked_reason = "chat deleted"
+            job.save()
+            return
+        # No manifest yet: create the tombstone so a racing task cannot write
+        # one afterwards.
+        if chat is not None and chat.archive_path:
+            from ciao.archive_jobs import new_job_id
+
+            tombstone_job(
+                self._runtime_root,
+                new_job_id(chat_id, chat.archive_path),
+                reason="chat deleted",
+            )
+
+    # ── Archive job wiring ────────────────────────────────────────────────
+
+    def _archive_path_for_chat(self, chat: ChatInfo) -> Path:
         archive_path = Path(chat.archive_path)
         if not archive_path.is_absolute():
             archive_path = self._config.workspace_root / archive_path
+        return archive_path
 
-        from ciao.insights import _has_insights_section, retry_insights_for_chat
+    def _job_inputs(
+        self,
+        chat: ChatInfo,
+        project: ProjectInfo | None,
+        *,
+        filtered_jsonl: str = "",
+        session_id: str = "",
+        text_mode: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve every stage input for one chat's archive job.
+
+        Paths are re-derived from the live config rather than stored, so a
+        resume after a workspace move still finds the right guide/vault; the
+        JSON-safe subset is persisted on the manifest by
+        :meth:`_persist_job_inputs`.
+        """
+        config = self._config
+        workspace = project.workspace if project else ""
+        is_system_chat = False
+        if chat.schedule_id:
+            from ciao.schedules import is_system_schedule_id
+
+            is_system_chat = is_system_schedule_id(chat.schedule_id)
+        trajectories_enabled = bool(
+            getattr(config, "trajectories_enabled", True)
+            and session_id
+            and filtered_jsonl
+        )
+        project_doc_path = (
+            project.vault_doc_path
+            if project and not project.is_auto and not is_system_chat
+            else ""
+        )
+        proposal_vault_root = (
+            self._workspace_vault_root(workspace) if workspace else None
+        )
+        guide_path = (
+            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            if workspace and config.workspace(workspace) is not None
+            else None
+        )
+        return {
+            "archive_path": self._archive_path_for_chat(chat),
+            "config": config,
+            "model": self._insights_model_for(chat, workspace),
+            "provider": chat.provider or "claude",
+            "session_id": session_id,
+            "filtered_jsonl": filtered_jsonl,
+            "text_mode": text_mode,
+            "trajectory_meta": {
+                "context": project.context if project else "",
+                "project_id": chat.project_id,
+                "chat_id": chat.chat_id,
+                "task_summary": chat.title,
+                "workspace": workspace,
+            },
+            "workspace_root": config.workspace_root,
+            "vault_root": config.vault_root,
+            "proposal_vault_root": proposal_vault_root,
+            "guide_path": guide_path,
+            "trajectories_enabled": trajectories_enabled,
+            "memory_proposals_enabled": True,
+            "project_doc_path": project_doc_path,
+        }
+
+    def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
+        from ciao.insights import resolve_insights_model
+
+        insights_models = getattr(self._config, "provider_insights_models", {}) or {}
+        return insights_models.get(chat.provider or "", "") or resolve_insights_model(
+            self._config, workspace or None, chat.provider or None
+        )
+
+    def _persist_job_inputs(self, job: Any, inputs: dict[str, Any]) -> None:
+        """Store the JSON-safe subset a resume needs on the manifest."""
+        job.inputs.update(
+            {
+                "model": str(inputs.get("model") or ""),
+                "provider": str(inputs.get("provider") or "claude"),
+                "session_id": str(inputs.get("session_id") or ""),
+                "filtered_jsonl": str(inputs.get("filtered_jsonl") or ""),
+                "text_mode": bool(inputs.get("text_mode", False)),
+                "trajectory_meta": dict(inputs.get("trajectory_meta") or {}),
+                "trajectories_enabled": bool(inputs.get("trajectories_enabled", True)),
+                "memory_proposals_enabled": bool(
+                    inputs.get("memory_proposals_enabled", True)
+                ),
+                "project_doc_path": str(inputs.get("project_doc_path") or ""),
+                "workspace": str(
+                    (inputs.get("trajectory_meta") or {}).get("workspace", "")
+                ),
+            }
+        )
+
+    def _restore_job_inputs(
+        self, chat: ChatInfo, project: ProjectInfo | None, job: Any
+    ) -> dict[str, Any]:
+        """Rebuild live stage inputs from a persisted manifest + live config."""
+        meta = dict(job.inputs.get("trajectory_meta") or {})
+        workspace = str(job.inputs.get("workspace") or "")
+        if not workspace and project is not None:
+            workspace = project.workspace
+        config = self._config
+        guide_path = (
+            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            if workspace and config.workspace(workspace) is not None
+            else None
+        )
+        proposal_vault_root = (
+            self._workspace_vault_root(workspace) if workspace else None
+        )
+        return {
+            "archive_path": self._archive_path_for_chat(chat),
+            "config": config,
+            "model": str(job.inputs.get("model") or ""),
+            "provider": str(job.inputs.get("provider") or chat.provider or "claude"),
+            "session_id": str(job.inputs.get("session_id") or ""),
+            "filtered_jsonl": str(job.inputs.get("filtered_jsonl") or ""),
+            "text_mode": bool(job.inputs.get("text_mode", False)),
+            "trajectory_meta": meta,
+            "workspace_root": config.workspace_root,
+            "vault_root": config.vault_root,
+            "proposal_vault_root": proposal_vault_root,
+            "guide_path": guide_path,
+            "trajectories_enabled": bool(job.inputs.get("trajectories_enabled", True)),
+            "memory_proposals_enabled": bool(
+                job.inputs.get("memory_proposals_enabled", True)
+            ),
+            "project_doc_path": str(job.inputs.get("project_doc_path") or ""),
+        }
+
+    def _new_job_for_chat(self, chat: ChatInfo, inputs: dict[str, Any]) -> Any:
+        from ciao.archive_jobs import content_revision, create_job
+
+        job = create_job(
+            self._runtime_root,
+            chat_id=chat.chat_id,
+            archive_path=chat.archive_path,
+            content_revision_value=content_revision(inputs["archive_path"]),
+        )
+        self._persist_job_inputs(job, inputs)
+        job.save()
+        self._archive_jobs[chat.chat_id] = job
+        return job
+
+    def _resume_job(
+        self, chat_id: str, archive_path: Path
+    ) -> tuple[Any, dict[str, Any]] | tuple[None, None]:
+        """Load (or seed) the manifest for an archived chat.
+
+        A chat archived before this feature has no manifest, so one is seeded
+        from the archive's current state: insights settled when the section is
+        present, trajectory unavailable (the raw JSONL is gone), and the fold
+        and proposals pending — which is what makes a legacy archive
+        repairable.
+        """
+        from ciao.archive_jobs import (
+            SKIPPED,
+            SUCCEEDED,
+            content_revision,
+            create_job,
+            load_job,
+            new_job_id,
+        )
+
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None, None
+        project = self._projects.get(chat.project_id) if chat.project_id else None
+        job = self._archive_jobs.get(chat_id)
+        if job is None:
+            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
+        if job is None:
+            inputs = self._job_inputs(chat, project, text_mode=True)
+            job = create_job(
+                self._runtime_root,
+                chat_id=chat_id,
+                archive_path=chat.archive_path,
+                content_revision_value=content_revision(archive_path),
+            )
+            self._persist_job_inputs(job, inputs)
+            from ciao.insights import _has_insights_section
+
+            if _has_insights_section(archive_path):
+                job.mark("insights", SUCCEEDED)
+            if not job.inputs.get("filtered_jsonl"):
+                job.mark("trajectory", SKIPPED, "raw session no longer available")
+            job.save()
+            self._archive_jobs[chat_id] = job
+        else:
+            inputs = self._restore_job_inputs(chat, project, job)
+            self._archive_jobs[chat_id] = job
+        return job, inputs
+
+    def _launch_job(
+        self,
+        chat_id: str,
+        job: Any,
+        inputs: dict[str, Any],
+        *,
+        stages: list[str] | None = None,
+    ) -> None:
+        self._begin_postprocess(chat_id, list(stages or job.resumable()))
+        asyncio.create_task(
+            self._tracked_postprocess(
+                chat_id, self._run_job(chat_id, job, inputs, stages=stages)
+            )
+        )
+
+    async def _run_job(
+        self,
+        chat_id: str,
+        job: Any,
+        inputs: dict[str, Any],
+        *,
+        stages: list[str] | None = None,
+    ) -> None:
+        """Check the archive revision, run the stages, settle the record."""
+        from ciao.archive_jobs import PENDING, RUNNING, content_revision
+        from ciao.insights import run_archive_pipeline
 
         try:
-            if _has_insights_section(archive_path):
-                return "already_has"
-        except OSError:
-            return "no_archive"
+            # A job whose archive changed *before* extraction landed cannot be
+            # resumed safely: the pending work was planned against different
+            # content. Block it and say why instead of writing derived state
+            # beside unknown text.
+            if job.status_of("insights") in (PENDING, RUNNING) and job.content_revision:
+                current = content_revision(inputs["archive_path"])
+                if current and current != job.content_revision:
+                    job.block(
+                        "insights",
+                        "archive content changed since the job was created",
+                    )
+                    job.save()
+                    return
+            await run_archive_pipeline(job, inputs, stages=stages)
+        except Exception:  # noqa: BLE001 — the tracked wrapper always settles
+            logger.exception("Archive job failed for chat %s", chat_id)
+        finally:
+            job.save()
+            self._overlay_job_postprocess(chat_id, job)
 
-        project = self._projects.get(chat.project_id) if chat.project_id else None
-        workspace = project.workspace if project else ""
-        self._begin_postprocess(chat_id, ["insights"])
+    def _overlay_job_postprocess(self, chat_id: str, job: Any) -> None:
+        """Fold a manifest's stage states into the chat's postprocess record.
 
-        async def _run() -> None:
-            try:
-                from ciao.insights import resolve_insights_model
+        The live step events already fill ``steps`` with counts and paths; the
+        manifest adds what they cannot: which stages are still unfinished,
+        whether the job is blocked, and the reason. Applied on settle and on
+        load so a partially-complete archive reports accurately without a live
+        pipeline.
+        """
+        from ciao.archive_jobs import manifest_view
 
-                workspace_ctx = workspace or None
-                insights_models = getattr(self._config, "provider_insights_models", {}) or {}
-                model = insights_models.get(chat.provider or "", "") or resolve_insights_model(
-                    self._config, workspace_ctx, chat.provider or None
-                )
-                await retry_insights_for_chat(
-                    config=self._config,
-                    archive_path=archive_path,
-                    model=model,
-                    provider=chat.provider or "claude",
-                    workspace=workspace,
-                    trajectory_meta={"chat_id": chat_id, "project_id": chat.project_id},
-                    workspace_root=self._config.workspace_root,
-                    vault_root=self._config.vault_root,
-                    project_doc_path=project.vault_doc_path if project and not project.is_auto else "",
-                )
-            except Exception:  # noqa: BLE001 — the job event already surfaces failures
-                logger.exception("Insights retry failed for chat %s", chat_id)
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        view = manifest_view(job)
+        state = dict(chat.postprocess or {})
+        steps = dict(state.get("steps") or {})
+        for name, status in (view.get("steps") or {}).items():
+            mapped = status.get("status")
+            if mapped in ("pending",):
+                continue
+            entry = steps.get(name)
+            if not isinstance(entry, dict):
+                entry = {"status": mapped, "extra": {}}
+            entry["manifest_status"] = mapped
+            steps[name] = entry
+        state["steps"] = steps
+        state["job"] = view
+        if view.get("blocked_reason"):
+            state["blocked_reason"] = view["blocked_reason"]
+        # Reflect the manifest outcome on the record itself, so a blocked or
+        # partly-complete job is visible even before `_end_postprocess` runs.
+        if view.get("state") in ("incomplete", "blocked") and state.get("state") != "running":
+            state["state"] = view["state"]
+        state["updated_at"] = _now_iso()
+        chat.postprocess = state
+        self._publish_postprocess(chat)
 
-        asyncio.create_task(self._tracked_postprocess(chat_id, _run()))
-        return "started"
+    # ── Startup resume ────────────────────────────────────────────────────
+
+    async def resume_interrupted_jobs(self, *, max_concurrency: int = 2) -> int:
+        """Resume eligible local archive jobs left incomplete by a crash.
+
+        Called once at startup after the registry loads. Interrupted ``running``
+        stages are made retryable first (nothing is running yet in this
+        process), then unfinished jobs with a live chat are resumed with
+        bounded concurrency. Blocked and tombstoned jobs are left alone.
+        """
+        from ciao.archive_jobs import RUNNING, list_jobs
+
+        jobs = list_jobs(self._runtime_root)
+        semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        started = 0
+        for job in jobs:
+            if job.tombstoned:
+                continue
+            for name in list(job.stages):
+                if job.status_of(name) == RUNNING:
+                    # The old process died with the stage in flight; make it
+                    # retryable rather than a stuck "running" forever.
+                    job.stage(name).status = "pending"
+            job.save()
+            chat = self._chats.get(job.chat_id)
+            if chat is None or not chat.archived:
+                continue
+            project = self._projects.get(chat.project_id) if chat.project_id else None
+            inputs = self._restore_job_inputs(chat, project, job)
+            if not inputs["archive_path"].exists():
+                continue
+            if not job.resumable():
+                self._overlay_job_postprocess(job.chat_id, job)
+                continue
+            self._archive_jobs[job.chat_id] = job
+            self._begin_postprocess(job.chat_id, list(job.resumable()))
+
+            async def _guarded(
+                job: Any = job, inputs: dict[str, Any] = inputs
+            ) -> None:
+                async with semaphore:
+                    await self._run_job(job.chat_id, job, inputs)
+
+            task = asyncio.create_task(
+                self._tracked_postprocess(job.chat_id, _guarded())
+            )
+            self._detached_tasks.add(task)
+            task.add_done_callback(self._detached_tasks.discard)
+            started += 1
+        return started
 
     def run_archive_postprocess(
         self,
@@ -4328,131 +4730,83 @@ class ProjectChatManager:
         project_meta: ProjectInfo | None,
     ) -> None:
         config = self._config
-        trajectory_meta = {
-            "context": project_meta.context if project_meta else "",
-            "project_id": chat_meta.project_id if chat_meta else "",
-            "chat_id": chat_id,
-            "task_summary": chat_meta.title if chat_meta else "",
-            "workspace": project_meta.workspace if project_meta else "",
-        }
-        trajectories_enabled = (
+        trajectories_enabled = bool(
             getattr(config, "trajectories_enabled", True)
             and outcome.filtered_jsonl is not None
             and outcome.session_id != ""
         )
-        run_insights = (
-            getattr(config, "insights_enabled", False)
-            and outcome.filtered_jsonl
+        run_insights = bool(
+            getattr(config, "insights_enabled", False) and outcome.filtered_jsonl
         )
-        if run_insights:
-            from ciao.insights import extract_and_append, resolve_insights_model
-            from ciao.schedules import is_system_schedule_id
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            # Nothing durable to key a manifest on; index the archive below so
+            # the file is still searchable.
+            pass
+        if chat is not None:
+            from ciao.archive_jobs import SKIPPED
 
-            # A system-schedule chat (memory curation, hygiene, skill
-            # evolution) is the memory machinery itself. Its archive keeps the
-            # insights section — the audit trail of what an unattended run did
-            # — and memory proposals still run, but extraction is told to
-            # ignore unattended (automation) turns: a real user statement made
-            # mid-run is caught, while the machinery's self-description is not
-            # lifted as a fact. See the "unattended" rule in ciao/insights.py.
-            is_system_chat = is_system_schedule_id(
-                chat_meta.schedule_id if chat_meta else ""
+            # The archive path may not be on the chat yet (this runs right after
+            # `archive_chat` set it, but a caller can pass the outcome directly);
+            # use the outcome's path as the authoritative one for the job.
+            if not chat.archive_path and outcome.path is not None:
+                try:
+                    chat.archive_path = str(
+                        outcome.path.relative_to(self._config.workspace_root)
+                    )
+                except ValueError:
+                    chat.archive_path = str(outcome.path)
+            inputs = self._job_inputs(
+                chat,
+                project_meta,
+                filtered_jsonl=outcome.filtered_jsonl or "",
+                session_id=outcome.session_id,
             )
-            workspace = project_meta.workspace if project_meta else None
-            insights_models = getattr(config, "provider_insights_models", {}) or {}
-            insights_model = insights_models.get(
-                chat_meta.provider if chat_meta else "", ""
-            ) or resolve_insights_model(
-                config, workspace, chat_meta.provider if chat_meta else None
-            )
-            # Auto projects (General, Claude Code CLI) are catch-alls whose
-            # docs would become junk drawers; only real projects get the
-            # archive-time canonical-doc update.
-            project_doc_path = (
-                project_meta.vault_doc_path
-                if project_meta and not project_meta.is_auto and not is_system_chat
-                else ""
-            )
-            proposal_vault_root = (
-                self._workspace_vault_root(workspace) if workspace else None
-            )
-            # Which steps can actually run for *this* chat, in execution order.
-            # Declared up front so a surface can say "3 steps" honestly instead
-            # of discovering the shape as events trickle in — and so a step that
-            # was never going to run is not reported as one that failed to.
-            expected = ["insights"]
-            if project_doc_path:
+            inputs["archive_path"] = outcome.path
+            inputs["trajectories_enabled"] = trajectories_enabled
+
+            # Declare the plan up front so a surface can say "3 steps" honestly
+            # and a stage that was never going to run is not reported as a
+            # failure. System chats keep insights and memory proposals but skip
+            # the project-doc fold (there is no canonical doc to fold into).
+            expected: list[str] = []
+            if run_insights:
+                expected.append("insights")
+            if inputs["project_doc_path"]:
                 expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if proposal_vault_root is not None:
+            if inputs["proposal_vault_root"] is not None:
                 expected.append("memory_proposals")
+
+            job = self._new_job_for_chat(chat, inputs)
+            # Stages that cannot run for this chat settle as skipped now, so the
+            # manifest is an accurate plan even before the task starts.
+            if not run_insights:
+                job.mark("insights", SKIPPED, "insights disabled or no transcript")
+            if not trajectories_enabled:
+                job.mark(
+                    "trajectory", SKIPPED, "no session input or trajectories disabled"
+                )
+            if not inputs["project_doc_path"]:
+                job.mark("project_doc_update", SKIPPED, "no canonical project doc")
+            if inputs["proposal_vault_root"] is None:
+                if inputs["trajectory_meta"].get("workspace"):
+                    # The chat runs in a workspace but its vault root did not
+                    # resolve: recoverable once the registry is fixed.
+                    job.block("memory_proposals", "workspace owner unavailable")
+                else:
+                    job.mark(
+                        "memory_proposals", SKIPPED, "workspace owner unavailable"
+                    )
+            job.save()
+
             self._begin_postprocess(chat_id, expected)
             asyncio.create_task(
                 self._tracked_postprocess(
-                    chat_id,
-                    extract_and_append(
-                        archive_path=outcome.path,
-                        filtered_jsonl=outcome.filtered_jsonl or "",
-                        config=config,
-                        model=insights_model,
-                        session_id=outcome.session_id,
-                        trajectory_meta=trajectory_meta,
-                        trajectories_enabled=trajectories_enabled,
-                        workspace_root=config.workspace_root,
-                        vault_root=config.vault_root,
-                        proposal_vault_root=proposal_vault_root,
-                        # Region auto-promotion writes the workspace the chat
-                        # ran in. Without this the live archive path left every
-                        # [memory]/[profile] fact queued instead of promoted,
-                        # because `apply_proposals` will not guess a guide.
-                        guide_path=(
-                            Path(config.agent_root(workspace)) / "CLAUDE.md"
-                            if workspace and config.workspace(workspace) is not None
-                            else None
-                        ),
-                        provider=chat_meta.provider if chat_meta else "claude",
-                        project_doc_path=project_doc_path,
-                        memory_proposals_enabled=True,
-                    ),
+                    chat_id, self._run_job(chat_id, job, inputs, stages=expected)
                 )
             )
-        elif trajectories_enabled:
-            from ciao import job_runs
-            from ciao.trajectory_builder import build_and_persist_trajectory
-
-            # Insights is off, or the chat is under the size gate, so the
-            # trajectory is the whole pipeline here. Tracked like the pipeline
-            # step it mirrors: this path previously reported nothing at all, so
-            # the Automation page showed "never run" on a job that had run
-            # hundreds of times.
-            self._begin_postprocess(chat_id, ["trajectory"])
-            try:
-                with job_runs.track_sync(
-                    "trajectory", "Trajectory capture",
-                    extra={
-                        "session_id": outcome.session_id,
-                        "chat_id": chat_id,
-                        "standalone": True,
-                    },
-                ) as run:
-                    written = build_and_persist_trajectory(
-                        session_id=outcome.session_id,
-                        filtered_jsonl=outcome.filtered_jsonl or "",
-                        archive_path=outcome.path,
-                        workspace_root=config.workspace_root,
-                        **cast("dict[str, Any]", trajectory_meta),
-                    )
-                    if written:
-                        run.extra["path"] = str(written)
-                    else:
-                        run.skip("empty session / no trajectory written")
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Inline trajectory write failed for chat %s", chat_id
-                )
-            finally:
-                self._end_postprocess(chat_id)
 
         # Index the newly archived file in the FTS5 database. The control
         # plane now runs its own index passes in bounded workers, so this

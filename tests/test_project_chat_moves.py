@@ -228,10 +228,10 @@ async def test_archive_postprocess_runs_insights_for_all_chats(
     chat = pcm.create_chat(project.project_id, title="insights chat")
     calls: list[dict] = []
 
-    async def fake_extract_and_append(**kwargs: object) -> None:
-        calls.append(kwargs)
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
+        calls.append(inputs)
 
-    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
 
     pcm.run_archive_postprocess(
         chat.chat_id,
@@ -271,10 +271,10 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
     chat = pcm.create_chat(project.project_id, title="guide chat")
     calls: list[dict] = []
 
-    async def fake_extract_and_append(**kwargs: object) -> None:
-        calls.append(kwargs)
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
+        calls.append(inputs)
 
-    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
 
     pcm.run_archive_postprocess(
         chat.chat_id,
@@ -319,10 +319,10 @@ async def test_archive_postprocess_system_chat_keeps_memory_writes(
     chat.schedule_id = "system-memory-curation@work"
     calls: list[dict] = []
 
-    async def fake_extract_and_append(**kwargs: object) -> None:
-        calls.append(kwargs)
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
+        calls.append(inputs)
 
-    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
 
     pcm.run_archive_postprocess(
         chat.chat_id,
@@ -357,10 +357,10 @@ async def test_archive_postprocess_user_chat_keeps_memory_writes(
     chat.schedule_id = "sched-abc123"
     calls: list[dict] = []
 
-    async def fake_extract_and_append(**kwargs: object) -> None:
-        calls.append(kwargs)
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
+        calls.append(inputs)
 
-    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
 
     pcm.run_archive_postprocess(
         chat.chat_id,

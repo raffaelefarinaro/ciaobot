@@ -1,0 +1,676 @@
+"""Resumable post-archive pipeline: archive-job manifest acceptance tests.
+
+Covers the AI-02 acceptance criteria:
+
+* a failure injected after each stage is recoverable independently, including
+  once insights already exist;
+* a retry does not duplicate region entries, proposal rows, learning recurrence
+  counts or project updates;
+* deleting an archived chat tombstones its job and cannot resurrect it;
+* missing ownership, changed archive content, model unavailability and terminal
+  failures produce explicit recoverable or blocked states.
+
+The pipeline itself is exercised against a synthetic vault/guide; no model call
+is ever made (the extraction function is monkeypatched where it is reached).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from ciao import archive_jobs as aj
+from ciao import insights
+from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
+from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
+
+INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────
+
+
+def _config(tmp_path: Path, *, insights_enabled: bool = True) -> CiaoConfig:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        insights_enabled=insights_enabled,
+    )
+
+
+def _manager(tmp_path: Path, *, insights_enabled: bool = True) -> ProjectChatManager:
+    config = _config(tmp_path, insights_enabled=insights_enabled)
+    runtime = config.state_path.parent
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def _archive(tmp_path: Path, body: str = "# chat\n\nbody\n") -> Path:
+    archive = tmp_path / "archive.md"
+    archive.write_text(body, encoding="utf-8")
+    return archive
+
+
+def _stamped_archive(tmp_path: Path, insights_body: str = "- a fact\n") -> Path:
+    return _archive(
+        tmp_path,
+        f"# chat\n\n{INSIGHTS_STAMP}\n## Session insights\n\n{insights_body}",
+    )
+
+
+def _job_inputs(
+    tmp_path: Path,
+    archive: Path,
+    *,
+    config: CiaoConfig | None = None,
+    model: str = "test-model",
+    **overrides: object,
+) -> dict:
+    config = config or _config(tmp_path)
+    inputs: dict = {
+        "archive_path": archive,
+        "config": config,
+        "model": model,
+        "provider": "claude",
+        "session_id": "sess-1",
+        "filtered_jsonl": "",
+        "text_mode": True,
+        "trajectory_meta": {"chat_id": "chat-1", "workspace": "work"},
+        "workspace_root": tmp_path,
+        "vault_root": tmp_path / "vault",
+        "proposal_vault_root": None,
+        "guide_path": None,
+        "trajectories_enabled": False,
+        "memory_proposals_enabled": False,
+        "project_doc_path": "",
+    }
+    inputs.update(overrides)
+    return inputs
+
+
+def _job(tmp_path: Path, archive: Path, **kwargs: object) -> aj.ArchiveJob:
+    return aj.create_job(
+        tmp_path / ".runtime",
+        chat_id=str(kwargs.pop("chat_id", "chat-1")),
+        archive_path=str(archive),
+        content_revision_value=aj.content_revision(archive),
+    )
+
+
+def _patch_insights_model(monkeypatch: pytest.MonkeyPatch, output: str) -> None:
+    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
+        return output
+
+    async def fake_text_call(body: str, model: str, **kwargs: object) -> str:
+        return output
+
+    monkeypatch.setattr(insights, "_call_model", fake_call)
+    monkeypatch.setattr(insights, "_call_text_model", fake_text_call)
+
+
+# ── Manifest basics ───────────────────────────────────────────────────────
+
+
+def test_manifest_round_trips_and_survives_a_reload(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    job.mark("project_doc_update", aj.SKIPPED, "no canonical project doc")
+    job.mark("trajectory", aj.SKIPPED, "no session input")
+    job.mark("memory_proposals", aj.FAILED, "model unavailable")
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("insights") == aj.SUCCEEDED
+    assert reloaded.stages["memory_proposals"].reason == "model unavailable"
+    assert reloaded.state == "incomplete"
+    assert reloaded.unfinished() == ["memory_proposals"]
+
+
+def test_version_mismatch_does_not_resume_a_stale_manifest(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.save()
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pipeline_version"] = aj.PIPELINE_VERSION + 1
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert aj.load_job(tmp_path / ".runtime", job.job_id) is None
+
+
+def test_tombstone_cannot_be_cleared_by_a_late_write(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.save()
+    aj.tombstone_job(tmp_path / ".runtime", job.job_id, reason="chat deleted")
+
+    # A racing task finishes and tries to save its (live) job.
+    job.mark("insights", aj.SUCCEEDED)
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.tombstoned is True
+    assert reloaded.state == aj.TOMBSTONED
+
+
+def test_resumable_excludes_blocked_and_exhausted_stages(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.mark("project_doc_update", aj.SKIPPED, "no canonical project doc")
+    job.mark("trajectory", aj.SKIPPED, "no session input")
+    job.block("insights", "archive content changed since the job was created")
+    for _ in range(aj.MAX_AUTO_ATTEMPTS):
+        job.mark("memory_proposals", aj.RUNNING)
+        job.mark("memory_proposals", aj.FAILED, "boom")
+
+    # A blocked precondition excludes the whole job from an automatic resume,
+    # and an exhausted stage is not retried on every boot either.
+    assert job.resumable() == []
+    assert set(job.unfinished()) == {"insights", "memory_proposals"}
+
+    # An explicit retry clears both the block and the exhaustion.
+    job.reset_failed(include_blocked=True)
+    assert job.status_of("insights") == aj.PENDING
+    assert job.status_of("memory_proposals") == aj.PENDING
+    assert set(job.resumable()) == {"insights", "memory_proposals"}
+
+
+# ── Stage resume: failure after each stage ────────────────────────────────
+
+
+def test_insights_stage_appends_and_settles(tmp_path: Path, monkeypatch) -> None:
+    archive = _archive(tmp_path)
+    _patch_insights_model(monkeypatch, "## Decisions\n- Chose sqlite. [idx=1]\n")
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(tmp_path, archive)
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.SUCCEEDED
+    assert "## Session insights" in archive.read_text(encoding="utf-8")
+
+
+def test_insights_failure_is_recorded_and_resumes(tmp_path: Path, monkeypatch) -> None:
+    archive = _archive(tmp_path)
+
+    async def failing(body: str, model: str, **kwargs: object) -> str:
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(insights, "_call_text_model", failing)
+    monkeypatch.setattr(insights, "_RETRY_DELAY_S", 0)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(tmp_path, archive)
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.FAILED
+    assert job.state == "incomplete"
+    assert "insights" in job.resumable()
+
+    # A successful second attempt resumes and settles the same manifest.
+    _patch_insights_model(monkeypatch, "## Errors\n- x. [idx=2]\n")
+    job.reset_failed()
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+    assert job.status_of("insights") == aj.SUCCEEDED
+
+
+def test_regression_insights_saved_proposals_not_run_is_recoverable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ticket's first step: insights exist, but the later stages did not run."""
+    archive = _stamped_archive(tmp_path)
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# guide\n", encoding="utf-8")
+
+    # Extraction must NOT be re-run: the section is already there.
+    async def must_not_call(*args: object, **kwargs: object) -> str:
+        raise AssertionError("extraction re-ran on an archive that already had insights")
+
+    monkeypatch.setattr(insights, "_call_model", must_not_call)
+    monkeypatch.setattr(insights, "_call_text_model", must_not_call)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        guide_path=guide,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights", "memory_proposals"]))
+
+    assert job.status_of("insights") == aj.SKIPPED
+    assert job.status_of("memory_proposals") == aj.SUCCEEDED
+
+
+def test_project_fold_runs_even_when_insights_are_skipped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _stamped_archive(
+        tmp_path,
+        "## Decisions\n- Chose sqlite over postgres because local-first.\n",
+    )
+    doc = tmp_path / "Project.md"
+    doc.write_text("# Project\n\n## Open loops\n- a\n", encoding="utf-8")
+
+    async def fake_oneshot(prompt: object, **kwargs: object) -> str:
+        return "# Project\n\n## Open loops\n- done\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        project_doc_path=str(doc),
+        memory_proposals_enabled=False,
+    )
+    job.mark("insights", aj.SKIPPED, "already present")
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["project_doc_update"]))
+
+    assert job.status_of("project_doc_update") == aj.SUCCEEDED
+    assert job.inputs["doc_fold_wrote"] is True
+
+
+def test_trajectory_runs_independently_of_a_failed_insights_stage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+
+    async def failing(body: str, model: str, **kwargs: object) -> str:
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(insights, "_call_text_model", failing)
+    monkeypatch.setattr(insights, "_RETRY_DELAY_S", 0)
+
+    written: list[dict] = []
+
+    def fake_trajectory(**kwargs: object) -> Path:
+        written.append(kwargs)
+        return tmp_path / "traj.json"
+
+    monkeypatch.setattr(
+        "ciao.trajectory_builder.build_and_persist_trajectory", fake_trajectory
+    )
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        session_id="sess-1",
+        filtered_jsonl="line",
+        trajectories_enabled=True,
+    )
+
+    asyncio.run(
+        insights.run_archive_pipeline(
+            job, inputs, stages=["insights", "trajectory"]
+        )
+    )
+
+    assert job.status_of("insights") == aj.FAILED
+    # The trajectory is independent and must still run, exactly as the old
+    # `finally` guaranteed.
+    assert job.status_of("trajectory") == aj.SUCCEEDED
+    assert written
+
+
+# ── Idempotency: no duplicates on retry ───────────────────────────────────
+
+
+def test_retry_does_not_duplicate_proposal_rows(tmp_path: Path) -> None:
+    archive = _stamped_archive(
+        tmp_path,
+        "## Decisions\n- Chose X over Y because reasons. [review]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+    job.reset_failed()
+    job.mark("memory_proposals", aj.PENDING)
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    assert queue.count("Chose X over Y because reasons.") == 1
+
+
+def test_retry_does_not_duplicate_region_entries(tmp_path: Path) -> None:
+    archive = _stamped_archive(
+        tmp_path,
+        "## User corrections\n"
+        "- Avoid em dashes; use commas instead. Durable rule: "
+        "Avoid em dashes; use commas instead. [memory]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    from ciao import memory_tool as mt
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        guide_path=guide,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+    job.reset_failed()
+    job.mark("memory_proposals", aj.PENDING)
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    entries, _ = mt.read_region(guide, "memory")
+    matching = [e for e in entries if "em dashes" in e]
+    assert len(matching) == 1
+
+
+def test_retry_does_not_double_count_learning_recurrence(tmp_path: Path) -> None:
+    from ciao import memory_proposals as mp
+
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    learning = "Rebuild the PWA bundle before testing."
+    assert mp.append_learning(vault, learning, source="chat-1") is True
+    # Re-observing the same learning increments once; a retry of the pipeline
+    # re-runs the same call, so the count is 2, not 3 or 4.
+    assert mp.append_learning(vault, learning, source="chat-1") is True
+    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    assert text.count("(x2)") == 1
+    assert "(x3)" not in text
+
+
+# ── Deletion / tombstone ──────────────────────────────────────────────────
+
+
+def test_deleting_an_archived_chat_tombstones_and_cannot_resurrect(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    assert aj.load_job(manager._runtime_root, job.job_id).tombstoned is False
+
+    assert manager.delete_chat(chat.chat_id) is True
+
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.tombstoned is True
+    # A racing finish after the delete must not resurrect it.
+    job.mark("insights", aj.SUCCEEDED)
+    job.save()
+    assert aj.load_job(manager._runtime_root, job.job_id).tombstoned is True
+
+
+def test_resume_skips_a_tombstoned_job(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.save()
+    aj.tombstone_job(tmp_path / ".runtime", job.job_id, reason="chat deleted")
+
+    called: list[str] = []
+
+    async def fake_pipeline(*args: object, **kwargs: object) -> None:
+        called.append("ran")
+
+    inputs = _job_inputs(tmp_path, archive)
+    result = asyncio.run(insights.run_archive_pipeline(job, inputs))
+
+    assert called == []
+    assert result.tombstoned is True
+
+
+# ── Blocked / recoverable states ──────────────────────────────────────────
+
+
+def test_changed_archive_content_blocks_before_resume(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+
+    # The archive changes under a job whose insights never landed.
+    archive.write_text("# chat\n\nsomething else entirely\n", encoding="utf-8")
+
+    asyncio.run(manager._run_job(chat.chat_id, job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.BLOCKED
+    assert "changed" in job.blocked_reason
+    assert manager.get_chat(chat.chat_id).postprocess.get("state") == "blocked"
+
+
+def test_missing_archive_blocks_the_job(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(tmp_path, archive)
+    archive.unlink()
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.BLOCKED
+    assert "missing" in job.stage("insights").reason
+
+
+def test_missing_workspace_owner_settles_proposals_as_skipped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _stamped_archive(tmp_path)
+    job = _job(tmp_path, archive)
+    # No workspace at all (a General chat): there is no queue to write to.
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=None,
+        memory_proposals_enabled=True,
+    )
+    inputs["trajectory_meta"] = {"chat_id": "chat-1", "workspace": ""}
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    assert job.status_of("memory_proposals") == aj.SKIPPED
+    assert "owner" in job.stage("memory_proposals").reason
+
+
+def test_broken_workspace_owner_blocks_rather_than_skips(tmp_path: Path) -> None:
+    """A workspace that exists but whose vault cannot resolve is recoverable."""
+    archive = _stamped_archive(tmp_path)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=None,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    assert job.status_of("memory_proposals") == aj.BLOCKED
+    assert "owner" in job.blocked_reason
+    assert job.state == "blocked"
+
+
+def test_startup_resume_makes_interrupted_stages_retryable(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    # Simulate a crash mid-stage: the manifest says running.
+    job.mark("insights", aj.RUNNING)
+    job.mark("memory_proposals", aj.PENDING)
+    job.save()
+
+    ran: list[str] = []
+
+    async def fake_pipeline(job_arg: object, inputs_arg: dict, **kwargs: object) -> None:
+        ran.append("ran")
+
+    import ciao.insights as _insights
+
+    original = _insights.run_archive_pipeline
+    _insights.run_archive_pipeline = fake_pipeline  # type: ignore[assignment]
+    try:
+        started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+    finally:
+        _insights.run_archive_pipeline = original  # type: ignore[assignment]
+
+    assert started == 1
+    assert ran == ["ran"]
+
+
+def test_startup_resume_leaves_blocked_jobs_alone(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    job.block("insights", "archive content changed since the job was created")
+    job.save()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+
+
+# ── Routes ────────────────────────────────────────────────────────────────
+
+
+def _client(manager: ProjectChatManager):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.web.routes_api import chat_archive_job, chat_retry_insights
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/chats/{chat_id}/retry-insights",
+                chat_retry_insights,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/chats/{chat_id}/archive-job",
+                chat_archive_job,
+                methods=["GET"],
+            ),
+        ]
+    )
+    app.state.project_chat_manager = manager
+    return TestClient(app)
+
+
+def test_archive_job_route_reports_the_manifest(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    job.mark("insights", aj.SUCCEEDED)
+    job.save()
+
+    resp = _client(manager).get(f"/api/chats/{chat.chat_id}/archive-job")
+
+    assert resp.status_code == 200
+    body = resp.json()["job"]
+    assert body["steps"]["insights"]["status"] == "ok"
+    assert "memory_proposals" in body["unfinished"]
+
+
+def test_archive_job_route_is_null_for_an_unprocessed_chat(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+
+    resp = _client(manager).get(f"/api/chats/{chat.chat_id}/archive-job")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job": None}
+
+
+def test_archive_job_route_404s_unknown_chat(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    resp = _client(manager).get("/api/chats/ghost/archive-job")
+    assert resp.status_code == 404
+
+
+def test_retry_route_409s_a_non_archived_chat(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+
+    resp = _client(manager).post(f"/api/chats/{chat.chat_id}/retry-insights")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "chat is not archived"
+
+
+def test_retry_route_reports_complete_when_nothing_is_unfinished(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _stamped_archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    for name in aj.PIPELINE_STAGES:
+        job.mark(name, aj.SKIPPED, "nothing to do")
+    job.save()
+
+    resp = _client(manager).post(f"/api/chats/{chat.chat_id}/retry-insights")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "complete"
+

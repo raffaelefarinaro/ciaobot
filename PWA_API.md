@@ -50,7 +50,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/retry-insights` | Re-run session-insights extraction for an archived chat (text-mode, on demand) |
+| POST | `/api/chats/{chat_id}/retry-insights` | Retry unfinished post-archive steps for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (insights when missing, plus project fold, trajectory and memory proposals after a crash). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
+| GET | `/api/chats/{chat_id}/archive-job` | The persisted post-archive manifest for an archived chat: per-stage statuses, `unfinished` list and any `blocked_reason` (or `{job:null}` when none exists) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |

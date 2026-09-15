@@ -2883,15 +2883,18 @@ async def chat_archive(request: Request) -> JSONResponse:
 
 
 async def chat_retry_insights(request: Request) -> JSONResponse:
-    """Re-run session-insights extraction for a single archived chat.
+    """Resume unfinished post-archive stages for a single archived chat.
 
-    The retry works in text mode against the rendered archive (the raw session
-    JSONL is reclaimed at archive time). Returns a job status; a pipeline that
-    is already running for the chat is left alone.
+    Re-runs whatever is still pending/failed on the archive's manifest —
+    insights extraction when it is missing, plus the project fold, trajectory
+    and memory proposals when a crash landed after insights. Returns the retry
+    status and the manifest view so the archived-chat panel can render partial
+    completion. A pipeline already running for the chat is left alone.
     """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
-    status = pcm.retry_insights(chat_id)
+    result = pcm.retry_archive_steps(chat_id)
+    status = result["status"]
     if status == "not_found":
         return JSONResponse({"error": "not found"}, status_code=404)
     if status == "not_archived":
@@ -2902,11 +2905,38 @@ async def chat_retry_insights(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "no archive file for this chat", "chat_id": chat_id}, status_code=409
         )
-    if status == "already_has":
-        return JSONResponse({"status": "already_has", "chat_id": chat_id}, status_code=200)
     if status == "running":
-        return JSONResponse({"status": "running", "chat_id": chat_id}, status_code=202)
-    return JSONResponse({"status": "started", "chat_id": chat_id}, status_code=202)
+        return JSONResponse(
+            {"status": "running", "chat_id": chat_id, "job": result["job"]},
+            status_code=202,
+        )
+    if status == "complete":
+        return JSONResponse({"status": "complete", "chat_id": chat_id, "job": result["job"]})
+    if status == "blocked":
+        return JSONResponse(
+            {"status": "blocked", "chat_id": chat_id, "job": result["job"]}
+        )
+    return JSONResponse(
+        {"status": "started", "chat_id": chat_id, "job": result["job"]},
+        status_code=202,
+    )
+
+
+async def chat_archive_job(request: Request) -> JSONResponse:
+    """The persisted post-archive manifest for one archived chat.
+
+    Returns the per-stage statuses, the unfinished list and any blocked reason
+    so a surface can report partial completion without a live pipeline. A chat
+    with no manifest (archived before this feature, or never processed) returns
+    ``{"job": null}`` rather than 404: the absence is a normal state, not an
+    error.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"job": pcm.archive_job_view(chat_id)})
+
 
 
 def _overlay_assistant_timings(
