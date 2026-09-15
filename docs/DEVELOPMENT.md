@@ -415,6 +415,31 @@ tokens must never enter the model's shell environment or telemetry arguments.
 
 See `docs/MCP.md` for the catalog and provider configuration.
 
+### Off-loop vault reads
+
+Vault reads are synchronous disk/SQLite work and must never run inline in an
+async handler. Use `ciao/async_reads.py`:
+
+- `await run_read(key, operation)` runs a complete read on a dedicated bounded
+  executor (`MAX_VAULT_READ_WORKERS`, default 4) and coalesces identical
+  in-flight reads by `key`. `operation` must open and close its own SQLite
+  connection so a connection never crosses threads.
+- Keep the operation whole: walk + parse + query for one logical read, not a
+  per-file `to_thread` call. `control_plane.vault_search` /
+  `vault_index_refresh` and the `vault_backlinks` / `vault_markdown_paths`
+  routes are the reference shapes.
+- Resolve scope (workspace, principal, paths) on the calling thread before
+  submitting, so a bad principal fails fast and the worker only does I/O.
+- Cancellation only detaches the awaiter; the worker cannot be stopped. The
+  coalescing map and bounded width keep that from becoming unbounded background
+  work, and every future's error is observed. Do not wrap mutations of
+  event-loop-owned managers this way — only complete read operations.
+- Call `reset_vault_read_executor()` in test setup/teardown for isolation.
+
+Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,
+bounded-concurrency, no-cross-thread-SQLite, cancellation and recovery
+contracts and reports p50/p95 heartbeat latency before and after.
+
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `CLAUDE.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
