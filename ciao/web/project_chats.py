@@ -4523,13 +4523,13 @@ class ProjectChatManager:
         }
 
     def _new_job_for_chat(self, chat: ChatInfo, inputs: dict[str, Any]) -> Any:
-        from ciao.archive_jobs import content_revision, create_job
+        from ciao.archive_jobs import archive_content_revision, create_job
 
         job = create_job(
             self._runtime_root,
             chat_id=chat.chat_id,
             archive_path=chat.archive_path,
-            content_revision_value=content_revision(inputs["archive_path"]),
+            content_revision_value=archive_content_revision(inputs["archive_path"]),
         )
         self._persist_job_inputs(job, inputs)
         job.save()
@@ -4550,7 +4550,7 @@ class ProjectChatManager:
         from ciao.archive_jobs import (
             SKIPPED,
             SUCCEEDED,
-            content_revision,
+            archive_content_revision,
             create_job,
             load_job,
             new_job_id,
@@ -4569,7 +4569,7 @@ class ProjectChatManager:
                 self._runtime_root,
                 chat_id=chat_id,
                 archive_path=chat.archive_path,
-                content_revision_value=content_revision(archive_path),
+                content_revision_value=archive_content_revision(archive_path),
             )
             self._persist_job_inputs(job, inputs)
             from ciao.insights import _has_insights_section
@@ -4609,17 +4609,24 @@ class ProjectChatManager:
         stages: list[str] | None = None,
     ) -> None:
         """Check the archive revision, run the stages, settle the record."""
-        from ciao.archive_jobs import PENDING, RUNNING, content_revision
+        from ciao.archive_jobs import (
+            PENDING,
+            RUNNING,
+            resume_revision_matches,
+        )
         from ciao.insights import run_archive_pipeline
 
         try:
             # A job whose archive changed *before* extraction landed cannot be
             # resumed safely: the pending work was planned against different
             # content. Block it and say why instead of writing derived state
-            # beside unknown text.
+            # beside unknown text. `resume_revision_matches` tolerates the
+            # pipeline's own insights append, so a crash between `_append_section`
+            # and the stage being marked succeeded is still resumable.
             if job.status_of("insights") in (PENDING, RUNNING) and job.content_revision:
-                current = content_revision(inputs["archive_path"])
-                if current and current != job.content_revision:
+                if not resume_revision_matches(
+                    inputs["archive_path"], job.content_revision
+                ):
                     job.block(
                         "insights",
                         "archive content changed since the job was created",

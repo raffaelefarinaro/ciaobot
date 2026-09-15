@@ -206,6 +206,44 @@ def _journal(tmp_path: Path) -> Path:
     return mr.journal_path(tmp_path, None)
 
 
+# ── Journal trimming ──────────────────────────────────────────────────────
+
+
+def test_trim_keeps_a_pending_receipt_that_predates_the_cut(tmp_path, monkeypatch):
+    """A prepared receipt before the retained tail must survive trimming.
+
+    Once the journal exceeds its size cap, the newest rows are kept and the
+    rest dropped — but an unresolved (non-terminal) receipt must stay
+    recoverable. Computing pending ids from the retained lines alone missed a
+    `prepared` row whose only line sat before the cut, so trimming deleted it.
+    """
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)
+    monkeypatch.setattr(mr, "KEEP_LINES", 3)
+    journal = _journal(tmp_path)
+    # Oldest line: an unresolved prepared receipt, followed by newer junk.
+    mr._append(journal, {"id": "mrcpt_pending_old", "status": mr.PREPARED, "ts": "t0"})
+    for i in range(6):
+        mr._append(journal, {"id": f"mrcpt_done_{i}", "status": mr.APPLIED, "ts": f"t{i}"})
+
+    rows = {r["id"] for r in mr.read_receipts(journal)}
+
+    assert "mrcpt_pending_old" in rows, "an unresolved receipt must not be trimmed"
+    assert mr.find_receipt(journal, "mrcpt_pending_old")["status"] == mr.PREPARED
+
+
+def test_trim_drops_only_terminal_receipts(tmp_path, monkeypatch):
+    """With every dropped id terminal, trimming proceeds."""
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    journal = _journal(tmp_path)
+    for i in range(5):
+        mr._append(journal, {"id": f"mrcpt_done_{i}", "status": mr.APPLIED, "ts": f"t{i}"})
+
+    rows = [r["id"] for r in mr.read_receipts(journal)]
+
+    assert rows == ["mrcpt_done_3", "mrcpt_done_4"]
+
+
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
     """A prepared receipt whose after-image is on disk settles to applied."""
     guide = _guide(tmp_path, memory=["fact one"])

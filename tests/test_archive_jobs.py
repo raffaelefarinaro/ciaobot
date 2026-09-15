@@ -106,7 +106,7 @@ def _job(tmp_path: Path, archive: Path, **kwargs: object) -> aj.ArchiveJob:
         tmp_path / ".runtime",
         chat_id=str(kwargs.pop("chat_id", "chat-1")),
         archive_path=str(archive),
-        content_revision_value=aj.content_revision(archive),
+        content_revision_value=aj.archive_content_revision(archive),
     )
 
 
@@ -332,10 +332,151 @@ def test_trajectory_runs_independently_of_a_failed_insights_stage(
     assert written
 
 
+# ── Provider/write failures stay retryable, not success ───────────────────
+
+
+def test_project_fold_provider_failure_is_retryable(tmp_path: Path, monkeypatch) -> None:
+    """A provider timeout/failure must not settle the fold as succeeded.
+
+    `update_project_doc` returns False for both a legit no-op and a failure;
+    the stage must stay failed so a retry can fold the doc.
+    """
+    archive = _stamped_archive(
+        tmp_path,
+        "## Decisions\n- Chose sqlite over postgres because local-first.\n",
+    )
+    doc = tmp_path / "Project.md"
+    doc.write_text("# Project\n\n## Open loops\n- a\n", encoding="utf-8")
+
+    async def boom(prompt: object, **kwargs: object) -> str:
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", boom)
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        project_doc_path=str(doc),
+        memory_proposals_enabled=False,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["project_doc_update"]))
+
+    assert job.status_of("project_doc_update") == aj.FAILED
+    assert "project_doc_update" in job.resumable()
+    # The doc was never updated.
+    assert doc.read_text(encoding="utf-8") == "# Project\n\n## Open loops\n- a\n"
+
+
+def test_project_fold_no_change_is_still_success(tmp_path: Path, monkeypatch) -> None:
+    """A NO_CHANGES sentinel is a legitimate no-op, not a failure."""
+    archive = _stamped_archive(
+        tmp_path,
+        "## Decisions\n- Chose sqlite over postgres because local-first.\n",
+    )
+    doc = tmp_path / "Project.md"
+    doc.write_text("# Project\n\n## Open loops\n- a\n", encoding="utf-8")
+
+    async def no_changes(prompt: object, **kwargs: object) -> str:
+        return "NO_CHANGES"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", no_changes)
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        project_doc_path=str(doc),
+        memory_proposals_enabled=False,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["project_doc_update"]))
+
+    assert job.status_of("project_doc_update") == aj.SUCCEEDED
+
+
+def test_trajectory_write_failure_is_retryable(tmp_path: Path, monkeypatch) -> None:
+    archive = _archive(tmp_path)
+
+    async def fake_call(body: str, model: str, **kwargs: object) -> str:
+        return "## Errors\n- x.\n"
+
+    def boom(trajectory: dict) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(insights, "_call_text_model", fake_call)
+    # Patch the internal write so the real `build_and_persist_trajectory`
+    # catches it and reports the failure through `error_out`.
+    monkeypatch.setattr("ciao.trajectory_builder.write_trajectory", boom)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        session_id="sess-1",
+        filtered_jsonl="line",
+        trajectories_enabled=True,
+    )
+
+    asyncio.run(
+        insights.run_archive_pipeline(job, inputs, stages=["insights", "trajectory"])
+    )
+
+    assert job.status_of("insights") == aj.SUCCEEDED
+    assert job.status_of("trajectory") == aj.FAILED
+    assert "trajectory" in job.resumable()
+
+
+def test_proposals_write_failure_is_retryable(tmp_path: Path, monkeypatch) -> None:
+    archive = _stamped_archive(
+        tmp_path,
+        "## Decisions\n- Chose X over Y because reasons. [review]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("queue unwritable")
+
+    monkeypatch.setattr(
+        "ciao.memory_proposals.append_proposals", boom
+    )
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    assert job.status_of("memory_proposals") == aj.FAILED
+    assert "memory_proposals" in job.resumable()
+
+
+def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
+    """Nothing to queue is a legitimate no-op, not a failure."""
+    archive = _stamped_archive(tmp_path, "## Errors\n- just a one-off. [idx=1]\n")
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    assert job.status_of("memory_proposals") == aj.SUCCEEDED
+
+
+
 # ── Idempotency: no duplicates on retry ───────────────────────────────────
-
-
-def test_retry_does_not_duplicate_proposal_rows(tmp_path: Path) -> None:
     archive = _stamped_archive(
         tmp_path,
         "## Decisions\n- Chose X over Y because reasons. [review]\n",
@@ -487,6 +628,51 @@ def test_missing_archive_blocks_the_job(tmp_path: Path) -> None:
 
     assert job.status_of("insights") == aj.BLOCKED
     assert "missing" in job.stage("insights").reason
+
+
+# ── Crash between the insights append and the stage mark ──────────────────
+
+
+def test_resume_accepts_the_pipelines_own_insights_append(tmp_path: Path) -> None:
+    """A crash after `_append_section` must not look like an external edit.
+
+    The manifest records the pre-insights revision; the archive now differs by
+    exactly the pipeline's own section. The resume must recognize that and run
+    the later stages instead of blocking the job forever.
+    """
+    archive = _archive(tmp_path, "# chat\n\nbody\n")
+    recorded = aj.archive_content_revision(archive)
+    # Simulate the crash: the section is appended, the stage never settles.
+    insights._append_section(archive, "## Decisions\n- Chose X.\n")
+
+    assert aj.resume_revision_matches(archive, recorded) is True
+
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = _job(tmp_path, archive, chat_id=chat.chat_id)
+    job.content_revision = recorded
+    job.started = True
+    job.mark("insights", aj.RUNNING)
+    job.save()
+
+    asyncio.run(manager._run_job(chat.chat_id, job, inputs, stages=["insights"]))
+
+    # Not blocked: insights is recognized as already appended.
+    assert job.status_of("insights") == aj.SKIPPED
+    assert job.blocked_reason == ""
+
+
+def test_resume_blocks_a_genuine_external_edit(tmp_path: Path) -> None:
+    archive = _archive(tmp_path, "# chat\n\nbody\n")
+    recorded = aj.archive_content_revision(archive)
+    archive.write_text("# chat\n\ncompletely different content\n", encoding="utf-8")
+
+    assert aj.resume_revision_matches(archive, recorded) is False
+
 
 
 def test_missing_workspace_owner_settles_proposals_as_skipped(

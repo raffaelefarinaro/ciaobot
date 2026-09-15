@@ -1019,6 +1019,11 @@ async def run_archive_pipeline(
                     doc = workspace_root / project_doc_path
                 resolved_doc_path = str(doc)
                 wrote = False
+                # `False` alone is ambiguous: the helper returns it both for a
+                # legitimate no-op (NO_CHANGES, guards) and for a provider or
+                # write failure. The error list separates the two so a real
+                # failure stays retryable instead of settling as success.
+                doc_errors: list[str] = []
                 async with job_runs.track(
                     "project_doc_update", "Project doc update", model=doc_model,
                     extra={"doc": str(doc), "archive": archive_path.name, "chat_id": chat_id},
@@ -1031,10 +1036,16 @@ async def run_archive_pipeline(
                         model=doc_model,
                         provider=effective_provider,
                         cwd=workspace_root,
+                        error_out=doc_errors,
                     )
                     run.extra["wrote"] = wrote
-                    if not wrote:
+                    if doc_errors:
+                        run.status = "error"
+                        run.error = doc_errors[-1]
+                    elif not wrote:
                         run.skip("no material changes for the project doc")
+                if doc_errors:
+                    raise RuntimeError(doc_errors[-1])
                 doc_fold_wrote = wrote
                 job.inputs["doc_fold_wrote"] = doc_fold_wrote
                 job.inputs["resolved_doc_path"] = resolved_doc_path
@@ -1045,6 +1056,7 @@ async def run_archive_pipeline(
             if name == "trajectory":
                 from ciao.trajectory_builder import build_and_persist_trajectory
 
+                trajectory_errors: list[str] = []
                 with job_runs.track_sync(
                     "trajectory", "Trajectory capture",
                     extra={"session_id": session_id, "chat_id": chat_id},
@@ -1060,11 +1072,19 @@ async def run_archive_pipeline(
                         task_summary=trajectory_meta.get("task_summary", ""),
                         workspace=trajectory_meta.get("workspace", ""),
                         workspace_root=workspace_root,
+                        error_out=trajectory_errors,
                     )
                     if path:
                         run.extra["path"] = str(path)
+                    elif trajectory_errors:
+                        run.status = "error"
+                        run.error = trajectory_errors[-1]
                     else:
                         run.skip("empty session / no trajectory written")
+                if trajectory_errors:
+                    # Eligibility already proved the input was non-empty, so a
+                    # None here is a parse/persist failure, not "nothing to do".
+                    raise RuntimeError(trajectory_errors[-1])
                 job.mark(name, SUCCEEDED)
                 job.save()
                 continue
@@ -1094,6 +1114,7 @@ async def run_archive_pipeline(
                             "Region reconcile failed for %s", archive_path
                         )
 
+                proposal_errors: list[str] = []
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name, "chat_id": chat_id},
@@ -1109,10 +1130,19 @@ async def run_archive_pipeline(
                         project_fold_wrote=doc_fold_wrote,
                         region_decisions=region_decisions,
                         workspace=trajectory_meta.get("workspace", ""),
+                        error_out=proposal_errors,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
                     run.extra["promoted"] = proposal_stats.get("promoted", 0)
+                    if proposal_errors:
+                        run.status = "error"
+                        run.error = proposal_errors[-1]
+                if proposal_errors:
+                    # A queue that could not be written, or a raise inside the
+                    # helper, means unapplied facts were not queued: keep the
+                    # stage retryable rather than settling it.
+                    raise RuntimeError(proposal_errors[-1])
                 job.mark(name, SUCCEEDED)
                 job.save()
                 continue

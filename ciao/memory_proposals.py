@@ -1841,6 +1841,7 @@ def proposals_from_archive(
     project_fold_wrote: bool = False,
     region_decisions: dict[str, dict[str, Any]] | None = None,
     workspace: str = "",
+    error_out: list[str] | None = None,
 ) -> Path | None:
     """Read an archived chat, route its insights, optionally auto-apply.
 
@@ -1863,6 +1864,12 @@ def proposals_from_archive(
     archived chat reports these counts back to the user, which the returned
     path alone cannot express. It stays an out-parameter so the return
     contract every existing caller relies on is unchanged.
+
+    ``error_out``, when given, records a reason for an internal failure (the
+    archive was unreadable, or a write/dedupe step raised). ``None`` alone
+    cannot distinguish that from a legitimate no-op — "the archive carried no
+    actionable facts" also returns ``None`` — so the resumable pipeline passes
+    this list to settle the stage as failed rather than succeeded.
     """
     try:
         if not archive_path.exists():
@@ -1991,8 +1998,12 @@ def proposals_from_archive(
             # auto-apply removes the applied facts from the list above.
             stats["proposed"] = len(proposals) if written else 0
         return written
-    except Exception:  # noqa: BLE001 — never crash the pipeline
+    except Exception as exc:  # noqa: BLE001 — never crash the pipeline
         logger.exception("memory proposals failed for %s", archive_path)
+        if error_out is not None:
+            error_out.append(
+                f"{type(exc).__name__}: {exc}"[:400] or "memory proposals failed"
+            )
         return None
 
 

@@ -116,13 +116,20 @@ async def update_project_doc(
     provider: str = "claude",
     cwd: Path | None = None,
     timeout_s: float = 300.0,
+    error_out: list[str] | None = None,
 ) -> bool:
     """Fold session insights into the canonical doc. Returns True on write.
 
     No-ops (returning False) when the doc does not exist, the insights carry
     no Decisions/Open loops, the model reports ``NO_CHANGES``, or the output
-    fails the safety guards. Raises nothing — callers treat this as
+    fails the safety guards. Never raises — callers treat this as
     fire-and-forget.
+
+    ``error_out``, when given, records a non-empty reason for an internal
+    failure (the provider call raised, the doc was unreadable, the write
+    failed). A plain ``False`` return cannot distinguish that from a legitimate
+    no-op, so the resumable pipeline passes this list to settle the stage as
+    failed rather than succeeded.
     """
     try:
         if not doc_path.is_file():
@@ -157,6 +164,8 @@ async def update_project_doc(
             doc_path.write_text(updated + "\n", encoding="utf-8")
             logger.info("project doc updated from insights: %s", doc_path)
             return True
-    except Exception:  # noqa: BLE001 — fire-and-forget, never crash the pipeline
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget, never crash the pipeline
         logger.exception("project doc update failed for %s", doc_path)
+        if error_out is not None:
+            error_out.append(f"{type(exc).__name__}: {exc}"[:400] or "project doc update failed")
         return False

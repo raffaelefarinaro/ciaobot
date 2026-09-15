@@ -201,3 +201,41 @@ def test_model_failure_never_raises(
 
     assert wrote is False
     assert doc.read_text(encoding="utf-8") == _DOC
+
+
+def test_model_failure_reports_a_reason_through_error_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider failure is distinguishable from a legitimate no-op."""
+    doc = _write_doc(tmp_path)
+
+    async def boom(prompt, **kwargs):
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", boom)
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.update_project_doc(
+        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        error_out=errors,
+    ))
+
+    assert wrote is False
+    assert errors and "upstream down" in errors[-1]
+
+
+def test_no_changes_sentinel_reports_no_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The NO_CHANGES no-op must not look like a failure to the caller."""
+    doc = _write_doc(tmp_path)
+    _patch_oneshot(monkeypatch, "NO_CHANGES")
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.update_project_doc(
+        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        error_out=errors,
+    ))
+
+    assert wrote is False
+    assert errors == []

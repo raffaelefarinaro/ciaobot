@@ -375,13 +375,16 @@ def build_and_persist_trajectory(
     workspace: str = "",
     workspace_root: Path | None = None,
     timestamp: datetime | None = None,
+    error_out: list[str] | None = None,
 ) -> Path | None:
     """One-shot orchestrator used by the post-archive task.
 
     Parses the filtered JSONL into a ``SessionData``, assembles a
     trajectory record (folding in insights text when available), and
     writes it to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``.
-    Returns the written path or ``None`` if the input is empty.
+    Returns the written path, or ``None`` when the input is empty or writing
+    failed. ``error_out``, when given, records a reason for the failure case so
+    the resumable pipeline can settle the stage as failed instead of succeeded.
     """
     if not session_id or not filtered_jsonl:
         return None
@@ -401,10 +404,14 @@ def build_and_persist_trajectory(
             workspace_root=workspace_root,
         )
         return write_trajectory(trajectory)
-    except Exception:  # noqa: BLE001 — never crash the post-archive task
+    except Exception as exc:  # noqa: BLE001 — never crash the post-archive task
         logger.exception(
             "Failed to build/persist trajectory for session %s", session_id
         )
+        if error_out is not None:
+            error_out.append(
+                f"{type(exc).__name__}: {exc}"[:400] or "trajectory persist failed"
+            )
         return None
 
 

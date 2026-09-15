@@ -183,16 +183,30 @@ def _trim_if_large(journal: Path) -> None:
         lines = journal.read_text(encoding="utf-8", errors="replace").splitlines()
         # Keep the newest rows, but never drop a non-terminal receipt: an
         # interrupted operation must stay recoverable until it settles.
+        #
+        # An id's effective status is its *last* row anywhere in the journal,
+        # not just in the retained tail. A `prepared` row with no terminal row
+        # can sit before the cut, so computing pending ids from the retained
+        # lines alone found nothing and the trim silently dropped the
+        # unresolved receipt. Fold the whole journal first, then refuse to trim
+        # while any id that would lose a line is still non-terminal.
         kept = lines[-KEEP_LINES:]
-        dropped_ids = {
-            json.loads(line).get("id")
-            for line in lines[:-KEEP_LINES]
-            if line.strip()
-        }
+        dropped_lines = lines[:-KEEP_LINES]
+        last_status: dict[str, object] = {}
+        for line in lines:
+            row = _safe_row(line)
+            if row is None:
+                continue
+            rid = str(row.get("id", ""))
+            if rid:
+                last_status[rid] = row.get("status")
         pending_ids = {
-            json.loads(line).get("id")
-            for line in kept
-            if line.strip() and json.loads(line).get("status") not in _TERMINAL
+            rid for rid, status in last_status.items() if status not in _TERMINAL
+        }
+        dropped_ids = {
+            str(row.get("id", ""))
+            for row in (_safe_row(line) for line in dropped_lines)
+            if row is not None and row.get("id")
         }
         if dropped_ids & pending_ids:
             return
@@ -201,6 +215,17 @@ def _trim_if_large(journal: Path) -> None:
         os.replace(tmp, journal)
     except Exception:  # noqa: BLE001 — trimming is best-effort
         logger.debug("memory receipts: trim failed", exc_info=True)
+
+
+def _safe_row(line: str) -> dict[str, Any] | None:
+    """Parse one journal line into a row, or None when it is unusable."""
+    if not line.strip():
+        return None
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return row if isinstance(row, dict) else None
 
 
 def read_receipts(journal: Path) -> list[dict[str, Any]]:

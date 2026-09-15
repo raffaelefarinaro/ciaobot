@@ -106,6 +106,64 @@ def content_revision(path: Path) -> str:
         return ""
 
 
+def archive_content_revision(path: Path) -> str:
+    """The revision recorded on an archive job.
+
+    Trailing whitespace is stripped so the digest is stable across the exact
+    number of newlines an append adds: the pipeline prepends ``\\n\\n`` to the
+    existing text, so a raw digest of the pre-insights archive and of the text
+    before its own section differ only by whitespace. Normalizing at write time
+    lets :func:`resume_revision_matches` recognize the pipeline's own append.
+    """
+    try:
+        return _sha(path.read_text(encoding="utf-8", errors="replace").rstrip())
+    except OSError:
+        return ""
+
+
+def _pre_insights_text(text: str) -> str:
+    """The archive text before the pipeline's own appended insights section.
+
+    Returns ``text`` unchanged when there is no appended section. Lazy import
+    of :mod:`ciao.insights` avoids an import cycle (insights imports this
+    module at call time).
+    """
+    from ciao.insights import locate_insights_section
+
+    location = locate_insights_section(text)
+    if location is None:
+        return text
+    return text[: location[0]]
+
+
+def resume_revision_matches(path: Path, recorded_revision: str) -> bool:
+    """True when a resume may proceed against the archive on disk.
+
+    A crash can land after ``_append_section`` wrote the insights but before
+    the manifest marked the stage succeeded. The archive then differs from the
+    recorded revision by exactly the pipeline's own append, which must not be
+    mistaken for an external edit and block the job. This returns true when the
+    current text matches the recorded revision, or when stripping the appended
+    insights section yields it. Both raw and trailing-newline-normalized
+    digests are compared so a manifest written by an earlier build (which
+    stored the unnormalized digest) still resumes. An empty recorded revision
+    is treated as "unknown" and accepted.
+    """
+    if not recorded_revision:
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    candidates = {
+        _sha(text),
+        _sha(text.rstrip()),
+        _sha(_pre_insights_text(text)),
+        _sha(_pre_insights_text(text).rstrip()),
+    }
+    return recorded_revision in candidates
+
+
 def new_job_id(chat_id: str, archive_path: str) -> str:
     """Stable id for one chat's archive job.
 

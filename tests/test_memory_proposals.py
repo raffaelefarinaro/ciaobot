@@ -227,6 +227,36 @@ def test_proposals_stats_stay_zero_when_nothing_is_filed(tmp_path: Path) -> None
     assert stats.get("proposed", 0) == 0
 
 
+def test_proposals_from_archive_reports_a_write_failure(tmp_path: Path, monkeypatch) -> None:
+    """An unwritable queue must be distinguishable from a legitimate no-op."""
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nsome turns here.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
+        encoding="utf-8",
+    )
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("queue unwritable")
+
+    monkeypatch.setattr(mp, "append_proposals", boom)
+    errors: list[str] = []
+
+    out = mp.proposals_from_archive(archive, vault, error_out=errors)
+
+    assert out is None
+    assert errors and "unwritable" in errors[-1]
+
+
+def test_proposals_from_archive_reports_no_error_for_a_no_op(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = tmp_path / "chat.md"
+    archive.write_text("# chat\n\nonly turns\n", encoding="utf-8")
+    errors: list[str] = []
+    assert mp.proposals_from_archive(archive, vault, error_out=errors) is None
+    assert errors == []
+
+
 # ── Auto-apply ────────────────────────────────────────────────────────────
 #
 # apply_proposals writes straight into the fenced `ciao:memory` /
