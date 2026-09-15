@@ -515,6 +515,10 @@ class CiaoConfig:
     # tab. A missing entry uses the provider's balanced default.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     restart_exit_code: int = 75
+    # Secure by default: an unset ``CIAO_AUTO_SYNC_ON_START`` must not run
+    # ``git pull --rebase`` on boot. Set it to ``true`` in ``.env`` to opt in.
+    # This must stay equal to the ``CIAO_AUTO_SYNC_ON_START`` fallback in
+    # ``from_env`` below.
     auto_sync_on_start: bool = False
     auto_vault_index: bool = True
     pwa_port: int = 8443
@@ -1539,7 +1543,7 @@ class CiaoConfig:
             restart_exit_code=int(
                 source.get("CIAO_RESTART_EXIT_CODE", "75")
             ),
-            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "true").lower()
+            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "false").lower()
             not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
