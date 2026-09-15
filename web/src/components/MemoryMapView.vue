@@ -1236,11 +1236,13 @@ function hitTestAt(clientX: number, clientY: number, pointerType?: string): Memo
   if (!canvasEl.value) return null
   const rect = canvasEl.value.getBoundingClientRect()
   const [wx, wy] = screenToWorld((clientX - rect.left) * dpr, (clientY - rect.top) * dpr)
-  // A touch tap gets a 44px screen-space target regardless of zoom, since the
-  // painted node is only ~13px across at fit scale. Mouse/pen keep the precise
+  // A touch tap gets a 44 CSS-pixel target regardless of zoom, since the
+  // painted node is only ~13px across at fit scale. `camera.scale` is in device
+  // pixels, so the diameter is scaled by dpr to match; a 44px target must stay
+  // 44 CSS px at DPR 2/3, not shrink to 22/15. Mouse/pen keep the precise
   // painted hit area.
   const minRadius = pointerType === 'touch'
-    ? minHitRadiusForScale(TOUCH_HIT_DIAMETER_PX, camera.scale)
+    ? minHitRadiusForScale(TOUCH_HIT_DIAMETER_PX * dpr, camera.scale)
     : 0
   return hitTest(wx, wy, minRadius)
 }

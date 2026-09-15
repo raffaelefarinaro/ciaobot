@@ -221,10 +221,11 @@ describe('hitTest', () => {
     expect(hitTest([n], 100 + painted - 1, 100, 0)?.id).toBe('a')
   })
 
-  it('minHitRadiusForScale gives a screen-space diameter at any zoom', () => {
-    // 44px across on screen at the default fit scale, expressed in world units.
+  it('minHitRadiusForScale gives a device-pixel diameter at any zoom', () => {
+    // A device-pixel diameter at the default fit scale, expressed in world
+    // units. Callers multiply a CSS-pixel token by devicePixelRatio first.
     expect(minHitRadiusForScale(44, DEFAULT_SCALE)).toBeCloseTo(44 / 2 / DEFAULT_SCALE)
-    // Zooming in shrinks the world-space floor, so the on-screen target holds.
+    // Zooming in shrinks the world-space floor, so the device-pixel target holds.
     const wide = minHitRadiusForScale(44, 0.55) * 0.55 * 2
     const close = minHitRadiusForScale(44, 2) * 2 * 2
     expect(wide).toBeCloseTo(44)

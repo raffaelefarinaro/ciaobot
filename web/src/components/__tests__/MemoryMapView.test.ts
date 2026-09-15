@@ -121,6 +121,15 @@ describe('MemoryMapView keyboard and touch access', () => {
       clientX: worldX * SCALE, clientY: worldY * SCALE,
     }))
   }
+  /** Dispatch at raw CSS-pixel coordinates, for DPR-sensitive target tests. */
+  function pointerTapAtCss(canvas: HTMLCanvasElement, cssX: number, cssY: number, pointerType = 'touch') {
+    for (const type of ['pointerdown', 'pointerup'] as const) {
+      canvas.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, pointerId: 1, isPrimary: true, pointerType,
+        clientX: cssX, clientY: cssY,
+      }))
+    }
+  }
 
   it('opens a note from a native title button, not just a row click', async () => {
     const { wrapper, mm } = await mountList()
@@ -300,6 +309,24 @@ describe('MemoryMapView keyboard and touch access', () => {
     pointerUp(canvas, 1, 30, 0, true, 'mouse')
     // A mouse keeps the painted hit area: 30 world units from the node misses.
     expect(mm.selectedId).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('keeps the touch target 44 CSS px at high DPR, not 44 device px', async () => {
+    // The component multiplies pointer coordinates by devicePixelRatio before
+    // screenToWorld, and camera.scale is device-pixel based, so a 44 CSS-pixel
+    // token has to be converted to device pixels too. Without that, the target
+    // shrinks to 44/dpr CSS px — the exact bug this pins at DPR 3.
+    vi.stubGlobal('devicePixelRatio', 3)
+    const { wrapper, mm, b } = await mountGraph()
+    // Move B out of the way so the only possible hit is A.
+    b.x = 100000
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    // 15 CSS px right of node A: inside the fixed 22 CSS px radius, outside the
+    // buggy 22/3 ≈ 7.3 CSS px radius and outside the painted node.
+    pointerTapAtCss(canvas, 15, 0, 'touch')
+    expect(mm.selectedId).toBe('a')
     wrapper.unmount()
   })
 

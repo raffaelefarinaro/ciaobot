@@ -249,16 +249,19 @@ export function nodeRadius(n: { degree: number }): number {
 }
 
 /**
- * Minimum hit-test radius in world units so a coarse pointer's target is at
- * least `diameterPx` across on screen, whatever the camera scale.
+ * Minimum hit-test radius in world units so a pointer's target is at least
+ * `diameterPx` across in the same space as `scale`.
  *
- * The painted node is `nodeRadius(n) * scale` on screen — about 13px across for
- * a degree-1 node at the default fit scale — far below the 44px touch token, so
- * a tap at fit zoom was likely to miss. Only coarse pointers get the floor; a
- * mouse keeps the precise painted target.
+ * `scale`, `worldToScreen`/`screenToWorld`, and the canvas backing store all
+ * work in *device* pixels, so `diameterPx` must be a device-pixel diameter — a
+ * CSS-pixel token has to be multiplied by `devicePixelRatio` first, or a 44px
+ * target shrinks to 22px at DPR 2. The painted node is `nodeRadius(n) * scale`
+ * on screen — about 13px across for a degree-1 node at the default fit scale —
+ * far below the 44px touch token, so a tap at fit zoom was likely to miss. Only
+ * coarse pointers get the floor; a mouse keeps the precise painted target.
  */
-export function minHitRadiusForScale(diameterPx: number, scale: number): number {
-  return diameterPx / 2 / Math.max(scale, 1e-6)
+export function minHitRadiusForScale(diameterDevicePx: number, scale: number): number {
+  return diameterDevicePx / 2 / Math.max(scale, 1e-6)
 }
 
 /**
