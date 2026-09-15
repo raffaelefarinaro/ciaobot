@@ -1237,14 +1237,18 @@ function hitTestAt(clientX: number, clientY: number): MemoryGraphNode | null {
 function onPointerDown(e: PointerEvent) {
   if (!canvasEl.value) return
   clearHover()
-  gestureNode = hitTestAt(e.clientX, e.clientY)
+  const hit = hitTestAt(e.clientX, e.clientY)
   const accepted = gesture.begin(
     { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, additive: e.shiftKey, isPrimary: e.isPrimary },
-    gestureNode ? gestureNode.id : null,
+    hit ? hit.id : null,
   )
   // A second finger (or a non-primary pointer) is ignored outright: it must
-  // never select a note or take over the pan the first finger started.
+  // never select a note or take over the pan the first finger started. The drag
+  // target is adopted only for the accepted pointer, so an ignored press can
+  // neither move the node the first finger grips nor replace it with a node
+  // under the extra finger.
   if (!accepted) return
+  gestureNode = hit
   // Capture routes every subsequent move/up for this pointer to the canvas even
   // if the finger leaves it, and is what lets pointercancel arrive here.
   canvasEl.value.setPointerCapture?.(e.pointerId)
@@ -1290,6 +1294,10 @@ function onCanvasPointerMove(e: PointerEvent) {
 }
 
 function onPointerUp(e: PointerEvent) {
+  // Only the pointer that owns the gesture may end it and release the target;
+  // an ignored pointer's `pointerup` must not clear the drag the first finger
+  // is still performing.
+  if (gesture.activePointerId !== e.pointerId) return
   const result = gesture.end({ pointerId: e.pointerId })
   gestureNode = null
   if (result.tap === 'node') mm.handleNodeClick(result.nodeId, result.additive)

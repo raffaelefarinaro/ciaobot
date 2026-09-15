@@ -87,6 +87,41 @@ describe('MemoryMapView keyboard and touch access', () => {
     return { wrapper, mm }
   }
 
+  /** Mount the graph surface with the canvas attached so pointer handlers are
+   * live, and place the two nodes at known world positions. The camera frames a
+   * zero-sized canvas, so it stays at the origin with DEFAULT_SCALE (0.55); a
+   * node at world (x, 0) therefore lands at screen x * 0.55. */
+  async function mountGraph() {
+    const wrapper = await mountView()
+    await flushPromises()
+    await nextTick()
+    const mm = useMemoryMapStore()
+    const a = mm.nodes.find(n => n.id === 'a')!
+    const b = mm.nodes.find(n => n.id === 'b')!
+    a.x = 0; a.y = 0; a.vx = 0; a.vy = 0
+    b.x = 100; b.y = 0; b.vx = 0; b.vy = 0
+    return { wrapper, mm, a, b }
+  }
+
+  const SCALE = 0.55
+  function pointerDown(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true) {
+    canvas.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, pointerId, isPrimary, pointerType: 'touch',
+      clientX: worldX * SCALE, clientY: worldY * SCALE,
+    }))
+  }
+  function pointerMove(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0) {
+    canvas.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true, pointerId, clientX: worldX * SCALE, clientY: worldY * SCALE,
+    }))
+  }
+  function pointerUp(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true) {
+    canvas.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, pointerId, isPrimary, pointerType: 'touch',
+      clientX: worldX * SCALE, clientY: worldY * SCALE,
+    }))
+  }
+
   it('opens a note from a native title button, not just a row click', async () => {
     const { wrapper, mm } = await mountList()
     const titles = wrapper.findAll('.mm-title-btn')
@@ -174,6 +209,74 @@ describe('MemoryMapView keyboard and touch access', () => {
     expect(mm.pathStart).toBe('a')
     // The hint explains the state in words, not just colour.
     expect(wrapper.find('.mm-detail-path-hint').text()).toContain('Start: Note A')
+    wrapper.unmount()
+  })
+
+  it('keeps dragging the first finger\'s node when a second pointer lands on another node', async () => {
+    const { wrapper, a, b } = await mountGraph()
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    // First finger grabs node A and starts dragging it.
+    pointerDown(canvas, 1, 0)
+    pointerMove(canvas, 1, 20)
+    expect(a.x).toBeCloseTo(20)
+
+    // Second finger lands on node B. The gesture model rejects it, and the
+    // component must not adopt B as the drag target.
+    pointerDown(canvas, 2, 100)
+    // The first finger keeps dragging A, not B...
+    pointerMove(canvas, 1, 40)
+    expect(a.x).toBeCloseTo(40)
+    expect(b.x).toBe(100)
+
+    // ...and the ignored pointer's release must not clear A.
+    pointerUp(canvas, 2, 100)
+    pointerMove(canvas, 1, 60)
+    expect(a.x).toBeCloseTo(60)
+    expect(b.x).toBe(100)
+
+    pointerUp(canvas, 1, 60)
+    wrapper.unmount()
+  })
+
+  it('does not let an ignored second pointer drag the node it landed on', async () => {
+    const { wrapper, a, b } = await mountGraph()
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    pointerDown(canvas, 1, 0)
+    pointerMove(canvas, 1, 20)
+    pointerDown(canvas, 2, 100)
+
+    // Moving the second finger must never move B, and must not move A either.
+    pointerMove(canvas, 2, 130)
+    expect(b.x).toBe(100)
+    expect(a.x).toBeCloseTo(20)
+
+    pointerUp(canvas, 2, 130)
+    // The first gesture is still live and can finish normally.
+    pointerMove(canvas, 1, 45)
+    expect(a.x).toBeCloseTo(45)
+    expect(b.x).toBe(100)
+    pointerUp(canvas, 1, 45)
+    wrapper.unmount()
+  })
+
+  it('still selects a node on a clean tap after an ignored pointer is gone', async () => {
+    const { wrapper, mm } = await mountGraph()
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    pointerDown(canvas, 1, 0)
+    pointerUp(canvas, 1, 0)
+    expect(mm.selectedId).toBe('a')
+
+    // A later gesture from another pointer behaves normally.
+    pointerDown(canvas, 2, 100, 0, false)
+    pointerUp(canvas, 2, 100, 0, false)
+    expect(mm.selectedId).toBe('a')
+
+    pointerDown(canvas, 3, 100)
+    pointerUp(canvas, 3, 100)
+    expect(mm.selectedId).toBe('b')
     wrapper.unmount()
   })
 })
