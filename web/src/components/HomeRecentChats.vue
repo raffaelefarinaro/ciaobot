@@ -1356,8 +1356,9 @@ defineExpose({ onArrow })
    not the single most important thing on screen. */
 .home-chat-retry {
   flex: 0 0 auto;
-  min-height: 24px;
-  padding: 2px 8px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 2px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 6px);
   background: transparent;

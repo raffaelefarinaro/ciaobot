@@ -305,6 +305,37 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
+  it('names the unfinished manifest stages on a partially-complete row', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'c-partial-work', project_id: 'work-project', title: 'Partial work chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/partial.md',
+        postprocess: {
+          state: 'incomplete',
+          steps: { insights: { status: 'ok' } },
+          job: {
+            job_id: 'j', state: 'incomplete',
+            unfinished: ['project_doc_update', 'memory_proposals'],
+          },
+        },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    const row = workLane.find('.home-tier--failed .home-chat-item')
+    expect(row.find('.home-chat-tidy-note').text())
+      .toBe('project doc, memory proposals not finished')
+    expect(row.find('.home-chat-retry').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   // One lane on screen: up/down roams its rows, left/right has nowhere to go
   // and is consumed so ChatLayout's global handler does not roam elsewhere.
   it('roams the single lane vertically and consumes sideways arrows at its edge', async () => {

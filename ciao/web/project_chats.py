@@ -4650,14 +4650,18 @@ class ProjectChatManager:
         view = manifest_view(job)
         state = dict(chat.postprocess or {})
         steps = dict(state.get("steps") or {})
+        # Only terminal outcomes become step entries. Pending/running/blocked
+        # stages are named by the manifest's `unfinished` list instead; folding
+        # them in would make a blocked insights stage read as "insights added".
+        terminal = {"ok": "ok", "skipped": "skipped", "error": "error"}
         for name, status in (view.get("steps") or {}).items():
-            mapped = status.get("status")
-            if mapped in ("pending",):
+            manifest_status = status.get("status")
+            if manifest_status not in terminal:
                 continue
             entry = steps.get(name)
             if not isinstance(entry, dict):
-                entry = {"status": mapped, "extra": {}}
-            entry["manifest_status"] = mapped
+                entry = {"status": terminal[manifest_status], "extra": {}}
+            entry["manifest_status"] = manifest_status
             steps[name] = entry
         state["steps"] = steps
         state["job"] = view
