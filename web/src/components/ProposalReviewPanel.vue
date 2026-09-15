@@ -766,12 +766,17 @@ watch(
           class="pr-row"
           :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }"
         >
-          <input
-            class="pr-row-check"
-            type="checkbox"
-            :checked="selected.has(row.id)"
-            @change="toggleRow(row.id)"
-          />
+          <!-- Wrapped so the tap target reaches 44px; the input itself keeps its
+               native size, and the aria-label names the fact this row controls. -->
+          <label class="pr-row-check-hit">
+            <input
+              class="pr-row-check"
+              type="checkbox"
+              :checked="selected.has(row.id)"
+              :aria-label="`Select ${kindLabel(row.kind)}: ${rowTitle(row)}`"
+              @change="toggleRow(row.id)"
+            />
+          </label>
 
           <div class="pr-row-body">
             <div class="pr-row-top">
@@ -1120,8 +1125,20 @@ watch(
   font-weight: 600;
 }
 
+/* Full-height tap target around the native checkbox (DESIGN.md's --touch),
+   so a thumb on a phone can hit the row's selection control. */
+.pr-row-check-hit {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding-top: 0.2rem;
+  cursor: pointer;
+}
+
 .pr-row-check {
-  margin-top: 0.2rem;
+  margin: 0;
 }
 
 .pr-row-body {
