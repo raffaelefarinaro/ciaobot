@@ -104,9 +104,9 @@ describe('MemoryMapView keyboard and touch access', () => {
   }
 
   const SCALE = 0.55
-  function pointerDown(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true) {
+  function pointerDown(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true, pointerType = 'touch') {
     canvas.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, pointerId, isPrimary, pointerType: 'touch',
+      bubbles: true, pointerId, isPrimary, pointerType,
       clientX: worldX * SCALE, clientY: worldY * SCALE,
     }))
   }
@@ -115,9 +115,9 @@ describe('MemoryMapView keyboard and touch access', () => {
       bubbles: true, pointerId, clientX: worldX * SCALE, clientY: worldY * SCALE,
     }))
   }
-  function pointerUp(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true) {
+  function pointerUp(canvas: HTMLCanvasElement, pointerId: number, worldX: number, worldY = 0, isPrimary = true, pointerType = 'touch') {
     canvas.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true, pointerId, isPrimary, pointerType: 'touch',
+      bubbles: true, pointerId, isPrimary, pointerType,
       clientX: worldX * SCALE, clientY: worldY * SCALE,
     }))
   }
@@ -277,6 +277,56 @@ describe('MemoryMapView keyboard and touch access', () => {
     pointerDown(canvas, 3, 100)
     pointerUp(canvas, 3, 100)
     expect(mm.selectedId).toBe('b')
+    wrapper.unmount()
+  })
+
+  it('gives a touch tap a 44px target outside the painted node', async () => {
+    const { wrapper, mm } = await mountGraph()
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    // World 30 from node A is outside its painted hit radius at fit scale
+    // (~12 world units) but inside the touch floor (~40 world units).
+    pointerDown(canvas, 1, 30, 0, true, 'touch')
+    pointerUp(canvas, 1, 30, 0, true, 'touch')
+    expect(mm.selectedId).toBe('a')
+    wrapper.unmount()
+  })
+
+  it('keeps the precise painted target for a mouse click', async () => {
+    const { wrapper, mm } = await mountGraph()
+    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+
+    pointerDown(canvas, 1, 30, 0, true, 'mouse')
+    pointerUp(canvas, 1, 30, 0, true, 'mouse')
+    // A mouse keeps the painted hit area: 30 world units from the node misses.
+    expect(mm.selectedId).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('returns focus to the graph region when a neighbor link unmounts', async () => {
+    const { wrapper, mm } = await mountGraph()
+    // Open A so its neighbor list (with B) renders in the detail panel.
+    mm.selectNode('a')
+    await nextTick()
+
+    const neighbor = wrapper.find('.mm-link-btn')
+    expect(neighbor.exists()).toBe(true)
+    ;(neighbor.element as HTMLElement).focus()
+    await neighbor.trigger('click')
+    await nextTick()
+    // The panel now shows B, so the link that opened it is gone.
+    expect(mm.selectedId).toBe('b')
+
+    await wrapper.find('.mm-detail-close').trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    // No list title exists in graph view, so focus lands on the graph region
+    // rather than the document body.
+    const canvasWrap = wrapper.find('.mm-canvas-wrap').element
+    expect(document.activeElement).toBe(canvasWrap)
+    expect(document.activeElement).not.toBe(document.body)
     wrapper.unmount()
   })
 })

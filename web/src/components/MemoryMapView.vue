@@ -70,7 +70,7 @@
         </div>
       </div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
+      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap" tabindex="0" role="region" aria-label="Vault graph">
         <canvas
           ref="canvasEl"
           :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
@@ -193,7 +193,7 @@
               v-for="n in sortedVisibleNodes"
               :key="n.id"
               :class="{ current: mm.selectedId === n.id }"
-              @click="activateRow(n)"
+              @click="activateRow(n, $event)"
             >
               <!-- The row opens the note by click, but a plain row handler is
                    unreachable by keyboard. A native button in the title cell
@@ -206,7 +206,7 @@
                   :data-mm-return="n.id"
                   :aria-pressed="mm.selectedId === n.id"
                   :aria-label="`Open ${n.title}`"
-                  @click.stop="activateRow(n)"
+                  @click.stop="activateRow(n, $event)"
                 ><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</button>
               </td>
               <td class="muted">{{ categoryLabelFor(n) }}</td>
@@ -353,7 +353,7 @@
               class="label mm-link-label mm-link-btn"
               :data-mm-return="nb.id"
               :aria-label="`Open ${nb.title}`"
-              @click="openNeighbor(nb.id)"
+              @click="openNeighbor(nb.id, $event)"
             >{{ nb.title }}</button>
             <button
               type="button"
@@ -427,6 +427,7 @@ import {
   hitTest as hitTestNodes,
   labelDegreeFloor,
   labelsVisible,
+  minHitRadiusForScale,
   nodeRadius,
   screenToWorld as toWorld,
   stepSimulation as stepLayout,
@@ -574,9 +575,10 @@ function openNoteFile(id: string) {
   void fileViewer.open(id)
 }
 /** Open a linked note, remembering the neighbor control so closing the detail
- * panel returns focus to it rather than to the top of the page. */
-function openNeighbor(id: string) {
-  detailReturnFocusId.value = id
+ * panel returns focus to it — unless that link unmounts when the panel content
+ * is replaced (see `detailReturnFocus`), in which case the watcher falls back. */
+function openNeighbor(id: string, event: Event) {
+  detailReturnFocus.value = { id, el: (event.currentTarget as HTMLElement | null) }
   openNoteFile(id)
 }
 const deletingNote = ref(false)
@@ -1215,8 +1217,8 @@ function tick() {
   rafId = requestAnimationFrame(tick)
 }
 
-function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  return hitTestNodes(simNodes, wx, wy)
+function hitTest(wx: number, wy: number, minRadius = 0): MemoryGraphNode | null {
+  return hitTestNodes(simNodes, wx, wy, minRadius)
 }
 
 // ---------- pointer gestures ----------
@@ -1226,18 +1228,27 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
 // unit-tested; this section only maps them onto the camera and the layout.
 const gesture = new GraphGesture()
 let gestureNode: MemoryGraphNode | null = null
+/** A touch tap's target diameter on screen, matching DESIGN.md's --touch token.
+ * Enforced in world units at the current camera scale so it holds at any zoom. */
+const TOUCH_HIT_DIAMETER_PX = 44
 
-function hitTestAt(clientX: number, clientY: number): MemoryGraphNode | null {
+function hitTestAt(clientX: number, clientY: number, pointerType?: string): MemoryGraphNode | null {
   if (!canvasEl.value) return null
   const rect = canvasEl.value.getBoundingClientRect()
   const [wx, wy] = screenToWorld((clientX - rect.left) * dpr, (clientY - rect.top) * dpr)
-  return hitTest(wx, wy)
+  // A touch tap gets a 44px screen-space target regardless of zoom, since the
+  // painted node is only ~13px across at fit scale. Mouse/pen keep the precise
+  // painted hit area.
+  const minRadius = pointerType === 'touch'
+    ? minHitRadiusForScale(TOUCH_HIT_DIAMETER_PX, camera.scale)
+    : 0
+  return hitTest(wx, wy, minRadius)
 }
 
 function onPointerDown(e: PointerEvent) {
   if (!canvasEl.value) return
   clearHover()
-  const hit = hitTestAt(e.clientX, e.clientY)
+  const hit = hitTestAt(e.clientX, e.clientY, e.pointerType)
   const accepted = gesture.begin(
     { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, additive: e.shiftKey, isPrimary: e.isPrimary },
     hit ? hit.id : null,
@@ -1453,28 +1464,50 @@ const ageLabelOfSelected = computed(() => {
   return mm.ageLabelOf(n)
 })
 
-// Which list/neighbor control opened the note currently in the detail panel.
-// Closing the panel returns focus there — otherwise a keyboard user who opened
-// a note and pressed the close button landed back at the top of the document,
-// having to tab through the whole list to get where they were.
-const detailReturnFocusId = ref<string | null>(null)
-function activateRow(n: MemoryGraphNode) {
-  detailReturnFocusId.value = n.id
+// Which control opened the note currently in the detail panel, and the element
+// to return focus to. Closing the panel returns focus there — otherwise a
+// keyboard user who opened a note and pressed the close button landed back at
+// the top of the document, having to tab through the whole list to get where
+// they were.
+//
+// The element is captured by reference rather than looked up by id, because
+// opening a note from a neighbor link unmounts that link: the panel's content
+// is replaced with the neighbor's, so the `[data-mm-return]` node for it no
+// longer exists by the time the panel closes. When the initiating control is
+// gone (the graph-view neighbor case), focus falls back to the graph region,
+// which is a stable, always-mounted destination in the same surface.
+const detailReturnFocus = ref<{ id: string; el: HTMLElement | null } | null>(null)
+/** Resolve the control to restore focus to: the clicked button itself, or the
+ * title button inside a clicked row. */
+function returnControlFor(event: Event): HTMLElement | null {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target) return null
+  if (target.matches('button')) return target
+  return target.querySelector<HTMLElement>('[data-mm-return]')
+}
+function activateRow(n: MemoryGraphNode, event: Event) {
+  detailReturnFocus.value = { id: n.id, el: returnControlFor(event) }
   mm.selectNode(n.id)
 }
 function closeDetail() {
   mm.selectNode(null)
 }
 watch(() => mm.selectedId, (id) => {
-  if (id !== null || !detailReturnFocusId.value) return
-  const returnId = detailReturnFocusId.value
-  detailReturnFocusId.value = null
+  if (id !== null || !detailReturnFocus.value) return
+  const { id: returnId, el } = detailReturnFocus.value
+  detailReturnFocus.value = null
   void nextTick(() => {
-    // Matched by dataset rather than a CSS.escape selector: note ids are file
-    // paths, and jsdom (the component-test environment) has no CSS.escape.
-    const el = Array.from(document.querySelectorAll<HTMLElement>('[data-mm-return]'))
+    if (el && el.isConnected) {
+      el.focus()
+      return
+    }
+    // The initiating link is gone (graph-view neighbor navigation). Prefer the
+    // list's title button when this note has one on screen, else the active
+    // surface's own region, so focus never drops to the document body.
+    const listTitle = Array.from(document.querySelectorAll<HTMLElement>('[data-mm-return]'))
       .find(candidate => candidate.dataset.mmReturn === returnId)
-    el?.focus()
+    if (listTitle) listTitle.focus()
+    else document.querySelector<HTMLElement>('.mm-canvas-wrap, .mm-list-wrap')?.focus()
   })
 })
 const sortedVisibleNodes = computed(() => {

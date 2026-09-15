@@ -249,15 +249,34 @@ export function nodeRadius(n: { degree: number }): number {
 }
 
 /**
+ * Minimum hit-test radius in world units so a coarse pointer's target is at
+ * least `diameterPx` across on screen, whatever the camera scale.
+ *
+ * The painted node is `nodeRadius(n) * scale` on screen — about 13px across for
+ * a degree-1 node at the default fit scale — far below the 44px touch token, so
+ * a tap at fit zoom was likely to miss. Only coarse pointers get the floor; a
+ * mouse keeps the precise painted target.
+ */
+export function minHitRadiusForScale(diameterPx: number, scale: number): number {
+  return diameterPx / 2 / Math.max(scale, 1e-6)
+}
+
+/**
  * The topmost node under a world-space point, or null.
  *
  * Walked back to front so the node drawn last — the one visibly on top — is the
- * one a click lands on.
+ * one a click lands on. `minRadius` (world units) enlarges every node's target,
+ * which is how a touch tap gets a screen-sized target at any zoom.
  */
-export function hitTest<T extends SimNode>(nodes: readonly T[], wx: number, wy: number): T | null {
+export function hitTest<T extends SimNode>(
+  nodes: readonly T[],
+  wx: number,
+  wy: number,
+  minRadius = 0,
+): T | null {
   for (let i = nodes.length - 1; i >= 0; i--) {
     const n = nodes[i]
-    const r = nodeRadius(n) + 3
+    const r = Math.max(nodeRadius(n) + 3, minRadius)
     const dx = n.x - wx
     const dy = n.y - wy
     if (dx * dx + dy * dy <= r * r) return n

@@ -18,6 +18,7 @@ import {
   hitTest,
   labelDegreeFloor,
   labelsVisible,
+  minHitRadiusForScale,
   nodeRadius,
   screenToWorld,
   stepSimulation,
@@ -207,6 +208,30 @@ describe('hitTest', () => {
 
   it('is null on an empty graph', () => {
     expect(hitTest([], 0, 0)).toBeNull()
+  })
+
+  it('a minimum radius enlarges every node target', () => {
+    const n = node({ id: 'a', x: 100, y: 100, degree: 1 })
+    const painted = nodeRadius(n) + 3
+    // Well outside the painted node, but inside the touch floor.
+    const point = 100 + painted + 10
+    expect(hitTest([n], point, 100)).toBeNull()
+    expect(hitTest([n], point, 100, 30)?.id).toBe('a')
+    // The floor never shrinks the painted target.
+    expect(hitTest([n], 100 + painted - 1, 100, 0)?.id).toBe('a')
+  })
+
+  it('minHitRadiusForScale gives a screen-space diameter at any zoom', () => {
+    // 44px across on screen at the default fit scale, expressed in world units.
+    expect(minHitRadiusForScale(44, DEFAULT_SCALE)).toBeCloseTo(44 / 2 / DEFAULT_SCALE)
+    // Zooming in shrinks the world-space floor, so the on-screen target holds.
+    const wide = minHitRadiusForScale(44, 0.55) * 0.55 * 2
+    const close = minHitRadiusForScale(44, 2) * 2 * 2
+    expect(wide).toBeCloseTo(44)
+    expect(close).toBeCloseTo(44)
+    // A degree-1 node's painted diameter at fit scale is far below the token,
+    // which is why the floor is needed at all.
+    expect((nodeRadius(node({ id: 'a', x: 0, y: 0, degree: 1 })) + 3) * 2 * DEFAULT_SCALE).toBeLessThan(44)
   })
 })
 
