@@ -674,6 +674,128 @@ def test_resume_blocks_a_genuine_external_edit(tmp_path: Path) -> None:
     assert aj.resume_revision_matches(archive, recorded) is False
 
 
+def test_downstream_resume_blocks_when_the_archive_changed_after_insights(
+    tmp_path: Path,
+) -> None:
+    """A downstream-only resume must validate the post-insights revision.
+
+    Insights succeeded but the fold/proposals never ran. Editing the archive
+    before the retry must block, not fold the changed content into derived
+    state.
+    """
+    archive = _stamped_archive(tmp_path)
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    job.mark("insights", aj.SUCCEEDED)
+    job.post_insights_revision = aj.archive_content_revision(archive)
+    job.save()
+
+    # The archived transcript (or its insights) is edited after insights.
+    archive.write_text(
+        archive.read_text(encoding="utf-8") + "\n## Decisions\n- tampered\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(manager._run_job(chat.chat_id, job, inputs, stages=["memory_proposals"]))
+
+    assert job.state == "blocked"
+    assert "changed" in job.blocked_reason
+
+
+def test_downstream_resume_proceeds_when_the_archive_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    archive = _stamped_archive(tmp_path)
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        chat_id=chat.chat_id,
+        proposal_vault_root=vault,
+        memory_proposals_enabled=True,
+    )
+    job = manager._new_job_for_chat(chat, inputs)
+    job.mark("insights", aj.SUCCEEDED)
+    job.post_insights_revision = aj.archive_content_revision(archive)
+    job.save()
+
+    asyncio.run(manager._run_job(chat.chat_id, job, inputs, stages=["memory_proposals"]))
+
+    assert job.status_of("memory_proposals") == aj.SUCCEEDED
+
+
+def test_startup_resume_resets_an_interrupted_final_attempt(tmp_path: Path) -> None:
+    """A crash during the last automatic attempt must stay retryable."""
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    stage = job.stage("insights")
+    stage.status = aj.RUNNING
+    stage.attempts = aj.MAX_AUTO_ATTEMPTS
+    job.save()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    # The stage was eligible: an un-reset interrupted final attempt would have
+    # been excluded by `resumable()` and nothing would start.
+    assert started == 1
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("insights") in (aj.PENDING, aj.RUNNING)
+    # An explicit retry resets an exhausted *pending* stage too, so it can
+    # always recover a stage the automatic budget gave up on.
+    reloaded.stage("insights").status = aj.PENDING
+    reloaded.stage("insights").attempts = aj.MAX_AUTO_ATTEMPTS
+    reloaded.reset_failed(include_blocked=True)
+    assert reloaded.stage("insights").attempts == 0
+    assert "insights" in reloaded.resumable()
+
+
+def test_startup_resume_blocks_a_missing_archive(tmp_path: Path) -> None:
+    """A missing archive settles blocked and is surfaced, not left stale."""
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    job.mark("insights", aj.RUNNING)
+    job.save()
+    archive.unlink()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.state == "blocked"
+    assert "missing" in reloaded.blocked_reason
+    postprocess = manager.get_chat(chat.chat_id).postprocess
+    assert postprocess.get("state") == "blocked"
+    assert postprocess.get("blocked_reason")
+
+
+
 
 def test_missing_workspace_owner_settles_proposals_as_skipped(
     tmp_path: Path, monkeypatch

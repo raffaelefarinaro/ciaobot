@@ -815,6 +815,22 @@ def _insights_body_from_archive(archive_path: Path) -> str:
     return text[location[1]:].strip()
 
 
+def _record_post_insights_revision(job: Any, archive_path: Path) -> None:
+    """Pin the archive revision the downstream stages will consume.
+
+    Insights is the only stage that rewrites the archive. Recording the
+    revision right after it settles gives a downstream-only resume a real
+    expected value to compare against, so an edit to the transcript or its
+    insights section between insights succeeding and a later resume is
+    detected instead of silently folded into the project doc and proposals.
+    """
+    from ciao.archive_jobs import archive_content_revision
+
+    revision = archive_content_revision(archive_path)
+    if revision:
+        job.post_insights_revision = revision
+
+
 async def run_archive_pipeline(
     job: Any,
     inputs: dict[str, Any],
@@ -951,6 +967,7 @@ async def run_archive_pipeline(
                     output = output or _insights_body_from_archive(archive_path)
                     job.inputs["insights_output"] = output
                     job.mark(name, SKIPPED, "archive already has insights")
+                    _record_post_insights_revision(job, archive_path)
                     job.save()
                     continue
                 effective_model, effective_provider, note = _resolve_insights_call(
@@ -1005,6 +1022,7 @@ async def run_archive_pipeline(
                     job.mark(name, SUCCEEDED)
                 else:
                     job.mark(name, SKIPPED, "no durable signal in this session")
+                _record_post_insights_revision(job, archive_path)
                 job.save()
                 continue
 

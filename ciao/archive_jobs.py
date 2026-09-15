@@ -220,6 +220,12 @@ class ArchiveJob:
     archive_path: str
     runtime_root: str
     content_revision: str = ""
+    #: The archive revision after the insights section landed. Downstream
+    #: stages (project fold, memory proposals) are resumed against this, so an
+    #: edit to the archive between insights succeeding and a later resume is
+    #: detected instead of being silently consumed. Empty until insights
+    #: settles.
+    post_insights_revision: str = ""
     pipeline_version: int = PIPELINE_VERSION
     manifest_version: int = MANIFEST_VERSION
     created_at: str = ""
@@ -306,12 +312,19 @@ class ArchiveJob:
         ``include_blocked`` is what an *explicit user retry* sets: a blocked
         stage was waiting for exactly that human action, so clearing the block
         and trying once more is the intent. An automatic startup resume must
-        not pass it.
+        not pass it. A pending stage that has exhausted its automatic budget is
+        also reset: otherwise an interrupted final attempt leaves it pending
+        but permanently excluded, and a user retry would launch nothing.
         """
         for name in PIPELINE_STAGES:
             status = self.status_of(name)
-            if status in (FAILED, RUNNING) or (include_blocked and status == BLOCKED):
-                stage = self.stage(name)
+            stage = self.stage(name)
+            exhausted_pending = status == PENDING and stage.attempts >= MAX_AUTO_ATTEMPTS
+            if (
+                status in (FAILED, RUNNING)
+                or exhausted_pending
+                or (include_blocked and status == BLOCKED)
+            ):
                 stage.status = PENDING
                 stage.reason = ""
                 # An explicit retry earns a fresh automatic budget; otherwise a
@@ -353,6 +366,7 @@ class ArchiveJob:
             "chat_id": self.chat_id,
             "archive_path": self.archive_path,
             "content_revision": self.content_revision,
+            "post_insights_revision": self.post_insights_revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "state": self.state,
@@ -378,6 +392,7 @@ class ArchiveJob:
             archive_path=str(raw.get("archive_path", "")),
             runtime_root=str(runtime_root),
             content_revision=str(raw.get("content_revision", "")),
+            post_insights_revision=str(raw.get("post_insights_revision", "")),
             pipeline_version=int(raw.get("pipeline_version", PIPELINE_VERSION) or 0),
             manifest_version=int(raw.get("manifest_version", MANIFEST_VERSION) or 0),
             created_at=str(raw.get("created_at", "")),

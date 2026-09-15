@@ -705,8 +705,11 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/hist
 # resolution and prune with actor/source, destination, before/after revisions
 # and status (prepared | applied | rolled_back | failed | conflict | undone).
 # `undoable` is true only for an applied operation this protocol can reverse;
-# unsupported legacy rows render without an Undo affordance. Optional query
-# params: workspace, limit (default 200).
+# unsupported legacy rows render without an Undo affordance. A multi-row batch
+# (batch accept/dismiss, expiry sweep) is one atomic rewrite, so exactly one
+# row carries the whole-file image and is undoable as a unit; the rest are
+# history-only (`undoable: false`) facts that must not each restore the file.
+# Optional query params: workspace, limit (default 200).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
 
 # Undo one receipt. Refuses with 409 when the destination changed since the

@@ -543,6 +543,77 @@ def test_queue_receipt_refuses_undo_when_the_queue_moved(tmp_path):
     assert "A later unrelated trait." in queue.read_text(encoding="utf-8")
 
 
+# ── Batch queue receipts ──────────────────────────────────────────────────
+
+
+def test_batch_receipt_records_one_undoable_transaction(tmp_path):
+    """A batch rewrite must not make each fact separately undoable.
+
+    The batch is one atomic file rewrite. If every per-fact receipt carried the
+    whole-file before image, undoing any one restored the whole pre-batch file
+    and resurrected every fact the batch had removed — including accepted ones.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    before = (
+        "# Memory Proposals\n\n"
+        "- [memory] Keep every fact.  _(from: Decisions)_\n"
+        "- [profile] Keep every trait.  _(from: Decisions)_\n"
+    )
+    queue.write_text(before, encoding="utf-8")
+    after = "# Memory Proposals\n\n"
+    queue.write_text(after, encoding="utf-8")
+
+    mr.record_queue_resolution_batch(
+        queue,
+        [
+            {"text": "Keep every fact.", "kind": "memory", "promoted": True},
+            {"text": "Keep every trait.", "kind": "profile", "promoted": False},
+        ],
+        before_text=before,
+        after_text=after,
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    )
+
+    receipts = [
+        r
+        for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    assert len(receipts) == 2
+    undoable = [r for r in receipts if mr.is_undoable(r)]
+    # Exactly one row can be undone, and it restores the whole pre-batch queue.
+    assert len(undoable) == 1
+    assert receipts[-1].get("undoable") is False
+
+    mr.undo_receipt(undoable[0]["id"], vault_root=tmp_path)
+    assert queue.read_text(encoding="utf-8") == before
+
+
+def test_batch_undo_of_a_non_transaction_row_is_refused(tmp_path):
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    mr.record_queue_resolution_batch(
+        queue,
+        [{"text": "Fact A.", "kind": "memory", "promoted": False}],
+        before_text="# Memory Proposals\n\n- [memory] Fact A.  _(from: Decisions)_\n",
+        after_text="# Memory Proposals\n\n",
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    )
+    rows = [
+        r
+        for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    # A single-item batch still records one undoable transaction row.
+    assert len(rows) == 1 and mr.is_undoable(rows[0])
+
+
 def test_queue_recovery_applied_when_the_bullet_is_gone(tmp_path):
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True, exist_ok=True)

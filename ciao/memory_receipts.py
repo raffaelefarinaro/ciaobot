@@ -275,9 +275,16 @@ def is_undoable(receipt: dict[str, Any]) -> bool:
     Legacy or unsupported rows — no image, an unknown kind, a non-``applied``
     status — are view-only. The History surface must render them without an
     Undo affordance rather than pretending the change is reversible.
+
+    ``undoable`` lets a multi-row batch record per-fact history rows without
+    offering an undo on each: one row carries the transaction's whole-file
+    before image, and the rest are explicitly ``undoable=False``. Without it,
+    undoing any one row restored the whole pre-batch file and resurrected every
+    fact the batch had removed.
     """
     return (
         receipt.get("status") == APPLIED
+        and receipt.get("undoable", True) is not False
         and str(receipt.get("kind", "")) in UNDOABLE_KINDS
         and receipt.get("before_text") is not None
         and receipt.get("after_text") is not None
@@ -457,12 +464,20 @@ def record_queue_resolution(
     vault_root: Path | None = None,
     before_text: str | None = None,
     after_text: str | None = None,
+    undoable: bool = True,
 ) -> dict[str, Any]:
     """Record an already-performed queue bullet removal as a receipt.
 
     Prefer :func:`queue_resolution`, which brackets the file rewrite with a
     ``prepared`` row so a crash mid-rewrite is recoverable. This entry point
     remains for callers that only want to record a completed removal.
+
+    ``undoable=False`` records a per-fact history row without a reversible
+    before image. A multi-row batch uses it for every fact except one: the
+    batch is a single atomic file rewrite, so exactly one row may carry the
+    whole-file before image. Marking each row undoable let undoing any one of
+    them restore the whole pre-batch file and resurrect every fact the batch
+    had removed.
 
     Returns the effective receipt. Never raises: a receipt is a record, and
     failing to record one must not fail the removal it describes.
@@ -480,6 +495,7 @@ def record_queue_resolution(
             before_text=before_text,
             after_text=after_text,
             status=APPLIED,
+            undoable=undoable,
         )
     except Exception:  # noqa: BLE001 — recording must not break removal
         logger.debug("memory receipts: queue receipt failed", exc_info=True)
@@ -569,6 +585,7 @@ def _write_queue_receipt(
     status: str,
     receipt_id: str | None = None,
     prepared: bool = False,
+    undoable: bool = True,
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -604,6 +621,12 @@ def _write_queue_receipt(
         "after_text": _image(after),
         "status": status,
     }
+    if not undoable:
+        # A per-fact history row for a batch that already records its
+        # transaction-level before image on one row. It must not offer an undo:
+        # restoring the whole pre-batch file from every row resurrected facts
+        # the batch had removed.
+        receipt["undoable"] = False
     if prepared:
         # The caller already wrote the ``prepared`` row; this is its
         # confirmation. A bullet that is still queued means the intended
@@ -617,6 +640,52 @@ def _write_queue_receipt(
     journal = journal_path(vault_root, proposals_path.parent)
     _append(journal, receipt)
     return receipt
+
+
+def record_queue_resolution_batch(
+    proposals_path: Path,
+    removals: list[dict[str, Any]],
+    *,
+    before_text: str,
+    after_text: str,
+    actor: str,
+    source: str,
+    workspace: str = "",
+    vault_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Record one queue rewrite that removed several bullets.
+
+    The batch is a single atomic file rewrite, so it is one transaction: the
+    first row carries the whole-file before/after images and is the only
+    undoable receipt. The remaining facts get history rows with
+    ``undoable=False`` so the History list still shows them without offering an
+    undo that would restore every other fact in the batch (and resurrect an
+    accepted fact's bullet). Each item in ``removals`` carries ``text``,
+    ``kind`` and ``promoted``.
+
+    Returns the recorded receipts; never raises.
+    """
+    receipts: list[dict[str, Any]] = []
+    for index, removal in enumerate(removals):
+        try:
+            receipts.append(
+                record_queue_resolution(
+                    proposals_path,
+                    removed_text=str(removal.get("text") or ""),
+                    kind=str(removal.get("kind") or ""),
+                    promoted=bool(removal.get("promoted")),
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    before_text=before_text,
+                    after_text=after_text,
+                    undoable=index == 0,
+                )
+            )
+        except Exception:  # noqa: BLE001 — recording must not break removal
+            logger.debug("memory receipts: batch row failed", exc_info=True)
+    return receipts
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────

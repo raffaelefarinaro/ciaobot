@@ -8107,7 +8107,7 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
             queue_after = "\n".join(keep).rstrip() + "\n"
             queue.write_text(queue_after, encoding="utf-8")
             from ciao.memory_proposals import record_dismissal
-            from ciao.memory_receipts import record_queue_resolution
+            from ciao.memory_receipts import record_queue_resolution_batch
 
             try:
                 vault_for_receipt = Path(config.workspace_vault_root(workspace))
@@ -8127,20 +8127,23 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                     source=swept_source,
                     outcome="swept",
                 )
-                # A reversible receipt for each swept fact, so an over-eager
-                # cutoff can be undone from History.
-                record_queue_resolution(
-                    queue,
-                    removed_text=swept_text,
-                    kind=swept_kind,
-                    promoted=False,
-                    actor="operator",
-                    source="pwa",
-                    workspace=workspace,
-                    vault_root=vault_for_receipt,
-                    before_text=queue_before,
-                    after_text=queue_after,
-                )
+            # The sweep is one atomic rewrite, so it records one reversible
+            # transaction-level receipt (the first row) plus non-undoable
+            # history rows: an over-eager cutoff can be undone as a whole, but
+            # a single fact's undo cannot resurrect every other swept bullet.
+            record_queue_resolution_batch(
+                queue,
+                [
+                    {"text": text, "kind": kind, "promoted": False}
+                    for kind, text in zip(swept_kinds, swept_texts)
+                ],
+                before_text=queue_before,
+                after_text=queue_after,
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_for_receipt,
+            )
             for kind in swept_kinds:
                 if proposal_outcomes.is_extraction_kind(kind):
                     proposal_outcomes.record(
@@ -8315,30 +8318,35 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 removed_here.add(row["id"])
         queue_after = "\n".join(lines).rstrip() + "\n"
         queue.write_text(queue_after, encoding="utf-8")
-        # One receipt per removed bullet, recorded against the single atomic
-        # file rewrite. The batch is itself the transaction; these receipts are
-        # its per-fact record for the History surface.
-        from ciao.memory_receipts import record_queue_resolution
+        # The batch is one atomic file rewrite: a single transaction-level
+        # receipt carries the whole-file before/after image, and the remaining
+        # facts are recorded as non-undoable history rows. Undoing each fact's
+        # row separately restored the whole pre-batch file and resurrected the
+        # other bullets (including accepted ones).
+        from ciao.memory_receipts import record_queue_resolution_batch
 
         try:
             vault_for_receipt = Path(config.workspace_vault_root(entry["workspace"]))
         except (AttributeError, ValueError):
             vault_for_receipt = queue.parent.parent
-        for row in entry["rows"]:
-            if row["id"] not in removed_here:
-                continue
-            record_queue_resolution(
-                queue,
-                removed_text=str(row.get("text") or ""),
-                kind=str(row.get("kind") or ""),
-                promoted=action == "accept",
-                actor="operator",
-                source="pwa",
-                workspace=entry["workspace"],
-                vault_root=vault_for_receipt,
-                before_text=queue_before,
-                after_text=queue_after,
-            )
+        record_queue_resolution_batch(
+            queue,
+            [
+                {
+                    "text": str(row.get("text") or ""),
+                    "kind": str(row.get("kind") or ""),
+                    "promoted": action == "accept",
+                }
+                for row in entry["rows"]
+                if row["id"] in removed_here
+            ],
+            before_text=queue_before,
+            after_text=queue_after,
+            actor="operator",
+            source="pwa",
+            workspace=entry["workspace"],
+            vault_root=vault_for_receipt,
+        )
         self_request_removed.update(removed_here)
         # Record THIS queue's outcomes immediately after its rewrite lands: a
         # later file failing to persist must not take already-persisted

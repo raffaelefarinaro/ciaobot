@@ -4617,22 +4617,23 @@ class ProjectChatManager:
         from ciao.insights import run_archive_pipeline
 
         try:
-            # A job whose archive changed *before* extraction landed cannot be
-            # resumed safely: the pending work was planned against different
-            # content. Block it and say why instead of writing derived state
-            # beside unknown text. `resume_revision_matches` tolerates the
-            # pipeline's own insights append, so a crash between `_append_section`
-            # and the stage being marked succeeded is still resumable.
-            if job.status_of("insights") in (PENDING, RUNNING) and job.content_revision:
-                if not resume_revision_matches(
-                    inputs["archive_path"], job.content_revision
-                ):
-                    job.block(
-                        "insights",
-                        "archive content changed since the job was created",
-                    )
-                    job.save()
-                    return
+            # Revision validation runs for every resume, not only an
+            # insights-pending one. `resume_revision_matches` tolerates the
+            # pipeline's own insights append, so the insights-pending case still
+            # works, while a downstream-only resume compares against the
+            # post-insights revision and blocks if the transcript or its
+            # insights section was edited after insights settled.
+            if not resume_revision_matches(
+                inputs["archive_path"],
+                job.post_insights_revision or job.content_revision,
+            ):
+                stage = "insights" if job.status_of("insights") in (PENDING, RUNNING) else "project_doc_update"
+                job.block(
+                    stage,
+                    "archive content changed since the job was created",
+                )
+                job.save()
+                return
             await run_archive_pipeline(job, inputs, stages=stages)
         except Exception:  # noqa: BLE001 — the tracked wrapper always settles
             logger.exception("Archive job failed for chat %s", chat_id)
@@ -4692,7 +4693,7 @@ class ProjectChatManager:
         process), then unfinished jobs with a live chat are resumed with
         bounded concurrency. Blocked and tombstoned jobs are left alone.
         """
-        from ciao.archive_jobs import RUNNING, list_jobs
+        from ciao.archive_jobs import MAX_AUTO_ATTEMPTS, RUNNING, list_jobs
 
         jobs = list_jobs(self._runtime_root)
         semaphore = asyncio.Semaphore(max(1, max_concurrency))
@@ -4703,8 +4704,17 @@ class ProjectChatManager:
             for name in list(job.stages):
                 if job.status_of(name) == RUNNING:
                     # The old process died with the stage in flight; make it
-                    # retryable rather than a stuck "running" forever.
-                    job.stage(name).status = "pending"
+                    # retryable rather than a stuck "running" forever. An
+                    # interrupted *final* attempt had already counted toward the
+                    # automatic budget, so reset the counter too: otherwise the
+                    # stage is pending but immediately excluded by
+                    # `resumable()`, and an explicit retry (which resets
+                    # failed/running/blocked, not a pending stage) would launch a
+                    # pipeline that runs nothing.
+                    stage = job.stage(name)
+                    stage.status = "pending"
+                    if stage.attempts >= MAX_AUTO_ATTEMPTS:
+                        stage.attempts = 0
             job.save()
             chat = self._chats.get(job.chat_id)
             if chat is None or not chat.archived:
@@ -4712,6 +4722,15 @@ class ProjectChatManager:
             project = self._projects.get(chat.project_id) if chat.project_id else None
             inputs = self._restore_job_inputs(chat, project, job)
             if not inputs["archive_path"].exists():
+                # The archive is gone, so no stage can run. Block (and surface
+                # it) rather than silently leaving a stale running/incomplete
+                # record that a client then downgrades to done, hiding the
+                # retry affordance.
+                for name in job.resumable() or job.unfinished():
+                    job.block(name, "archive file is missing")
+                job.save()
+                self._archive_jobs[job.chat_id] = job
+                self._overlay_job_postprocess(job.chat_id, job)
                 continue
             if not job.resumable():
                 self._overlay_job_postprocess(job.chat_id, job)
