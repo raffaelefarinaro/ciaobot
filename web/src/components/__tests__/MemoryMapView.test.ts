@@ -356,4 +356,22 @@ describe('MemoryMapView keyboard and touch access', () => {
     expect(document.activeElement).not.toBe(document.body)
     wrapper.unmount()
   })
+
+  it('groups the neighbor actions for wrapping at narrow panel widths', async () => {
+    const { wrapper, mm } = await mountGraph()
+    mm.selectNode('a')
+    await nextTick()
+
+    const row = wrapper.find('.mm-link-item')
+    // The title and its actions are peers the stylesheet can wrap, rather than
+    // inline buttons after the title. The wrapper is non-shrinking so the
+    // actions keep a full touch target instead of being squeezed out of view.
+    const actions = row.find('.mm-link-actions')
+    expect(actions.exists()).toBe(true)
+    expect(actions.findAll('.mm-path-btn')).toHaveLength(2)
+    expect(actions.find('.mm-link-focus').exists()).toBe(true)
+    // The title button is before the actions and remains the open control.
+    expect(row.find('.mm-link-btn').attributes('aria-label')).toBe('Open Note B')
+    wrapper.unmount()
+  })
 })

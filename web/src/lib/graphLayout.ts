@@ -265,11 +265,15 @@ export function minHitRadiusForScale(diameterDevicePx: number, scale: number): n
 }
 
 /**
- * The topmost node under a world-space point, or null.
+ * The node under a world-space point, or null.
  *
- * Walked back to front so the node drawn last — the one visibly on top — is the
- * one a click lands on. `minRadius` (world units) enlarges every node's target,
- * which is how a touch tap gets a screen-sized target at any zoom.
+ * A painted hit is resolved first, back to front, so the node drawn last — the
+ * one visibly on top — wins for a precise pointer. When `minRadius` (world
+ * units) enlarges every target for a coarse pointer, an enlarged target can
+ * cover several nodes (a touch-sized radius is far wider than the layout gap),
+ * so among candidates outside a painted hit the *nearest centre* is chosen
+ * rather than whichever happens to be drawn last — a tap centred on one dot
+ * must never grab a neighbour that merely overlaps its expanded target.
  */
 export function hitTest<T extends SimNode>(
   nodes: readonly T[],
@@ -277,14 +281,24 @@ export function hitTest<T extends SimNode>(
   wy: number,
   minRadius = 0,
 ): T | null {
+  let nearest: T | null = null
+  let nearestDist = Infinity
   for (let i = nodes.length - 1; i >= 0; i--) {
     const n = nodes[i]
-    const r = Math.max(nodeRadius(n) + 3, minRadius)
     const dx = n.x - wx
     const dy = n.y - wy
-    if (dx * dx + dy * dy <= r * r) return n
+    const d2 = dx * dx + dy * dy
+    const painted = nodeRadius(n) + 3
+    if (d2 <= painted * painted) return n
+    if (minRadius > painted) {
+      const r = Math.max(painted, minRadius)
+      if (d2 <= r * r && d2 < nearestDist) {
+        nearest = n
+        nearestDist = d2
+      }
+    }
   }
-  return null
+  return nearest
 }
 
 // ---------- label pressure ---------------------------------------------------

@@ -355,29 +355,34 @@
               :aria-label="`Open ${nb.title}`"
               @click="openNeighbor(nb.id, $event)"
             >{{ nb.title }}</button>
-            <button
-              type="button"
-              class="mm-path-btn"
-              :class="{ active: mm.pathStart === nb.id }"
-              :aria-pressed="mm.pathStart === nb.id"
-              :aria-label="`Set ${nb.title} as path start`"
-              @click.stop="mm.choosePathEndpoint(nb.id, 'start')"
-            >start</button>
-            <button
-              type="button"
-              class="mm-path-btn"
-              :class="{ active: mm.pathEnd === nb.id }"
-              :aria-pressed="mm.pathEnd === nb.id"
-              :aria-label="`Set ${nb.title} as path end`"
-              @click.stop="mm.choosePathEndpoint(nb.id, 'end')"
-            >end</button>
-            <button
-              type="button"
-              class="mm-link-focus"
-              title="Locate in graph"
-              aria-label="Locate in graph"
-              @click.stop="focusNode(nb.id)"
-            >⌖</button>
+            <!-- Actions are grouped and non-shrinking so, at the panel's 220px
+                 minimum, they wrap to a second line instead of being pushed out
+                 of view by the note title. -->
+            <span class="mm-link-actions">
+              <button
+                type="button"
+                class="mm-path-btn"
+                :class="{ active: mm.pathStart === nb.id }"
+                :aria-pressed="mm.pathStart === nb.id"
+                :aria-label="`Set ${nb.title} as path start`"
+                @click.stop="mm.choosePathEndpoint(nb.id, 'start')"
+              >start</button>
+              <button
+                type="button"
+                class="mm-path-btn"
+                :class="{ active: mm.pathEnd === nb.id }"
+                :aria-pressed="mm.pathEnd === nb.id"
+                :aria-label="`Set ${nb.title} as path end`"
+                @click.stop="mm.choosePathEndpoint(nb.id, 'end')"
+              >end</button>
+              <button
+                type="button"
+                class="mm-link-focus"
+                title="Locate in graph"
+                aria-label="Locate in graph"
+                @click.stop="focusNode(nb.id)"
+              >⌖</button>
+            </span>
           </div>
         </div>
 
@@ -1691,22 +1696,27 @@ onBeforeUnmount(() => {
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
+/* A neighbor row wraps its action group below the title at narrow widths
+   instead of overflowing horizontally. */
 .mm-link-item {
-  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
   font-size: var(--text-sm); color: var(--fg);
 }
 .mm-link-item:hover { background: var(--bg3); }
-.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
 /* The neighbor's name is a real button: opening it is a core action, and a
    clickable span is unreachable by keyboard. Reset to read like the text it
-   replaced, then give it the app's focus ring. */
+   replaced, then give it the app's focus ring. `min-width: 0` lets a long title
+   shrink and wrap; the actions keep their own row when there is no room. */
 .mm-link-btn {
   background: none; border: none; padding: 0; margin: 0; text-align: left;
   font: inherit; color: inherit; cursor: pointer; min-height: var(--touch);
-  display: flex; align-items: center;
+  display: flex; align-items: center; flex: 1 1 auto; min-width: 0;
+  overflow-wrap: anywhere;
 }
-.mm-link-label { cursor: pointer; flex: 1; }
+.mm-link-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.mm-link-label { cursor: pointer; }
 .mm-link-label:hover { text-decoration: underline; }
 .mm-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mm-link-focus {
@@ -1888,6 +1898,9 @@ onBeforeUnmount(() => {
 }
 .mm-path-btn:hover { color: var(--fg); border-color: var(--fg2); }
 .mm-path-btn.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Inside the neighbor row the flex gap owns spacing, so drop the trailing
+   margin that the list cell needs. */
+.mm-link-actions .mm-path-btn { margin-right: 0; }
 .mm-path-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .deg-cell { white-space: nowrap; }
 .deg-bar {

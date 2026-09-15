@@ -221,6 +221,28 @@ describe('hitTest', () => {
     expect(hitTest([n], 100 + painted - 1, 100, 0)?.id).toBe('a')
   })
 
+  it('picks the nearest node among overlapping enlarged targets', () => {
+    // Two nodes 60 world units apart, further than the layout gap and beyond
+    // each other's painted radius, but both inside a 45-unit touch floor. The
+    // tap is nearer `near`, which is drawn first; a loop that returned the
+    // last-drawn qualifying node would grab `far`.
+    const near = node({ id: 'near', x: 0, y: 0, degree: 1 })
+    const far = node({ id: 'far', x: 60, y: 0, degree: 1 })
+    expect(hitTest([near, far], 20, 0, 45)?.id).toBe('near')
+    expect(hitTest([far, near], 20, 0, 45)?.id).toBe('near')
+    // A tap nearer far resolves to far regardless of draw order.
+    expect(hitTest([near, far], 45, 0, 45)?.id).toBe('far')
+  })
+
+  it('a painted hit always wins over an enlarged neighbour', () => {
+    const near = node({ id: 'near', x: 0, y: 0, degree: 1 })
+    const far = node({ id: 'far', x: 60, y: 0, degree: 1 })
+    // The tap is inside far's painted radius but much closer to near's centre;
+    // the precise painted hit on far takes precedence over the enlarging floor.
+    const painted = nodeRadius(far) + 3
+    expect(hitTest([near, far], 60 - painted + 1, 0, 45)?.id).toBe('far')
+  })
+
   it('minHitRadiusForScale gives a device-pixel diameter at any zoom', () => {
     // A device-pixel diameter at the default fit scale, expressed in world
     // units. Callers multiply a CSS-pixel token by devicePixelRatio first.
