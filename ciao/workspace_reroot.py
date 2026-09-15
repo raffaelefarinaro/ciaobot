@@ -2265,6 +2265,13 @@ def repair(
     from ciao.fts_search import get_db_path
 
     search_db = Path(db_path) if db_path is not None else get_db_path(runtime_root)
+    # A database that does not exist yet is itself the repair trigger. On the
+    # upgrade path the install-owned database is intentionally absent (the
+    # legacy global cache is left in place), and both probes below return empty
+    # for a missing database — so without this the index would be reported clean
+    # while every note and transcript stayed unsearchable until a separate
+    # search happened to rebuild it.
+    index_missing = not search_db.exists()
 
     def record(item: RepairItem) -> None:
         (reported if item.drift in _REPAIR_REPORT_ONLY else repaired).append(item)
@@ -2291,7 +2298,7 @@ def repair(
         errors.append(
             {"workspace": "", "error": f"could not inspect the transcript index: {exc}"}
         )
-    if stale or unindexed:
+    if index_missing or stale or unindexed:
         rebuilt = rebuild_search_index(
             install_root,
             sorted(workspaces),
@@ -2302,6 +2309,15 @@ def repair(
             {"workspace": e.get("workspace", ""), "error": e.get("error", "")}
             for e in rebuilt.get("errors", [])
         )
+        if index_missing:
+            repaired.append(
+                RepairItem(
+                    workspace="",
+                    drift="search_index_missing",
+                    detail=f"no search database at {search_db}",
+                    action="rebuilt the install-owned search index",
+                )
+            )
         if stale:
             repaired.append(
                 RepairItem(

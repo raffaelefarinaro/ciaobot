@@ -214,6 +214,68 @@ def test_explicit_override_still_wins_over_the_install_default(
     assert not (config.state_path.parent / fts_search.SEARCH_DB_NAME).exists()
 
 
+def test_cli_explicit_runtime_root_defines_the_key_base(tmp_path: Path, monkeypatch) -> None:
+    """An explicit install runtime must drive BOTH the database and the key base.
+
+    With ``CIAO_WORKSPACE`` unset and ``--runtime-root /install/.runtime`` plus a
+    re-rooted ``--vault-root /install/personal/memory-vault``, deriving the key
+    base from the vault's parent would open the install's live database while
+    writing keys relative to ``/install/personal`` — so ``_ensure_path_base``
+    cleared every workspace and transcript row before indexing one vault.
+    """
+    from ciao import cli
+
+    install = tmp_path / "install"
+    runtime = install / ".runtime"
+    personal = install / "personal" / "memory-vault"
+    work = install / "work" / "memory-vault"
+    for vault, marker in ((personal, "personal"), (work, "work")):
+        notes = vault / "People"
+        notes.mkdir(parents=True)
+        (notes / f"{marker.title()}.md").write_text(
+            f"---\ntitle: {marker}\n---\n# {marker}\n"
+            f"alba-{marker} aymen-{marker}\n",
+            encoding="utf-8",
+        )
+    # Both roots are already in one install-owned database, keyed to the install.
+    conn = sqlite3.connect(fts_search.get_db_path(runtime))
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, personal, path_base=install)
+        fts_search.index_vault(conn, work, path_base=install)
+    finally:
+        conn.close()
+
+    monkeypatch.delenv("CIAO_MEMORY_DIR", raising=False)
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    assert (
+        cli.main(
+            [
+                "vault-search",
+                "aymen-personal",
+                "--vault-root",
+                str(personal),
+                "--runtime-root",
+                str(runtime),
+            ]
+        )
+        == 0
+    )
+
+    # Both roots' rows survived: the key base was the install, not the vault's
+    # parent, so the pass did not wipe the sibling root.
+    conn = sqlite3.connect(fts_search.get_db_path(runtime))
+    try:
+        paths = {row[0] for row in conn.execute("SELECT path FROM vault_meta")}
+    finally:
+        conn.close()
+    assert "personal/memory-vault/People/Personal.md" in paths
+    assert "work/memory-vault/People/Work.md" in paths
+
+
 def test_two_installs_sharing_an_override_diagnose_the_reset(tmp_path: Path, caplog) -> None:
     """A deliberately shared database is diagnosed, not silently mixed.
 
