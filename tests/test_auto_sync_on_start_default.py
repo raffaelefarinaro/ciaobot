@@ -27,11 +27,23 @@ def test_auto_sync_on_start_dataclass_default_matches_env_fallback():
 
 
 def test_auto_sync_on_start_env_opt_in_is_honoured():
-    assert CiaoConfig.from_env({"CIAO_AUTO_SYNC_ON_START": "true"}).auto_sync_on_start
+    for value in ("true", "TRUE", " true ", "1", "yes", "y", "on"):
+        assert CiaoConfig.from_env(
+            {"CIAO_AUTO_SYNC_ON_START": value}
+        ).auto_sync_on_start
 
 
 def test_auto_sync_on_start_falsey_values_disable():
     for value in ("0", "false", "no", "off", "FALSE", "Off"):
+        assert not CiaoConfig.from_env(
+            {"CIAO_AUTO_SYNC_ON_START": value}
+        ).auto_sync_on_start
+
+
+def test_auto_sync_on_start_invalid_or_blank_values_fail_closed():
+    # An unset, blank, padded-false, or misspelled value must not enable the
+    # boot-time `git pull --rebase`. Only an explicit affirmative opts in.
+    for value in ("", "   ", "false ", "flase", "maybe", "enabled"):
         assert not CiaoConfig.from_env(
             {"CIAO_AUTO_SYNC_ON_START": value}
         ).auto_sync_on_start
