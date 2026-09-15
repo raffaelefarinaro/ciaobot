@@ -1351,8 +1351,21 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     # be derived from the vault root on a migrated install.
     from ciao.config import logs_root_for
 
-    logs_root = logs_root_for(key_base, vault_root, key_base / ".runtime")
-    db_path = fts_search.get_db_path()
+    runtime_root = _resolve_runtime_root(getattr(args, "runtime_root", None))
+    logs_root = logs_root_for(key_base, vault_root, runtime_root)
+    # Install-owned, exactly like the MCP tools and startup indexing: with the
+    # legacy global `~/.ciao/vault-fts.db`, a `ciao vault-search` run from a dev
+    # checkout cleared the production install's index (and vice versa) because
+    # the key base differs between installs. An explicit `--runtime-root` or
+    # `CIAO_RUNTIME_ROOT` wins; otherwise the index lives under the install that
+    # owns the vault (`<key_base>/.runtime`), not the shell's cwd.
+    explicit_runtime = bool(
+        getattr(args, "runtime_root", None)
+        or os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+    )
+    if not explicit_runtime:
+        runtime_root = (key_base / ".runtime").resolve()
+    db_path = fts_search.get_db_path(runtime_root)
 
     if args.rebuild and db_path.exists():
         try:
@@ -2335,7 +2348,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
                 workspace, names, vault_name=leaf
             )
             result["search"] = workspace_reroot.rebuild_search_index(
-                workspace, names, vault_name=leaf
+                workspace, names, runtime_root=runtime, vault_name=leaf
             )
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "migrated" else 1
@@ -3564,6 +3577,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    search_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Install runtime root that owns the search database. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime; the index is install-owned "
+            "so two installs cannot clear each other's derived state."
+        ),
     )
     search_parser.set_defaults(func=_vault_search_command)
 
