@@ -50,6 +50,14 @@ T = TypeVar("T")
 # simultaneous scans of the same disk.
 MAX_VAULT_READ_WORKERS = 4
 
+# Most outstanding vault reads (running *and* queued) allowed before a new
+# distinct read waits. `max_workers` bounds running threads only;
+# ``ThreadPoolExecutor``'s queue is unbounded, and because cancellation
+# deliberately leaves a submitted read running, a burst of distinct keys — or
+# disconnected callers — would otherwise pile up full-vault scans without limit.
+# Coalescing shares one slot across callers of the same key.
+MAX_VAULT_READ_BACKLOG = 12
+
 _EXECUTOR_LOCK = threading.Lock()
 _EXECUTOR: "_VaultReadExecutor | None" = None
 
@@ -95,20 +103,73 @@ class _VaultReadExecutor:
     """A bounded executor that coalesces identical in-flight reads by key.
 
     A submitted operation's future is shared by every same-key waiter, but a
-    caller never awaits it directly: :meth:`submit` hands back a fresh,
-    per-caller future bridged to the shared one by a callback. Cancelling a
-    caller therefore tears down only its own future and leaves the shared work —
-    and its other waiters — untouched.
+    caller never awaits it directly: :meth:`bridge` hands back a fresh,
+    per-caller future tied to the shared one by a callback. Cancelling a caller
+    therefore tears down only its own future and leaves the shared work — and
+    its other waiters — untouched.
+
+    ``max_workers`` bounds running threads; ``max_backlog`` bounds *outstanding*
+    work (running plus queued), which ``ThreadPoolExecutor`` does not. Admission
+    is atomic under one lock: a caller either joins an existing same-key read
+    (no new slot), reserves one, or waits for a slot to free. Because
+    cancellation leaves admitted work running, this is what stops a burst of
+    distinct keys — or disconnected callers — from piling up full-vault scans
+    without limit.
     """
 
-    def __init__(self, max_workers: int = MAX_VAULT_READ_WORKERS) -> None:
+    def __init__(
+        self,
+        max_workers: int = MAX_VAULT_READ_WORKERS,
+        max_backlog: int = MAX_VAULT_READ_BACKLOG,
+    ) -> None:
         self.max_workers = max_workers
+        self.max_backlog = max(1, int(max_backlog))
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="ciao-vault-read",
         )
         self._inflight: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
+        self._outstanding = 0
+        # One wakeup event per event loop. Releasing a slot sets every waiter's
+        # event so they re-check capacity; `asyncio.Event.set` before `wait`
+        # still wakes the later `wait`.
+        self._waiters: dict[asyncio.AbstractEventLoop, asyncio.Event] = {}
+
+    # -- admission ------------------------------------------------------
+
+    def acquire(
+        self,
+        key: str,
+        operation: Callable[[], T],
+        *,
+        coalesce: bool,
+    ) -> Future[T] | None:
+        """Join a same-key read or reserve a slot and submit.
+
+        Returns the shared future to await, or ``None`` when the backlog is
+        full — the caller then waits for a slot and retries.
+        """
+        register = False
+        with self._lock:
+            if coalesce:
+                existing = self._inflight.get(key)
+                if existing is not None:
+                    return existing  # type: ignore[return-value]
+            if self._outstanding >= self.max_backlog:
+                return None
+            self._outstanding += 1
+            future = self._executor.submit(operation)
+            if coalesce:
+                self._inflight[key] = future
+            register = True
+        # Registered outside the lock: the callback re-acquires it, and a
+        # worker that finished during `add_done_callback` would otherwise run
+        # `_release` while the lock is held (the same inversion the coalescing
+        # forget callback must avoid).
+        if register:
+            future.add_done_callback(self._make_release(key))
+        return future
 
     def submit(
         self,
@@ -117,24 +178,68 @@ class _VaultReadExecutor:
         *,
         coalesce: bool,
     ) -> Future[T]:
-        if coalesce:
-            created = False
-            with self._lock:
+        """Uncapped synchronous submission that still counts outstanding work.
+
+        Kept for callers that manage admission themselves (and for tests);
+        :func:`run_read` is the capped async entry point. Bypassing the cap is
+        deliberate here — the cap is enforced by :meth:`acquire`, and a caller
+        already holding a slot must be able to start it.
+        """
+        register = False
+        with self._lock:
+            if coalesce:
                 shared = self._inflight.get(key)
                 if shared is None:
                     shared = self._executor.submit(operation)
                     self._inflight[key] = shared
-                    created = True
-            # Registered outside the lock: the callback re-acquires it, and a
-            # worker that finished during `add_done_callback` would otherwise
-            # invoke `_forget_key` while the lock is held (deadlock).
-            if created:
-                shared.add_done_callback(self._make_forget(key))
-            return self._bridge(shared)
+                    self._outstanding += 1
+                    register = True
+            else:
+                shared = self._executor.submit(operation)
+                self._outstanding += 1
+                register = True
+        if register:
+            # Outside the lock, for the same callback/lock inversion `acquire`
+            # documents.
+            shared.add_done_callback(self._make_release(key))
+        bridged: Future[T] = self.bridge(shared)
+        return bridged
 
-        return self._executor.submit(operation)
+    # -- backpressure ---------------------------------------------------
 
-    def _bridge(self, shared: Future[Any]) -> Future[Any]:
+    def _make_release(self, key: str) -> Callable[[Future[Any]], None]:
+        def _release(done: Future[Any]) -> None:
+            with self._lock:
+                if self._inflight.get(key) is done:
+                    del self._inflight[key]
+                self._outstanding = max(0, self._outstanding - 1)
+                waiters = list(self._waiters.items())
+            for loop, event in waiters:
+                try:
+                    loop.call_soon_threadsafe(event.set)
+                except RuntimeError:
+                    # The loop has closed; its waiters are gone.
+                    with self._lock:
+                        self._waiters.pop(loop, None)
+            _observe_failure(done)
+
+        return _release
+
+    async def wait_for_slot(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wait until a slot may be reserved, without blocking the loop."""
+        with self._lock:
+            event = self._waiters.get(loop)
+            if event is None:
+                event = asyncio.Event()
+                self._waiters[loop] = event
+            event.clear()
+            if self._outstanding < self.max_backlog:
+                return
+        await event.wait()
+
+    # -- futures --------------------------------------------------------
+
+    def bridge(self, shared: Future[Any]) -> Future[Any]:
         """A per-caller future that mirrors ``shared`` without sharing its state.
 
         Copying the result out in the done-callback is deliberate: awaiting the
@@ -161,27 +266,19 @@ class _VaultReadExecutor:
             except InvalidStateError:
                 # The caller was cancelled between the check above and this set,
                 # or the destination was already settled. The shared future's
-                # outcome is still observed by `_forget_key`/the executor.
+                # outcome is still observed by the release callback.
                 return
 
         shared.add_done_callback(_propagate)
         return destination
 
-    def _make_forget(self, key: str) -> Callable[[Future[Any]], None]:
-        def _forget(done: Future[Any]) -> None:
-            self._forget_key(key, done)
-
-        return _forget
-
-    def _forget_key(self, key: str, future: Future[Any]) -> None:
-        with self._lock:
-            if self._inflight.get(key) is future:
-                del self._inflight[key]
-        _observe_failure(future)
-
     def inflight_keys(self) -> list[str]:
         with self._lock:
             return list(self._inflight)
+
+    def outstanding(self) -> int:
+        with self._lock:
+            return self._outstanding
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
@@ -222,8 +319,17 @@ async def run_read(
     invocation. Cancelling the returned awaitable detaches this caller; the
     worker keeps running, remains joinable by a later caller, and has its
     completion or error observed by the executor.
+
+    Admission is bounded: when more than ``MAX_VAULT_READ_BACKLOG`` reads are
+    outstanding, a caller waits for a slot here instead of queueing another
+    full-vault scan. Coalescing means same-key callers never consume one.
     """
 
     loop = asyncio.get_running_loop()
-    future = _get_executor().submit(key, operation, coalesce=coalesce)
-    return await asyncio.wrap_future(future, loop=loop)
+    executor = _get_executor()
+    while True:
+        shared = executor.acquire(key, operation, coalesce=coalesce)
+        if shared is not None:
+            break
+        await executor.wait_for_slot(loop)
+    return await asyncio.wrap_future(executor.bridge(shared), loop=loop)

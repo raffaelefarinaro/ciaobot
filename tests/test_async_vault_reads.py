@@ -394,6 +394,92 @@ def test_vault_index_refresh_and_search_share_one_write_lock(
     assert max_active_writers == 1, max_active_writers
 
 
+# -- acceptance: bounded pending queue / backpressure ------------------------
+
+
+def test_uncapped_submissions_cannot_create_an_unbounded_backlog() -> None:
+    """PR #467 review: outstanding work is capped, not just worker width.
+
+    ``ThreadPoolExecutor``'s queue is unbounded and a cancelled caller leaves
+    its read running, so a burst of distinct keys would otherwise pile up
+    full-vault scans. More submissions than the cap must wait for a slot; when
+    the blockers are released all of them still run.
+    """
+    executor = async_reads.vault_read_executor()
+    blockers: list[threading.Event] = []
+    for _ in range(executor.max_workers):
+        event = threading.Event()
+        executor._executor.submit(lambda e=event: e.wait(5))
+        blockers.append(event)
+
+    async def _scenario() -> list[int]:
+        results: list[int] = []
+
+        async def _submit(index: int) -> None:
+            results.append(await run_read(f"backlog-{index}", lambda i=index: i))
+
+        tasks = [
+            asyncio.ensure_future(_submit(i))
+            for i in range(executor.max_backlog + 5)
+        ]
+        # Let every admission attempt run against the saturated pool.
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+        # Outstanding is capped: no more than the backlog, so no unbounded queue.
+        assert executor.outstanding() <= executor.max_backlog
+        # Nothing completed, because all workers are held by the blockers.
+        assert results == []
+
+        for event in blockers:
+            event.set()
+        await asyncio.gather(*tasks)
+        return sorted(results)
+
+    results = asyncio.run(_scenario())
+
+    # Backpressure delayed work, it did not drop it.
+    assert results == list(range(executor.max_backlog + 5))
+
+
+def test_waiter_resumes_without_blocking_the_event_loop() -> None:
+    """A caller waiting for a slot must still let the loop serve other work."""
+    executor = async_reads.vault_read_executor()
+    blockers: list[threading.Event] = []
+    for _ in range(executor.max_workers):
+        event = threading.Event()
+        executor._executor.submit(lambda e=event: e.wait(5))
+        blockers.append(event)
+
+    ticks = 0
+
+    async def _heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    async def _scenario() -> int:
+        heartbeat = asyncio.ensure_future(_heartbeat())
+        tasks = [
+            asyncio.ensure_future(run_read(f"wait-{i}", lambda i=i: i))
+            for i in range(executor.max_backlog + 3)
+        ]
+        await asyncio.sleep(0.1)
+        ticks_while_waiting = ticks
+        for event in blockers:
+            event.set()
+        await asyncio.gather(*tasks)
+        heartbeat.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await heartbeat
+        return ticks_while_waiting
+
+    ticks_while_waiting = asyncio.run(_scenario())
+
+    # The loop kept ticking while callers were parked on the backlog.
+    assert ticks_while_waiting >= 5
+
+
 # -- acceptance: cancellation and recovery ----------------------------------
 
 

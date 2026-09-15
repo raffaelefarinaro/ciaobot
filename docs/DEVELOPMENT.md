@@ -423,7 +423,10 @@ async handler. Use `ciao/async_reads.py`:
 - `await run_read(key, operation)` runs a complete read on a dedicated bounded
   executor (`MAX_VAULT_READ_WORKERS`, default 4) and coalesces identical
   in-flight reads by `key`. `operation` must open and close its own SQLite
-  connection so a connection never crosses threads.
+  connection so a connection never crosses threads. Admission is capped at
+  `MAX_VAULT_READ_BACKLOG` (default 12) outstanding reads; over the cap a caller
+  waits for a slot without blocking the loop. Do not bypass `run_read` for heavy
+  reads, or that backpressure is lost.
 - Keep the operation whole: walk + parse + query for one logical read, not a
   per-file `to_thread` call. `control_plane.vault_search` /
   `vault_index_refresh` and the `vault_backlinks` / `vault_markdown_paths`
@@ -440,7 +443,10 @@ async handler. Use `ciao/async_reads.py`:
   with `keyed_lock(key)`: concurrent `index_vault` passes against one
   `vault-fts.db` race SQLite's single file-level write lock and fail with
   `database is locked`. Take the lock only around the writes; leave the
-  read-only query outside it so reads stay concurrent.
+  read-only query outside it so reads stay concurrent. Every same-database
+  writer must take it — the archive postprocess's `index_file` is dispatched
+  through `run_read` under `keyed_lock(f"fts-index:{db_path}")` too, since its
+  callers are async and the control plane's index passes now run in workers.
 - Call `reset_vault_read_executor()` in test setup/teardown for isolation.
 
 Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,

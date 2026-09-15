@@ -4454,25 +4454,66 @@ class ProjectChatManager:
             finally:
                 self._end_postprocess(chat_id)
 
-        # Index the newly archived file in the FTS5 database
+        # Index the newly archived file in the FTS5 database. The control
+        # plane now runs its own index passes in bounded workers, so this
+        # formerly loop-serialized writer can overlap them. Run it through the
+        # same off-loop executor and the same per-database `keyed_lock`, or a
+        # concurrent scan holds SQLite's write lock past the connection timeout
+        # and this write is skipped with "database is locked".
+        operation = self._make_archive_index_operation(outcome)
         try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            # Synchronous caller (CLI/tests): run inline under the same lock.
+            operation()
+        else:
+            self._spawn_detached(
+                self._index_archive_file_off_loop(chat_id, outcome, operation),
+                name=f"archive-index-{chat_id}",
+            )
+
+    def _make_archive_index_operation(
+        self, outcome: ArchiveOutcome
+    ) -> Callable[[], None]:
+        """A closure that indexes one archived file under the shared write lock."""
+        config = self._config
+
+        def _operation() -> None:
             import sqlite3
-            from ciao.fts_search import get_db_path, init_db, index_file
+
+            from ciao.async_reads import keyed_lock
+            from ciao.fts_search import get_db_path, index_file, init_db
 
             # Install-owned: the same database the MCP tools, the CLI and
             # startup indexing resolve, so an archived chat cannot land in the
             # legacy global `~/.ciao` index that a second install then clears.
             db_path = get_db_path(Path(config.state_path).parent)
             conn = sqlite3.connect(db_path)
-            init_db(conn)
-            index_file(
-                conn,
-                config.vault_root,
-                outcome.path,
-                path_base=Path(config.workspace_root),
-            )
-            conn.close()
-        except Exception:  # noqa: BLE001
+            try:
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_file(
+                        conn,
+                        config.vault_root,
+                        outcome.path,
+                        path_base=Path(config.workspace_root),
+                    )
+            finally:
+                conn.close()
+
+        return _operation
+
+    async def _index_archive_file_off_loop(
+        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
+    ) -> None:
+        """Run the archive index write in a bounded worker, logging failures."""
+        from ciao.async_reads import run_read
+
+        try:
+            await run_read(f"archive-index:{outcome.path}", operation)
+        except Exception:  # noqa: BLE001 — archiving already succeeded
             logger.exception(
                 "FTS search: failed to index archived file %s for chat %s",
                 outcome.path,
