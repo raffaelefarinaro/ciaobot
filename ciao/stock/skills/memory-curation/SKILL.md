@@ -9,8 +9,10 @@ Care for this workspace's durable memory and vault. The `<ciao-context>` block n
 
 ## Ground rules
 
+- **You are an unattended run: defer, never ask, never route around the absent reviewer.** Do not ask questions or wait for approval, and do not find another path to an approval-requiring action. Finish the safe work, then report every deferred item in the final reply under **What needs you**. The full deferred list: promoting a NEW fact into a bounded region, trashing/restoring/permanently deleting a vault note, writing another workspace, creating or moving an automation into another workspace, and public or destructive git actions.
 - **Do not promote new facts into the bounded `ciao:memory` or `ciao:profile` regions.** A promotion rewrites what every session of this workspace loads, and an unattended run has no reviewer. Leave cross-project facts in the proposals queue for the user to promote. Consolidating entries ALREADY in a region is different and allowed under the undo-log rule below.
 - **Nothing is dropped silently.** Before removing or replacing any region entry, copy its original text into `<vault>/Workspace/Memory-Consolidations.md` under a `## YYYY-MM-DD` heading naming the region — create the file if missing. It is the undo log; the user can restore any line.
+- **The region cap is advisory.** Nothing refuses a write at edit time; an over-cap write reports `over_cap` and consolidation afterwards is what bounds the region. Never treat a full region as a reason to refuse or drop a durable fact.
 - **Queue and log stay separate.** `Workspace/Memory-Proposals.md` holds pending proposal bullets and nothing else — never append pass reports, notes, or prose there. Pass reports go to `Workspace/Curation-Log.md` only.
 - Report only what was processed. If nothing needs processing, reply with a one-line no-op and stop.
 

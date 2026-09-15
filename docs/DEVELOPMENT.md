@@ -325,6 +325,17 @@ on one rule: a remembered fact is either **state**, a current value that gets
 replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
 
+The write policy for every path that can touch durable memory — attended
+remember, archive extraction, unattended curation, direct edit, and proposal
+acceptance — is stated once in `ciao/memory_policy.py` and described in
+`docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
+any change here: the region cap is **advisory** on every path (a write goes
+through and reports `over_cap`; consolidation, not refusal, bounds a region),
+and an **unattended run defers** approval-requiring work and reports it instead
+of asking or routing around the missing reviewer. `tests/test_memory_policy.py`
+pins the matrix to the stock assets and the docs, so a copy that contradicts it
+fails the suite.
+
 Three detectors, all model-free, because a model asked to tally a few hundred
 entries returns a confident number and a different one tomorrow:
 
