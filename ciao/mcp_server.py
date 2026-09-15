@@ -29,7 +29,6 @@ from ciao.control_plane import (
     McpPrincipal,
     _UNSET,
 )
-from ciao.schedules import DEFAULT_INTERVAL_MINUTES
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -132,16 +131,14 @@ _DESTRUCTIVE = ToolAnnotations(
 )
 
 
-# Create-time defaults for the merged `schedule` and `loop` tools. Their
-# signatures default every field to None instead, so an "update" can tell a
-# field the caller left out from one the caller set to the create default.
-# Encoding the defaults in the signature made those two cases identical, and
-# update stripped every field equal to a default: daily_time="09:00",
-# frequency="weekly", archive_policy="manual" and every ""-clear vanished, so
-# "move the daily report to 09:00" called schedule_update with an empty payload
-# and still returned ok. The same comparison left loop's start=False in the
-# payload (False != True), where loop_update rejected it as
-# `invalid_fields: start`.
+# Create-time defaults for the `schedule` tool. Its signature defaults every
+# field to None instead, so an "update" can tell a field the caller left out
+# from one the caller set to the create default. Encoding the defaults in the
+# signature made those two cases identical, and update stripped every field
+# equal to a default: daily_time="09:00", frequency="weekly",
+# archive_policy="manual" and every ""-clear vanished, so "move the daily
+# report to 09:00" called schedule_update with an empty payload and still
+# returned ok.
 _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "prompt": "",
     "daily_time": "09:00",
@@ -153,16 +150,6 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "model": "",
     "archive_policy": "manual",
     "workspace": "",
-}
-# Retained for the deprecated `loop` tool; the merged `schedule` tool takes
-# interval_minutes through _SCHEDULE_CREATE_DEFAULTS-less None handling.
-_LOOP_CREATE_DEFAULTS: dict[str, Any] = {
-    "prompt": "",
-    "chat_id": "",
-    "interval_minutes": DEFAULT_INTERVAL_MINUTES,
-    "title": "",
-    "autostart": False,
-    "start": True,
 }
 
 
@@ -284,7 +271,7 @@ class CiaoMcpService:
             "ciaobot",
             instructions=(
                 "Use these tools for Ciaobot memory, vault, projects, chats, "
-                "schedules, loops, files, and application state. Prefer them "
+                "schedules, files, and application state. Prefer them "
                 "over curl, the ciao CLI, or direct .runtime edits. All paths "
                 "are relative to the active workspace or vault."
             ),
@@ -1592,158 +1579,6 @@ class CiaoMcpService:
                     "invalid_action", "action must be pause, resume, run, or delete."
                 )
             return await self._invoke("schedule_action", op, mutating=True)
-
-        @tool(name="loops_list", annotations=_READ, structured_output=True)
-        async def loops_list() -> dict[str, Any]:
-            """DEPRECATED — use `schedules_list` and read the interval entries.
-
-            Loops became the `interval` cadence of a schedule. This lists the
-            interval schedules bound to a chat in the active workspace, in the
-            retired loop shape, and will be removed.
-            """
-            return await self._invoke("loops_list", lambda cp, p: cp.loops_list(p))
-
-        @tool(name="loop", annotations=_WRITE, structured_output=True)
-        async def loop(
-            action: str,
-            prompt: str | None = None,
-            chat_id: str | None = None,
-            interval_minutes: int | None = None,
-            title: str | None = None,
-            autostart: bool | None = None,
-            start: bool | None = None,
-            loop_id: str = "",
-        ) -> dict[str, Any]:
-            """DEPRECATED — call `schedule` with frequency="interval" instead.
-
-            Loops became one cadence of the schedule primitive. Prefer:
-            `schedule(action="create", frequency="interval",
-            interval_minutes=N, chat_id=..., prompt=...)`, which does the same
-            thing, reports the same fields as every other automation, and can
-            also open a fresh chat per run (pass project_id instead of
-            chat_id). This tool remains for one release and will be removed.
-
-            It creates or updates an interval schedule bound to one chat: the
-            prompt is re-sent into that chat every N minutes, retaining its
-            context and running with that chat's own model and mode.
-
-            action:
-                "create" — create an interval entry and (by default) start it.
-                "update" — update an existing entry. Pass loop_id to target it;
-                    all other fields are optional overrides.
-
-            Args (create):
-                chat_id: An existing chat id, or omit / pass empty / "this" for
-                    the calling chat. If you must target another chat, resolve
-                    its id via chats_list first — chat titles aren't unique.
-                prompt: Give a short, fixed no-change response for a no-op
-                    run, so repeated runs stay cheap and scannable.
-                interval_minutes: Whole minutes, minimum 1, default 10. There
-                    is no model field — each run uses the target chat's current
-                    model and mode.
-                autostart, start: These collapsed into one enabled flag when
-                    loops merged into schedules. Either being true means "run
-                    it"; only both false leaves it stopped. The returned
-                    payload carries the real `running` flag — report that, not
-                    your intent.
-
-            Args (update): loop_id is required; every other field is unset by
-                default and only a field you pass is changed. `start` is
-                honoured here too: True starts the cadence, False stops it
-                (same as loop_action), and the returned payload carries the
-                resulting `running` flag.
-
-            If the target chat is busy when a run comes due, that run is
-            skipped and retried on the next tick (not queued). If the target
-            chat is gone, the run continues in a replacement chat in the same
-            project, or the entry is disabled when no project resolves either.
-            Interval entries do not catch up runs missed during downtime
-            (unlike wall-clock schedules, which fire once for a missed
-            occurrence on startup).
-            """
-            # Snapshot the arguments before any other local exists, so no helper
-            # local can leak into the control-plane payload.
-            supplied: dict[str, Any] = {
-                key: value for key, value in locals().items()
-                if key not in {"self", "action", "loop_id"}
-            }
-            if action == "create":
-                values: dict[str, Any] = {
-                    key: _LOOP_CREATE_DEFAULTS.get(key, value) if value is None else value
-                    for key, value in supplied.items()
-                }
-                return await self._invoke(
-                    "loop",
-                    lambda cp, p: cp.loop_create(p, **values),
-                    mutating=True,
-                )
-            if action == "update":
-                if not loop_id:
-                    raise ControlPlaneError("invalid_action", "loop_id is required for update.")
-                # Only the fields the caller passed, keyed off None rather than
-                # off equality with the create defaults: that comparison dropped
-                # interval_minutes=10 and every ""-clear (reporting ok while
-                # changing nothing) and, because False != True, forwarded
-                # start=False to loop_update, which rejected it as
-                # `invalid_fields: start`.
-                values = {
-                    key: value for key, value in supplied.items()
-                    if key != "start" and value is not None
-                }
-                if not values and start is None:
-                    raise ControlPlaneError(
-                        "invalid_action",
-                        "update needs at least one field to change besides loop_id.",
-                    )
-                # loop_create refuses an empty prompt; loop_update does not, and
-                # a loop with a blank prompt keeps ticking on nothing.
-                if values.get("prompt") == "":
-                    raise ControlPlaneError(
-                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
-                    )
-
-                def _update(cp: CiaoControlPlane, principal: McpPrincipal) -> dict[str, Any]:
-                    result: dict[str, Any] = cp.loop_update(principal, loop_id, **values)
-                    if start is None:
-                        return result
-                    # `start` is a runtime cadence flag, not a stored loop field,
-                    # so it has to go through the lifecycle calls instead of the
-                    # update payload.
-                    if start:
-                        cp.loop_start(principal, loop_id)
-                    else:
-                        cp.loop_stop(principal, loop_id)
-                    return {"ok": True, "data": {**result.get("data", {}), "running": bool(start)}}
-
-                return await self._invoke("loop", _update, mutating=True)
-            raise ControlPlaneError("invalid_action", "action must be create or update.")
-
-        @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
-        async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
-            """DEPRECATED — use `schedule_action` on the interval schedule.
-
-            Loops became interval schedules, and their ids are schedule ids:
-            `schedule_action(schedule_id=..., action="pause"|"resume"|"run"
-            |"delete")` is the replacement. This tool remains for one release.
-
-            action:
-                "start"  — start the cadence (same as schedule_action resume).
-                "stop"   — stop it without deleting (same as pause).
-                "run"    — run once immediately.
-                "delete" — delete the entry (destructive).
-            """
-            dispatch = {
-                "start": lambda cp, p: cp.loop_start(p, loop_id),
-                "stop": lambda cp, p: cp.loop_stop(p, loop_id),
-                "run": lambda cp, p: cp.loop_run(p, loop_id),
-                "delete": lambda cp, p: cp.loop_delete(p, loop_id),
-            }
-            op = dispatch.get(action)
-            if op is None:
-                raise ControlPlaneError(
-                    "invalid_action", "action must be start, stop, run, or delete."
-                )
-            return await self._invoke("loop_action", op, mutating=True)
 
         # Workspace file read/write use the provider's native filesystem tools.
         @tool(name="file_surface", annotations=_READ, structured_output=True)

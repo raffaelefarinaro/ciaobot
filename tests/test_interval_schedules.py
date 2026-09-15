@@ -586,6 +586,63 @@ def test_migrate_loops_no_file_is_a_no_op(tmp_path: Path) -> None:
     assert migrate_loops(tmp_path) == 0
 
 
+def test_publish_automations_changed_only_emits_schedules_changed() -> None:
+    """The deprecated `loops_changed` alias was retired (#441).
+
+    A cached PWA that still listened for it only ever needed it alongside
+    `schedules_changed`; keeping the extra frame would leave a second event
+    every consumer must ignore.
+    """
+    from ciao.schedules import publish_automations_changed
+
+    published: list[dict] = []
+    pcm = type(
+        "P", (), {"events": type("E", (), {"publish": lambda _self, event: published.append(event)})()}
+    )()
+
+    publish_automations_changed(pcm)
+
+    assert published == [{"type": "schedules_changed"}]
+
+
+def test_migrate_loops_logs_one_retirement_line_for_a_nonempty_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Retiring loops.json is a one-time event and must leave a trace.
+
+    The rename is what makes it one-time, so the import path logs exactly one
+    INFO line either way — including when no entry was importable, since the
+    file is gone afterwards and a silent disappearance is hard to diagnose.
+    """
+    _write_loops(tmp_path, [{"loop_id": "loop-a", "prompt": "p", "web_chat_id": ""}])
+
+    with caplog.at_level("INFO", logger="ciao.schedules"):
+        assert migrate_loops(tmp_path) == 0
+    assert (tmp_path / "loops.json.migrated").exists()
+
+    infos = [r.message for r in caplog.records if r.levelname == "INFO"]
+    assert any("Retired" in message and "loops.json" in message for message in infos)
+
+    # A second boot has no file to retire, so it logs nothing new.
+    caplog.clear()
+    with caplog.at_level("INFO", logger="ciao.schedules"):
+        assert migrate_loops(tmp_path) == 0
+    assert not [r for r in caplog.records if r.levelname == "INFO"]
+
+
+def test_migrate_loops_logs_the_import_when_it_carries_entries(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_loops(tmp_path, [
+        {"loop_id": "loop-a", "prompt": "p", "web_chat_id": "c"},
+    ])
+    with caplog.at_level("INFO", logger="ciao.schedules"):
+        assert migrate_loops(tmp_path) == 1
+
+    infos = [r.message for r in caplog.records if r.levelname == "INFO"]
+    assert any("Imported 1 loop(s)" in message for message in infos)
+
+
 def test_migrated_loop_rehomes_into_its_own_project_not_general(tmp_path: Path) -> None:
     """A migrated loop whose chat is deleted must resume where it lived.
 
@@ -651,10 +708,10 @@ def test_backfill_stamps_the_rehome_fallback_on_pre_existing_entries(
 ) -> None:
     """Entries written before the stamp existed are only repairable now.
 
-    The MCP `schedule`/`loop` creators recorded no fallback at all, so a
-    chat-bound entry created that way re-homes into the workspace's General
-    once its chat is deleted — and by then the chat's project is unknowable.
-    The startup backfill closes that window while the chat is still there.
+    The MCP `schedule` creator recorded no fallback at all, so a chat-bound
+    entry created that way re-homes into the workspace's General once its chat
+    is deleted — and by then the chat's project is unknowable. The startup
+    backfill closes that window while the chat is still there.
     """
     store = ScheduleStore(tmp_path)
     bound = store.create(
