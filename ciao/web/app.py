@@ -117,7 +117,6 @@ from ciao.web.routes_api import (
     list_housekeeping,
     run_housekeeping_action,
     dismiss_housekeeping_action,
-    list_loops,
     list_schedules,
     list_workspaces,
     project_chats,
@@ -134,9 +133,6 @@ from ciao.web.routes_api import (
     proposals_history,
     run_schedule_now,
     schedule_detail,
-    create_loop,
-    loop_detail,
-    run_loop_now,
     startup_status_endpoint,
     active_chats_endpoint,
     menubar_chats_endpoint,
@@ -299,12 +295,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        # Loops — retired; interval schedules now cover them. Kept for one
-        # release so a PWA build cached before the merge keeps working.
-        Route("/api/loops", list_loops, methods=["GET"]),
-        Route("/api/loops", create_loop, methods=["POST"]),
-        Route("/api/loop-run/{loop_id}", run_loop_now, methods=["POST"]),
-        Route("/api/loops/{loop_id}", loop_detail, methods=["PATCH", "DELETE"]),
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
         Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),

@@ -180,9 +180,9 @@ def normalize_auto_archive(entry: "ScheduleEntry") -> bool:
 
     The dispatcher already refuses to archive these, so storing ``auto`` only
     produced a setting the UI displayed and honoured nowhere. Normalising at the
-    store means every write path — REST, MCP, both legacy loop routes, and a
-    retarget that turns a project entry into a fixed-chat one — lands on the
-    same answer, rather than each remembering to check.
+    store means every write path — REST, MCP, and a retarget that turns a
+    project entry into a fixed-chat one — lands on the same answer, rather than
+    each remembering to check.
     """
     if supports_auto_archive(entry) or getattr(entry, "archive_policy", "") != "auto":
         return False
@@ -194,11 +194,10 @@ def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
     """Keep ``fallback_project_id`` in step with ``web_chat_id``.
 
     Every path that binds or rebinds an automation's chat calls this — REST
-    create/update, the ``schedule`` MCP create/update, and both legacy loop
-    routes. The field records where a *fixed-chat* entry re-homes once its
-    target chat is deleted, so it can only be captured while that chat still
-    exists; ``resolve_automation_project`` cannot derive it later, by which
-    point the chat is gone.
+    create/update and the ``schedule`` MCP create/update. The field records
+    where a *fixed-chat* entry re-homes once its target chat is deleted, so it
+    can only be captured while that chat still exists; ``resolve_automation_project``
+    cannot derive it later, by which point the chat is gone.
 
     This exists because stamping it per call site did not hold: each creator
     was fixed separately and the next one shipped without it, and no update
@@ -242,10 +241,7 @@ def publish_automations_changed(pcm) -> None:
 
     Schedules are read over REST when a chat or the Automations page mounts, so
     without this an entry created in another tab (or by the model mid-turn)
-    stays invisible until a reload. ``loops_changed`` is emitted alongside the
-    new event name because a PWA build cached before loops were folded into
-    schedules only listens for that one, and its ``/api/loops`` refetch still
-    resolves through the compatibility route.
+    stays invisible until a reload.
 
     Fire-and-forget: the events hub has no replay buffer, a missed frame heals
     on the next mount, and a fan-out failure must never fail the operation that
@@ -254,11 +250,11 @@ def publish_automations_changed(pcm) -> None:
     events = getattr(pcm, "events", None)
     if events is None:
         return
-    for event in ({"type": "schedules_changed"}, {"type": "loops_changed"}):
-        try:
-            events.publish(event)
-        except Exception:  # noqa: BLE001 — never fail an operation on fan-out
-            logger.exception("%s publish failed", event["type"])
+    event = {"type": "schedules_changed"}
+    try:
+        events.publish(event)
+    except Exception:  # noqa: BLE001 — never fail an operation on fan-out
+        logger.exception("%s publish failed", event["type"])
 
 
 def migrate_loops(runtime_root: Path) -> int:
@@ -351,8 +347,20 @@ def migrate_loops(runtime_root: Path) -> int:
             "on the next boot because its ids now exist as schedules",
             imported, source,
         )
+        return imported
+    # One line either way: the legacy file is retired now, and the rename above
+    # is what makes this a one-time event. An import that carried nothing over
+    # still leaves the file gone, which is worth a line rather than a silent
+    # disappearance.
     if imported:
-        logger.info("Imported %d loop(s) as interval schedules", imported)
+        logger.info(
+            "Imported %d loop(s) as interval schedules and retired %s",
+            imported, source.name,
+        )
+    else:
+        logger.info(
+            "Retired %s with no importable loop entries", source.name
+        )
     return imported
 
 
@@ -1264,8 +1272,8 @@ class ScheduleManager:
         only be read off the bound chat while that chat still exists, and the
         entries this repairs are exactly the ones whose chat has not been
         deleted yet. Without it, every chat-bound schedule written before
-        ``stamp_fallback_project`` existed — the MCP `schedule`/`loop` creators
-        stamped nothing at all — keeps an empty fallback until someone happens
+        ``stamp_fallback_project`` existed — the MCP `schedule` creator stamped
+        nothing at all — keeps an empty fallback until someone happens
         to edit it, and deleting its chat first re-homes the unattended run
         into the workspace's General instead of the project it lived in.
 

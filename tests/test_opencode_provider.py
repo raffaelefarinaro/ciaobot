@@ -2025,7 +2025,7 @@ def test_destructive_control_plane_tools_still_prompt():
     assert actions["*"] == "allow"
     for destructive in (
         "chat_delete", "project_action", "chat_stop",
-        "schedule_action", "loop_action",
+        "schedule_action",
         "background_run_start", "background_run_cancel",
     ):
         assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive

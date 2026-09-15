@@ -148,7 +148,6 @@ skill surface (admin or redundant with native tools).
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
-| Loops (deprecated) | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
 | Workspace files | `file_surface` |
 
 **Sub-day recurrence** is `schedule` with `frequency="interval"` and
@@ -156,13 +155,13 @@ skill surface (admin or redundant with native tools).
 inherits that chat's model and mode; combined with `project_id` it opens a
 fresh chat per run.
 
-The `loops_list` / `loop` / `loop_action` tools are **deprecated** and translate
-onto interval schedules for one release. Loops were a separate primitive with
-two runtime flags — `start` (tick now) and `autostart` (come back after a
-restart) — which were routinely conflated: a loop created with
-`autostart=true` reported as running while the PWA banner correctly said
-`stopped`. The merged primitive has one `enabled` flag, and both legacy fields
-report it.
+The retired `loops_list` / `loop` / `loop_action` tools were removed. Loops were
+a separate primitive with two runtime flags — `start` (tick now) and
+`autostart` (come back after a restart) — which were routinely conflated: a loop
+created with `autostart=true` reported as running while the PWA banner correctly
+said `stopped`. The merged primitive has one `enabled` flag, and a legacy
+`.runtime/loops.json` is imported once on startup as interval schedules (see
+`ciao/schedules.py::migrate_loops`).
 
 **Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
 SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
@@ -171,7 +170,7 @@ app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_action`, `chat_delete`, `chat_stop`,
 `background_run_start`, `background_run_cancel`, `schedule_action`,
-`loop_action`, `vault_review`) are deliberately excluded and
+`vault_review`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

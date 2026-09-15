@@ -198,7 +198,6 @@ _DESTRUCTIVE_MCP_TOOLS = (
     "project_action",
     "chat_stop",
     "schedule_action",
-    "loop_action",
     "background_run_start",
     "background_run_cancel",
 )

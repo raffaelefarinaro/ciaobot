@@ -27,8 +27,6 @@ class _FakeControlPlane:
         self.schedule_values = None
         self.schedule_create_values: dict | None = None
         self.schedule_updates: list[tuple[str, dict]] = []
-        self.loop_updates: list[tuple[str, dict]] = []
-        self.loop_lifecycle: list[tuple[str, str]] = []
 
     def chat_mode(self, _principal) -> str:
         return self.mode
@@ -57,18 +55,6 @@ class _FakeControlPlane:
     def schedule_update(self, _principal, schedule_id, **changes) -> dict:
         self.schedule_updates.append((schedule_id, changes))
         return {"ok": True, "data": {"schedule_id": schedule_id, **changes}}
-
-    def loop_update(self, _principal, loop_id, **changes) -> dict:
-        self.loop_updates.append((loop_id, changes))
-        return {"ok": True, "data": {"loop_id": loop_id, **changes}}
-
-    def loop_start(self, _principal, loop_id) -> dict:
-        self.loop_lifecycle.append(("start", loop_id))
-        return {"ok": True, "data": {"loop_id": loop_id}}
-
-    def loop_stop(self, _principal, loop_id) -> dict:
-        self.loop_lifecycle.append(("stop", loop_id))
-        return {"ok": True, "data": {"loop_id": loop_id, "running": False}}
 
 
 def _service(tmp_path: Path, *, mode: str = "auto") -> tuple[CiaoMcpService, _FakeControlPlane]:
@@ -277,10 +263,12 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
         "chat_create",
         "schedule",
         "schedule_action",
-        "loop",
-        "loop_action",
         "chat_handover",
     } <= names
+
+    # The retired loop tools are gone for good; interval cadence lives on the
+    # unified `schedule` tool.
+    assert not ({"loops_list", "loop", "loop_action"} & names)
 
     # Tools migrated to the ciao CLI, PWA, or the provider's native tools are gone.
     assert not (
@@ -293,7 +281,7 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "capabilities_get",
             "chat_new_session",
             "chat_retry_update",
-            # Folded into `schedule` / `loop` / `project` / `project_action`.
+            # Folded into `schedule` / `project` / `project_action`.
             "schedule_preview",
             "schedule_create",
             "schedule_update",
@@ -481,59 +469,18 @@ def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -
 
 def test_update_refuses_to_clear_a_prompt(tmp_path: Path) -> None:
     """"" now reaches the control plane (that is how a title/provider/model is
-    cleared), but neither schedule_update nor loop_update rejects a blank
-    prompt — an automation with no prompt would keep firing on nothing."""
-    # One service per call: the streamable-HTTP session manager refuses a
-    # second lifespan.
-    schedule_service, schedule_plane = _service(tmp_path / "schedule")
-    loop_service, loop_plane = _service(tmp_path / "loop")
+    cleared), but schedule_update rejects a blank prompt — an automation with no
+    prompt would keep firing on nothing."""
+    service, control_plane = _service(tmp_path)
 
-    schedule_result = _call(
-        schedule_service,
+    result = _call(
+        service,
         "schedule",
         {"action": "update", "schedule_id": "sched-1", "prompt": ""},
     )
-    loop_result = _call(
-        loop_service, "loop", {"action": "update", "loop_id": "loop-1", "prompt": ""}
-    )
 
-    assert schedule_result["isError"] is True
-    assert loop_result["isError"] is True
-    assert schedule_plane.schedule_updates == []
-    assert loop_plane.loop_updates == []
-
-
-def test_loop_update_forwards_the_create_default_interval(tmp_path: Path) -> None:
-    """interval_minutes=10 equals the create default, so it was dropped and the
-    loop kept its old cadence while the call reported ok."""
-    service, control_plane = _service(tmp_path)
-
-    result = _call(
-        service,
-        "loop",
-        {"action": "update", "loop_id": "loop-1", "interval_minutes": 10},
-    )
-
-    assert result["structuredContent"]["ok"] is True
-    assert control_plane.loop_updates == [("loop-1", {"interval_minutes": 10})]
-
-
-def test_loop_update_applies_start_false_through_the_lifecycle(tmp_path: Path) -> None:
-    """`start` is a runtime flag, not a stored field: forwarding it to
-    loop_update failed with `invalid_fields: start`, so an update that also
-    stopped the loop errored out entirely."""
-    service, control_plane = _service(tmp_path)
-
-    result = _call(
-        service,
-        "loop",
-        {"action": "update", "loop_id": "loop-1", "title": "watch", "start": False},
-    )
-
-    assert result["structuredContent"]["ok"] is True
-    assert control_plane.loop_updates == [("loop-1", {"title": "watch"})]
-    assert control_plane.loop_lifecycle == [("stop", "loop-1")]
-    assert result["structuredContent"]["data"]["running"] is False
+    assert result["isError"] is True
+    assert control_plane.schedule_updates == []
 
 
 class _LifecyclePcm:
@@ -835,34 +782,6 @@ def test_schedule_update_rejects_chat_binding(tmp_path: Path) -> None:
     assert excinfo.value.code == "chat_binding_unsupported"
     stored = schedules.list_entries()[0]
     assert stored.web_chat_id is None
-
-
-def test_mcp_loop_create_and_retarget_keep_the_rehome_fallback_in_step(
-    tmp_path: Path,
-) -> None:
-    """Retargeting must move the fallback, not leave it on the old project."""
-    pcm = _work_project_pcm()
-    chats = {
-        "chat-a": SimpleNamespace(chat_id="chat-a", project_id="project-work"),
-        "chat-b": SimpleNamespace(
-            chat_id="chat-b", project_id="project-work-general"
-        ),
-    }
-    pcm.get_chat = lambda cid: chats.get(cid)  # type: ignore[method-assign]
-    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
-    principal = _chat_create_principal(project_id="project-work", workspace="work")
-
-    created = control_plane.loop_create(
-        principal, chat_id="chat-a", prompt="watch the queue", interval_minutes=15
-    )
-    loop_id = created["data"]["loop_id"]
-    assert schedules._store.get(loop_id).fallback_project_id == "project-work"
-
-    control_plane.loop_update(principal, loop_id, chat_id="chat-b")
-
-    assert schedules._store.get(loop_id).fallback_project_id == (
-        "project-work-general"
-    )
 
 
 # ── workspace boundary for schedule targeting ────────────────────────────
@@ -1173,34 +1092,6 @@ def test_unknown_frequency_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ControlPlaneError) as excinfo:
         control_plane.schedule_create(principal, prompt="p", frequency="hourly")
     assert excinfo.value.code == "invalid_frequency"
-
-
-def test_deprecated_loop_create_makes_an_interval_schedule(tmp_path: Path) -> None:
-    """The retired `loop` tool stays wired for one release."""
-    control_plane, principal = _interval_control_plane(tmp_path)
-
-    result = control_plane.loop_create(principal, "", "Check PRs", interval_minutes=15)
-
-    data = result["data"]
-    assert data["web_chat_id"] == "chat-work"
-    assert data["workspace"] == "work"
-    assert data["interval_minutes"] == 15
-    # start defaults to True, and `autostart` reports the same one flag.
-    assert data["running"] is True and data["autostart"] is True
-
-    # The same entry is a first-class schedule.
-    listed = control_plane.schedules_list(principal)["data"]
-    assert [row["schedule_id"] for row in listed] == [data["loop_id"]]
-    assert listed[0]["frequency"] == "interval"
-
-
-def test_deprecated_loop_create_without_start_stays_stopped(tmp_path: Path) -> None:
-    control_plane, principal = _interval_control_plane(tmp_path)
-
-    result = control_plane.loop_create(
-        principal, "", "Check PRs", autostart=False, start=False
-    )
-    assert result["data"]["running"] is False
 
 
 @pytest.mark.asyncio

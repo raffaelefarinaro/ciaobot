@@ -64,13 +64,14 @@ def harness_skill_overrides() -> dict[str, str]:
 # the right default; for Ciaobot's own control plane it isn't. Each tool below
 # is the programmatic twin of a button in the PWA, is bearer-token scoped to
 # this instance, and lands in a UI where its effect is visible and reversible.
-# Prompting "Approve use of mcp__ciaobot__loop_create?" one line after the user
-# asked for a loop is friction with no safety value, so these names are handed
-# to ``ClaudeAgentOptions.allowed_tools`` and never reach the PermissionGate.
+# Prompting "Approve use of mcp__ciaobot__schedule?" one line after the user
+# asked for an automation is friction with no safety value, so these names are
+# handed to ``ClaudeAgentOptions.allowed_tools`` and never reach the
+# PermissionGate.
 #
 # The cut is the ``_DESTRUCTIVE`` annotation in ``ciao/mcp_server.py``: deletes
 # and lifecycle actions (``chat_delete``, ``project_delete``, ``chat_stop``,
-# ``schedule_action``, ``loop_action``, ``project_complete``), plus
+# ``schedule_action``, ``project_complete``), plus
 # ``background_run_start`` / ``background_run_cancel``, which execute and kill
 # real commands, are deliberately absent and still raise a card.
 # ``tests/test_mcp_server.py``
@@ -106,10 +107,6 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "background_run_status",
     "schedules_list",
     "schedule",
-    # Deprecated aliases onto interval schedules; still auto-approved while
-    # they exist so a model reaching for the old name is not a friction wall.
-    "loops_list",
-    "loop",
     "file_surface",
 )
 
