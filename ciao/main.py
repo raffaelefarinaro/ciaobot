@@ -452,6 +452,24 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("refresh_vault_index", "index refresh failed")
             logger.exception("Vault index refresh failed")
 
+    # Reconcile any memory receipt interrupted between its prepared row and its
+    # terminal state. Runs after the re-rooting so the journals it reads are the
+    # ones beside each workspace's vault, and before the server binds so no chat
+    # can resolve a queue while its earlier operation is still ambiguous.
+    tracker.start("recover_memory_receipts")
+    try:
+        from ciao.memory_receipts import recover_memory_journals
+
+        recovery = await asyncio.to_thread(recover_memory_journals, config)
+        tracker.done(
+            "recover_memory_receipts",
+            f"{len(recovery.get('reconciled') or [])} reconciled, "
+            f"{len(recovery.get('conflicts') or [])} conflict(s)",
+        )
+    except Exception:
+        tracker.fail("recover_memory_receipts", "receipt recovery failed")
+        logger.exception("Memory receipt recovery failed")
+
     # The PWA ships pre-built in the installed package; workspaces never
     # contain app source, so there is no frontend rebuild at startup.
 

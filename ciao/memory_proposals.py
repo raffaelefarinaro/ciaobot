@@ -352,14 +352,33 @@ def _promote_to_region(
     *,
     vault_root: Path | None = None,
     decision: dict[str, Any] | None = None,
+    actor: str = "agent",
+    source: str = "archive",
+    workspace: str = "",
 ) -> tuple[str, str | None]:
     """Write one region-bound proposal.
 
     Returns ``(outcome, promotable_or_None)`` where outcome is ``"written"``,
     ``"duplicate"`` (already remembered — dropped from both applied and
-    remaining), ``"failed"`` (the write itself failed; stays queued), or
-    ``"unshaped"`` (not state-shaped text; stays queued for the curator to
-    rephrase).
+    remaining), ``"conflict"`` (the destination changed under a concurrent
+    writer; nothing was written and the fact stays queued), ``"failed"`` (the
+    write itself failed, including a lock that could not be taken; stays
+    queued), or ``"unshaped"`` (not state-shaped text; stays queued for the
+    curator to rephrase).
+
+    Fail-safe by construction: the guide lock is *required*, not best-effort.
+    An earlier version caught a lock failure and proceeded with ``lock=None``,
+    which reintroduced exactly the lost-update race the lock exists to prevent
+    — two concurrent accepts both read, both append to their own snapshot, and
+    the second write silently drops the first fact while its row is dismissed
+    as promoted. A lock that cannot be taken now returns ``"failed"`` with zero
+    guide writes and the fact left pending.
+
+    Every write goes through :func:`ciao.memory_receipts.commit_region_change`,
+    which records a stable-id receipt (actor/source, expected revision,
+    before/after images, prepared/applied status) and re-checks the revision
+    under the lock before replacing the file, so an external direct edit is
+    reported as a conflict rather than overwritten.
 
     ``decision`` is this fact's row from :func:`plan_region_reconcile`, when
     the caller ran one: ``{"action": "covered"}`` drops the fact as already
@@ -368,12 +387,19 @@ def _promote_to_region(
     the consolidations undo log first — and ``{"action": "add"}`` or ``None``
     is the plain append path.
     """
+    from ciao.memory_receipts import (
+        RevisionConflict,
+        commit_region_change,
+        content_revision,
+    )
     from ciao.memory_tool import (
-        _guide_lock,
+        MemoryLockError,
         ensure_regions,
+        guide_lock,
         read_region,
+        release_guide_lock,
         resolve_region,
-        write_region,
+        serialize_entries,
     )
 
     promotable = _promotable_text(proposal.text)
@@ -382,15 +408,15 @@ def _promote_to_region(
     from ciao.memory_audit import strip_learned_stamp
 
     # The whole read-merge-write, under the same lock `update_region` takes.
-    # Without it two concurrent accepts — or an accept racing an MCP
-    # /remember — both read the region, both append to their own snapshot, and
-    # the second write drops the first fact while its row is dismissed as
-    # promoted.
-    lock = None
+    # A lock we cannot take is a hard, retryable failure: never fall through to
+    # an unlocked write.
     try:
-        lock = _guide_lock(guide_path)
-    except Exception:  # noqa: BLE001 — a lock we cannot take must not block a write
-        lock = None
+        lock = guide_lock(guide_path)
+    except MemoryLockError as exc:
+        logger.info(
+            "memory apply: guide lock unavailable, fact stays queued (%s)", exc
+        )
+        return "failed", promotable
     try:
         ensure_regions(guide_path)
         region = resolve_region(proposal.target)
@@ -401,6 +427,11 @@ def _promote_to_region(
                 "; ".join(d.message for d in diags),
             )
             return "failed", promotable
+        # Pin the exact body this merge was computed against. `commit_region_change`
+        # re-reads under its lock and refuses on any drift, so a competing
+        # managed write that landed between this read and the commit is a
+        # conflict — the fact stays queued — instead of being overwritten.
+        expected_revision = content_revision(serialize_entries(entries))
         # Compared with stamps stripped: the same fact promoted on two
         # different days is still the same fact.
         if promotable in {strip_learned_stamp(entry) for entry in entries}:
@@ -474,7 +505,21 @@ def _promote_to_region(
                     f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
                 )
                 _log_consolidation(vault_root, region, old)
-                write_region(guide_path, region, updated)
+                commit_region_change(
+                    guide_path,
+                    region,
+                    entries=updated,
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    lock=lock,
+                    expected_revision=expected_revision,
+                    fact_text=promotable,
+                    destination=f"ciao:{region}",
+                    removed_texts=[old],
+                    kind="region_update",
+                )
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
                     index,
@@ -488,17 +533,33 @@ def _promote_to_region(
         # region — read by the aging audit so unverified old facts surface
         # for re-verification instead of asserting themselves forever.
         stamped = f"{promotable} [{date.today().isoformat()}]"
-        write_region(guide_path, region, entries + [stamped])
+        commit_region_change(
+            guide_path,
+            region,
+            entries=entries + [stamped],
+            actor=actor,
+            source=source,
+            workspace=workspace,
+            vault_root=vault_root,
+            lock=lock,
+            expected_revision=expected_revision,
+            fact_text=promotable,
+            destination=f"ciao:{region}",
+            kind="region_apply",
+        )
         return "written", promotable
+    except RevisionConflict as exc:
+        logger.info("memory apply: destination changed, fact stays queued (%s)", exc)
+        return "conflict", promotable
+    except MemoryLockError as exc:
+        logger.info("memory apply: lost the guide lock, fact stays queued (%s)", exc)
+        return "failed", promotable
     except Exception as exc:  # noqa: BLE001 — one bad write must not stop a batch
         logger.info("memory apply: falling back to proposals (%s)", exc)
         return "failed", promotable
     finally:
-        if lock is not None:
-            try:
-                lock.close()
-            except Exception:  # noqa: BLE001
-                pass
+        release_guide_lock(lock)
+
 
 
 def accept_region_fact(
@@ -508,6 +569,9 @@ def accept_region_fact(
     text: str,
     vault_root: Path | None,
     decision: dict[str, Any] | None = None,
+    actor: str = "operator",
+    source: str = "pwa",
+    workspace: str = "",
 ) -> tuple[str, str | None]:
     """Write one approved region fact through the guarded path.
 
@@ -532,6 +596,9 @@ def accept_region_fact(
         guide_path,
         vault_root=vault_root,
         decision=decision,
+        actor=actor,
+        source=source,
+        workspace=workspace,
     )
 
 
@@ -692,6 +759,9 @@ def apply_proposals(
     vault_root: Path | None = None,
     region_decisions: dict[str, dict[str, Any]] | None = None,
     learning_source: str = "",
+    actor: str = "auto",
+    source: str = "archive",
+    workspace: str = "",
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Write every confidently-addressed proposal to its destination.
 
@@ -706,6 +776,9 @@ def apply_proposals(
     ``region_decisions`` maps :func:`_decision_key` (region + promotable fact
     text) to its reconcile decision (see :func:`plan_region_reconcile`);
     absent or None, every region write is the plain append path.
+
+    ``actor``/``source``/``workspace`` are stamped into the region write's
+    receipt so the review History can say who changed memory and from where.
     """
     from ciao.memory_tool import resolve_region
 
@@ -748,6 +821,9 @@ def apply_proposals(
                     guide_path,
                     vault_root=vault_root,
                     decision=decision,
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
                 )
                 if outcome == "written":
                     applied.append(promotable or proposal.text)
@@ -765,10 +841,11 @@ def apply_proposals(
                         outcome="duplicate",
                     )
                 else:
-                    # Failed writes and event-shaped text both stay queued:
-                    # the first for a retry, the second for a curator to
-                    # rephrase into a standing rule. Neither is a decision
-                    # yet, so neither is recorded.
+                    # Failed writes, revision conflicts and event-shaped text
+                    # all stay queued: the first and second for a retry or a
+                    # re-plan, the third for a curator to rephrase into a
+                    # standing rule. None is a decision yet, so none is
+                    # recorded.
                     remaining.append(proposal)
             elif proposal.target == "people" and vault_root is not None:
                 name = proposal.payload or _safe_name(proposal.text.split("-")[0])
@@ -1763,6 +1840,7 @@ def proposals_from_archive(
     project_doc_path: str = "",
     project_fold_wrote: bool = False,
     region_decisions: dict[str, dict[str, Any]] | None = None,
+    workspace: str = "",
 ) -> Path | None:
     """Read an archived chat, route its insights, optionally auto-apply.
 
@@ -1891,6 +1969,9 @@ def proposals_from_archive(
                 vault_root=workspace_vault_root,
                 region_decisions=region_decisions,
                 learning_source=archive_path.stem,
+                actor="auto",
+                source="archive",
+                workspace=workspace,
             )
             if promoted:
                 if stats is not None:
