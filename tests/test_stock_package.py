@@ -155,8 +155,10 @@ def test_stock_memory_agent_role_matches_curator_contract() -> None:
     assert "~3000 memory / ~1375 profile" in role
     assert "Workspace/Memory-Consolidations.md" in role
     assert "[review] Keep" in role
-    # New-fact promotion stays reviewed even though consolidation is allowed.
-    assert "Promoting NEW facts into a region is a reviewed action" in role
+    # New-fact promotion follows the archive/curation split even though
+    # consolidation is allowed: archive extraction auto-applies a confident
+    # state-shaped fact, but the unattended curator never promotes a new one.
+    assert "an unattended curation run never promotes a new region fact" in role
 
 
 def test_stock_workspace_guide_carries_default_caps() -> None:

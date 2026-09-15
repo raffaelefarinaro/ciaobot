@@ -939,8 +939,11 @@ class CiaoMcpService:
             """Add, replace, or remove one entry in native CLAUDE.md memory.
 
             ``region`` is ``memory`` or ``profile``. Use ``match`` for
-            replace/remove; use ``entry`` for add/replace. The operation
-            enforces the configured bounded-region limit.
+            replace/remove; use ``entry`` for add/replace. The region cap is
+            advisory: the write always goes through, and the result carries
+            ``over_cap`` with ``used_chars`` and ``char_limit`` when it exceeds
+            the configured limit. Consolidation, not refusal, is what bounds a
+            region.
             """
             return await self._invoke(
                 "memory_update",

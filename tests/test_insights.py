@@ -183,11 +183,12 @@ def test_filter_flags_unattended_user_turns(
     workspace = tmp_path / "ws"
     session_id = "sess-unatt"
     jsonl = _project_dir(workspace) / f"{session_id}.jsonl"
+    from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
+
     _write_jsonl(jsonl, [
         {"type": "user", "message": {"content": (
             "[CIAO_CONTEXT_BEGIN]\n<ciao-context>\n"
-            "unattended=true; this turn was fired automatically. Do not ask "
-            "questions or wait for approval.\n</ciao-context>\n"
+            f"{UNATTENDED_CAPSULE_GUIDANCE}\n</ciao-context>\n"
             "[CIAO_CONTEXT_END]\n\nRun the nightly curation pass."
         )}},
         {"type": "assistant", "message": {"content": [
