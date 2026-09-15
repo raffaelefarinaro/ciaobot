@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ciao import vault_index
-from ciao.async_reads import run_read
+from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
     get_db_path,
@@ -682,8 +682,15 @@ class CiaoControlPlane:
             db_path = get_db_path(self._search_runtime_dir())
             conn = sqlite3.connect(db_path)
             try:
-                init_db(conn)
-                index_vault(conn, root, path_base=base)
+                # Serialize the write phase per database file. Distinct query
+                # keys run concurrently, but SQLite takes one file-level write
+                # lock, so two index passes against this database would race it
+                # and fail with "database is locked" once a scan outlasts the
+                # connection timeout. The search that follows is read-only and
+                # does not need the lock.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_vault(conn, root, path_base=base)
                 rows = search_vault(
                     conn,
                     query,
@@ -736,8 +743,12 @@ class CiaoControlPlane:
             db_path = get_db_path(runtime_dir)
             conn = sqlite3.connect(db_path)
             try:
-                init_db(conn)
-                indexed, removed = index_vault(conn, search_root, path_base=base)
+                # Same database-file write lock as vault_search: an index
+                # refresh and a search can land on the same SQLite file, so the
+                # write phase is serialized per database.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    indexed, removed = index_vault(conn, search_root, path_base=base)
             finally:
                 conn.close()
             return len(entries), indexed, removed

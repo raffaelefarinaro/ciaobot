@@ -317,6 +317,83 @@ def test_workspace_scope_is_stable_under_concurrency(
     assert expected not in {"", NO_MATCH_KEY_PREFIX}
 
 
+# -- acceptance: serialized shared-database writes ---------------------------
+
+
+def test_concurrent_distinct_searches_serialize_their_index_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #467 review: distinct query keys must not index the same DB at once.
+
+    Each search's ``_search`` closure calls ``index_vault`` against the shared
+    ``vault-fts.db``. Different query strings mean different coalescing keys, so
+    without serialization several index passes run in parallel and race SQLite's
+    one file-level write lock. Only one writer may be inside the critical
+    section at a time, while the read-only search phase stays concurrent.
+    """
+    control_plane, principal = _plane(tmp_path, monkeypatch)
+
+    active_writers = 0
+    max_active_writers = 0
+    writer_guard = threading.Lock()
+
+    def _counting_index(conn, root, *, path_base=None):
+        nonlocal active_writers, max_active_writers
+        with writer_guard:
+            active_writers += 1
+            max_active_writers = max(max_active_writers, active_writers)
+        time.sleep(0.05)
+        with writer_guard:
+            active_writers -= 1
+        return (0, 0)
+
+    monkeypatch.setattr(cp_module, "index_vault", _counting_index)
+
+    async def _scenario() -> None:
+        await asyncio.gather(
+            *(control_plane.vault_search(principal, f"distinct-{i}") for i in range(6))
+        )
+
+    asyncio.run(_scenario())
+
+    # One writer inside the index critical section at a time, never two.
+    assert max_active_writers == 1, max_active_writers
+
+
+def test_vault_index_refresh_and_search_share_one_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh path writes the same database, so it takes the same lock."""
+    control_plane, principal = _plane(tmp_path, monkeypatch)
+
+    active_writers = 0
+    max_active_writers = 0
+    writer_guard = threading.Lock()
+
+    def _counting_index(conn, root, *, path_base=None):
+        nonlocal active_writers, max_active_writers
+        with writer_guard:
+            active_writers += 1
+            max_active_writers = max(max_active_writers, active_writers)
+        time.sleep(0.05)
+        with writer_guard:
+            active_writers -= 1
+        return (0, 0)
+
+    monkeypatch.setattr(cp_module, "index_vault", _counting_index)
+
+    async def _scenario() -> None:
+        await asyncio.gather(
+            control_plane.vault_index_refresh(principal),
+            control_plane.vault_search(principal, "some-query"),
+            control_plane.vault_search(principal, "other-query"),
+        )
+
+    asyncio.run(_scenario())
+
+    assert max_active_writers == 1, max_active_writers
+
+
 # -- acceptance: cancellation and recovery ----------------------------------
 
 
@@ -399,6 +476,84 @@ def test_cancellation_does_not_grow_the_in_flight_registry() -> None:
     keys = asyncio.run(_scenario())
 
     assert keys == ["cancel-registry"]
+
+
+def test_cancelling_one_waiter_does_not_cancel_a_shared_queued_read() -> None:
+    """PR #467 review: a shared future must survive one caller's cancellation.
+
+    With all workers busy a coalesced read sits in the queue. Before the fix the
+    caller awaited the shared concurrent future directly, so cancelling one
+    waiter propagated into it: the operation never ran and every other same-key
+    waiter got ``CancelledError`` too.
+    """
+    executor = async_reads.vault_read_executor()
+    blockers: list[threading.Event] = []
+    for _ in range(executor.max_workers):
+        event = threading.Event()
+        executor._executor.submit(lambda e=event: e.wait(5))
+        blockers.append(event)
+
+    started = threading.Event()
+
+    def _operation() -> str:
+        started.set()
+        return "value"
+
+    async def _waiter() -> str:
+        return await run_read("shared-queued", _operation)
+
+    async def _scenario() -> tuple[str, bool, list[str]]:
+        first = asyncio.ensure_future(_waiter())
+        second = asyncio.ensure_future(_waiter())
+        await asyncio.sleep(0.05)
+        # The queued read has not started: all workers are occupied.
+        assert started.is_set() is False
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        for event in blockers:
+            event.set()
+        try:
+            value = await second
+        except asyncio.CancelledError:  # pragma: no cover - regression guard
+            raise AssertionError("cancelling one waiter cancelled the shared read")
+        return value, started.is_set(), executor.inflight_keys()
+
+    value, ran, keys = asyncio.run(_scenario())
+
+    assert value == "value"
+    assert ran is True
+    assert keys == []
+
+
+def test_each_waiter_awaits_its_own_future() -> None:
+    """A bridge future per caller, not the shared one, is what shielding needs."""
+    executor = async_reads.vault_read_executor()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _operation() -> str:
+        started.set()
+        release.wait(3)
+        return "value"
+
+    async def _scenario() -> tuple[object, object]:
+        first = executor.submit("bridge-key", _operation, coalesce=True)
+        second = executor.submit("bridge-key", _operation, coalesce=True)
+        while not started.is_set():
+            await asyncio.sleep(0.005)
+        assert first is not second
+        # Cancelling one caller's own future leaves the shared work pending.
+        first.cancel()
+        release.set()
+        return first, second
+
+    first, second = asyncio.run(_scenario())
+
+    assert first.cancelled() is True
+    assert second.result() == "value"
 
 
 # -- acceptance: p50/p95 before and after -----------------------------------

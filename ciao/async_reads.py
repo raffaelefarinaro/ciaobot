@@ -22,7 +22,14 @@ connection is opened and closed inside the worker, so it never crosses threads.
 Cancellation only detaches the caller: the worker thread cannot be stopped and
 keeps running to completion. Coalescing plus the bounded width is what keeps
 that from becoming unbounded background work, and every future's completion and
-error is observed even when its last awaiter was cancelled.
+error is observed even when its last awaiter was cancelled. Each caller awaits
+its own ``asyncio`` future fed by a done-callback, never the shared concurrent
+future directly, so cancelling one waiter cannot cancel the work the other
+waiters of the same key are still waiting on.
+
+Synchronous writers that share a database are additionally serialized by
+``keyed_lock``: concurrent index passes against one SQLite file would otherwise
+compete for its write lock and surface as ``database is locked``.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -45,6 +52,27 @@ MAX_VAULT_READ_WORKERS = 4
 
 _EXECUTOR_LOCK = threading.Lock()
 _EXECUTOR: "_VaultReadExecutor | None" = None
+
+_KEYED_LOCKS: dict[str, threading.Lock] = {}
+_KEYED_LOCKS_GUARD = threading.Lock()
+
+
+def keyed_lock(key: str) -> threading.Lock:
+    """A process-wide lock for one shared resource, created on first use.
+
+    Used to serialize writes to a shared SQLite file: two workers indexing the
+    same database concurrently take turns instead of racing for its write lock.
+    Locks are never evicted — the registry holds one small entry per database
+    and root, and dropping a lock a worker still holds would let a later caller
+    create a second one and defeat the serialization.
+    """
+
+    with _KEYED_LOCKS_GUARD:
+        lock = _KEYED_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _KEYED_LOCKS[key] = lock
+        return lock
 
 
 def _observe_failure(future: Future[Any]) -> None:
@@ -64,7 +92,14 @@ def _observe_failure(future: Future[Any]) -> None:
 
 
 class _VaultReadExecutor:
-    """A bounded executor that coalesces identical in-flight reads by key."""
+    """A bounded executor that coalesces identical in-flight reads by key.
+
+    A submitted operation's future is shared by every same-key waiter, but a
+    caller never awaits it directly: :meth:`submit` hands back a fresh,
+    per-caller future bridged to the shared one by a callback. Cancelling a
+    caller therefore tears down only its own future and leaves the shared work —
+    and its other waiters — untouched.
+    """
 
     def __init__(self, max_workers: int = MAX_VAULT_READ_WORKERS) -> None:
         self.max_workers = max_workers
@@ -83,21 +118,54 @@ class _VaultReadExecutor:
         coalesce: bool,
     ) -> Future[T]:
         if coalesce:
+            created = False
             with self._lock:
-                pending = self._inflight.get(key)
-                if pending is not None:
-                    return pending  # type: ignore[return-value]
-                future = self._executor.submit(operation)
-                self._inflight[key] = future
+                shared = self._inflight.get(key)
+                if shared is None:
+                    shared = self._executor.submit(operation)
+                    self._inflight[key] = shared
+                    created = True
             # Registered outside the lock: the callback re-acquires it, and a
             # worker that finished during `add_done_callback` would otherwise
             # invoke `_forget_key` while the lock is held (deadlock).
-            future.add_done_callback(self._make_forget(key))
-            return future
+            if created:
+                shared.add_done_callback(self._make_forget(key))
+            return self._bridge(shared)
 
-        future = self._executor.submit(operation)
-        future.add_done_callback(_observe_failure)
-        return future
+        return self._executor.submit(operation)
+
+    def _bridge(self, shared: Future[Any]) -> Future[Any]:
+        """A per-caller future that mirrors ``shared`` without sharing its state.
+
+        Copying the result out in the done-callback is deliberate: awaiting the
+        shared future with ``asyncio.shield`` still leaves the caller's wrapper
+        cancelled (it raises ``CancelledError`` at the await point), while
+        awaiting the shared future directly lets one cancellation propagate into
+        it. A separate destination future keeps the two apart.
+        """
+
+        destination: Future[Any] = Future()
+
+        def _propagate(done: Future[Any]) -> None:
+            try:
+                if destination.cancelled():
+                    return
+                if done.cancelled():
+                    destination.cancel()
+                    return
+                error = done.exception()
+                if error is not None:
+                    destination.set_exception(error)
+                else:
+                    destination.set_result(done.result())
+            except InvalidStateError:
+                # The caller was cancelled between the check above and this set,
+                # or the destination was already settled. The shared future's
+                # outcome is still observed by `_forget_key`/the executor.
+                return
+
+        shared.add_done_callback(_propagate)
+        return destination
 
     def _make_forget(self, key: str) -> Callable[[Future[Any]], None]:
         def _forget(done: Future[Any]) -> None:

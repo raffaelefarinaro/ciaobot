@@ -430,10 +430,17 @@ async handler. Use `ciao/async_reads.py`:
   routes are the reference shapes.
 - Resolve scope (workspace, principal, paths) on the calling thread before
   submitting, so a bad principal fails fast and the worker only does I/O.
-- Cancellation only detaches the awaiter; the worker cannot be stopped. The
+- Cancellation only detaches the awaiter; the worker cannot be stopped. Each
+  caller awaits its own bridge future, so cancelling one waiter of a coalesced
+  key does not cancel the shared work its other waiters depend on. The
   coalescing map and bounded width keep that from becoming unbounded background
   work, and every future's error is observed. Do not wrap mutations of
   event-loop-owned managers this way — only complete read operations.
+- Serialize the write phase of any operation that shares a synchronous store
+  with `keyed_lock(key)`: concurrent `index_vault` passes against one
+  `vault-fts.db` race SQLite's single file-level write lock and fail with
+  `database is locked`. Take the lock only around the writes; leave the
+  read-only query outside it so reads stay concurrent.
 - Call `reset_vault_read_executor()` in test setup/teardown for isolation.
 
 Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,
