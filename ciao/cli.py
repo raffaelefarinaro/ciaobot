@@ -2957,6 +2957,72 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     return label_hygiene.main(module_args)
 
 
+def _eval_command(args: argparse.Namespace) -> int:
+    """Versioned behavioral evaluations for prompts, providers, and guides.
+
+    Three verbs: ``contracts`` runs the deterministic, model-free guard checks
+    (CI half); ``run`` performs the bounded model-backed probe; ``compare``
+    diffs a baseline and a candidate report. Nothing here reads a live vault —
+    the packaged synthetic scenario catalog is the only input.
+    """
+    from ciao import behavioral_eval
+
+    action = getattr(args, "eval_action", "")
+    if action == "contracts":
+        contract_report = behavioral_eval.run_contract_checks()
+        if args.json:
+            print(json.dumps(contract_report.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_contract_text(contract_report))
+        return 0 if contract_report.ok() else 1
+    if action == "compare":
+        baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+        candidate = json.loads(Path(args.candidate).read_text(encoding="utf-8"))
+        comparison = behavioral_eval.compare_reports(baseline, candidate)
+        if args.json:
+            print(json.dumps(comparison, indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_comparison_text(comparison))
+        return 0
+    if action == "run":
+        import asyncio
+
+        catalog = behavioral_eval.load_scenarios()
+        budget = behavioral_eval.EvalBudget.from_env()
+        if args.max_calls is not None:
+            budget.max_calls = max(1, args.max_calls)
+        if args.max_cost_usd is not None:
+            budget.max_cost_usd = max(0.0, args.max_cost_usd)
+        if args.cost_per_call is not None:
+            budget.cost_per_call_usd = max(0.0, args.cost_per_call)
+        include = tuple(
+            item.strip() for item in (args.include or "").split(",") if item.strip()
+        )
+        eval_report = asyncio.run(
+            behavioral_eval.run_model_eval(
+                catalog,
+                provider=args.provider,
+                model=args.model,
+                label=args.label,
+                budget=budget,
+                repeats=args.repeats,
+                concurrency=args.concurrency,
+                include=include,
+                timeout_s=args.timeout,
+            )
+        )
+        out = Path(args.out) if args.out else behavioral_eval.default_report_path(args.label)
+        behavioral_eval.write_report(eval_report, out)
+        if args.json:
+            print(json.dumps(eval_report.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_report_text(eval_report))
+            print(f"Wrote {out}")
+        return 1 if eval_report.zero_tolerance_failures else 0
+    print("error: unknown eval action", file=sys.stderr)
+    return 2
+
+
 def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     """Delete a resolved skill proposal from a workspace's review queue.
 
@@ -4273,6 +4339,87 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the structured report as JSON instead of text.",
     )
     label_hygiene_parser.set_defaults(func=_label_hygiene_command)
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help=(
+            "Versioned behavioral evaluations for prompts, providers, and "
+            "guides. 'contracts' is deterministic CI; 'run' is boundedly "
+            "model-backed."
+        ),
+    )
+    eval_sub = eval_parser.add_subparsers(dest="eval_action", required=True)
+    eval_contracts = eval_sub.add_parser(
+        "contracts",
+        help="Run the deterministic, model-free guard checks over the scenario catalog.",
+    )
+    eval_contracts.add_argument(
+        "--json", action="store_true", help="Emit the structured report as JSON."
+    )
+    eval_contracts.set_defaults(func=_eval_command)
+
+    eval_run = eval_sub.add_parser(
+        "run",
+        help="Run the bounded model-backed probe (explicit; enforces a call/cost ceiling).",
+    )
+    eval_run.add_argument("--provider", default="claude", choices=["claude", "opencode"])
+    eval_run.add_argument(
+        "--model",
+        required=True,
+        help="Provider model id to evaluate. Required; the runner never defaults it.",
+    )
+    eval_run.add_argument(
+        "--label",
+        default="candidate",
+        help="Report label (baseline or candidate). Recorded with provenance.",
+    )
+    eval_run.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Runs per scenario; >1 exposes model noise. Report shows mean and stdev.",
+    )
+    eval_run.add_argument(
+        "--concurrency", type=int, default=1, help="Concurrent scenario probes."
+    )
+    eval_run.add_argument(
+        "--include",
+        default="",
+        help="Comma-separated scenario ids to run (default: the whole catalog).",
+    )
+    eval_run.add_argument(
+        "--max-calls", type=int, default=None,
+        help="Hard call ceiling for this run (default: CIAO_EVAL_MAX_CALLS or 40).",
+    )
+    eval_run.add_argument(
+        "--max-cost-usd", type=float, default=None,
+        help="Hard estimated-cost ceiling in USD (default: CIAO_EVAL_MAX_COST_USD or 2.00).",
+    )
+    eval_run.add_argument(
+        "--cost-per-call", type=float, default=None,
+        help="Declared per-call upper-bound cost used to enforce --max-cost-usd.",
+    )
+    eval_run.add_argument(
+        "--timeout", type=float, default=120.0, help="Per-call timeout in seconds."
+    )
+    eval_run.add_argument(
+        "--out", type=Path, default=None, help="Report path (default: .runtime/evals/...)."
+    )
+    eval_run.add_argument(
+        "--json", action="store_true", help="Emit the structured report as JSON."
+    )
+    eval_run.set_defaults(func=_eval_command)
+
+    eval_compare = eval_sub.add_parser(
+        "compare",
+        help="Diff a baseline and a candidate report on provenance and quality.",
+    )
+    eval_compare.add_argument("--baseline", type=Path, required=True)
+    eval_compare.add_argument("--candidate", type=Path, required=True)
+    eval_compare.add_argument(
+        "--json", action="store_true", help="Emit the structured comparison as JSON."
+    )
+    eval_compare.set_defaults(func=_eval_command)
 
     skills_parser = subparsers.add_parser(
         "skills",

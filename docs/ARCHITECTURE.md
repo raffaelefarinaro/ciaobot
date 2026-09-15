@@ -87,6 +87,7 @@ ciao/                          Python backend (Starlette).
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
   label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in the `ciao-support` skill and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule.
   core_prompt.py                Loads the compact Ciaobot core for provider system prompts; native provider guide loaders remain the sole source of bounded memory.
+  behavioral_eval.py            Versioned behavioral evaluations for prompts, providers, and guides. Deterministic, model-free contract checks validate the shipped guards (scoped search, control_plane scope, event-shape routing, unattended approval, injection canaries) against the synthetic scenario catalog in `ciao/stock/evals/scenarios.json`; a bounded, credentialed model-backed runner probes one provider/model and records the sha256 of the core prompt, guide fixture, extraction prompts, provider, model, and tool catalog with every result. It never reads a live vault and enforces a declared call/cost ceiling. CLI: `ciao eval contracts|run|compare`.
    memory_tool.py               Bounded memory regions: locate/read/diagnose, atomically prune expired entries, report usage, and apply typed bounded edits in CLAUDE.md; also owns one-time legacy migration.
    memory_policy.py             Machine-readable memory/unattended-execution policy: the context→destinations→approval→cap→undo matrix, the `[review]` destination vocabulary, the unattended deferral list, and the capsule's unattended guidance string. Behavior-free; implementation stays in memory_proposals.py/memory_tool.py and the stock assets, which tests pin to this module.
    vault_review.py              Deterministic workspace-scoped vault-note review candidates, append-only dispositions, reversible trash/restore, and attended permanent deletion; bookkeeping is excluded from ordinary review candidates.
@@ -109,6 +110,7 @@ ciao/                          Python backend (Starlette).
     workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
     schedules.json             Per-workspace system schedules (Workspace care, Skill reflection).
     schedules/                 Supplemental packaged schedule assets, including the legacy weekly-review template.
+    evals/scenarios.json       Synthetic behavioral-eval scenarios (recall, abstention, supersession, attended/unattended extraction, approval deferral, tool choice, isolation, injection). No real vault content; consumed by `ciao eval` via `ciao/behavioral_eval.py`.
   web/                         PWA web server (Python routes) + static assets (built by web/).
     app.py                     Starlette app factory: middleware, route table, SPA catch-all.
     auth.py                    Session-cookie auth middleware and serializer.
@@ -490,5 +492,7 @@ Completed projects can be restored. The sidebar footer has an archive icon next 
 - `docs/DEVELOPMENT.md`: setup, dev workflow, testing, change guidelines.
 - `INTEGRATIONS.md`: env vars, OAuth setup, MCP connectors, server runtime knobs.
 - `PWA_API.md`: API endpoints, auth flow, state paths.
+- `docs/MEMORY_EVAL.md`: deterministic retrieval eval and the sandboxed live-vault probe runbook.
+- `docs/BEHAVIORAL_EVAL.md`: versioned behavioral evaluations for prompts, providers, and guides (`ciao eval`); scenario catalog and baseline/candidate reports.
 - `docs/MCP.md`: agent control-plane security, tool catalog, provider process configuration, and numeric release evaluation.
 - `web/README.md`: PWA frontend dev workflow, iOS Safari gotchas, design system tokens.

@@ -243,6 +243,9 @@ ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao critique --input plan.md --type plan # Multi-model adversarial review panel
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
+ciao eval contracts --json # Deterministic behavioral-eval guard checks (model-free; CI half)
+ciao eval run --model <id> --label candidate # Bounded model-backed behavioral probe (explicit; cost ceiling)
+ciao eval compare --baseline a.json --candidate b.json # Baseline/candidate delta with provenance
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
