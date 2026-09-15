@@ -382,6 +382,127 @@ describe('ProposalReviewPanel', () => {
   })
 })
 
+describe('queue load states', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  it('never shows a zero-state success message while the first GET is delayed', async () => {
+    // The bug: a slow initial fetch fell through to "Nothing queued here." and
+    // read as a successfully cleared queue before the server had answered.
+    let release!: (value: { rows: ProposalRow[] }) => void
+    const pendingQueue = new Promise<{ rows: ProposalRow[] }>((r) => { release = r })
+    apiGet.mockImplementation((path: string) => {
+      if (String(path).startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      return pendingQueue
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    expect(wrapper.text()).toContain('Loading proposals…')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+
+    // The delayed response lands: the zero-state is replaced by the real queue.
+    release({ rows: [row({ id: 'a' })] })
+    await flushPromises()
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reports a rejected first GET with Retry and no empty-queue claim', async () => {
+    apiGet.mockRejectedValue(new Error('proposals are unreachable'))
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-error-block').exists()).toBe(true)
+    expect(wrapper.text()).toContain('proposals are unreachable')
+    expect(wrapper.find('.pr-error-block').text()).toContain('retry')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    // No rows section at all while the list could not be read.
+    expect(wrapper.find('.pr-group').exists()).toBe(false)
+
+    // Retry issues a fresh request and renders the rows it returns.
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    await wrapper.find('.pr-error-block .btn-chip').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(wrapper.find('.pr-error-block').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps existing rows after a failed refresh and labels them stale', async () => {
+    apiGet.mockResolvedValueOnce({ rows: [row({ id: 'a' }), row({ id: 'b' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.findAll('.pr-row')).toHaveLength(2)
+
+    // A forced refresh (as after a mutation) fails. Rows must stay.
+    apiGet.mockRejectedValueOnce(new Error('refresh broke'))
+    await useProposalsStore().fetch({ force: true })
+    await nextTick()
+
+    expect(wrapper.findAll('.pr-row')).toHaveLength(2)
+    expect(wrapper.find('.pr-stale').exists()).toBe(true)
+    expect(wrapper.find('.pr-stale').text()).toContain('last loaded queue')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    expect(wrapper.find('.pr-error-block').exists()).toBe(false)
+
+    // Retry succeeds: the stale notice clears.
+    apiGet.mockResolvedValueOnce({ rows: [row({ id: 'a' })] })
+    await wrapper.find('.pr-stale .btn-chip').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-stale').exists()).toBe(false)
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('offers Clear filters when a filter hides the whole queue', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', kind: 'memory' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    useProposalsStore().search = 'nothing matches this'
+    await nextTick()
+
+    expect(wrapper.text()).toContain('No proposals match the current filters')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    await wrapper.find('.pr-clear-filter').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('says "All reviewed." only after a successful load of an empty queue', async () => {
+    apiGet.mockResolvedValue({ rows: [] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('All reviewed.')
+    expect(wrapper.text()).not.toContain('Loading proposals…')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    wrapper.unmount()
+  })
+})
+
 describe('talk about it', () => {
   let pinia: ReturnType<typeof createPinia>
 
