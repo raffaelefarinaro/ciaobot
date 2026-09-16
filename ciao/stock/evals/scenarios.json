@@ -185,7 +185,7 @@
       "retrieved": [],
       "expect": {
         "tools": ["memory_update"],
-        "writes": ["tabs"]
+        "writes": [{"text": "tabs", "destination": "memory"}]
       }
     },
     {
@@ -199,7 +199,7 @@
       },
       "retrieved": [],
       "expect": {
-        "writes": ["ceramics"]
+        "writes": [{"text": "ceramics", "destination": "people"}]
       }
     },
     {
@@ -305,7 +305,7 @@
       "forbid": ["unsupported_auto_memory"],
       "expect": {
         "consolidation_allowed": true,
-        "writes": ["tab"],
+        "writes": [{"text": "tab", "destination": "memory"}],
         "paraphrase_tokens": ["tab", "indentation", "spaces"]
       }
     },
@@ -344,7 +344,7 @@
       "retrieved": [],
       "expect": {
         "tools": ["memory_update"],
-        "writes": ["develop"]
+        "writes": [{"text": "develop", "destination": "memory"}]
       }
     },
     {
@@ -366,6 +366,7 @@
       "expect": {
         "answer_facts": ["Villa Australis"],
         "tools": ["vault_search"],
+        "forbidden_tools": ["memory_update", "project", "workspace_create"],
         "writes_forbidden": true,
         "unsupported_facts": ["Hotel Boreale is current", "cancelled", "outdoor"]
       }

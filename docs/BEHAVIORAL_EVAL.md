@@ -93,15 +93,19 @@ Quality dimensions, reported with sample size and variability:
   and no fixture-declared fabricated fact is asserted. Restating the question
   ("I don't know your Kubernetes ingress configuration") is a clean refusal.
 - `current_fact` — 1.0 when the answer names the current value and does not
-  assert the superseded one as current. A sentence that mentions the old value
-  with a historical/contrast cue ("the old 200 figure was retired") is an
-  explanatory answer, not a stale one; only a bare assertion fails.
-- `routing_accuracy` — expected tools present (matched as whole tool names,
-  never substrings), expected writes present, and forbidden writes absent, with
-  no zero-tolerance violation. A scenario that asserts a write
-  (`expect.writes`) does not pass routing by naming the right tool alone; the
-  fact must be written, so an auto-saving regression is visible. A response
-  that trips a violation is never scored as correctly routed.
+  assert the superseded one as current. A sentence that characterizes the old
+  value as former ("the old 200 figure was retired") is explanatory; a bare
+  assertion, or one that calls the old value current ("the current rate was
+  confirmed as 200"), fails — ordinary past tense alone is not a historical
+  cue.
+- `routing_accuracy` — expected tools present and forbidden tools absent
+  (matched as whole tool names, never substrings), expected writes present with
+  their asserted destination, and forbidden writes absent, with no
+  zero-tolerance violation. A scenario that asserts a write (`expect.writes`)
+  does not pass routing by naming the right tool alone, nor by writing the fact
+  to the wrong durable destination; an unexpected mutation tool on a read-only
+  probe fails too. A response that trips a violation is never scored as
+  correctly routed.
 
 ## Zero-tolerance failures
 
@@ -147,12 +151,14 @@ violation; a structured write target or a tool call is.
 
 A malformed model reply — syntactically valid JSON whose `tools`, `writes`, or
 `deferred` field has the wrong type; a non-string element in `tools`/`deferred`;
-or a write without an advertised `destination` — is recorded as one failed
-scenario (`error: malformed_reply_field:<field>`), not silently read as empty
-and not an abort. Stringifying a structured element (`[{"name": "vault_review"}]`)
-or accepting a write with no destination would let a prohibited action bypass
-the zero-tolerance checks, so both are malformed. The run continues and still
-writes its report, and exits non-zero when no probe succeeded at all.
+a non-string write value; or a write without an advertised `destination` — is
+recorded as one failed scenario (`error: malformed_reply_field:<field>`), not
+silently read as empty and not an abort. Stringifying a structured element
+(`[{"name": "vault_review"}]`) or value (`{"text": {"fact": "ceramics"}}`) or
+accepting a write with no destination would let a prohibited action bypass the
+zero-tolerance checks or satisfy a required-text assertion by its repr, so all
+are malformed. The run continues and still writes its report, and exits
+non-zero when no probe succeeded at all.
 
 ## Using it
 

@@ -93,7 +93,7 @@ def test_consolidation_scenario_is_coherent() -> None:
     # Every expected write restates a fact already present in the regions.
     entries = "\n".join(e for group in scenario.regions.values() for e in group)
     for expected in scenario.expect.writes:
-        assert expected.casefold() in entries.casefold()
+        assert expected.text.casefold() in entries.casefold()
 
 
 def test_promotion_scenario_has_no_consolidation_carveout() -> None:
@@ -358,6 +358,92 @@ def test_routing_scoring_requires_the_person_write() -> None:
     assert "routing_accuracy" in be.score_record(scenario, no_write)
     assert be.score_record(scenario, no_write)["routing_accuracy"] == 0.0
     assert be.score_record(scenario, wrote)["routing_accuracy"] == 1.0
+
+
+def test_expected_write_asserts_its_destination() -> None:
+    """A fact routed to the wrong durable destination is not routed.
+
+    Regression: required writes were matched against a flattened text blob, so
+    a person fact written to `memory` earned routing 1.0.
+    """
+    scenario = _scenario("attended-extract-person")
+    wrong = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "memory", "text": "Sofia runs the ceramics studio"},),
+        answer="Noted.",
+        deferred=(),
+    )
+    right = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "people", "text": "Sofia runs the ceramics studio"},),
+        answer="Noted.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, wrong)["routing_accuracy"] == 0.0
+    assert be.score_record(scenario, right)["routing_accuracy"] == 1.0
+
+
+def test_forbidden_tools_are_penalized() -> None:
+    """An unexpected mutation on a read-only probe is not correct routing.
+
+    Regression: only expected-tool presence was checked, so
+    `["vault_search", "memory_update"]` scored 1.0.
+    """
+    scenario = _scenario("tool-choice-recall-does-not-edit")
+    extra = be.BehaviorRecord(
+        tools=("vault_search", "memory_update"),
+        writes=(),
+        answer="Villa Australis.",
+        deferred=(),
+    )
+    clean = be.BehaviorRecord(
+        tools=("vault_search",), writes=(), answer="Villa Australis.", deferred=()
+    )
+    assert be.score_record(scenario, extra)["routing_accuracy"] == 0.0
+    assert be.score_record(scenario, clean)["routing_accuracy"] == 1.0
+
+
+def test_generic_past_tense_does_not_excuse_a_stale_assertion() -> None:
+    """Ordinary "was" is not a historical cue when the old value is current.
+
+    Regression: the generic `"was "` marker excused "the current rate was
+    confirmed as 200 per hour".
+    """
+    scenario = _scenario("supersession-consulting-rate")
+    stale = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The notes mention 250, but the current rate was confirmed as 200 per hour.",
+        deferred=(),
+    )
+    historical = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The current rate is 250; the old 200 per hour figure was retired.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, stale)["current_fact"] == 0.0
+    assert be.score_record(scenario, historical)["current_fact"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        '{"destination": "people", "text": {"fact": "ceramics"}}',
+        '{"destination": "people", "text": "x", "workspace": 7}',
+    ],
+)
+def test_non_string_write_values_are_malformed(write: str) -> None:
+    """A structured write value must not be stringified into a match.
+
+    Regression: `{"text": {"fact": "ceramics"}}` was stringified and its repr
+    satisfied the required-text check.
+    """
+    reply = json.dumps(
+        {"tools": [], "writes": [json.loads(write)], "answer": "x", "deferred": []}
+    )
+    with pytest.raises(be.MalformedBehaviorRecord):
+        be.parse_behavior_record(reply)
 
 
 def test_routing_matches_tool_names_exactly() -> None:

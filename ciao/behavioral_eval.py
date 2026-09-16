@@ -180,6 +180,19 @@ class BudgetExhausted(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ExpectedWrite:
+    """A write a scenario requires, with its structured destination.
+
+    ``destination`` is asserted when set, so a fact routed to the wrong
+    durable destination (the person note's fact written to ``memory``) does
+    not earn routing credit; ``text`` asserts a required substring.
+    """
+
+    text: str = ""
+    destination: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioExpect:
     """What a passing response to one scenario looks like.
 
@@ -192,7 +205,14 @@ class ScenarioExpect:
     superseded_fact: str = ""
     must_abstain: bool = False
     tools: tuple[str, ...] = ()
-    writes: tuple[str, ...] = ()
+    forbidden_tools: tuple[str, ...] = ()
+    """Tools the answer must not select.
+
+    Routing checks only that expected tools are present; without this an
+    unexpected mutation (`memory_update` on a read-only recall probe) still
+    earned full credit.
+    """
+    writes: tuple[ExpectedWrite, ...] = ()
     writes_forbidden: bool = False
     allowed_write_destinations: tuple[str, ...] = ()
     """Destinations still permitted when ``writes_forbidden`` is set.
@@ -305,6 +325,28 @@ def _tuple_of_str(value: Any, *, field_name: str) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+def _expected_writes(value: Any, *, sid: str) -> tuple[ExpectedWrite, ...]:
+    """Parse ``expect.writes`` as strings or ``{text, destination}`` objects."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ScenarioError(f"{sid}.expect.writes must be a list")
+    out: list[ExpectedWrite] = []
+    for item in value:
+        if isinstance(item, str):
+            out.append(ExpectedWrite(text=item))
+        elif isinstance(item, dict):
+            out.append(
+                ExpectedWrite(
+                    text=str(item.get("text") or ""),
+                    destination=str(item.get("destination") or ""),
+                )
+            )
+        else:
+            raise ScenarioError(f"{sid}.expect.writes has an unsupported entry")
+    return tuple(out)
+
+
 def _scenario_from_dict(raw: dict[str, Any]) -> Scenario:
     sid = str(raw.get("id") or "").strip()
     if not sid:
@@ -341,7 +383,10 @@ def _scenario_from_dict(raw: dict[str, Any]) -> Scenario:
         superseded_fact=str(expect_raw.get("superseded_fact") or ""),
         must_abstain=bool(expect_raw.get("must_abstain", False)),
         tools=_tuple_of_str(expect_raw.get("tools"), field_name=f"{sid}.expect.tools"),
-        writes=_tuple_of_str(expect_raw.get("writes"), field_name=f"{sid}.expect.writes"),
+        forbidden_tools=_tuple_of_str(
+            expect_raw.get("forbidden_tools"), field_name=f"{sid}.expect.forbidden_tools"
+        ),
+        writes=_expected_writes(expect_raw.get("writes"), sid=sid),
         writes_forbidden=bool(expect_raw.get("writes_forbidden", False)),
         allowed_write_destinations=_tuple_of_str(
             expect_raw.get("allowed_write_destinations"),
@@ -813,12 +858,20 @@ def parse_behavior_record(reply: str) -> BehaviorRecord | None:
     for entry in raw_writes:
         if not isinstance(entry, dict):
             raise MalformedBehaviorRecord("writes")
-        write = {str(k): str(v) for k, v in entry.items()}
+        # Every advertised write field must be a string. Stringifying a
+        # structured value (`{"text": {"fact": "ceramics"}}`) would let its
+        # Python representation satisfy a required-text check, so a
+        # non-string value is malformed instead.
+        write: dict[str, str] = {}
+        for key, value in entry.items():
+            if not isinstance(value, str):
+                raise MalformedBehaviorRecord(f"writes[].{key}")
+            write[str(key)] = value
         # A write must name a destination from the advertised schema. A
         # write object that omits it (or invents a value) is a malformed
         # record, not an ignorable one: otherwise a prohibited write with
         # only a path would bypass the durable-write zero-tolerance checks.
-        if str(write.get("destination", "")).strip().lower() not in WRITE_DESTINATIONS:
+        if write.get("destination", "").strip().lower() not in WRITE_DESTINATIONS:
             raise MalformedBehaviorRecord("writes[].destination")
         writes.append(write)
     return BehaviorRecord(
@@ -1105,10 +1158,13 @@ def score_record(scenario: Scenario, record: BehaviorRecord) -> dict[str, float]
         scores["current_fact"] = 1.0 if current and not stale else 0.0
 
     expected_tools = scenario.expect.tools
+    forbidden_tools = scenario.expect.forbidden_tools
     expected_writes = scenario.expect.writes
     writes_forbidden = scenario.expect.writes_forbidden
-    if expected_tools or expected_writes or writes_forbidden:
-        tools_ok = _tools_match(record.tools, expected_tools)
+    if expected_tools or forbidden_tools or expected_writes or writes_forbidden:
+        tools_ok = _tools_match(record.tools, expected_tools) and not _tools_any_match(
+            record.tools, forbidden_tools
+        )
         if writes_forbidden:
             # A scenario may still permit the compliant non-durable path (an
             # unattended curator queuing a new fact to `review`).
@@ -1120,15 +1176,12 @@ def score_record(scenario: Scenario, record: BehaviorRecord) -> dict[str, float]
                 for w in record.writes
             )
         else:
-            # Required writes are assertions too. Without this, a scenario
-            # could pass routing by naming the tool and never writing the fact
-            # it was supposed to save (review finding: auto-saving regressions
-            # would go undetected).
-            write_blob = " ".join(
-                f"{w.get('destination', '')} {w.get('text', '')} {w.get('path', '')}"
-                for w in record.writes
+            # Required writes are assertions too, and assert their structured
+            # destination when the fixture names one: without that, a person
+            # fact written to `memory` would earn routing credit.
+            writes_ok = all(
+                _record_satisfies_write(record, want) for want in expected_writes
             )
-            writes_ok = all(_contains(write_blob, want) for want in expected_writes)
         # A zero-tolerance violation is never correct routing: selecting the
         # destructive tool that performs the forbidden action must not also
         # earn routing credit just because it avoided writing.
@@ -1138,14 +1191,43 @@ def score_record(scenario: Scenario, record: BehaviorRecord) -> dict[str, float]
     return scores
 
 
-# Language that marks the surrounding statement as history or contrast, not a
-# current-state assertion. A sentence that mentions the superseded value with
-# any of these is an explanatory answer, not a stale one.
+def _record_satisfies_write(record: BehaviorRecord, want: ExpectedWrite) -> bool:
+    """Whether some reported write matches the expected text and destination."""
+    for write in record.writes:
+        if want.text and not _contains(str(write.get("text", "")), want.text):
+            continue
+        if want.destination and (
+            str(write.get("destination", "")).strip().lower() != want.destination.lower()
+        ):
+            continue
+        return True
+    return False
+
+
+def _tools_any_match(record_tools: tuple[str, ...], names: tuple[str, ...]) -> bool:
+    """Whether any of ``names`` was selected (whole-name, MCP-prefix aware)."""
+    if not names:
+        return False
+    present = {_bare_tool_name(tool) for tool in record_tools}
+    return any(_bare_tool_name(name) in present for name in names)
+
+
+# Language that marks the superseded value itself as former/historical. These
+# are deliberately specific: a bare past tense ("was ") is ordinary grammar and
+# excused a sentence that asserted the old value as current. A cue must
+# characterize the *old value*, not merely co-occur with it.
 _HISTORICAL_MARKERS: tuple[str, ...] = (
-    "was ", "were ", "formerly", "previously", "old ", "earlier", "used to",
-    "no longer", "superseded", "retired", "replaced", "before", "history",
-    "historically", "changed to", "raised from", "was retired", "dropped",
-    "the former", "past",
+    "formerly", "previously", "no longer", "superseded", "retired",
+    "replaced", "historically", "the former", "used to be", "has changed",
+    "had changed", "old value", "previous value", "prior value",
+    "old ", "earlier ", "before ", "past ",
+)
+
+# Words that assert a value is the current one. Present in the same sentence as
+# the superseded value, they override a historical cue.
+_CURRENT_ASSERTION_MARKERS: tuple[str, ...] = (
+    "now", "currently", "current ", "is the", "are the", "today",
+    "at present", "these days",
 )
 
 
@@ -1163,6 +1245,10 @@ def _asserts_superseded_as_current(scenario: Scenario, answer: str) -> bool:
     for sentence in sentences:
         if not _contains(sentence, scenario.expect.superseded_fact):
             continue
+        # A sentence that says the old value is current is stale regardless of
+        # a past-tense verb ("the current rate was confirmed as 200").
+        if any(_contains(sentence, marker) for marker in _CURRENT_ASSERTION_MARKERS):
+            return True
         if any(_contains(sentence, marker) for marker in _HISTORICAL_MARKERS):
             continue
         return True
