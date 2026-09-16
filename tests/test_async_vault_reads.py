@@ -441,6 +441,41 @@ def test_uncapped_submissions_cannot_create_an_unbounded_backlog() -> None:
     assert results == list(range(executor.max_backlog + 5))
 
 
+def test_shutdown_discards_queued_reads() -> None:
+    """PR #467 review: the executor must be closed on shutdown.
+
+    Disconnected callers can leave reads queued. At interpreter exit Python
+    joins the pool's workers, so without a shutdown close a restart would wait
+    for the whole backlog; ``cancel_futures=True`` discards the queued ones,
+    leaving only the at-most-pool-width workers already running.
+    """
+    executor = async_reads.vault_read_executor()
+    blockers: list[threading.Event] = []
+    for _ in range(executor.max_workers):
+        event = threading.Event()
+        executor._executor.submit(lambda e=event: e.wait(5))
+        blockers.append(event)
+
+    ran: list[int] = []
+    # Synchronous submissions so the test can inspect each future directly.
+    queued = [
+        executor.submit(f"shutdown-{i}", lambda i=i: ran.append(i), coalesce=True)
+        for i in range(executor.max_backlog)
+    ]
+
+    # Shutdown discards the queued work instead of running the backlog.
+    async_reads.shutdown_vault_read_executor()
+    for event in blockers:
+        event.set()
+    # Give any surviving worker time to run; a discarded read never does.
+    time.sleep(0.2)
+
+    assert ran == []
+    assert all(fut.cancelled() for fut in queued), [
+        fut.cancelled() for fut in queued
+    ]
+
+
 def test_waiter_resumes_without_blocking_the_event_loop() -> None:
     """A caller waiting for a slot must still let the loop serve other work."""
     executor = async_reads.vault_read_executor()

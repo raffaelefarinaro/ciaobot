@@ -307,6 +307,19 @@ def reset_vault_read_executor() -> None:
         _EXECUTOR = None
 
 
+def shutdown_vault_read_executor() -> None:
+    """Close the executor at server shutdown, discarding queued reads.
+
+    Registered on the application's shutdown lifecycle. ``close()`` passes
+    ``cancel_futures=True`` so the up-to-``MAX_VAULT_READ_BACKLOG`` reads that
+    disconnected callers left queued are discarded instead of running before
+    the process can exit. A worker already running cannot be interrupted, but
+    at most ``MAX_VAULT_READ_WORKERS`` of those remain, so a restart is never
+    held up by a deep backlog of full-vault scans.
+    """
+    reset_vault_read_executor()
+
+
 async def run_read(
     key: str,
     operation: Callable[[], T],
