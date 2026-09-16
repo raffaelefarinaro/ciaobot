@@ -642,6 +642,9 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
+Memory mutations also expose `GET /api/memory/receipts` and
+`POST /api/memory/receipts/{id}/undo` (see below).
+
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
 guide in either layout), and only then is the bullet dropped. Write-then-dismiss,
@@ -696,6 +699,19 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # a wider limit would return the same page - a client paging with "show more"
 # must stop on `at_max` rather than on `truncated`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
+
+# Managed memory mutations (receipts), newest first: every region write, queue
+# resolution and prune with actor/source, destination, before/after revisions
+# and status (prepared | applied | rolled_back | failed | conflict | undone).
+# `undoable` is true only for an applied operation this protocol can reverse;
+# unsupported legacy rows render without an Undo affordance. Optional query
+# params: workspace, limit (default 200).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
+
+# Undo one receipt. Refuses with 409 when the destination changed since the
+# operation (undo would otherwise delete an unrelated later fact), 400 when the
+# receipt is unsupported/view-only, 404 when the id is unknown.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID/undo"
 ```
 
 

@@ -505,6 +505,8 @@ class CiaoControlPlane:
         match: str = "",
     ) -> dict[str, Any]:
         """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        from ciao.memory_tool import MemoryLockError
+
         workspace = self._workspace(principal)
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
@@ -516,6 +518,10 @@ class CiaoControlPlane:
         )
         guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         try:
+            vault_root = Path(self.config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            vault_root = None
+        try:
             result = update_region(
                 guide,
                 canonical,
@@ -523,7 +529,16 @@ class CiaoControlPlane:
                 entry=entry,
                 match=match,
                 char_limit=limit,
+                actor="agent",
+                source="mcp",
+                workspace=workspace,
+                vault_root=vault_root,
             )
+        except MemoryLockError as exc:
+            # Retryable, and explicitly not a success: the region is unchanged.
+            raise ControlPlaneError(
+                "memory_update_locked", f"memory is busy; retry: {exc}", retryable=True
+            ) from exc
         except ValueError as exc:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)

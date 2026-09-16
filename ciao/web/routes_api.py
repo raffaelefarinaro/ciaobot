@@ -7891,6 +7891,101 @@ async def proposals_history(request: Request) -> JSONResponse:
     )
 
 
+async def memory_receipts(request: Request) -> JSONResponse:
+    """List managed memory mutations and whether each can be undone.
+
+    Reads the per-workspace receipt journal written by every managed region
+    write, queue resolution and prune. A receipt is ``undoable`` only when it
+    is applied, carries a before/after image, and names an operation this
+    protocol knows how to reverse; unsupported legacy rows render without an
+    Undo affordance.
+    """
+    from ciao.memory_receipts import list_receipts
+
+    config = request.app.state.config
+    workspace_filter = request.query_params.get("workspace", "").strip()
+    try:
+        requested = int(request.query_params.get("limit", "200"))
+    except ValueError:
+        return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for workspace in config.workspace_names():
+        if workspace_filter and workspace != workspace_filter:
+            continue
+        try:
+            vault = Path(config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            continue
+        key = str(vault)
+        if key in seen:
+            continue
+        seen.add(key)
+        # No per-row workspace filter: this journal belongs to this workspace's
+        # vault, and a caller that did not know the workspace name records a
+        # blank ``workspace``. Filtering on it would hide those rows.
+        for row in list_receipts(vault, limit=max(1, requested)):
+            row["workspace"] = workspace
+            rows.append(row)
+    rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
+    return JSONResponse({"rows": rows[: max(1, requested)], "total": len(rows)})
+
+
+async def memory_receipt_undo(request: Request) -> JSONResponse:
+    """Reverse one applied, conflict-free receipt.
+
+    Refuses (409) when the destination changed since the operation — undo would
+    otherwise delete an unrelated later fact — and (400) when the receipt is
+    unsupported/legacy/view-only.
+    """
+    from ciao.memory_receipts import (
+        MemoryReceiptError,
+        RevisionConflict,
+        UndoUnsupported,
+        find_receipt,
+        journal_path,
+        undo_receipt,
+    )
+
+    config = request.app.state.config
+    rid = request.path_params["id"]
+    workspace = request.query_params.get("workspace", "").strip()
+    try:
+        vault = Path(config.workspace_vault_root(workspace)) if workspace else None
+    except (AttributeError, ValueError):
+        vault = None
+    if vault is None:
+        # No workspace named: search every journal for the id.
+        for candidate in config.workspace_names():
+            try:
+                candidate_vault = Path(config.workspace_vault_root(candidate))
+            except (AttributeError, ValueError):
+                continue
+            if find_receipt(journal_path(candidate_vault, None), rid) is not None:
+                vault = candidate_vault
+                workspace = candidate
+                break
+    if vault is None:
+        return JSONResponse({"error": f"unknown receipt: {rid}"}, status_code=404)
+    try:
+        result = await asyncio.to_thread(
+            undo_receipt, rid, vault_root=vault, actor="operator", source="pwa"
+        )
+    except RevisionConflict as exc:
+        return JSONResponse(
+            {"error": str(exc), "id": rid, "conflict": True}, status_code=409
+        )
+    except UndoUnsupported as exc:
+        return JSONResponse(
+            {"error": str(exc), "id": rid, "undoable": False}, status_code=400
+        )
+    except MemoryReceiptError as exc:
+        return JSONResponse({"error": str(exc), "id": rid}, status_code=404)
+    return JSONResponse(
+        {"ok": True, "id": rid, "workspace": workspace, "receipt": result.get("id", "")}
+    )
+
+
 def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Map ids to removable file contexts, or return an error.
 
@@ -7927,7 +8022,8 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         queue = _proposals_file(config, workspace)
         if not queue.is_file():
             continue
-        lines = queue.read_text(encoding="utf-8").splitlines()
+        queue_before = queue.read_text(encoding="utf-8")
+        lines = queue_before.splitlines()
         keep = []
         section_date = None
         changed = False
@@ -7952,9 +8048,15 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 continue
             keep.append(raw_line)
         if changed:
-            queue.write_text("\n".join(keep).rstrip() + "\n", encoding="utf-8")
+            queue_after = "\n".join(keep).rstrip() + "\n"
+            queue.write_text(queue_after, encoding="utf-8")
             from ciao.memory_proposals import record_dismissal
+            from ciao.memory_receipts import record_queue_resolution
 
+            try:
+                vault_for_receipt = Path(config.workspace_vault_root(workspace))
+            except (AttributeError, ValueError):
+                vault_for_receipt = queue.parent.parent
             for swept_kind, swept_text, swept_source in zip(
                 swept_kinds, swept_texts, swept_sources
             ):
@@ -7968,6 +8070,20 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                     via="pwa",
                     source=swept_source,
                     outcome="swept",
+                )
+                # A reversible receipt for each swept fact, so an over-eager
+                # cutoff can be undone from History.
+                record_queue_resolution(
+                    queue,
+                    removed_text=swept_text,
+                    kind=swept_kind,
+                    promoted=False,
+                    actor="operator",
+                    source="pwa",
+                    workspace=workspace,
+                    vault_root=vault_for_receipt,
+                    before_text=queue_before,
+                    after_text=queue_after,
                 )
             for kind in swept_kinds:
                 if proposal_outcomes.is_extraction_kind(kind):
@@ -8128,7 +8244,8 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 if not outcome.get("ok"):
                     keep_lines.add(int(row["line"]))
 
-        lines = queue.read_text(encoding="utf-8").splitlines()
+        queue_before = queue.read_text(encoding="utf-8")
+        lines = queue_before.splitlines()
         # Highest index first so the lower ones stay valid, and each removal
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
@@ -8140,7 +8257,32 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 continue
             if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
                 removed_here.add(row["id"])
-        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        queue_after = "\n".join(lines).rstrip() + "\n"
+        queue.write_text(queue_after, encoding="utf-8")
+        # One receipt per removed bullet, recorded against the single atomic
+        # file rewrite. The batch is itself the transaction; these receipts are
+        # its per-fact record for the History surface.
+        from ciao.memory_receipts import record_queue_resolution
+
+        try:
+            vault_for_receipt = Path(config.workspace_vault_root(entry["workspace"]))
+        except (AttributeError, ValueError):
+            vault_for_receipt = queue.parent.parent
+        for row in entry["rows"]:
+            if row["id"] not in removed_here:
+                continue
+            record_queue_resolution(
+                queue,
+                removed_text=str(row.get("text") or ""),
+                kind=str(row.get("kind") or ""),
+                promoted=action == "accept",
+                actor="operator",
+                source="pwa",
+                workspace=entry["workspace"],
+                vault_root=vault_for_receipt,
+                before_text=queue_before,
+                after_text=queue_after,
+            )
         self_request_removed.update(removed_here)
         # Record THIS queue's outcomes immediately after its rewrite lands: a
         # later file failing to persist must not take already-persisted
@@ -8286,6 +8428,9 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
             target=row.get("region") or row["kind"],
             text=row["text"],
             vault_root=vault_root,
+            actor="operator",
+            source="pwa",
+            workspace=str(row.get("workspace") or ""),
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
@@ -8323,6 +8468,18 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
                 "this reads as an event, not a standing rule, so it would rot "
                 "in always-loaded memory. Use \u201ctalk about it\u201d to rephrase it as "
                 "what is true from now on, then accept."
+            ),
+        }
+    if outcome == "conflict":
+        # The region changed under a concurrent writer between planning and
+        # write. Nothing was written; the row survives and a retry re-reads.
+        return {
+            "ok": False,
+            "region": region,
+            "conflict": True,
+            "error": (
+                f"ciao:{region} changed while this was being applied, so nothing "
+                "was written. Retry to apply it against the current entries."
             ),
         }
     return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
@@ -8557,13 +8714,33 @@ async def proposal_action(request: Request) -> JSONResponse:
             )
 
     queue = Path(ctx["path"])
-    lines = queue.read_text(encoding="utf-8").splitlines()
+    queue_before = queue.read_text(encoding="utf-8")
+    lines = queue_before.splitlines()
     # A concurrent request or the CLI may have removed this bullet first; the
     # loser must not rewrite the file around the winner's deletion, and only
     # the request that actually removed the row records its outcome.
+    from ciao.memory_receipts import record_queue_resolution
+
     removed_ours = _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
     if removed_ours:
-        queue.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        queue_after = "\n".join(lines).rstrip() + "\n"
+        queue.write_text(queue_after, encoding="utf-8")
+        try:
+            vault_for_receipt = Path(config.workspace_vault_root(ctx["workspace"]))
+        except (AttributeError, ValueError):
+            vault_for_receipt = queue.parent.parent
+        record_queue_resolution(
+            queue,
+            removed_text=str(row.get("text") or ""),
+            kind=str(row.get("kind") or ""),
+            promoted=action == "accept",
+            actor="operator",
+            source="pwa",
+            workspace=ctx["workspace"],
+            vault_root=vault_for_receipt,
+            before_text=queue_before,
+            after_text=queue_after,
+        )
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
