@@ -1177,37 +1177,45 @@ def append_proposals(
     source_path: Path | None = None,
     allow_dismissed: bool = False,
 ) -> Path | None:
-    """Append a timestamped batch to ``Workspace/Memory-Proposals.md``."""
+    """Append a timestamped batch to ``Workspace/Memory-Proposals.md``.
+
+    Read-merge-write under :func:`ciao.memory_receipts.queue_lock` so a
+    concurrent undo (or another writer) cannot land between the dedupe read and
+    the rewrite and be silently overwritten.
+    """
     if not proposals:
         return None
+
+    from ciao.memory_receipts import queue_lock
 
     out_path = workspace_vault_root / _PROPOSALS_RELATIVE
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if out_path.exists():
-        # An existing file's header may predate the bounded-region layout and
-        # still name `~/.ciao/memory.md` / `ciao memory add`. Refresh just that
-        # header so the corrected wording reaches installed queues; bullets and
-        # anything below them are left byte-identical.
-        existing = _refresh_header(out_path.read_text(encoding="utf-8"))
-    else:
-        existing = _STUB_HEADER
+    with queue_lock(out_path):
+        if out_path.exists():
+            # An existing file's header may predate the bounded-region layout and
+            # still name `~/.ciao/memory.md` / `ciao memory add`. Refresh just that
+            # header so the corrected wording reaches installed queues; bullets and
+            # anything below them are left byte-identical.
+            existing = _refresh_header(out_path.read_text(encoding="utf-8"))
+        else:
+            existing = _STUB_HEADER
 
-    decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
-    already = _existing_proposal_texts(existing) | decided
-    # Compare the text exactly as ``as_bullet`` will write it, or a proposal
-    # whose text is only whitespace-different from a queued/dismissed one
-    # slips past dedupe and lands as a visually identical duplicate row.
-    fresh = [p for p in proposals if _one_line(p.text) not in already]
-    if not fresh:
-        return None
+        decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
+        already = _existing_proposal_texts(existing) | decided
+        # Compare the text exactly as ``as_bullet`` will write it, or a proposal
+        # whose text is only whitespace-different from a queued/dismissed one
+        # slips past dedupe and lands as a visually identical duplicate row.
+        fresh = [p for p in proposals if _one_line(p.text) not in already]
+        if not fresh:
+            return None
 
-    header = _proposals_header_block(source_path)
-    lines = [p.as_bullet() for p in fresh]
-    block = header + "\n".join(lines) + "\n"
+        header = _proposals_header_block(source_path)
+        lines = [p.as_bullet() for p in fresh]
+        block = header + "\n".join(lines) + "\n"
 
-    out_path.write_text(existing + "\n" + block, encoding="utf-8")
-    return out_path
+        out_path.write_text(existing + "\n" + block, encoding="utf-8")
+        return out_path
 
 
 # Matches a bullet written by ``MemoryProposal.as_bullet``.
@@ -2104,22 +2112,27 @@ def remove_proposal_by_substring(
     needle = needle.strip()
     if not needle:
         return None
-    lines = proposals_path.read_text(encoding="utf-8").splitlines()
-    candidates: list[int] = []
-    for index, line in enumerate(lines):
-        if parse_bullet(line) is None:
-            continue
-        if needle.casefold() in line.casefold():
-            candidates.append(index)
-    if len(candidates) != 1:
-        return None
-    bullet = parse_bullet(lines[candidates[0]])
-    if bullet is None:
-        return None
-    del lines[candidates[0]]
-    lines = _sweep_empty_batches(lines)
-    proposals_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return bullet.kind, bullet.text
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(proposals_path):
+        lines = proposals_path.read_text(encoding="utf-8").splitlines()
+        candidates: list[int] = []
+        for index, line in enumerate(lines):
+            if parse_bullet(line) is None:
+                continue
+            if needle.casefold() in line.casefold():
+                candidates.append(index)
+        if len(candidates) != 1:
+            return None
+        bullet = parse_bullet(lines[candidates[0]])
+        if bullet is None:
+            return None
+        del lines[candidates[0]]
+        lines = _sweep_empty_batches(lines)
+        proposals_path.write_text(
+            "\n".join(lines).rstrip() + "\n", encoding="utf-8"
+        )
+        return bullet.kind, bullet.text
 
 
 def dismiss_proposal_by_substring(

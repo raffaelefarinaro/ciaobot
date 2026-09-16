@@ -636,16 +636,21 @@ def test_missing_archive_blocks_the_job(tmp_path: Path) -> None:
 def test_resume_accepts_the_pipelines_own_insights_append(tmp_path: Path) -> None:
     """A crash after `_append_section` must not look like an external edit.
 
-    The manifest records the pre-insights revision; the archive now differs by
-    exactly the pipeline's own section. The resume must recognize that and run
-    the later stages instead of blocking the job forever.
+    The manifest records the pre-insights revision plus the exact hash of the
+    section it appended. The resume authenticates the on-disk section against
+    that evidence and runs the later stages instead of blocking the job.
     """
     archive = _archive(tmp_path, "# chat\n\nbody\n")
     recorded = aj.archive_content_revision(archive)
     # Simulate the crash: the section is appended, the stage never settles.
-    insights._append_section(archive, "## Decisions\n- Chose X.\n")
+    appended = insights._append_section(archive, "## Decisions\n- Chose X.\n")
+    assert appended
+    append_hash = aj.text_revision(appended)
 
-    assert aj.resume_revision_matches(archive, recorded) is True
+    assert (
+        aj.resume_revision_matches(archive, recorded, expected_append_revision=append_hash)
+        is True
+    )
 
     manager = _manager(tmp_path)
     project = manager.create_project("Work", workspace="work")
@@ -655,6 +660,7 @@ def test_resume_accepts_the_pipelines_own_insights_append(tmp_path: Path) -> Non
     inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
     job = _job(tmp_path, archive, chat_id=chat.chat_id)
     job.content_revision = recorded
+    job.insights_append_revision = append_hash
     job.started = True
     job.mark("insights", aj.RUNNING)
     job.save()
@@ -664,6 +670,40 @@ def test_resume_accepts_the_pipelines_own_insights_append(tmp_path: Path) -> Non
     # Not blocked: insights is recognized as already appended.
     assert job.status_of("insights") == aj.SKIPPED
     assert job.blocked_reason == ""
+
+
+def test_resume_refuses_an_edited_insights_tail(tmp_path: Path) -> None:
+    """An edit confined to the appended body must not pass the crash check.
+
+    The pre-insights prefix still matches the manifest revision, but the
+    appended section no longer hashes to the recorded output, so the resume
+    blocks instead of letting the fold/proposals consume edited content.
+    """
+    archive = _archive(tmp_path, "# chat\n\nbody\n")
+    recorded = aj.archive_content_revision(archive)
+    appended = insights._append_section(archive, "## Decisions\n- Chose X.\n")
+    append_hash = aj.text_revision(appended)
+
+    # Edit only the appended insights body.
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Chose X.", "Chose Y."),
+        encoding="utf-8",
+    )
+
+    assert aj.resume_revision_matches(archive, recorded) is False
+    assert (
+        aj.resume_revision_matches(archive, recorded, expected_append_revision=append_hash)
+        is False
+    )
+
+
+def test_resume_refuses_a_prefix_match_without_append_evidence(tmp_path: Path) -> None:
+    """No recorded append hash means a prefix match cannot be trusted."""
+    archive = _archive(tmp_path, "# chat\n\nbody\n")
+    recorded = aj.archive_content_revision(archive)
+    insights._append_section(archive, "## Decisions\n- Chose X.\n")
+
+    assert aj.resume_revision_matches(archive, recorded) is False
 
 
 def test_resume_blocks_a_genuine_external_edit(tmp_path: Path) -> None:

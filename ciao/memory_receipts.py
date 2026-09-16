@@ -52,6 +52,8 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -146,6 +148,136 @@ def journal_path(vault_root: Path | None, guide: Path | None = None) -> Path:
     if guide is not None:
         return Path(guide).parent / "Workspace" / RECEIPTS_NAME
     raise MemoryReceiptError("a vault root or a guide path is required")
+
+
+QUEUE_LOCK_TIMEOUT_S = 30.0
+"""How long a managed queue write waits for the queue lock before failing.
+
+Bounded like the guide lock so a wedged holder cannot pin a request forever,
+and long enough that ordinary concurrency never trips it.
+"""
+
+# Queue locks live outside the vault. The lock sits beside the queue today only
+# because it was simplest, but the vault is user-owned content: a stray
+# ``*.lock`` there pollutes the tree and broke the re-rooting round-trip's
+# byte-identical invariant. Keep the lock file in a stable per-install
+# directory keyed by the resolved queue path, so the vault stays untouched.
+_QUEUE_LOCK_DIR_ENV = "CIAO_QUEUE_LOCK_DIR"
+
+
+def _queue_lock_path(resolved_key: str) -> Path:
+    """A lock file for a queue path, outside the vault it guards.
+
+    Uses ``CIAO_QUEUE_LOCK_DIR`` when set (tests pin it), else a per-user
+    directory under the system temp root. Deterministic in the resolved queue
+    path so every process and thread guarding the same queue picks the same
+    lock. The uid component keeps two local accounts from colliding on a shared
+    ``/tmp``.
+    """
+    base = os.environ.get(_QUEUE_LOCK_DIR_ENV, "").strip()
+    if base:
+        root = Path(base)
+    else:
+        try:
+            uid = os.getuid()
+        except AttributeError:  # pragma: no cover - non-POSIX
+            uid = 0
+        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{uid}"
+    digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()[:32]
+    return root / f"{digest}.lock"
+
+
+# Re-entrancy depth per resolved queue path for the current thread. A wrapper
+# (`queue_resolution`) holds the lock across a body that calls a writer
+# (`remove_proposal_by_substring`) which also takes it; the inner acquire must
+# not try to flock the same file again (that would deadlock against ourselves).
+_QUEUE_LOCK_DEPTH = threading.local()
+
+
+class QueueLockError(RuntimeError):
+    """The proposal queue lock could not be acquired.
+
+    Deliberately fatal to the write it guards, exactly like
+    :class:`ciao.memory_tool.MemoryLockError`: a caller that swallowed this and
+    wrote anyway would reintroduce the lost-update race the lock exists to
+    prevent.
+    """
+
+    retryable = True
+
+
+@contextmanager
+def queue_lock(
+    proposals_path: Path, *, timeout_s: float = QUEUE_LOCK_TIMEOUT_S
+):
+    """Serialize a read-check-replace on one proposal queue file.
+
+    The undo path re-reads the queue, compares its revision against the
+    receipt's after image, and only then replaces the file. Without a lock the
+    check and the replace are not atomic: another writer can land in between,
+    and the stale replacement silently discards that update. Every managed
+    queue writer (``append_proposals``, ``remove_proposal_by_substring``, the
+    PWA batch/sweep/single routes, and :func:`_undo_queue`) takes this same
+    lock, so the revision check is meaningful across processes and threads.
+
+    Re-entrant within one thread so a wrapper can hold it across a body that
+    calls a writer which takes it again; the cross-process guard is the
+    ``flock`` held by the outermost acquire.
+
+    A lock that cannot be taken raises :class:`QueueLockError`; callers must let
+    it propagate rather than fall through to an unlocked write.
+    """
+    import fcntl
+    import time
+
+    try:
+        key = str(proposals_path.resolve())
+    except OSError:
+        key = str(proposals_path)
+    depths = getattr(_QUEUE_LOCK_DEPTH, "depths", None)
+    if depths is None:
+        depths = {}
+        _QUEUE_LOCK_DEPTH.depths = depths
+    if depths.get(key, 0) > 0:
+        # Already held by this thread; the outermost acquire owns the flock.
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+
+    lock_path = _queue_lock_path(key)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+", encoding="utf-8")
+    except OSError as exc:
+        raise QueueLockError(f"could not open queue lock {lock_path}: {exc}") from exc
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise QueueLockError(
+                    f"queue lock {lock_path} is held; the write was not applied"
+                )
+            time.sleep(0.05)
+        except OSError as exc:
+            handle.close()
+            raise QueueLockError(f"could not lock {lock_path}: {exc}") from exc
+    depths[key] = 1
+    try:
+        yield
+    finally:
+        depths.pop(key, None)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
 
 
 def _append(journal: Path, payload: dict[str, Any]) -> None:
@@ -521,53 +653,58 @@ def queue_resolution(
     reconciled by :func:`recover_pending` on the next startup by asking whether
     the bullet is still present: gone means the removal landed, present means
     it did not.
+
+    The queue lock is held for the whole block, so the ``prepared`` before
+    image this records cannot be made stale by a concurrent writer landing
+    between the read and the body's rewrite.
     """
-    try:
-        before = proposals_path.read_text(encoding="utf-8")
-    except OSError:
-        before = ""
-    rid = new_receipt_id(
-        f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
-    )
-    journal = journal_path(vault_root, proposals_path.parent)
-    base: dict[str, Any] = {
-        "id": rid,
-        "ts": _now(),
-        "actor": actor,
-        "source": source,
-        "workspace": workspace,
-        "kind": "queue_resolve",
-        "queue": str(proposals_path),
-        "action": "promoted" if promoted else "dismissed",
-        "fact_text": removed_text,
-        "removed_text": removed_text,
-        "promoted": promoted,
-    }
-    try:
-        _append(journal, {**base, "status": PREPARED})
-    except Exception:  # noqa: BLE001 — the removal proceeds regardless
-        logger.debug("memory receipts: could not prepare queue receipt", exc_info=True)
-    try:
-        yield base
-    finally:
+    with queue_lock(proposals_path):
         try:
-            _write_queue_receipt(
-                proposals_path,
-                removed_text=removed_text,
-                kind=kind,
-                promoted=promoted,
-                actor=actor,
-                source=source,
-                workspace=workspace,
-                vault_root=vault_root,
-                before_text=before,
-                after_text=None,
-                status=APPLIED,
-                receipt_id=rid,
-                prepared=True,
-            )
-        except Exception:  # noqa: BLE001 — recording must not break removal
-            logger.debug("memory receipts: queue receipt failed", exc_info=True)
+            before = proposals_path.read_text(encoding="utf-8")
+        except OSError:
+            before = ""
+        rid = new_receipt_id(
+            f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
+        )
+        journal = journal_path(vault_root, proposals_path.parent)
+        base: dict[str, Any] = {
+            "id": rid,
+            "ts": _now(),
+            "actor": actor,
+            "source": source,
+            "workspace": workspace,
+            "kind": "queue_resolve",
+            "queue": str(proposals_path),
+            "action": "promoted" if promoted else "dismissed",
+            "fact_text": removed_text,
+            "removed_text": removed_text,
+            "promoted": promoted,
+        }
+        try:
+            _append(journal, {**base, "status": PREPARED})
+        except Exception:  # noqa: BLE001 — the removal proceeds regardless
+            logger.debug("memory receipts: could not prepare queue receipt", exc_info=True)
+        try:
+            yield base
+        finally:
+            try:
+                _write_queue_receipt(
+                    proposals_path,
+                    removed_text=removed_text,
+                    kind=kind,
+                    promoted=promoted,
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    before_text=before,
+                    after_text=None,
+                    status=APPLIED,
+                    receipt_id=rid,
+                    prepared=True,
+                )
+            except Exception:  # noqa: BLE001 — recording must not break removal
+                logger.debug("memory receipts: queue receipt failed", exc_info=True)
 
 
 def _write_queue_receipt(
@@ -970,24 +1107,31 @@ def _undo_queue(
     actor: str,
     source: str,
 ) -> dict[str, Any]:
-    """Restore the queue file to its before image when it has not moved since."""
+    """Restore the queue file to its before image when it has not moved since.
+
+    Read, revision check and replace happen under :func:`queue_lock`, so a
+    concurrent managed writer cannot land between them. Without the lock the
+    revision check proved nothing: another update could arrive after the check
+    and before ``os.replace``, and the undo would silently discard it.
+    """
     path = Path(str(receipt.get("queue", "")))
     if not path.name:
         raise UndoUnsupported("receipt names no queue")
-    try:
-        current = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise MemoryReceiptError(f"queue unreadable: {exc}") from exc
-    if content_revision(current) != str(receipt.get("after_revision", "")):
-        raise RevisionConflict(
-            "the queue changed after this operation; undo was refused"
-        )
     before = receipt.get("before_text")
     if before is None:
         raise UndoUnsupported("receipt carries no queue image")
-    tmp = path.with_name(f".{path.name}.undo.tmp")
-    tmp.write_text(str(before), encoding="utf-8")
-    os.replace(tmp, path)
+    with queue_lock(path):
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise MemoryReceiptError(f"queue unreadable: {exc}") from exc
+        if content_revision(current) != str(receipt.get("after_revision", "")):
+            raise RevisionConflict(
+                "the queue changed after this operation; undo was refused"
+            )
+        tmp = path.with_name(f".{path.name}.undo.tmp")
+        tmp.write_text(str(before), encoding="utf-8")
+        os.replace(tmp, path)
     undone = {
         **{k: v for k, v in receipt.items() if k != "v"},
         "status": UNDONE,
@@ -1060,6 +1204,26 @@ def receipt_journal_candidates(config: Any) -> list[Path]:
             key = ""
         if key and key not in seen:
             journals.append(journal_path(Path(vault_root), None))
+    # The guide-local fallback journal. A managed write that reaches
+    # ``journal_path`` with no vault root (a provider prune whose caller passes
+    # only the guide) records beside that guide's ``Workspace/`` folder. Include
+    # every agent root's fallback journal so those receipts are still discovered
+    # and reconciled after a crash.
+    targets = getattr(config, "agent_root_targets", None)
+    try:
+        roots = list(targets()) if callable(targets) else []
+    except Exception:  # noqa: BLE001 — a broken registry must not block startup
+        roots = []
+    for root, _name in roots:
+        try:
+            fallback = journal_path(None, Path(root) / "CLAUDE.md")
+        except MemoryReceiptError:
+            continue
+        key = str(fallback)
+        if key in seen:
+            continue
+        seen.add(key)
+        journals.append(fallback)
     return journals
 
 

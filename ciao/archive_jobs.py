@@ -106,6 +106,11 @@ def content_revision(path: Path) -> str:
         return ""
 
 
+def text_revision(text: str) -> str:
+    """Digest an in-memory string (used for the exact appended insights image)."""
+    return _sha(text)
+
+
 def archive_content_revision(path: Path) -> str:
     """The revision recorded on an archive job.
 
@@ -136,18 +141,44 @@ def _pre_insights_text(text: str) -> str:
     return text[: location[0]]
 
 
-def resume_revision_matches(path: Path, recorded_revision: str) -> bool:
+def _appended_insights_tail(text: str) -> str | None:
+    """The exact appended insights section (stamp included), or None.
+
+    Returns ``text[section_start:]`` — the bytes :func:`ciao.insights._append_section`
+    writes — so a resume can authenticate the *whole* appended section rather
+    than trusting any tail that happens to follow a matching prefix. An edit
+    confined to the appended body then fails the check instead of being
+    consumed by the fold and proposal stages.
+    """
+    from ciao.insights import locate_insights_section
+
+    location = locate_insights_section(text)
+    if location is None:
+        return None
+    return text[location[0]:]
+
+
+def resume_revision_matches(
+    path: Path,
+    recorded_revision: str,
+    *,
+    expected_append_revision: str = "",
+) -> bool:
     """True when a resume may proceed against the archive on disk.
 
     A crash can land after ``_append_section`` wrote the insights but before
     the manifest marked the stage succeeded. The archive then differs from the
-    recorded revision by exactly the pipeline's own append, which must not be
-    mistaken for an external edit and block the job. This returns true when the
-    current text matches the recorded revision, or when stripping the appended
-    insights section yields it. Both raw and trailing-newline-normalized
-    digests are compared so a manifest written by an earlier build (which
-    stored the unnormalized digest) still resumes. An empty recorded revision
-    is treated as "unknown" and accepted.
+    recorded revision by the pipeline's own append, which must not be mistaken
+    for an external edit and block the job.
+
+    The append is authenticated, not assumed. When ``expected_append_revision``
+    is set (the hash of the exact section the pipeline was about to write), a
+    matching pre-insights prefix is accepted only if the appended section
+    hashes to it. Without that evidence a prefix match is refused: an edit
+    confined to the appended body would otherwise pass the check and be folded
+    into the project doc and proposals. A manifest written before this field
+    existed has no evidence, so its crashed-append window stays blocked rather
+    than risking consumption of edited content.
     """
     if not recorded_revision:
         return True
@@ -155,13 +186,19 @@ def resume_revision_matches(path: Path, recorded_revision: str) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    candidates = {
-        _sha(text),
-        _sha(text.rstrip()),
-        _sha(_pre_insights_text(text)),
-        _sha(_pre_insights_text(text).rstrip()),
-    }
-    return recorded_revision in candidates
+    # No append happened (or the whole file is unchanged): the recorded digest
+    # matches the current text directly. Both raw and trailing-newline variants
+    # are compared so a manifest written by an earlier build still resumes.
+    if recorded_revision in {_sha(text), _sha(text.rstrip())}:
+        return True
+    if not expected_append_revision:
+        return False
+    tail = _appended_insights_tail(text)
+    if tail is None:
+        return False
+    prefix = _pre_insights_text(text)
+    prefix_matches = recorded_revision in {_sha(prefix), _sha(prefix.rstrip())}
+    return prefix_matches and _sha(tail) == expected_append_revision
 
 
 def new_job_id(chat_id: str, archive_path: str) -> str:
@@ -226,6 +263,11 @@ class ArchiveJob:
     #: detected instead of being silently consumed. Empty until insights
     #: settles.
     post_insights_revision: str = ""
+    #: Hash of the exact section the pipeline appended, set immediately before
+    #: ``_append_section`` writes it. A crashed-append resume authenticates the
+    #: on-disk section against this, so an edit confined to the appended body
+    #: is refused rather than consumed. Empty for a job that never appended.
+    insights_append_revision: str = ""
     pipeline_version: int = PIPELINE_VERSION
     manifest_version: int = MANIFEST_VERSION
     created_at: str = ""
@@ -367,6 +409,7 @@ class ArchiveJob:
             "archive_path": self.archive_path,
             "content_revision": self.content_revision,
             "post_insights_revision": self.post_insights_revision,
+            "insights_append_revision": self.insights_append_revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "state": self.state,
@@ -393,6 +436,7 @@ class ArchiveJob:
             runtime_root=str(runtime_root),
             content_revision=str(raw.get("content_revision", "")),
             post_insights_revision=str(raw.get("post_insights_revision", "")),
+            insights_append_revision=str(raw.get("insights_append_revision", "")),
             pipeline_version=int(raw.get("pipeline_version", PIPELINE_VERSION) or 0),
             manifest_version=int(raw.get("manifest_version", MANIFEST_VERSION) or 0),
             created_at=str(raw.get("created_at", "")),

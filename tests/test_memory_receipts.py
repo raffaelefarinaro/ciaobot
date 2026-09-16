@@ -543,6 +543,129 @@ def test_queue_receipt_refuses_undo_when_the_queue_moved(tmp_path):
     assert "A later unrelated trait." in queue.read_text(encoding="utf-8")
 
 
+# ── Queue lock ────────────────────────────────────────────────────────────
+
+
+def test_queue_lock_is_reentrant_within_a_thread(tmp_path):
+    """A wrapper can hold the lock across a body that takes it again."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    with mr.queue_lock(queue):
+        with mr.queue_lock(queue):
+            inner = True
+    assert inner
+
+
+def test_undo_holds_the_queue_lock_across_read_and_replace(tmp_path):
+    """A concurrent writer cannot land between the revision check and replace.
+
+    The lock is held by another writer first. The undo must block on it, then
+    re-read the *updated* queue and report a conflict — proving the check runs
+    under the lock rather than against a stale image captured before it. If the
+    check were outside the lock, the undo would replace the newer state with
+    the stale before-image and silently discard it.
+    """
+    import threading
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Keep every fact.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    with mr.queue_resolution(
+        queue,
+        removed_text="Keep every fact.",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        mp.remove_proposal_by_substring(queue, "Keep every fact.")
+    rid = [
+        r["id"]
+        for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ][-1]
+
+    from ciao.memory_receipts import RevisionConflict
+
+    errors: list[Exception] = []
+    done = threading.Event()
+
+    def undo() -> None:
+        try:
+            with mr.queue_lock(queue):
+                pass
+            mr.undo_receipt(rid, vault_root=tmp_path)
+        except Exception as exc:  # noqa: BLE001 — captured for the assertion
+            errors.append(exc)
+        finally:
+            done.set()
+
+    with mr.queue_lock(queue):
+        t = threading.Thread(target=undo)
+        t.start()
+        # The undo is blocked on the lock; a newer writer lands its update.
+        queue.write_text(
+            queue.read_text(encoding="utf-8")
+            + "- [profile] A later unrelated trait.  _(from: Decisions)_\n",
+            encoding="utf-8",
+        )
+    t.join(timeout=10)
+
+    assert done.is_set()
+    assert any(isinstance(e, RevisionConflict) for e in errors)
+    assert "A later unrelated trait." in queue.read_text(encoding="utf-8")
+
+
+def test_queue_lock_refuses_to_write_when_held(tmp_path):
+    """A held lock is reportable, not silently ignored."""
+    import fcntl
+    import threading
+    import time
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    lock_path = mr._queue_lock_path(str(queue.resolve()))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    acquired = threading.Event()
+
+    def contender() -> None:
+        try:
+            with mr.queue_lock(queue, timeout_s=0.2):
+                acquired.set()
+        except mr.QueueLockError:
+            pass
+
+    t = threading.Thread(target=contender)
+    t.start()
+    t.join(timeout=10)
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+    assert not acquired.is_set()
+    time.sleep(0)
+
+
+def test_queue_lock_file_lives_outside_the_vault(tmp_path):
+    """The lock must not pollute the user-owned vault tree."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    with mr.queue_lock(queue):
+        pass
+
+    assert not (queue.parent / f"{queue.name}.lock").exists()
+    assert mr._queue_lock_path(str(queue.resolve())).exists()
+
+
 # ── Batch queue receipts ──────────────────────────────────────────────────
 
 
@@ -786,6 +909,41 @@ def test_recover_memory_journals_covers_every_workspace_vault(tmp_path):
     mt.update_region(guide, "memory", action="add", entry="Crash fact.")
     result = mr.recover_memory_journals(config)
     assert [r["id"] for r in result["reconciled"]] == ["mrcpt_startup"]
+
+
+def test_recovery_scans_the_guide_local_fallback_journal(tmp_path):
+    """A receipt written beside a guide (no vault seam) is still discovered.
+
+    An automatic prune whose caller passes only the guide records under the
+    guide's sibling ``Workspace/``. Startup recovery must scan that fallback so
+    the interrupted mutation is reconciled, not silently orphaned.
+    """
+    _client, config = _receipts_client(tmp_path)
+    guide = Path(config.agent_root("personal")) / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    mt.ensure_regions(guide)
+    before = mt.serialize_entries(mt.read_region(guide, "memory")[0])
+    after = mt.serialize_entries(["Fallback fact."])
+    journal = mr.journal_path(None, guide)
+    mr._append(
+        journal,
+        {
+            "id": "mrcpt_fallback",
+            "ts": mr._now(),
+            "kind": "region_apply",
+            "guide": str(guide),
+            "region": "memory",
+            "before_revision": mr.content_revision(before),
+            "after_revision": mr.content_revision(after),
+            "before_text": before,
+            "after_text": after,
+            "status": mr.PREPARED,
+        },
+    )
+    mt.update_region(guide, "memory", action="add", entry="Fallback fact.")
+
+    result = mr.recover_memory_journals(config)
+    assert [r["id"] for r in result["reconciled"]] == ["mrcpt_fallback"]
 
 
 def test_mcp_memory_update_lock_failure_is_retryable_not_success(tmp_path, monkeypatch):

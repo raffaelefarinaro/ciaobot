@@ -8074,38 +8074,45 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
     removed = 0
+    from ciao.memory_receipts import queue_lock
+
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
         if not queue.is_file():
             continue
-        queue_before = queue.read_text(encoding="utf-8")
-        lines = queue_before.splitlines()
-        keep = []
-        section_date = None
-        changed = False
-        # Swept rows are collected and recorded only AFTER the rewrite lands:
-        # a failed write must not leave phantom dismissals in the tally.
-        swept_kinds: list[str] = []
-        swept_texts: list[str] = []
-        swept_sources: list[str] = []
-        for raw_line in lines:
-            m = _SECTION_DATE_RE.match(raw_line)
-            if m:
-                section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        # Read, classify and rewrite under the queue lock so a concurrent
+        # managed writer (undo, another route, the curator CLI) cannot land in
+        # between and be silently overwritten.
+        with queue_lock(queue):
+            queue_before = queue.read_text(encoding="utf-8")
+            lines = queue_before.splitlines()
+            keep = []
+            section_date = None
+            changed = False
+            # Swept rows are collected and recorded only AFTER the rewrite lands:
+            # a failed write must not leave phantom dismissals in the tally.
+            swept_kinds: list[str] = []
+            swept_texts: list[str] = []
+            swept_sources: list[str] = []
+            for raw_line in lines:
+                m = _SECTION_DATE_RE.match(raw_line)
+                if m:
+                    section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                    keep.append(raw_line)
+                    continue
+                bullet = proposal_kinds.parse_bullet(raw_line)
+                if bullet is not None and section_date is not None and section_date < cutoff:
+                    removed += 1
+                    changed = True
+                    swept_kinds.append(bullet.kind)
+                    swept_texts.append(bullet.text)
+                    swept_sources.append(bullet.source)
+                    continue
                 keep.append(raw_line)
-                continue
-            bullet = proposal_kinds.parse_bullet(raw_line)
-            if bullet is not None and section_date is not None and section_date < cutoff:
-                removed += 1
-                changed = True
-                swept_kinds.append(bullet.kind)
-                swept_texts.append(bullet.text)
-                swept_sources.append(bullet.source)
-                continue
-            keep.append(raw_line)
+            if changed:
+                queue_after = "\n".join(keep).rstrip() + "\n"
+                queue.write_text(queue_after, encoding="utf-8")
         if changed:
-            queue_after = "\n".join(keep).rstrip() + "\n"
-            queue.write_text(queue_after, encoding="utf-8")
             from ciao.memory_proposals import record_dismissal
             from ciao.memory_receipts import record_queue_resolution_batch
 
@@ -8303,21 +8310,27 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 if not outcome.get("ok"):
                     keep_lines.add(int(row["line"]))
 
-        queue_before = queue.read_text(encoding="utf-8")
-        lines = queue_before.splitlines()
-        # Highest index first so the lower ones stay valid, and each removal
-        # verifies the content at that index - a promotion above may have
-        # awaited a model call while another request rewrote this same file.
-        removed_here: set[str] = set()
-        for row in sorted(
-            entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
-        ):
-            if int(row.get("line", -1)) in keep_lines:
-                continue
-            if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
-                removed_here.add(row["id"])
-        queue_after = "\n".join(lines).rstrip() + "\n"
-        queue.write_text(queue_after, encoding="utf-8")
+        # Read, remove and rewrite under the queue lock so a concurrent undo or
+        # another writer cannot land between the line-index read and this
+        # rewrite and be silently discarded.
+        from ciao.memory_receipts import queue_lock
+
+        with queue_lock(queue):
+            queue_before = queue.read_text(encoding="utf-8")
+            lines = queue_before.splitlines()
+            # Highest index first so the lower ones stay valid, and each removal
+            # verifies the content at that index - a promotion above may have
+            # awaited a model call while another request rewrote this same file.
+            removed_here: set[str] = set()
+            for row in sorted(
+                entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
+            ):
+                if int(row.get("line", -1)) in keep_lines:
+                    continue
+                if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
+                    removed_here.add(row["id"])
+            queue_after = "\n".join(lines).rstrip() + "\n"
+            queue.write_text(queue_after, encoding="utf-8")
         # The batch is one atomic file rewrite: a single transaction-level
         # receipt carries the whole-file before/after image, and the remaining
         # facts are recorded as non-undoable history rows. Undoing each fact's
@@ -8778,17 +8791,23 @@ async def proposal_action(request: Request) -> JSONResponse:
             )
 
     queue = Path(ctx["path"])
-    queue_before = queue.read_text(encoding="utf-8")
-    lines = queue_before.splitlines()
-    # A concurrent request or the CLI may have removed this bullet first; the
-    # loser must not rewrite the file around the winner's deletion, and only
-    # the request that actually removed the row records its outcome.
-    from ciao.memory_receipts import record_queue_resolution
+    # A concurrent request, the undo path, or the CLI may have removed this
+    # bullet first; the loser must not rewrite the file around the winner's
+    # deletion, and only the request that actually removed the row records its
+    # outcome. Read/remove/rewrite under the queue lock so the winner's write
+    # cannot land between this read and this rewrite.
+    from ciao.memory_receipts import record_queue_resolution, queue_lock
 
-    removed_ours = _remove_bullet_line(lines, ctx["line"], str(ctx["row"].get("raw") or ""))
+    with queue_lock(queue):
+        queue_before = queue.read_text(encoding="utf-8")
+        lines = queue_before.splitlines()
+        removed_ours = _remove_bullet_line(
+            lines, ctx["line"], str(ctx["row"].get("raw") or "")
+        )
+        if removed_ours:
+            queue_after = "\n".join(lines).rstrip() + "\n"
+            queue.write_text(queue_after, encoding="utf-8")
     if removed_ours:
-        queue_after = "\n".join(lines).rstrip() + "\n"
-        queue.write_text(queue_after, encoding="utf-8")
         try:
             vault_for_receipt = Path(config.workspace_vault_root(ctx["workspace"]))
         except (AttributeError, ValueError):

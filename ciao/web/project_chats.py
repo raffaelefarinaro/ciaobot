@@ -4618,16 +4618,27 @@ class ProjectChatManager:
 
         try:
             # Revision validation runs for every resume, not only an
-            # insights-pending one. `resume_revision_matches` tolerates the
-            # pipeline's own insights append, so the insights-pending case still
-            # works, while a downstream-only resume compares against the
-            # post-insights revision and blocks if the transcript or its
-            # insights section was edited after insights settled.
+            # insights-pending one. While insights is still pending/running the
+            # recorded revision is the pre-insights one, and the pipeline's own
+            # append is accepted only when the on-disk section authenticates
+            # against the exact output the pipeline recorded before writing it.
+            # Once insights settles, a full-file match against the
+            # post-insights revision is required.
+            insights_pending = job.status_of("insights") in (PENDING, RUNNING)
+            recorded = (
+                job.content_revision if insights_pending else job.post_insights_revision
+            ) or job.content_revision
+            expected_append = job.insights_append_revision if insights_pending else ""
             if not resume_revision_matches(
                 inputs["archive_path"],
-                job.post_insights_revision or job.content_revision,
+                recorded,
+                expected_append_revision=expected_append,
             ):
-                stage = "insights" if job.status_of("insights") in (PENDING, RUNNING) else "project_doc_update"
+                stage = (
+                    "insights"
+                    if insights_pending
+                    else "project_doc_update"
+                )
                 job.block(
                     stage,
                     "archive content changed since the job was created",
@@ -4987,8 +4998,22 @@ class ProjectChatManager:
                 self._config,
                 provider=provider_name,
                 agent_root=agent_root,
+                workspace=self._workspace_for_chat(chat_id),
             )
         return self._providers[chat_id]
+
+    def _workspace_for_chat(self, chat_id: str) -> str:
+        """The logical workspace a chat runs in, or the primary fallback.
+
+        Mirrors ``_agent_root_for_chat`` so the provider's prune receipt lands
+        in the vault journal that workspace owns.
+        """
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat else None
+        workspace = project.workspace if project else ""
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        return workspace
 
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.

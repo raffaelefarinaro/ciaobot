@@ -858,6 +858,7 @@ async def run_archive_pipeline(
         SKIPPED,
         SUCCEEDED,
         TOMBSTONED,
+        text_revision,
     )
 
     if job.tombstoned or job.state == TOMBSTONED:
@@ -1005,6 +1006,13 @@ async def run_archive_pipeline(
                             context_block=context_block,
                         )
                     if extracted:
+                        # Record the exact section hash *before* the write, so a
+                        # crash between the append and the stage mark leaves
+                        # evidence a resume can authenticate against.
+                        section = _format_section(extracted)
+                        if section:
+                            job.insights_append_revision = text_revision(section)
+                            job.save()
                         _append_section(archive_path, extracted)
                         output = extracted
                         logger.info("Appended session insights to %s", archive_path)
@@ -1304,12 +1312,28 @@ def _indent_body_fences(text: str) -> str:
     )
 
 
-def _append_section(path: Path, body: str) -> None:
+def _format_section(body: str) -> str:
+    """The exact insights section ``_append_section`` writes, or '' for empty."""
     text = _indent_body_fences(body.strip())
     if not text:
-        return
+        return ""
+    return f"{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n"
+
+
+def _append_section(path: Path, body: str) -> str:
+    """Append the insights section; return the exact section text written.
+
+    The returned string is the section from its stamp onward — exactly what
+    ``locate_insights_section`` points at — so a caller can record its hash as
+    crash-recovery evidence: a resume authenticates the on-disk section against
+    it instead of trusting any tail that follows a matching prefix.
+    """
+    section = _format_section(body)
+    if not section:
+        return ""
     with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n")
+        f.write(f"\n\n{section}")
+    return section
 
 
 async def _run_model_with_retry(
