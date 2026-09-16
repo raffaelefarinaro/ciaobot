@@ -682,6 +682,10 @@ def queue_resolution(
             "fact_text": removed_text,
             "removed_text": removed_text,
             "promoted": promoted,
+            # The proposal kind is part of the recovery identity: removing
+            # `[memory] Use Python` must not be blocked by a remaining
+            # `[profile] Use Python`.
+            "proposal_kind": kind,
             # The before image and revision live on the prepared row so a
             # crash-recovered receipt can still be undone: recovery fills in the
             # after image/revision from disk, and `is_undoable` needs both.
@@ -871,6 +875,7 @@ def queue_resolution_multi(
         except OSError:
             before = ""
         texts = [str(r.get("text") or "") for r in removals]
+        removal_kinds = [str(r.get("kind") or "") for r in removals]
         rid = new_receipt_id(
             f"{proposals_path}|queue_resolve_batch|"
             f"{'|'.join(texts)}|{content_revision(before)}"
@@ -889,6 +894,7 @@ def queue_resolution_multi(
             else "dismissed",
             "removed_texts": texts,
             "removed_text": texts[0] if texts else "",
+            "removed_kinds": removal_kinds,
             "promoted": any(bool(r.get("promoted")) for r in removals),
             "batch": True,
             # Before image/revision on the prepared row so a crash-recovered
@@ -910,7 +916,8 @@ def queue_resolution_multi(
             except OSError:
                 after = ""
             all_gone = bool(texts) and not any(
-                _bullets_containing(after, needle) for needle in texts
+                _bullets_match(after, text, removal_kinds[i] if i < len(removal_kinds) else "")
+                for i, text in enumerate(texts)
             )
             if completed and all_gone:
                 # Only a completed, content-verified rewrite earns applied
@@ -1074,13 +1081,16 @@ def _reconcile_region(
     )
 
 
-def _bullets_containing(text: str, needle: str) -> bool:
-    """True when a parsed bullet's *text* equals ``needle`` exactly.
+def _bullets_match(text: str, needle: str, kind: str = "") -> bool:
+    """True when a parsed bullet matches ``needle`` (exactly) and ``kind``.
 
     Compares parsed bullet text, not the raw line: a substring search reported
     a removed ``Use Python`` as still queued while ``Use Python 3`` remained,
-    which rolled back a successful resolution. Matches on the same normalized
-    one-line form proposal identity uses.
+    which rolled back a successful resolution. When the receipt names a
+    proposal kind, the bullet's kind must match too, so removing
+    ``[memory] Use Python`` is not blocked by a remaining ``[profile] Use
+    Python``. A receipt with no kind (the CLI's free-substring path) falls back
+    to text-only matching.
     """
     from ciao.memory_proposals import _one_line
     from ciao.proposal_kinds import parse_bullet
@@ -1088,13 +1098,21 @@ def _bullets_containing(text: str, needle: str) -> bool:
     target = _one_line(str(needle))
     if not target:
         return False
+    wanted_kind = str(kind or "").strip().lower()
     for line in text.splitlines():
         bullet = parse_bullet(line)
         if bullet is None:
             continue
+        if wanted_kind and bullet.kind.lower() != wanted_kind:
+            continue
         if _one_line(bullet.text) == target:
             return True
     return False
+
+
+def _bullets_containing(text: str, needle: str) -> bool:
+    """Back-compat shim: exact text match with no kind constraint."""
+    return _bullets_match(text, needle)
 
 
 def _reconcile_queue(
@@ -1109,18 +1127,27 @@ def _reconcile_queue(
     # A batch prepared row lists every removed bullet; the removal landed only
     # when all of them are gone. A single row names one ``removed_text``.
     removed_texts = receipt.get("removed_texts")
+    kinds = receipt.get("removed_kinds")
     if isinstance(removed_texts, list) and removed_texts:
-        needles = [str(t) for t in removed_texts if str(t)]
+        kinds_list = kinds if isinstance(kinds, list) else []
+        needles = [
+            (str(t), str(kinds_list[i]) if i < len(kinds_list) else "")
+            for i, t in enumerate(removed_texts)
+            if str(t)
+        ]
     else:
         single = str(receipt.get("removed_text", ""))
-        needles = [single] if single else []
+        single_kind = str(receipt.get("proposal_kind", ""))
+        needles = [(single, single_kind)] if single else []
     if not needles:
         return None
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
-    still_present = [n for n in needles if _bullets_containing(text, n)]
+    still_present = [
+        needle for needle, kind in needles if _bullets_match(text, needle, kind)
+    ]
     if not still_present:
         # The rewrite landed. Populate the after image/revision from disk so a
         # recovered receipt stays undoable: a prepared row carries only the

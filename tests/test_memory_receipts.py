@@ -952,6 +952,60 @@ def test_queue_recovery_completes_the_decision_sidecar(tmp_path):
     assert "A resolved fact." in sidecar.read_text(encoding="utf-8")
 
 
+def test_settlement_distinguishes_bullets_of_the_same_text_by_kind(tmp_path):
+    """Removing ``[memory] Use Python`` is not blocked by ``[profile] Use Python``.
+
+    Text-only matching saw the remaining profile bullet and rolled the memory
+    resolution back.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [profile] Use Python.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_kind",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "Use Python",
+            "proposal_kind": "memory",
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_kind"]
+    assert settled and settled[0]["status"] == mr.APPLIED
+
+
+def test_settlement_keeps_the_same_kind_present(tmp_path):
+    """A remaining same-kind bullet still rolls the resolution back."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Use Python.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_kind_present",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "Use Python.",
+            "proposal_kind": "memory",
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_kind_present"]
+    assert settled and settled[0]["status"] == mr.ROLLED_BACK
+
+
 def test_failed_batch_rewrite_is_not_recorded_applied(tmp_path):
     """A body that raises must not leave applied receipts.
 
