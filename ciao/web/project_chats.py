@@ -4466,12 +4466,27 @@ class ProjectChatManager:
         except RuntimeError:
             loop = None
         if loop is None:
-            # Synchronous caller (CLI/tests): run inline under the same lock.
-            operation()
+            # Synchronous caller (CLI/tests): run inline. Best-effort like the
+            # async branch — an optional FTS update must never fail an archive
+            # that already succeeded.
+            self._run_archive_index_best_effort(chat_id, outcome, operation)
         else:
             self._spawn_detached(
                 self._index_archive_file_off_loop(chat_id, outcome, operation),
                 name=f"archive-index-{chat_id}",
+            )
+
+    def _run_archive_index_best_effort(
+        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
+    ) -> None:
+        """Run the archive index write inline, logging but never raising."""
+        try:
+            operation()
+        except Exception:  # noqa: BLE001 — archiving already succeeded
+            logger.exception(
+                "FTS search: failed to index archived file %s for chat %s",
+                outcome.path,
+                chat_id,
             )
 
     def _make_archive_index_operation(
