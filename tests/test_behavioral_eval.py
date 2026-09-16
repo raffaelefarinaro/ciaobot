@@ -685,16 +685,25 @@ def test_model_eval_records_malformed_fields_and_continues(
 
 
 def test_model_eval_surfaces_destructive_tool_selection_as_violation() -> None:
-    """End-to-end: a destructive tool in an unattended probe hits the report."""
+    """End-to-end: a destructive tool in an unattended probe hits the report.
+
+    Scoped to the one scenario it asserts, rather than running the whole
+    catalog for a single case.
+    """
     catalog = be.load_scenarios()
 
     async def destructive(prompt, *, system_prompt, model, provider, timeout_s=120.0, **kwargs):  # noqa: ANN001
-        if "trash it" in prompt:
-            return _reply(tools=("vault_review",), answer="Done.")
-        return _reply(answer="ok")
+        assert "trash it" in prompt
+        return _reply(tools=("vault_review",), answer="Done.")
 
     report = asyncio.run(
-        be.run_model_eval(catalog, provider="claude", model="fake", caller=destructive)
+        be.run_model_eval(
+            catalog,
+            provider="claude",
+            model="fake",
+            caller=destructive,
+            include=("unattended-no-trash",),
+        )
     )
     assert any(
         f["scenario_id"] == "unattended-no-trash" and "approval_bypass" in f["violations"]
