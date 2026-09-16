@@ -1342,17 +1342,35 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
     vault_root = _resolve_vault_root(args.vault_root)
-    # Keys are relative to the install root, so one database can hold several
-    # agent roots each with a vault of the same name.
-    key_base = Path(
-        os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
-    ).expanduser().resolve()
     # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
     # be derived from the vault root on a migrated install.
     from ciao.config import logs_root_for
 
-    logs_root = logs_root_for(key_base, vault_root, key_base / ".runtime")
-    db_path = fts_search.get_db_path()
+    # The install root defines BOTH the stored-key base and the database: an
+    # explicit --runtime-root / CIAO_RUNTIME_ROOT names `<install>/.runtime`, so
+    # its parent is the authoritative install root. Deriving the key base from
+    # `--vault-root` instead (e.g. `/install/personal` from
+    # `/install/personal/memory-vault`) opened the install's live database while
+    # writing keys, and `_ensure_path_base` then cleared every workspace's rows
+    # because the base did not match the server's `/install`.
+    runtime_arg = getattr(args, "runtime_root", None)
+    env_runtime = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+    if runtime_arg or env_runtime:
+        runtime_root = _resolve_runtime_root(runtime_arg)
+        key_base = runtime_root.parent
+    else:
+        # Keys are relative to the install root, so one database can hold several
+        # agent roots each with a vault of the same name.
+        key_base = Path(
+            os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
+        ).expanduser().resolve()
+        runtime_root = (key_base / ".runtime").resolve()
+    logs_root = logs_root_for(key_base, vault_root, runtime_root)
+    # Install-owned, exactly like the MCP tools and startup indexing: with the
+    # legacy global `~/.ciao/vault-fts.db`, a `ciao vault-search` run from a dev
+    # checkout cleared the production install's index (and vice versa) because
+    # the key base differs between installs.
+    db_path = fts_search.get_db_path(runtime_root)
 
     if args.rebuild and db_path.exists():
         try:
@@ -2335,7 +2353,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
                 workspace, names, vault_name=leaf
             )
             result["search"] = workspace_reroot.rebuild_search_index(
-                workspace, names, vault_name=leaf
+                workspace, names, runtime_root=runtime, vault_name=leaf
             )
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "migrated" else 1
@@ -2854,7 +2872,29 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         return 1
     if not raw_matches and flat_matches:
         needle = flattened
-    removed = remove_proposal_by_substring(path, needle)
+    if not union:
+        print(
+            f"No unique memory proposal matched {needle!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    # Bracket the removal with a receipt so a crash between the queue rewrite
+    # and the decision record is recoverable, and so the History surface can
+    # reverse a dismissal the curator made.
+    from ciao.memory_receipts import queue_resolution
+
+    with queue_resolution(
+        path,
+        removed_text=needle,
+        kind="",
+        promoted=bool(args.promoted),
+        actor="agent",
+        source="cli",
+        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+        vault_root=vault,
+    ):
+        removed = remove_proposal_by_substring(path, needle)
     if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
@@ -3564,6 +3604,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    search_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Install runtime root that owns the search database. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime; the index is install-owned "
+            "so two installs cannot clear each other's derived state."
+        ),
     )
     search_parser.set_defaults(func=_vault_search_command)
 

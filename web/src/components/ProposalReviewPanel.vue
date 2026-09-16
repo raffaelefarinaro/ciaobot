@@ -167,6 +167,45 @@ const selected = computed({
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
+// -- Queue load states ------------------------------------------------------
+//
+// The queue used to render one empty state — "Nothing queued here." — whenever
+// `filtered` was empty, so the first (slow) GET, a failed first GET, and a
+// filter that matched nothing all looked like a successfully reviewed queue.
+// These four are distinct and must stay distinct: a load that has not answered
+// yet, a load that failed before any snapshot, a filter hiding a non-empty
+// scope, and a queue that really is empty.
+
+/** No snapshot has loaded and none has failed yet: the first fetch is about to
+ * start or is in flight. Keyed off `loaded`/`loadError` rather than `loading`,
+ * so the render between mount and `onMounted` cannot flash a zero-state. */
+const queueLoading = computed(() => !store.loaded && !store.loadError)
+
+/** The list could not be read and there is no snapshot to fall back on, so no
+ * empty-queue claim may be made. */
+const queueFailed = computed(() => Boolean(store.loadError) && !store.loaded)
+
+/** Rows in the current workspace scope before the kind/search filters. Lets
+ * "nothing matches the filter" be told apart from "nothing queued", the way
+ * the History list already does. */
+const scopedCount = computed(() => store.scopedRows(projectStore.activeWorkspace).length)
+
+/** A kind/search filter is hiding a non-empty scope. When `filtered` is empty
+ * but `scopedCount` is not, a filter must be active: both are computed from
+ * the same rows, and with no filter the two are equal. */
+const filtersHideEverything = computed(
+  () => !filtered.value.length && scopedCount.value > 0,
+)
+
+/** The last successful snapshot held nothing in scope, with no failed refresh
+ * on top. "All reviewed." may only describe a load that actually succeeded;
+ * while a refresh is failing the stale banner speaks instead. */
+const queueEmpty = computed(() => store.loaded && !store.loadError && scopedCount.value === 0)
+
+function retryQueue() {
+  void store.fetch({ force: true })
+}
+
 // -- Queue / History tabs ---------------------------------------------------
 //
 // The two sub-views share this panel (and its workspace/kind/search filter
@@ -670,7 +709,7 @@ watch(
         class="pr-tabs"
         @update:model-value="switchTab"
       />
-      <p v-if="store.view === 'queue'" class="pr-summary">
+      <p v-if="store.view === 'queue' && !queueLoading && !queueFailed" class="pr-summary">
         <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
         <button
           v-if="store.kindFilter !== 'all' || store.search"
@@ -741,8 +780,40 @@ watch(
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 
-    <p v-if="!filtered.length" class="pr-empty">Nothing queued here.</p>
+    <!-- The queue's four load states, kept apart so none of them can borrow the
+         others' words. The old single "Nothing queued here." rendered under a
+         slow or failed first GET and read as a confirmed-empty queue. -->
+    <p v-if="queueLoading" class="pr-empty" role="status" aria-live="polite">Loading proposals…</p>
 
+    <div v-else-if="queueFailed" class="pr-error-block" role="alert">
+      <p class="pr-error">{{ store.loadError }}</p>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+    </div>
+
+    <!-- A refresh failed while rows are already on screen: keep showing them,
+         but say they are the last snapshot rather than the current one. -->
+    <div v-else-if="store.loadError" class="pr-stale" role="status">
+      <span>Could not refresh — showing the last loaded queue.</span>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+    </div>
+
+    <!-- Empty-state claims render only on a successful load with no failed
+         refresh shadowing it. `filtersHideEverything` needs a filter to be the
+         reason; `queueEmpty` is the only branch allowed to say "All reviewed." -->
+    <template v-if="!queueLoading && !queueFailed && !store.loadError">
+      <p v-if="filtersHideEverything" class="pr-empty">
+        No proposals match the current filters.
+        <button
+          v-if="store.kindFilter !== 'all' || store.search"
+          type="button"
+          class="pr-clear-filter"
+          @click="store.resetFilters()"
+        >Clear filters</button>
+      </p>
+      <p v-else-if="queueEmpty" class="pr-empty">All reviewed.</p>
+    </template>
+
+    <template v-if="!queueLoading && !queueFailed">
     <section class="pr-group">
       <header v-if="filtered.length" class="pr-group-head">
         <label class="pr-group-select">
@@ -879,6 +950,7 @@ watch(
       </label>
       <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
     </footer>
+    </template>
     </div>
   </div>
 </template>
@@ -936,6 +1008,31 @@ watch(
   color: var(--fg2);
   font-size: 0.9rem;
   padding: var(--space-4) 0;
+}
+
+/* A failed first load: the error stands alone with a retry, and no empty-queue
+   claim sits under it. */
+.pr-error-block {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-3) 0;
+}
+
+.pr-error-block .pr-error {
+  margin: 0;
+}
+
+/* A refresh that failed while rows are on screen. Muted, not an alert: the
+   data is still usable, it is just the last snapshot. */
+.pr-stale {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  color: var(--warning);
+  font-size: 0.85rem;
 }
 
 /* Queue / History tablist, matching ProjectView's project-tabs underline
@@ -1022,6 +1119,23 @@ watch(
   color: var(--accent);
   font-size: 0.78rem;
   cursor: pointer;
+}
+
+/* Touch: the inline link is only glyph-height, well under the 44px minimum.
+   Grow the hit area with padding and pull the extra back with a matching
+   negative margin, so the control stays visually inline where it sits in the
+   empty-state sentence. Same trick as the History list's clear control. */
+@media (pointer: coarse) {
+  .pr-clear-filter {
+    --pr-clear-visual: 1.1rem;
+    --pr-clear-pad: calc((var(--touch, 44px) - var(--pr-clear-visual)) / 2);
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch, 44px);
+    padding: var(--pr-clear-pad);
+    margin: calc(-1 * var(--pr-clear-pad));
+    margin-left: calc(var(--space-2) - var(--pr-clear-pad));
+  }
 }
 
 .pr-batch-count {

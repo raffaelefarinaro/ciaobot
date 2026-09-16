@@ -4459,7 +4459,10 @@ class ProjectChatManager:
             import sqlite3
             from ciao.fts_search import get_db_path, init_db, index_file
 
-            db_path = get_db_path()
+            # Install-owned: the same database the MCP tools, the CLI and
+            # startup indexing resolve, so an archived chat cannot land in the
+            # legacy global `~/.ciao` index that a second install then clears.
+            db_path = get_db_path(Path(config.state_path).parent)
             conn = sqlite3.connect(db_path)
             init_db(conn)
             index_file(

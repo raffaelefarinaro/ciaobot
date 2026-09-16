@@ -98,6 +98,7 @@ RESERVED_UNINDEXED_FILES = frozenset(
     {
         "memory-proposals.md",
         "memory-consolidations.md",
+        "memory-receipts.jsonl",
         "curation-log.md",
         "weekly-review-log.md",
         "vault-review.md",

@@ -957,6 +957,7 @@ async def extract_and_append(
                         project_doc_path=resolved_doc_path,
                         project_fold_wrote=doc_fold_wrote,
                         region_decisions=region_decisions,
+                        workspace=(trajectory_meta or {}).get("workspace", ""),
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
