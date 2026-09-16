@@ -20,13 +20,20 @@ Spot-check a real install without touching its live FTS database or
 LaunchAgents (a dev-checkout run against live state can destroy both):
 
 ```bash
-export CIAO_MEMORY_DIR=$(mktemp -d)          # fresh index, isolated from ~/.ciao
+export CIAO_MEMORY_DIR=$(mktemp -d)          # force a throwaway index for this probe
 export CIAO_WORKSPACE=<install workspace>           # the install root
 cd <ciaobot checkout>
 .venv/bin/python -m ciao.cli vault-search \
   --vault-root <workspace>/<agent-root>/memory-vault \
   --limit 3 "<probe query>"
 ```
+
+The index is now install-owned: without the override it resolves
+`<CIAO_RUNTIME_ROOT>/vault-fts.db` (defaulting to `<workspace>/.runtime`), so a
+dev checkout and a production install can no longer clear each other's derived
+index. The explicit `CIAO_MEMORY_DIR` here is still deliberate: a probe that
+inherits the live install's runtime would read and rebuild the live database, so
+a throwaway path keeps the probe read-only against real state.
 
 Probe set (adjust entities to the vault under test):
 

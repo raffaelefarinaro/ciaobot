@@ -53,19 +53,41 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 NO_MATCH_KEY_PREFIX = os.sep
 
 
-def get_db_path() -> Path:
-    """Resolve the path to the SQLite search database.
+SEARCH_DB_NAME = "vault-fts.db"
 
-    Defaults to ``~/.ciao/vault-fts.db``. Overridable via ``CIAO_MEMORY_DIR``
-    so that tests can point to a temporary directory.
+
+def get_db_path(runtime_dir: Path | None = None) -> Path:
+    """Resolve the path to the SQLite search database for one install.
+
+    The default is INSTALL-OWNED: ``<runtime_dir>/vault-fts.db``. Derived state
+    must not be shared between installs, or a production install and a dev
+    checkout using ``~/.ciao/vault-fts.db`` would clear each other's index on
+    every alternating search (``_ensure_path_base`` drops the tables when the
+    key base changes). Callers pass their own runtime directory, which is
+    ``config.state_path.parent`` for the app and CLI.
+
+    ``CIAO_MEMORY_DIR`` stays an explicit override and wins over
+    ``runtime_dir``: tests and migration tooling point it at a temporary
+    directory, and an operator may deliberately share one database. When it is
+    set the caller is responsible for that sharing — the ownership check in
+    ``_ensure_path_base`` diagnoses a mismatch instead of mixing key formats.
+
+    ``runtime_dir=None`` with no override returns the legacy global path
+    ``~/.ciao/vault-fts.db``. That is a fallback for the rare caller with no
+    install context; every real entry point (CLI, MCP, startup indexing) passes
+    its runtime directory so they all resolve the same install-owned database.
+    The legacy database is never moved or deleted here: it is left in place and
+    a fresh install-owned index is rebuilt on first use.
     """
     override = os.environ.get("CIAO_MEMORY_DIR", "").strip()
     if override:
         db_dir = Path(override).expanduser()
+    elif runtime_dir is not None:
+        db_dir = Path(runtime_dir).expanduser()
     else:
         db_dir = Path.home() / ".ciao"
     db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / "vault-fts.db"
+    return db_dir / SEARCH_DB_NAME
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -125,6 +147,18 @@ def _ensure_path_base(conn: sqlite3.Connection, base: Path) -> None:
     if row is not None and row[0] == resolved:
         return
     if row is not None:
+        # Diagnosed, not silent: with install-owned databases this only happens
+        # when two installs deliberately share one database (an explicit
+        # CIAO_MEMORY_DIR or a manually shared runtime). Saying so is the whole
+        # difference between "your search index is empty" and "another install
+        # owns this database"; the rows are derived, so dropping them is safe.
+        logger.warning(
+            "FTS search: database path base changed from %r to %r; dropping the "
+            "derived index. Two installs are sharing one search database (check "
+            "CIAO_MEMORY_DIR / CIAO_RUNTIME_ROOT).",
+            row[0],
+            resolved,
+        )
         for table in ("vault_fts", "vault_meta", "transcript_fts", "transcript_meta"):
             conn.execute(f"DELETE FROM {table}")
     conn.execute(

@@ -989,7 +989,9 @@ def audit_job_runs(
     }
 
 
-def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[str, Any]:
+def _search_index_audit(
+    install_root: Path, workspaces: Sequence[str], runtime_dir: Path
+) -> dict[str, Any]:
     """Whether the full-text index still describes the vault on disk.
 
     The audit checked notes, links, guides, regions and skills, but never the
@@ -1024,12 +1026,12 @@ def _search_index_audit(install_root: Path, workspaces: Sequence[str]) -> dict[s
             (root / name).is_dir() and any((root / name).rglob("*.md"))
             for name in workspaces
         ) if workspaces else False
-        db = get_db_path()
+        db = get_db_path(runtime_dir)
         if not db.exists():
             out["missing"] = bool(has_notes)
             return out
-        out["stale_rows"] = stale_search_rows(root)
-        out["transcripts_unindexed"] = unindexed_transcript_archive(root)
+        out["stale_rows"] = stale_search_rows(root, db_path=db)
+        out["transcripts_unindexed"] = unindexed_transcript_archive(root, db_path=db)
     except OSError as exc:
         out["errors"].append({"type": "search_index_unreadable", "detail": str(exc)})
     return out
@@ -1365,7 +1367,11 @@ def run_os_audit(
     # Install-wide, like the other global sections: one search database serves
     # every root, so reporting it per workspace would say the same thing N times.
     search_result = (
-        _search_index_audit(workspace, list(getattr(config, "workspace_names", lambda: [])()))
+        _search_index_audit(
+            workspace,
+            list(getattr(config, "workspace_names", lambda: [])()),
+            runtime,
+        )
         if want_global
         else {
             "missing": False,

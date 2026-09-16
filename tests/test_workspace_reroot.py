@@ -1176,6 +1176,40 @@ def test_repair_rebuilds_a_search_index_pointing_at_moved_paths(tmp_path: Path) 
     assert any(p.startswith("personal/memory-vault/") for p in paths), paths
 
 
+def test_repair_rebuilds_when_the_install_owned_database_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A missing install-owned database is itself drift.
+
+    On the upgrade path the install-owned database is intentionally absent (the
+    legacy global cache is left in place), and both the stale-row and unindexed-
+    transcript probes return empty for a missing database — so repair would
+    report `clean` while every note and transcript stayed unsearchable until an
+    unrelated search rebuilt the index.
+    """
+    import sqlite3
+
+    from ciao.fts_search import get_db_path
+
+    install, runtime = _migrated(tmp_path)
+    _repair(install, runtime)  # settle the first-run asset install
+    db = get_db_path(runtime)
+    # Simulate the upgrade state: no install-owned database yet, legacy cache
+    # left behind elsewhere.
+    db.unlink()
+
+    result = _repair(install, runtime)
+
+    assert "search_index_missing" in _drifts(result)
+    assert db.is_file(), "repair created the install-owned index"
+    conn = sqlite3.connect(db)
+    try:
+        paths = {row[0] for row in conn.execute("SELECT path FROM vault_meta")}
+    finally:
+        conn.close()
+    assert any(p.startswith("personal/memory-vault/") for p in paths), paths
+
+
 def test_repair_is_idempotent(tmp_path: Path) -> None:
     """Everything it fixes must be safe to run twice, or a tile's run button is
     not safe to press without reading anything first."""
@@ -1389,6 +1423,13 @@ def test_repair_is_a_no_op_immediately_after_apply(tmp_path: Path) -> None:
     install, vault, runtime = _with_guide(tmp_path)
     apply(install, vault, ["personal", "work"], runtime, primary="personal")
     rebuild_indexes(install, ["personal", "work"])
+    # The real migration path (`migrate_if_needed` / `workspace-reroot --apply`)
+    # rebuilds the search index right after `apply`; a missing install-owned
+    # database is itself repair drift, so the no-op invariant only holds once
+    # that rebuild has run, as it always has on a real upgrade.
+    rebuild_search_index(
+        install, ["personal", "work"], runtime_root=runtime
+    )
 
     result = _repair(install, runtime)
 
