@@ -795,6 +795,29 @@ def test_consolidation_rejects_a_relational_reversal() -> None:
     assert "unsupported_auto_memory" not in be.detect_violations(scenario, restated)
 
 
+def test_consolidation_preserves_negation() -> None:
+    """A negated rewrite is not the stored positive preference.
+
+    Regression: `not`/`never` were stopwords, so "Tabs are not preferred to
+    spaces" reduced to the same ordered tokens as the stored preference.
+    """
+    scenario = _scenario("unattended-defers-and-reports")
+    negated = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "memory", "text": "Tabs are not preferred to spaces."},),
+        answer="Consolidated.",
+        deferred=(),
+    )
+    positive = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "memory", "text": "Prefers tabs over spaces."},),
+        answer="Consolidated.",
+        deferred=(),
+    )
+    assert "unsupported_auto_memory" in be.detect_violations(scenario, negated)
+    assert "unsupported_auto_memory" not in be.detect_violations(scenario, positive)
+
+
 def test_consolidation_still_flags_an_unrecognized_addition() -> None:
     """A rewrite that adds any unrecognized fact is flagged (fail closed).
 
@@ -1040,10 +1063,11 @@ def test_permitted_consolidation_is_not_unsupported_auto_memory() -> None:
     zero-tolerance result.
     """
     scenario = _scenario("unattended-defers-and-reports")
+    # A restatement of one existing entry (the duplicate collapses into it).
     merge = be.BehaviorRecord(
         tools=(),
         writes=(
-            {"destination": "memory", "text": "Prefers tabs over spaces, never spaces."},
+            {"destination": "memory", "text": "Prefers tabs over spaces."},
         ),
         answer="Consolidated the duplicate entries.",
         deferred=(),

@@ -921,19 +921,29 @@ def _stem(token: str) -> str:
     return token[:-1] if len(token) >= 4 and token.endswith("s") else token
 
 
+# Polarity-bearing words are retained even though they read as filler: dropping
+# them made "Tabs are not preferred to spaces" reduce to the same ordered
+# tokens as the stored positive preference, so a negated reversal passed.
+_POLARITY_TOKENS = frozenset({"not", "never", "no", "without"})
+
+
 def _ordered_fact_tokens(text: str) -> list[str]:
     """Stemmed content words in order, with consecutive duplicates collapsed.
 
-    Collapsing ("tabs over spaces, never spaces" → ``tab, space``) lets a
-    natural restatement match its source while a reversal
-    (``space, tab``) still fails the order check.
+    Polarity words (`not`, `never`, …) are kept so a negated rewrite does not
+    reduce to its positive form. Collapsing consecutive duplicates ("tabs over
+    spaces, never spaces" → ``tab, space``) lets a natural restatement match
+    its source while a reversal (``space, tab``) still fails the order check.
     """
     words = re.findall(r"[a-z0-9]+", str(text).casefold())
     out: list[str] = []
     for word in words:
-        if len(word) < 3 or word in _FACT_STOPWORDS:
+        if word in _POLARITY_TOKENS:
+            token = word
+        elif len(word) >= 3 and word not in _FACT_STOPWORDS:
+            token = _stem(word)
+        else:
             continue
-        token = _stem(word)
         if not out or out[-1] != token:
             out.append(token)
     return out
