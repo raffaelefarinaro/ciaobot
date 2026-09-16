@@ -169,6 +169,69 @@ describe('post-mutation refresh', () => {
   })
 })
 
+describe('queue load errors', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  it('records a first-load failure in loadError, not the action error slot', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('proposals are unreachable'))
+    const store = useProposalsStore()
+
+    await store.fetch()
+
+    expect(store.loadError).toBe('proposals are unreachable')
+    expect(store.error).toBe('')
+    expect(store.loaded).toBe(false)
+    expect(store.loading).toBe(false)
+  })
+
+  it('preserves the last good snapshot when a refresh fails', async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({ rows: [row({ id: 'a' })] } as never)
+    const store = useProposalsStore()
+    await store.fetch()
+    expect(store.loaded).toBe(true)
+
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('refresh broke'))
+    await store.fetch({ force: true })
+
+    expect(store.rows.map(r => r.id)).toEqual(['a'])
+    expect(store.loadError).toBe('refresh broke')
+    // `loaded` stays true: there IS a snapshot, it is just stale.
+    expect(store.loaded).toBe(true)
+  })
+
+  it('clears loadError on the next successful load', async () => {
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('nope'))
+    const store = useProposalsStore()
+    await store.fetch()
+    expect(store.loadError).toBe('nope')
+
+    vi.mocked(api.get).mockResolvedValueOnce({ rows: [row({ id: 'a' })] } as never)
+    await store.fetch({ force: true })
+
+    expect(store.loadError).toBe('')
+    expect(store.rows.map(r => r.id)).toEqual(['a'])
+  })
+
+  it('does not let a list refresh erase an unread action failure', async () => {
+    // The risk named in the ticket: refresh used to clear `error`, hiding an
+    // accept failure the operator had not read. The two slots are separate now.
+    vi.mocked(api.get).mockResolvedValue({ rows: [row({ id: 'a' })] } as never)
+    vi.mocked(api.post).mockRejectedValueOnce(new Error('accept refused'))
+    const store = useProposalsStore()
+
+    await store.act('a', 'accept')
+    expect(store.error).toBe('accept refused')
+
+    await store.fetch({ force: true })
+    expect(store.error).toBe('accept refused')
+    expect(store.loadError).toBe('')
+  })
+})
+
 
 function historyRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
   return {

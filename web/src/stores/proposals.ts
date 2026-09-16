@@ -22,7 +22,15 @@ export const useProposalsStore = defineStore('proposals', () => {
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const busy = computed(() => busyIds.value.size > 0)
+  /** Action failures only (an accept/dismiss that refused). Kept separate from
+   * `loadError` so a list refresh can never erase an unread action failure. */
   const error = ref('')
+  /** List-load failures only. Separate from `error` for the same reason the
+   * History ledger has `historyError`: a failed GET is not the outcome of an
+   * action, and clearing it here used to wipe an accept error nobody had read.
+   * When set while `loaded` is true, the rows on screen are the last
+   * successfully loaded snapshot and must be labelled stale, not empty. */
+  const loadError = ref('')
   const loaded = ref(false)
   let fetchPromise: Promise<void> | null = null
   /** Ticket for the newest in-flight list request; older responses are dropped. */
@@ -167,16 +175,21 @@ export const useProposalsStore = defineStore('proposals', () => {
     const seq = ++fetchSeq
     const request = (async () => {
       loading.value = true
-      error.value = ''
+      // Only the list-load slot is cleared here. `error` belongs to actions.
+      loadError.value = ''
       try {
         const data = await api.get<ProposalsResponse>('/api/proposals')
         if (seq !== fetchSeq) return
         rows.value = data.rows ?? []
         loaded.value = true
+        loadError.value = ''
         pruneSelected()
       } catch (e) {
         if (seq !== fetchSeq) return
-        error.value = e instanceof Error ? e.message : 'Could not load proposals'
+        // Rows are left untouched: a refresh that fails keeps the previous
+        // successful snapshot, and `loadError` (plus `loaded`) tells the view
+        // it is stale rather than empty.
+        loadError.value = e instanceof Error ? e.message : 'Could not load proposals'
       } finally {
         if (seq === fetchSeq) loading.value = false
       }
@@ -379,7 +392,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, fetch, ensureLoaded, act, batch, dismissOlderThan,
+    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, batch, dismissOlderThan,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,
