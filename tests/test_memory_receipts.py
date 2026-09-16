@@ -1007,11 +1007,12 @@ def test_settlement_keeps_the_same_kind_present(tmp_path):
 
 
 def test_failed_batch_rewrite_is_not_recorded_applied(tmp_path):
-    """A body that raises must not leave applied receipts.
+    """A body that raises before writing must not leave applied receipts.
 
     The bracket records applied rows only for a completed, content-verified
-    rewrite; a disk-full/permission error leaves a rolled_back transaction row
-    so History does not falsely claim the facts were resolved.
+    rewrite. When the body raised with the queue still at its before-image,
+    there is nothing to recover, so the transaction settles rolled_back and no
+    applied row is written.
     """
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True, exist_ok=True)
@@ -1041,11 +1042,55 @@ def test_failed_batch_rewrite_is_not_recorded_applied(tmp_path):
         for r in mr.read_receipts(mr.journal_path(tmp_path, None))
         if r["kind"] == "queue_resolve"
     ]
-    assert rows, "a terminal transaction row must be recorded"
-    assert rows[-1]["status"] == mr.ROLLED_BACK
+    assert rows, "the transaction row must be recorded"
     assert all(r["status"] != mr.APPLIED for r in rows)
+    # The queue is unchanged, so the transaction is rolled back, not applied.
+    assert rows[-1]["status"] == mr.ROLLED_BACK
     # The bullet is still present, so it was never resolved.
     assert "Fact A." in queue.read_text(encoding="utf-8")
+
+
+def test_partial_queue_rewrite_is_left_for_recovery(tmp_path):
+    """A truncated write that matches neither image stays recoverable.
+
+    `queue.write_text` can truncate then raise; a terminal rollback would make
+    startup recovery skip a file that may have lost unrelated proposals. The
+    prepared row must stay non-terminal.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    before = (
+        "# Memory Proposals\n\n"
+        "- [memory] Fact A.  _(from: Decisions)_\n"
+        "- [memory] Unrelated B.  _(from: Decisions)_\n"
+    )
+    queue.write_text(before, encoding="utf-8")
+
+    class _Boom(Exception):
+        pass
+
+    try:
+        with mr.queue_resolution_multi(
+            queue,
+            [{"text": "Fact A.", "kind": "memory", "promoted": False}],
+            actor="operator",
+            source="pwa",
+            vault_root=tmp_path,
+        ):
+            # Simulate a partial/truncated write that then raises.
+            queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+            raise _Boom("short write")
+    except _Boom:
+        pass
+
+    journal = mr.journal_path(tmp_path, None)
+    rows = [r for r in mr.read_receipts(journal) if r["kind"] == "queue_resolve"]
+    assert rows and rows[-1]["status"] == mr.PREPARED
+
+    # Recovery then classifies the partial state (here: every bullet gone, so
+    # APPLIED) instead of finding a terminal row and skipping it.
+    result = mr.recover_pending(journal=journal)
+    assert [r["id"] for r in result.reconciled] == [rows[-1]["id"]]
 
 
 def test_single_route_uses_a_prepared_receipt_before_the_rewrite(tmp_path):

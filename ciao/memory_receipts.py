@@ -956,10 +956,10 @@ def queue_resolution_multi(
                     _append(journal, settled)
                 except Exception:  # noqa: BLE001
                     logger.debug("memory receipts: batch settle failed", exc_info=True)
-            else:
-                # Leave a recoverable terminal row: the rewrite did not land
-                # (or did not remove every bullet), so recovery/undo cannot
-                # misreport it as applied.
+            elif content_revision(after) == content_revision(before):
+                # A completed rewrite that removed nothing left the queue at its
+                # exact before-image, so there is nothing to recover: settle it
+                # rolled_back now.
                 try:
                     _append(
                         journal,
@@ -970,11 +970,17 @@ def queue_resolution_multi(
                             "before_text": _image(before),
                             "after_text": _image(after),
                             "status": ROLLED_BACK,
-                            "detail": "batch rewrite did not land",
+                            "detail": "batch rewrite removed nothing",
                         },
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug("memory receipts: batch rollback failed", exc_info=True)
+            # Otherwise (`write_text` raised mid-way, or only some bullets are
+            # gone) leave the prepared row non-terminal: the queue may match
+            # neither image, and startup recovery is the one place that can
+            # classify it as applied, rolled_back or conflict. Writing a
+            # terminal rollback here would make recovery skip a file that may
+            # have lost unrelated proposals.
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────
