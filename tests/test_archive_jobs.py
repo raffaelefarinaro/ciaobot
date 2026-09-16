@@ -252,6 +252,26 @@ def test_unfinished_job_keeps_the_session_payload(tmp_path: Path) -> None:
     assert reloaded.inputs.get("filtered_jsonl") == "payload"
 
 
+def test_blocked_raw_input_stage_keeps_the_session_payload(tmp_path: Path) -> None:
+    """A blocked insights/trajectory still needs the raw input.
+
+    Startup blocks these stages when the archive is missing; the missing-file
+    path supports a later restore, after which an explicit retry resets them to
+    pending. Dropping the payload then would leave the trajectory permanently
+    skipped and non-text-mode insights running against an empty transcript.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.inputs["filtered_jsonl"] = "payload"
+    job.block("insights", "archive file is missing")
+    job.block("trajectory", "archive file is missing")
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.inputs.get("filtered_jsonl") == "payload"
+
+
 def test_insights_append_is_skipped_when_evidence_cannot_persist(
     tmp_path: Path, monkeypatch
 ) -> None:

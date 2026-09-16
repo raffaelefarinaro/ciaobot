@@ -4846,44 +4846,57 @@ class ProjectChatManager:
             # and a stage that was never going to run is not reported as a
             # failure. System chats keep insights and memory proposals but skip
             # the project-doc fold (there is no canonical doc to fold into).
+            # `project_doc_update` and `memory_proposals` consume the insights
+            # text, so they are only planned when extraction actually runs;
+            # otherwise there is nothing to fold or route.
             expected: list[str] = []
             if run_insights:
                 expected.append("insights")
-            if inputs["project_doc_path"]:
-                expected.append("project_doc_update")
+                if inputs["project_doc_path"]:
+                    expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if inputs["proposal_vault_root"] is not None:
+            if run_insights and inputs["proposal_vault_root"] is not None:
                 expected.append("memory_proposals")
 
-            job = self._new_job_for_chat(chat, inputs)
-            # Stages that cannot run for this chat settle as skipped now, so the
-            # manifest is an accurate plan even before the task starts.
-            if not run_insights:
-                job.mark("insights", SKIPPED, "insights disabled or no transcript")
-            if not trajectories_enabled:
-                job.mark(
-                    "trajectory", SKIPPED, "no session input or trajectories disabled"
-                )
-            if not inputs["project_doc_path"]:
-                job.mark("project_doc_update", SKIPPED, "no canonical project doc")
-            if inputs["proposal_vault_root"] is None:
-                if inputs["trajectory_meta"].get("workspace"):
-                    # The chat runs in a workspace but its vault root did not
-                    # resolve: recoverable once the registry is fixed.
-                    job.block("memory_proposals", "workspace owner unavailable")
-                else:
+            if expected:
+                job = self._new_job_for_chat(chat, inputs)
+                # Stages that cannot run for this chat settle as skipped now, so
+                # the manifest is an accurate plan even before the task starts.
+                if not run_insights:
+                    job.mark("insights", SKIPPED, "insights disabled or no transcript")
+                elif not inputs["project_doc_path"]:
+                    job.mark("project_doc_update", SKIPPED, "no canonical project doc")
+                if not trajectories_enabled:
                     job.mark(
-                        "memory_proposals", SKIPPED, "workspace owner unavailable"
+                        "trajectory", SKIPPED, "no session input or trajectories disabled"
                     )
-            job.save()
+                if run_insights and inputs["proposal_vault_root"] is None:
+                    if inputs["trajectory_meta"].get("workspace"):
+                        # The chat runs in a workspace but its vault root did not
+                        # resolve: recoverable once the registry is fixed.
+                        job.block("memory_proposals", "workspace owner unavailable")
+                    else:
+                        job.mark(
+                            "memory_proposals", SKIPPED, "workspace owner unavailable"
+                        )
+                job.save()
 
-            self._begin_postprocess(chat_id, expected)
-            asyncio.create_task(
-                self._tracked_postprocess(
-                    chat_id, self._run_job(chat_id, job, inputs, stages=expected)
+                self._begin_postprocess(chat_id, expected)
+                task = self._spawn_detached(
+                    self._tracked_postprocess(
+                        chat_id, self._run_job(chat_id, job, inputs, stages=expected)
+                    ),
+                    name=f"archive-postprocess-{chat_id}",
                 )
-            )
+                # Retain as the chat's live archive task so a delete can cancel
+                # a stage that is mid-model-call; see `_cancel_archive_job`.
+                self._archive_tasks[chat_id] = task
+
+                def _drop_archive(_task: asyncio.Task, _cid: str = chat_id) -> None:
+                    self._archive_tasks.pop(_cid, None)
+
+                task.add_done_callback(_drop_archive)
 
         # Index the newly archived file in the FTS5 database. The control
         # plane now runs its own index passes in bounded workers, so this

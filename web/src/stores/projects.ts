@@ -2704,8 +2704,16 @@ export const useProjectStore = defineStore('projects', () => {
     if (!chat) return
     const pp: ChatPostprocess = { ...(chat.postprocess || { state: 'done' }) }
     pp.job = job
-    if (job.unfinished?.length && pp.state !== 'running') {
-      pp.state = job.state === 'blocked' ? 'blocked' : 'incomplete'
+    if (job.unfinished?.length) {
+      if (pp.state !== 'running') {
+        pp.state = job.state === 'blocked' ? 'blocked' : 'incomplete'
+      }
+    } else if (pp.state === 'incomplete' || pp.state === 'blocked') {
+      // The server confirmed nothing is unfinished (e.g. a completion event was
+      // missed). Clear a stale incomplete/blocked state, or the UI keeps
+      // showing "not finished" and a retry control forever.
+      pp.state = 'done'
+      pp.step = ''
     }
     chat.postprocess = pp
   }

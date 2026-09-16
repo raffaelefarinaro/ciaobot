@@ -353,11 +353,17 @@ class ArchiveJob:
         inputs and results) is kept on the manifest only so insights and the
         trajectory can run. Once those stages are settled — or impossible to
         retry — the payload is dead weight that duplicates transcript data on
-        every archived chat, so it is removed. Kept while a stage that reads it
-        is still unfinished, so an explicit retry can still use it.
+        every archived chat, so it is removed.
+
+        A *blocked* insights/trajectory still counts as needing it: startup
+        blocks those stages when the archive is missing, and the missing-file
+        path explicitly supports a later restore, after which an explicit retry
+        resets them to pending. Dropping the payload then would leave the retry
+        with an empty transcript, permanently skipping the trajectory.
         """
         needs_payload = any(
-            self.status_of(n) in INCOMPLETE for n in ("insights", "trajectory")
+            self.status_of(n) in (INCOMPLETE | {BLOCKED})
+            for n in ("insights", "trajectory")
         )
         if not needs_payload:
             self.inputs.pop("filtered_jsonl", None)

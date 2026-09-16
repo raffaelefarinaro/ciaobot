@@ -2918,6 +2918,28 @@ describe('retryInsights', () => {
     expect(store.chatPostprocess('c1')?.state).toBe('incomplete')
     expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual(['memory_proposals'])
   })
+
+  test('clears a stale incomplete state when the server reports completion', async () => {
+    const store = useProjectStore()
+    store.chats = [
+      {
+        chat_id: 'c1', project_id: 'p1', title: 'A', archived: true,
+        postprocess: {
+          state: 'incomplete',
+          job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+        },
+      },
+    ] as unknown as typeof store.chats
+    // The completion event was missed, so the client still thinks work remains;
+    // the server now confirms nothing is unfinished.
+    apiPost.mockResolvedValue({
+      status: 'complete',
+      job: { job_id: 'j', state: 'done', unfinished: [] },
+    })
+    await store.retryInsights('c1')
+    expect(store.chatPostprocess('c1')?.state).toBe('done')
+    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual([])
+  })
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
