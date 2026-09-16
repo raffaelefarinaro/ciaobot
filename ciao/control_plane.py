@@ -505,6 +505,8 @@ class CiaoControlPlane:
         match: str = "",
     ) -> dict[str, Any]:
         """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        from ciao.memory_tool import MemoryLockError
+
         workspace = self._workspace(principal)
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
@@ -516,6 +518,10 @@ class CiaoControlPlane:
         )
         guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         try:
+            vault_root = Path(self.config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            vault_root = None
+        try:
             result = update_region(
                 guide,
                 canonical,
@@ -523,7 +529,16 @@ class CiaoControlPlane:
                 entry=entry,
                 match=match,
                 char_limit=limit,
+                actor="agent",
+                source="mcp",
+                workspace=workspace,
+                vault_root=vault_root,
             )
+        except MemoryLockError as exc:
+            # Retryable, and explicitly not a success: the region is unchanged.
+            raise ControlPlaneError(
+                "memory_update_locked", f"memory is busy; retry: {exc}", retryable=True
+            ) from exc
         except ValueError as exc:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)
@@ -625,6 +640,21 @@ class CiaoControlPlane:
             return Path(base)
         return Path(self.config.vault_root).parent
 
+    def _search_runtime_dir(self) -> Path | None:
+        """The install runtime directory that owns this install's search index.
+
+        Every control-plane entry point resolves its database through this, so
+        the MCP tools cannot disagree with the CLI or startup indexing about
+        which database belongs to this install. Falls back to the install root's
+        ``.runtime`` when a minimal config stub has no ``state_path`` — the same
+        directory the server uses.
+        """
+        state_path = getattr(self.config, "state_path", None)
+        if state_path:
+            return Path(state_path).parent
+        base = self._search_key_base()
+        return base / ".runtime"
+
     def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.
 
@@ -637,7 +667,7 @@ class CiaoControlPlane:
         """
         root = self._vault_root(principal)
         base = self._search_key_base()
-        db_path = get_db_path()
+        db_path = get_db_path(self._search_runtime_dir())
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)
@@ -680,7 +710,7 @@ class CiaoControlPlane:
             index_root, workspace=self._index_stamp(principal)
         )
         vault_index.write_index_file(entries, index_root / "INDEX.md")
-        db_path = get_db_path()
+        db_path = get_db_path(self._search_runtime_dir())
         conn = sqlite3.connect(db_path)
         try:
             init_db(conn)

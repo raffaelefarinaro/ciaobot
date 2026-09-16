@@ -1695,6 +1695,7 @@ def rebuild_search_index(
     workspaces: list[str],
     *,
     db_path: Path | None = None,
+    runtime_root: Path | None = None,
     vault_name: str = VAULT_DIR_NAME,
 ) -> dict[str, Any]:
     """Drop and rebuild the full-text index against the new paths.
@@ -1703,21 +1704,24 @@ def rebuild_search_index(
     incremental repair is not possible: the rows are not stale, they are wrong.
     Dropping is the only honest option.
 
-    ``db_path`` exists because ``fts_search.get_db_path`` resolves from the
-    ambient ``CIAO_MEMORY_DIR`` (defaulting to ``~/.ciao``) and there is no
-    per-install search database to derive from an install root. So migrating an
-    install that is NOT the ambient one would otherwise drop the ambient
-    install's index — the same environment leak P2 found in the os-audit command.
-    A caller that knows which database belongs to the install it is migrating
-    must say so; the default is the ambient one, which is correct for the normal
-    case of migrating the install you are running in.
+    The index is INSTALL-OWNED: the default database is
+    ``<runtime_root>/vault-fts.db`` (``<install_root>/.runtime`` when the caller
+    does not name one), not the legacy global ``~/.ciao`` database. Migrating an
+    install must never drop another install's index, and two installs sharing a
+    database is exactly the defect this resolves. An explicit ``db_path`` still
+    wins for the migration tooling that manages its own location, and
+    ``CIAO_MEMORY_DIR`` still overrides inside :func:`get_db_path`.
     """
     import sqlite3
 
     from ciao.fts_search import get_db_path, index_logs, index_vault, init_db
 
     install_root = Path(install_root).resolve()
-    db = Path(db_path) if db_path is not None else get_db_path()
+    if db_path is not None:
+        db = Path(db_path)
+    else:
+        runtime = Path(runtime_root) if runtime_root is not None else install_root / ".runtime"
+        db = get_db_path(runtime)
     result: dict[str, Any] = {"database": str(db), "indexed": [], "errors": []}
     try:
         if db.exists():
@@ -2163,7 +2167,9 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     leaf = vault_root.name or VAULT_DIR_NAME
     try:
         outcome["indexes"] = rebuild_indexes(install_root, names, vault_name=leaf)
-        outcome["search"] = rebuild_search_index(install_root, names, vault_name=leaf)
+        outcome["search"] = rebuild_search_index(
+            install_root, names, runtime_root=runtime_root, vault_name=leaf
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("re-root: rebuilding derived state failed")
         outcome["derived_error"] = str(exc)
@@ -2253,6 +2259,19 @@ def repair(
     repaired: list[RepairItem] = []
     reported: list[RepairItem] = []
     errors: list[dict[str, str]] = []
+    # The install's own runtime directory owns its search index. Callers that
+    # pass an explicit db_path keep it; every other caller resolves the same
+    # per-install database the server and CLI use, never the legacy global one.
+    from ciao.fts_search import get_db_path
+
+    search_db = Path(db_path) if db_path is not None else get_db_path(runtime_root)
+    # A database that does not exist yet is itself the repair trigger. On the
+    # upgrade path the install-owned database is intentionally absent (the
+    # legacy global cache is left in place), and both probes below return empty
+    # for a missing database — so without this the index would be reported clean
+    # while every note and transcript stayed unsearchable until a separate
+    # search happened to rebuild it.
+    index_missing = not search_db.exists()
 
     def record(item: RepairItem) -> None:
         (reported if item.drift in _REPAIR_REPORT_ONLY else repaired).append(item)
@@ -2268,25 +2287,37 @@ def repair(
     # whose path no longer resolves is not stale, it is wrong: the note it points
     # at moved when the vault did.
     try:
-        stale = stale_search_rows(install_root, db_path=db_path)
+        stale = stale_search_rows(install_root, db_path=search_db)
     except Exception as exc:  # noqa: BLE001
         stale = []
         errors.append({"workspace": "", "error": f"could not inspect the search index: {exc}"})
     try:
-        unindexed = unindexed_transcript_archive(install_root, db_path=db_path)
+        unindexed = unindexed_transcript_archive(install_root, db_path=search_db)
     except Exception as exc:  # noqa: BLE001
         unindexed = 0
         errors.append(
             {"workspace": "", "error": f"could not inspect the transcript index: {exc}"}
         )
-    if stale or unindexed:
+    if index_missing or stale or unindexed:
         rebuilt = rebuild_search_index(
-            install_root, sorted(workspaces), db_path=db_path, vault_name=leaf
+            install_root,
+            sorted(workspaces),
+            db_path=search_db,
+            vault_name=leaf,
         )
         errors.extend(
             {"workspace": e.get("workspace", ""), "error": e.get("error", "")}
             for e in rebuilt.get("errors", [])
         )
+        if index_missing:
+            repaired.append(
+                RepairItem(
+                    workspace="",
+                    drift="search_index_missing",
+                    detail=f"no search database at {search_db}",
+                    action="rebuilt the install-owned search index",
+                )
+            )
         if stale:
             repaired.append(
                 RepairItem(
@@ -2522,7 +2553,7 @@ def unindexed_transcript_archive(
     logs = install_root / "Logs"
     if not logs.is_dir():
         return 0
-    db = Path(db_path) if db_path is not None else get_db_path()
+    db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
     if not db.exists():
         return 0
     conn = sqlite3.connect(db)
@@ -2549,7 +2580,7 @@ def stale_search_rows(
 
     from ciao.fts_search import get_db_path
 
-    db = Path(db_path) if db_path is not None else get_db_path()
+    db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
     if not db.exists():
         return []
     install_root = Path(install_root).resolve()

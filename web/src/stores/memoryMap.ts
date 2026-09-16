@@ -313,8 +313,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return new Set(chain)
   })
   const pathHint = computed(() => {
-    if (!pathStart.value) return 'Shift-click a note to start, then shift-click another to trace the shortest path between them.'
-    if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Shift-click another note.`
+    if (!pathStart.value) return 'Pick a note\'s “start” action — or shift-click a dot on the graph — to set the path start.'
+    if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Now pick another note’s “end” action.`
     if (pathIds.value.size === 0) return 'No path found between those two notes.'
     return `${pathIds.value.size} notes on the path.`
   })
@@ -587,6 +587,31 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     pathEnd.value = null
   }
   /**
+   * Set a path endpoint from an explicit control — the list rows' actions and
+   * the detail panel's buttons, which are the keyboard/touch equivalent of
+   * shift-clicking a dot.
+   *
+   * `'start'`/`'end'` name the slot outright so a mouse-less user is never
+   * relying on "the first one you pick becomes the start". `'toggle'` is the
+   * single-button form: the first pick is the start, the second the end, and a
+   * third starts over.
+   */
+  function choosePathEndpoint(id: string, which: 'start' | 'end' | 'toggle') {
+    if (which === 'start') {
+      pathStart.value = id
+      if (pathEnd.value === id) pathEnd.value = null
+      return
+    }
+    if (which === 'end') {
+      pathEnd.value = id
+      if (pathStart.value === id) pathStart.value = null
+      return
+    }
+    if (!pathStart.value) pathStart.value = id
+    else if (!pathEnd.value) pathEnd.value = id
+    else { pathStart.value = id; pathEnd.value = null }
+  }
+  /**
    * Permanently delete a note. The backend strips dangling references from
    * every note that linked to it before removing the file, so we only need
    * to mirror that locally: drop the node, drop its edges, and repair the
@@ -618,9 +643,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
 
   function handleNodeClick(id: string, shiftKey: boolean) {
     if (shiftKey) {
-      if (!pathStart.value) pathStart.value = id
-      else if (!pathEnd.value) pathEnd.value = id
-      else { pathStart.value = id; pathEnd.value = null }
+      choosePathEndpoint(id, 'toggle')
       return
     }
     // Clicking a node directly on the canvas should feel the same as
@@ -641,7 +664,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
-    resetPath, handleNodeClick, deleteNote,
+    resetPath, choosePathEndpoint, handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

@@ -70,19 +70,42 @@
         </div>
       </div>
       <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
+      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap" tabindex="0" role="region" aria-label="Vault graph">
         <canvas
           ref="canvasEl"
           :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
-          @mousedown="onMouseDown"
-          @mousemove="onCanvasHover"
-          @mouseleave="clearHover"
+          aria-hidden="true"
+          @pointerdown="onPointerDown"
+          @pointermove="onCanvasPointerMove"
+          @pointerleave="clearHover"
+          @pointerup="onPointerUp"
+          @pointercancel="onPointerCancel"
+          @lostpointercapture="onLostPointerCapture"
           @wheel.prevent="onWheel"
+          @contextmenu.prevent
         />
         <div class="mm-zoom-controls">
           <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
           <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
           <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
+        </div>
+        <!-- Path endpoints for the current focus, mirrored from the list/detail
+             controls so a keyboard user can also set them without leaving the
+             canvas. Shown only while a focus exists. -->
+        <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Path finder for the focused note">
+          <span class="mm-path-controls-label">{{ mm.selectedNode.title }}</span>
+          <button
+            type="button"
+            :class="['btn-chip', { active: mm.pathStart === mm.selectedNode.id }]"
+            :aria-pressed="mm.pathStart === mm.selectedNode.id"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'start')"
+          >Start path</button>
+          <button
+            type="button"
+            :class="['btn-chip', { active: mm.pathEnd === mm.selectedNode.id }]"
+            :aria-pressed="mm.pathEnd === mm.selectedNode.id"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'end')"
+          >End path</button>
         </div>
         <div class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
@@ -123,8 +146,8 @@
         <div class="mm-hint-overlay">
           <span>
             {{ mm.visibleNodes.length }} notes ·
-            <template v-if="zoomedOut">hover a note to name it and trace its links · zoom in for titles</template>
-            <template v-else>hover to trace links · click to pin the neighbourhood · shift-click two to find a path</template>
+            <template v-if="zoomedOut">tap or hover a note to name it · zoom in for titles · use the List view to work by keyboard</template>
+            <template v-else>tap or click to pin the neighbourhood · drag to pan · set path start/end from a note's actions</template>
           </span>
         </div>
         <div
@@ -133,7 +156,7 @@
           :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
         >{{ hoveredNode.title }}</div>
       </div>
-      <div v-else class="mm-list-wrap">
+      <div v-else class="mm-list-wrap" tabindex="0" role="region" aria-label="Vault notes list">
         <table>
           <thead>
             <!-- Sortable headers state which way they are sorted, in both the
@@ -162,6 +185,7 @@
                   Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
                 </button>
               </th>
+              <th class="th-plain">Path</th>
             </tr>
           </thead>
           <tbody>
@@ -169,9 +193,22 @@
               v-for="n in sortedVisibleNodes"
               :key="n.id"
               :class="{ current: mm.selectedId === n.id }"
-              @click="mm.selectNode(n.id)"
+              @click="activateRow(n, $event)"
             >
-              <td><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</td>
+              <!-- The row opens the note by click, but a plain row handler is
+                   unreachable by keyboard. A native button in the title cell
+                   gives the same action a focusable, named control while the
+                   row click keeps the whole-row pointer target. -->
+              <td class="cell-title">
+                <button
+                  type="button"
+                  class="mm-title-btn"
+                  :data-mm-return="n.id"
+                  :aria-pressed="mm.selectedId === n.id"
+                  :aria-label="`Open ${n.title}`"
+                  @click.stop="activateRow(n, $event)"
+                ><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</button>
+              </td>
               <td class="muted">{{ categoryLabelFor(n) }}</td>
               <td>
                 <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
@@ -185,6 +222,29 @@
                 <span class="deg-n">{{ n.degree }}</span>
               </td>
               <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
+              <!-- Path endpoints, usable without the graph or a pointer: the
+                   list is the complete alternative to the canvas, so choosing
+                   a path may not depend on shift-clicking a dot. Names carry
+                   the note as well as the slot, since every row's control
+                   shares a visible label. -->
+              <td class="path-cell">
+                <button
+                  type="button"
+                  class="mm-path-btn"
+                  :class="{ active: mm.pathStart === n.id }"
+                  :aria-pressed="mm.pathStart === n.id"
+                  :aria-label="`Set ${n.title} as path start`"
+                  @click.stop="mm.choosePathEndpoint(n.id, 'start')"
+                >start</button>
+                <button
+                  type="button"
+                  class="mm-path-btn"
+                  :class="{ active: mm.pathEnd === n.id }"
+                  :aria-pressed="mm.pathEnd === n.id"
+                  :aria-label="`Set ${n.title} as path end`"
+                  @click.stop="mm.choosePathEndpoint(n.id, 'end')"
+                >end</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -202,7 +262,7 @@
           class="mm-detail-close"
           title="Close (Esc)"
           aria-label="Close note detail"
-          @click="mm.selectNode(null)"
+          @click="closeDetail"
         >×</button>
         <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
         <div class="mm-detail-title">
@@ -210,6 +270,33 @@
           <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
         </div>
         <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
+        <!-- Explicit, named path controls: the shift-click instructions on the
+             canvas describe a gesture a touch or keyboard user cannot perform,
+             and a note's path endpoints have to be settable from whichever
+             surface actually opened it. -->
+        <div class="mm-detail-path-controls" role="group" aria-label="Path finder for this note">
+          <button
+            type="button"
+            class="btn-chip"
+            :class="{ active: mm.pathStart === mm.selectedNode.id }"
+            :aria-pressed="mm.pathStart === mm.selectedNode.id"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'start')"
+          >Start path</button>
+          <button
+            type="button"
+            class="btn-chip"
+            :class="{ active: mm.pathEnd === mm.selectedNode.id }"
+            :aria-pressed="mm.pathEnd === mm.selectedNode.id"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'end')"
+          >End path</button>
+          <button
+            v-if="mm.pathStart || mm.pathEnd"
+            type="button"
+            class="btn-chip"
+            @click="mm.resetPath()"
+          >Clear path</button>
+        </div>
+        <p v-if="mm.pathStart || mm.pathEnd" class="mm-detail-path-hint" role="status">{{ mm.pathHint }}</p>
         <button
           v-if="mm.selectedNode.stale"
           type="button"
@@ -258,14 +345,44 @@
             class="mm-link-item"
           >
             <span class="dot" :style="{ background: colorForNode(nb) }" />
-            <span class="label mm-link-label" @click="openNoteFile(nb.id)">{{ nb.title }}</span>
+            <!-- A native button, not a clickable span: opening a neighbor is a
+                 core part of inspecting a note and has to be reachable by
+                 keyboard and Enter/Space. -->
             <button
               type="button"
-              class="mm-link-focus"
-              title="Locate in graph"
-              aria-label="Locate in graph"
-              @click.stop="focusNode(nb.id)"
-            >⌖</button>
+              class="label mm-link-label mm-link-btn"
+              :data-mm-return="nb.id"
+              :aria-label="`Open ${nb.title}`"
+              @click="openNeighbor(nb.id, $event)"
+            >{{ nb.title }}</button>
+            <!-- Actions are grouped and non-shrinking so, at the panel's 220px
+                 minimum, they wrap to a second line instead of being pushed out
+                 of view by the note title. -->
+            <span class="mm-link-actions">
+              <button
+                type="button"
+                class="mm-path-btn"
+                :class="{ active: mm.pathStart === nb.id }"
+                :aria-pressed="mm.pathStart === nb.id"
+                :aria-label="`Set ${nb.title} as path start`"
+                @click.stop="mm.choosePathEndpoint(nb.id, 'start')"
+              >start</button>
+              <button
+                type="button"
+                class="mm-path-btn"
+                :class="{ active: mm.pathEnd === nb.id }"
+                :aria-pressed="mm.pathEnd === nb.id"
+                :aria-label="`Set ${nb.title} as path end`"
+                @click.stop="mm.choosePathEndpoint(nb.id, 'end')"
+              >end</button>
+              <button
+                type="button"
+                class="mm-link-focus"
+                title="Locate in graph"
+                aria-label="Locate in graph"
+                @click.stop="focusNode(nb.id)"
+              >⌖</button>
+            </span>
           </div>
         </div>
 
@@ -298,6 +415,7 @@ import { isLightTheme } from '../lib/theme'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import TabBar, { type TabSpec } from './TabBar.vue'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
+import { GraphGesture } from '../lib/graphGesture'
 import {
   COOLING_DURATION_MS,
   DEFAULT_SCALE,
@@ -314,6 +432,7 @@ import {
   hitTest as hitTestNodes,
   labelDegreeFloor,
   labelsVisible,
+  minHitRadiusForScale,
   nodeRadius,
   screenToWorld as toWorld,
   stepSimulation as stepLayout,
@@ -459,6 +578,13 @@ function openNoteFile(id: string) {
   // content follow, on top of opening the file.
   mm.requestFocus(id)
   void fileViewer.open(id)
+}
+/** Open a linked note, remembering the neighbor control so closing the detail
+ * panel returns focus to it — unless that link unmounts when the panel content
+ * is replaced (see `detailReturnFocus`), in which case the watcher falls back. */
+function openNeighbor(id: string, event: Event) {
+  detailReturnFocus.value = { id, el: (event.currentTarget as HTMLElement | null) }
+  openNoteFile(id)
 }
 const deletingNote = ref(false)
 async function deleteNote(id: string) {
@@ -1096,8 +1222,118 @@ function tick() {
   rafId = requestAnimationFrame(tick)
 }
 
-function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  return hitTestNodes(simNodes, wx, wy)
+function hitTest(wx: number, wy: number, minRadius = 0): MemoryGraphNode | null {
+  return hitTestNodes(simNodes, wx, wy, minRadius)
+}
+
+// ---------- pointer gestures ----------
+// One gesture model for mouse, pen and touch: Pointer Events with capture, so
+// the same code drives a click, a drag and a tap on a touchscreen. The rules
+// (tap slop, one pointer at a time, cancellation) live in graphGesture and are
+// unit-tested; this section only maps them onto the camera and the layout.
+const gesture = new GraphGesture()
+let gestureNode: MemoryGraphNode | null = null
+/** A touch tap's target diameter on screen, matching DESIGN.md's --touch token.
+ * Enforced in world units at the current camera scale so it holds at any zoom. */
+const TOUCH_HIT_DIAMETER_PX = 44
+
+function hitTestAt(clientX: number, clientY: number, pointerType?: string): MemoryGraphNode | null {
+  if (!canvasEl.value) return null
+  const rect = canvasEl.value.getBoundingClientRect()
+  const [wx, wy] = screenToWorld((clientX - rect.left) * dpr, (clientY - rect.top) * dpr)
+  // A touch tap gets a 44 CSS-pixel target regardless of zoom, since the
+  // painted node is only ~13px across at fit scale. `camera.scale` is in device
+  // pixels, so the diameter is scaled by dpr to match; a 44px target must stay
+  // 44 CSS px at DPR 2/3, not shrink to 22/15. Mouse/pen keep the precise
+  // painted hit area.
+  const minRadius = pointerType === 'touch'
+    ? minHitRadiusForScale(TOUCH_HIT_DIAMETER_PX * dpr, camera.scale)
+    : 0
+  return hitTest(wx, wy, minRadius)
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (!canvasEl.value) return
+  clearHover()
+  const hit = hitTestAt(e.clientX, e.clientY, e.pointerType)
+  const accepted = gesture.begin(
+    { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, additive: e.shiftKey, isPrimary: e.isPrimary },
+    hit ? hit.id : null,
+  )
+  // A second finger (or a non-primary pointer) is ignored outright: it must
+  // never select a note or take over the pan the first finger started. The drag
+  // target is adopted only for the accepted pointer, so an ignored press can
+  // neither move the node the first finger grips nor replace it with a node
+  // under the extra finger.
+  if (!accepted) return
+  gestureNode = hit
+  // Capture routes every subsequent move/up for this pointer to the canvas even
+  // if the finger leaves it, and is what lets pointercancel arrive here.
+  canvasEl.value.setPointerCapture?.(e.pointerId)
+  e.preventDefault()
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!gesture.active) return
+  const move = gesture.move({
+    pointerId: e.pointerId,
+    clientX: e.clientX,
+    clientY: e.clientY,
+    additive: false,
+    isPrimary: e.isPrimary,
+  })
+  if (!move) return
+  if ('dragging' in move) {
+    const node = gestureNode
+    if (!node) return
+    wakeSimulation()
+    if (!canvasEl.value) return
+    const rect = canvasEl.value.getBoundingClientRect()
+    const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
+    node.x = wx
+    node.y = wy
+    node.vx = 0
+    node.vy = 0
+    return
+  }
+  // Dragging is the user taking the camera: whatever tween was in flight would
+  // otherwise keep pulling the view out from under the gesture.
+  cancelCameraTween()
+  camera.x += move.pan.dx * dpr
+  camera.y += move.pan.dy * dpr
+  requestRedraw()
+}
+
+/** One move handler on the canvas: a live gesture drags/pans, an idle pointer
+ * hovers. Keeping them separate listeners would double-fire on a drag. */
+function onCanvasPointerMove(e: PointerEvent) {
+  if (gesture.active) onPointerMove(e)
+  else onCanvasHover(e)
+}
+
+function onPointerUp(e: PointerEvent) {
+  // Only the pointer that owns the gesture may end it and release the target;
+  // an ignored pointer's `pointerup` must not clear the drag the first finger
+  // is still performing.
+  if (gesture.activePointerId !== e.pointerId) return
+  const result = gesture.end({ pointerId: e.pointerId })
+  gestureNode = null
+  if (result.tap === 'node') mm.handleNodeClick(result.nodeId, result.additive)
+  else if (result.tap === 'empty') mm.selectNode(null)
+}
+
+// `pointercancel` is the browser taking the touch for a scroll/zoom/system
+// gesture; `lostpointercapture` is the capture ending for any reason. Either
+// way the drag must stop cleanly rather than leave a node stuck under a finger.
+function onPointerCancel(e: PointerEvent) {
+  if (gesture.cancel({ pointerId: e.pointerId })) {
+    gestureNode = null
+  }
+}
+function onLostPointerCapture(e: PointerEvent) {
+  if (gesture.cancel({ pointerId: e.pointerId })) {
+    gestureNode = null
+  }
 }
 
 // ---------- hover name overlay ----------
@@ -1108,10 +1344,11 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
 // of a node redraws (the highlight ring).
 const hoveredNode = ref<MemoryGraphNode | null>(null)
 const hoverPos = ref({ x: 0, y: 0 })
-function onCanvasHover(e: MouseEvent) {
+function onCanvasHover(e: PointerEvent) {
   // While a press is held (node drag, pan) the surface is "grabbed", not
-  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise.
-  if (!canvasEl.value || downPos) {
+  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise. Coarse
+  // pointers have no hover at all, so this only ever matters for a mouse/pen.
+  if (!canvasEl.value || gesture.active) {
     clearHover()
     return
   }
@@ -1137,67 +1374,6 @@ function clearHover() {
   hoveredNode.value = null
 }
 
-// A plain click has to survive a few pixels of incidental pointer jitter
-// between mousedown and mouseup, or it reads as a drag every time — this was
-// the "it keeps thinking I want to move it" complaint. Nothing (node move,
-// pan) actually happens until the pointer clears this threshold; a release
-// before that is unambiguously a click.
-const CLICK_DRAG_THRESHOLD_PX = 4
-let hitNode: MemoryGraphNode | null = null
-let dragging: MemoryGraphNode | null = null
-let panStart: { x: number; y: number; cx: number; cy: number } | null = null
-let downPos: { x: number; y: number } | null = null
-let dragged = false
-
-function onMouseDown(e: MouseEvent) {
-  if (!canvasEl.value) return
-  clearHover()
-  const rect = canvasEl.value.getBoundingClientRect()
-  const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
-  hitNode = hitTest(wx, wy)
-  dragged = false
-  downPos = { x: e.clientX, y: e.clientY }
-  if (hitNode) (hitNode as any)._shiftIntent = e.shiftKey
-  else panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y }
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
-}
-function onMouseMove(e: MouseEvent) {
-  if (!downPos) return
-  if (!dragged) {
-    const dx = e.clientX - downPos.x
-    const dy = e.clientY - downPos.y
-    if (Math.hypot(dx, dy) < CLICK_DRAG_THRESHOLD_PX) return
-    dragged = true
-    if (hitNode) { dragging = hitNode; wakeSimulation() }
-  }
-  if (dragging) {
-    if (!canvasEl.value) return
-    const rect = canvasEl.value.getBoundingClientRect()
-    const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
-    dragging.x = wx
-    dragging.y = wy
-    dragging.vx = 0
-    dragging.vy = 0
-  } else if (panStart) {
-    // Dragging is the user taking the camera: whatever tween was in flight
-    // would otherwise keep pulling the view out from under the gesture.
-    cancelCameraTween()
-    camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
-    camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
-    requestRedraw()
-  }
-}
-function onMouseUp() {
-  if (hitNode && !dragged) mm.handleNodeClick(hitNode.id, !!(hitNode as any)._shiftIntent)
-  else if (!hitNode && !dragged) mm.selectNode(null)
-  hitNode = null
-  dragging = null
-  panStart = null
-  downPos = null
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
-}
 function onWheel(e: WheelEvent) {
   cancelCameraTween()
   if (!canvasEl.value || !W || !H) return
@@ -1294,6 +1470,53 @@ const ageLabelOfSelected = computed(() => {
   if (!n) return ''
   return mm.ageLabelOf(n)
 })
+
+// Which control opened the note currently in the detail panel, and the element
+// to return focus to. Closing the panel returns focus there — otherwise a
+// keyboard user who opened a note and pressed the close button landed back at
+// the top of the document, having to tab through the whole list to get where
+// they were.
+//
+// The element is captured by reference rather than looked up by id, because
+// opening a note from a neighbor link unmounts that link: the panel's content
+// is replaced with the neighbor's, so the `[data-mm-return]` node for it no
+// longer exists by the time the panel closes. When the initiating control is
+// gone (the graph-view neighbor case), focus falls back to the graph region,
+// which is a stable, always-mounted destination in the same surface.
+const detailReturnFocus = ref<{ id: string; el: HTMLElement | null } | null>(null)
+/** Resolve the control to restore focus to: the clicked button itself, or the
+ * title button inside a clicked row. */
+function returnControlFor(event: Event): HTMLElement | null {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target) return null
+  if (target.matches('button')) return target
+  return target.querySelector<HTMLElement>('[data-mm-return]')
+}
+function activateRow(n: MemoryGraphNode, event: Event) {
+  detailReturnFocus.value = { id: n.id, el: returnControlFor(event) }
+  mm.selectNode(n.id)
+}
+function closeDetail() {
+  mm.selectNode(null)
+}
+watch(() => mm.selectedId, (id) => {
+  if (id !== null || !detailReturnFocus.value) return
+  const { id: returnId, el } = detailReturnFocus.value
+  detailReturnFocus.value = null
+  void nextTick(() => {
+    if (el && el.isConnected) {
+      el.focus()
+      return
+    }
+    // The initiating link is gone (graph-view neighbor navigation). Prefer the
+    // list's title button when this note has one on screen, else the active
+    // surface's own region, so focus never drops to the document body.
+    const listTitle = Array.from(document.querySelectorAll<HTMLElement>('[data-mm-return]'))
+      .find(candidate => candidate.dataset.mmReturn === returnId)
+    if (listTitle) listTitle.focus()
+    else document.querySelector<HTMLElement>('.mm-canvas-wrap, .mm-list-wrap')?.focus()
+  })
+})
 const sortedVisibleNodes = computed(() => {
   const arr = [...mm.visibleNodes]
   arr.sort((a, b) => {
@@ -1334,9 +1557,8 @@ onBeforeUnmount(() => {
   if (animRafId) cancelAnimationFrame(animRafId)
   camTween = null
   pulse = null
+  gesture.cancel()
   ro?.disconnect()
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('mousemove', handleDetailDrag)
   window.removeEventListener('mouseup', stopDetailDrag)
   window.removeEventListener('resize', onResizeNarrow)
@@ -1474,23 +1696,44 @@ onBeforeUnmount(() => {
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
+/* A neighbor row wraps its action group below the title at narrow widths
+   instead of overflowing horizontally. */
 .mm-link-item {
-  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
   font-size: var(--text-sm); color: var(--fg);
 }
 .mm-link-item:hover { background: var(--bg3); }
-.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-.mm-link-label { cursor: pointer; flex: 1; }
+/* The neighbor's name is a real button: opening it is a core action, and a
+   clickable span is unreachable by keyboard. Reset to read like the text it
+   replaced, then give it the app's focus ring. `min-width: 0` lets a long title
+   shrink and wrap; the actions keep their own row when there is no room. */
+.mm-link-btn {
+  background: none; border: none; padding: 0; margin: 0; text-align: left;
+  font: inherit; color: inherit; cursor: pointer; min-height: var(--touch);
+  display: flex; align-items: center; flex: 1 1 auto; min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mm-link-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.mm-link-label { cursor: pointer; }
 .mm-link-label:hover { text-decoration: underline; }
+.mm-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mm-link-focus {
   background: none; border: none; color: var(--fg3); cursor: pointer; padding: 2px 4px;
   border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: 1; flex: none;
+  min-width: var(--touch); min-height: var(--touch);
 }
 .mm-link-focus:hover { background: var(--bg2); color: var(--fg); }
 
 .mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
-.mm-canvas-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+/* touch-action:none makes the canvas own its touches so a drag pans instead of
+   scrolling the page underneath. It is scoped to the canvas on purpose: panning
+   and pinch-zoom of the page remain available everywhere else, per DESIGN.md. */
+.mm-canvas-wrap canvas {
+  display: block; width: 100%; height: 100%; cursor: grab;
+  touch-action: none; -webkit-user-select: none; user-select: none;
+}
 .mm-canvas-wrap canvas.mm-canvas--node-hover { cursor: pointer; }
 /* Name overlay for the label-free far-out view. pointer-events:none so it can
    never sit between the cursor and the node it names. */
@@ -1510,6 +1753,19 @@ onBeforeUnmount(() => {
   z-index: 2;
 }
 .mm-zoom-controls { position: absolute; top: var(--space-3); right: var(--space-3); display: flex; flex-direction: column; gap: 6px; }
+/* Path endpoints for the focused note, without requiring a shift-click on a
+   dot (impossible on touch, undiscoverable without a mouse). Sits under the
+   zoom controls so the two never overlap. */
+.mm-path-controls {
+  position: absolute; top: calc(var(--space-3) + 3 * var(--touch) + 12px); right: var(--space-3);
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
+  max-width: 200px;
+}
+.mm-path-controls-label {
+  font-size: var(--text-xs); color: var(--fg3); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
+}
+.mm-path-controls .btn-chip { min-height: var(--touch); }
 .mm-hint-overlay {
   position: absolute; bottom: var(--space-3); left: var(--space-3); font-size: var(--text-xs); color: var(--fg3);
   background: color-mix(in srgb, var(--bg) 70%, transparent); padding: 4px 8px; border-radius: var(--radius-sm);
@@ -1598,6 +1854,7 @@ onBeforeUnmount(() => {
 }
 
 .mm-list-wrap { overflow: auto; padding: var(--space-4); }
+.mm-list-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .mm-list-wrap thead th {
   text-align: left; padding: 0; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
@@ -1623,6 +1880,28 @@ onBeforeUnmount(() => {
 .mm-list-wrap tbody tr.current { background: var(--bg2); box-shadow: inset 2px 0 0 var(--accent); }
 .mm-list-wrap .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
 .mm-list-wrap .muted { color: var(--fg3); }
+/* The note title is a button so the row's action is keyboard reachable. It
+   reads as the plain text it replaced, and carries a full 44px hit target. */
+.cell-title { padding-top: 0; padding-bottom: 0; }
+.mm-title-btn {
+  display: flex; align-items: center; width: 100%; min-height: var(--touch);
+  background: none; border: none; padding: 0; margin: 0; text-align: left;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.mm-title-btn:hover { text-decoration: underline; }
+.mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.path-cell { white-space: nowrap; }
+.mm-path-btn {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--fg3); font-family: var(--font); font-size: var(--text-xs);
+  min-height: var(--touch); min-width: 44px; padding: 0 8px; margin-right: 4px; cursor: pointer;
+}
+.mm-path-btn:hover { color: var(--fg); border-color: var(--fg2); }
+.mm-path-btn.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Inside the neighbor row the flex gap owns spacing, so drop the trailing
+   margin that the list cell needs. */
+.mm-link-actions .mm-path-btn { margin-right: 0; }
+.mm-path-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .deg-cell { white-space: nowrap; }
 .deg-bar {
   display: inline-block; width: 46px; height: 4px; border-radius: 2px;
@@ -1653,6 +1932,12 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs); font-weight: 500; letter-spacing: normal; text-transform: none;
 }
 .mm-detail-verified { color: var(--fg3); font-size: var(--text-xs); margin: -2px 0 var(--space-2); }
+.mm-detail-path-controls {
+  display: flex; flex-wrap: wrap; gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+.mm-detail-path-controls .btn-chip { min-height: var(--touch); }
+.mm-detail-path-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0 0 var(--space-2); }
 .mm-detail-path {
   display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
   font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;
