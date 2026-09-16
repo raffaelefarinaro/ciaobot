@@ -1186,7 +1186,7 @@ def append_proposals(
     if not proposals:
         return None
 
-    from ciao.memory_receipts import queue_lock
+    from ciao.memory_receipts import queue_lock, write_queue_atomically
 
     out_path = workspace_vault_root / _PROPOSALS_RELATIVE
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1214,9 +1214,8 @@ def append_proposals(
         lines = [p.as_bullet() for p in fresh]
         block = header + "\n".join(lines) + "\n"
 
-        out_path.write_text(existing + "\n" + block, encoding="utf-8")
+        write_queue_atomically(out_path, existing + "\n" + block)
         return out_path
-
 
 # Matches a bullet written by ``MemoryProposal.as_bullet``.
 _BULLET_RE = re.compile(r"^- \[[^\]]+\] (.+?)  _\(from: [^)]*\)_\s*$")
@@ -2129,9 +2128,9 @@ def remove_proposal_by_substring(
             return None
         del lines[candidates[0]]
         lines = _sweep_empty_batches(lines)
-        proposals_path.write_text(
-            "\n".join(lines).rstrip() + "\n", encoding="utf-8"
-        )
+        from ciao.memory_receipts import write_queue_atomically
+
+        write_queue_atomically(proposals_path, "\n".join(lines).rstrip() + "\n")
         return bullet.kind, bullet.text
 
 

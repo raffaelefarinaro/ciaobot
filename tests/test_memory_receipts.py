@@ -701,6 +701,32 @@ def test_queue_lock_file_lives_outside_the_vault(tmp_path):
     assert mr._queue_lock_path(str(queue.resolve())).exists()
 
 
+def test_write_queue_atomically_keeps_the_old_file_on_failure(tmp_path, monkeypatch):
+    """A failed write must not truncate or partially rewrite the queue.
+
+    In-place `write_text` truncates before writing, so a partial write can lose
+    unrelated proposals. The helper writes a temp file and renames it, so a
+    failure leaves the original intact.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    original = "# Memory Proposals\n\n- [memory] Keep this.  _(from: Decisions)_\n"
+    queue.write_text(original, encoding="utf-8")
+
+    real = Path.write_text
+
+    def boom(self, *args, **kwargs):
+        if self.name.endswith(".write.tmp"):
+            raise OSError("disk full")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with pytest.raises(OSError):
+        mr.write_queue_atomically(queue, "# Memory Proposals\n\n")
+
+    assert queue.read_text(encoding="utf-8") == original
+
+
 # ── Batch queue receipts ──────────────────────────────────────────────────
 
 

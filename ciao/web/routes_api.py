@@ -7488,7 +7488,11 @@ def _sweep_queue_file(
     other request while another writer holds the lock. Returns the count and,
     when a rewrite landed, the per-fact fields the caller records.
     """
-    from ciao.memory_receipts import queue_lock, queue_resolution_multi
+    from ciao.memory_receipts import (
+        queue_lock,
+        queue_resolution_multi,
+        write_queue_atomically,
+    )
 
     result: dict[str, Any] = {
         "removed": 0,
@@ -7540,7 +7544,7 @@ def _sweep_queue_file(
                 workspace=workspace,
                 vault_root=vault_for_receipt,
             ):
-                queue.write_text(queue_after, encoding="utf-8")
+                write_queue_atomically(queue, queue_after)
     result["changed"] = changed
     result["removed"] = len(swept_texts)
     result["kinds"] = swept_kinds
@@ -7565,7 +7569,11 @@ def _rewrite_queue_single(
     synchronous sleep, so this must not run on the event loop. Returns whether
     this call actually removed the bullet.
     """
-    from ciao.memory_receipts import queue_lock, queue_resolution
+    from ciao.memory_receipts import (
+        queue_lock,
+        queue_resolution,
+        write_queue_atomically,
+    )
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
@@ -7583,7 +7591,7 @@ def _rewrite_queue_single(
             vault_root=vault_root,
         ) as _receipt:
             queue_after = "\n".join(lines).rstrip() + "\n"
-            queue.write_text(queue_after, encoding="utf-8")
+            write_queue_atomically(queue, queue_after)
     return True
 
 
@@ -7601,7 +7609,11 @@ def _rewrite_queue_batch(
     doing this on the event loop would freeze unrelated requests while another
     writer holds the lock. Returns the ids whose bullets this call removed.
     """
-    from ciao.memory_receipts import queue_lock, queue_resolution_multi
+    from ciao.memory_receipts import (
+        queue_lock,
+        queue_resolution_multi,
+        write_queue_atomically,
+    )
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
@@ -7630,7 +7642,7 @@ def _rewrite_queue_batch(
             workspace=workspace,
             vault_root=vault_root,
         ):
-            queue.write_text(queue_after, encoding="utf-8")
+            write_queue_atomically(queue, queue_after)
     return removed_here
 
 

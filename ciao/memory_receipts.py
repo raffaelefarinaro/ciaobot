@@ -187,6 +187,28 @@ def _queue_lock_path(resolved_key: str) -> Path:
     return root / f"{digest}.lock"
 
 
+def write_queue_atomically(path: Path, text: str) -> None:
+    """Replace a proposal queue via a temp file and ``os.replace``.
+
+    In-place ``write_text`` truncates before it writes, so a partial write or an
+    error mid-write can lose unrelated proposals permanently. A same-directory
+    temp file plus an atomic rename means a reader (or a crash) sees either the
+    complete old file or the complete new one. Callers must hold
+    :func:`queue_lock` for the path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.write.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 # Re-entrancy depth per resolved queue path for the current thread. A wrapper
 # (`queue_resolution`) holds the lock across a body that calls a writer
 # (`remove_proposal_by_substring`) which also takes it; the inner acquire must
