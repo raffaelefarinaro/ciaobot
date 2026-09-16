@@ -891,47 +891,79 @@ def queue_resolution_multi(
             _append(journal, {**base, "status": PREPARED})
         except Exception:  # noqa: BLE001 — the removal proceeds regardless
             logger.debug("memory receipts: could not prepare batch receipt", exc_info=True)
+        completed = False
         try:
             yield base
+            completed = True
         finally:
             try:
                 after = proposals_path.read_text(encoding="utf-8")
             except OSError:
                 after = ""
-            try:
-                record_queue_resolution_batch(
-                    proposals_path,
-                    removals,
-                    before_text=before,
-                    after_text=after,
-                    actor=actor,
-                    source=source,
-                    workspace=workspace,
-                    vault_root=vault_root,
-                    # The transaction row below is the only undoable one; the
-                    # per-fact rows are history-only so undoing one cannot
-                    # restore the whole pre-batch file.
-                    undoable_first=False,
-                )
-            except Exception:  # noqa: BLE001 — recording must not break removal
-                logger.debug("memory receipts: batch receipt failed", exc_info=True)
-            # Settle the prepared transaction row with the whole-file images and
-            # the transaction-level outcome. It is the single undoable row.
-            settled = {
-                **base,
-                "before_revision": content_revision(before),
-                "after_revision": content_revision(after),
-                "before_text": _image(before),
-                "after_text": _image(after),
-                "kind": "queue_resolve",
-                "removed_texts": texts,
-                "removed_text": texts[0] if texts else "",
-                "status": APPLIED,
-            }
-            try:
-                _append(journal, settled)
-            except Exception:  # noqa: BLE001
-                logger.debug("memory receipts: batch settle failed", exc_info=True)
+            from ciao.proposal_kinds import parse_bullet
+
+            bullets = [
+                line for line in after.splitlines() if parse_bullet(line) is not None
+            ]
+            all_gone = bool(texts) and not any(
+                any(needle in line for line in bullets) for needle in texts
+            )
+            if completed and all_gone:
+                # Only a completed, content-verified rewrite earns applied
+                # rows. The body raising (disk full, permission error) leaves
+                # the prepared row for startup recovery instead of falsely
+                # claiming the facts were accepted or dismissed.
+                try:
+                    record_queue_resolution_batch(
+                        proposals_path,
+                        removals,
+                        before_text=before,
+                        after_text=after,
+                        actor=actor,
+                        source=source,
+                        workspace=workspace,
+                        vault_root=vault_root,
+                        # The transaction row below is the only undoable one;
+                        # the per-fact rows are history-only so undoing one
+                        # cannot restore the whole pre-batch file.
+                        undoable_first=False,
+                    )
+                except Exception:  # noqa: BLE001 — recording must not break removal
+                    logger.debug("memory receipts: batch receipt failed", exc_info=True)
+                settled = {
+                    **base,
+                    "before_revision": content_revision(before),
+                    "after_revision": content_revision(after),
+                    "before_text": _image(before),
+                    "after_text": _image(after),
+                    "kind": "queue_resolve",
+                    "removed_texts": texts,
+                    "removed_text": texts[0] if texts else "",
+                    "status": APPLIED,
+                }
+                try:
+                    _append(journal, settled)
+                except Exception:  # noqa: BLE001
+                    logger.debug("memory receipts: batch settle failed", exc_info=True)
+            else:
+                # Leave a recoverable terminal row: the rewrite did not land
+                # (or did not remove every bullet), so recovery/undo cannot
+                # misreport it as applied.
+                try:
+                    _append(
+                        journal,
+                        {
+                            **base,
+                            "before_revision": content_revision(before),
+                            "after_revision": content_revision(after),
+                            "before_text": _image(before),
+                            "after_text": _image(after),
+                            "status": ROLLED_BACK,
+                            "detail": "batch rewrite did not land",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("memory receipts: batch rollback failed", exc_info=True)
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────

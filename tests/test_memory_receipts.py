@@ -853,6 +853,48 @@ def test_batch_recovery_rolled_back_when_a_bullet_remains(tmp_path):
     assert settled and settled[0]["status"] == mr.ROLLED_BACK
 
 
+def test_failed_batch_rewrite_is_not_recorded_applied(tmp_path):
+    """A body that raises must not leave applied receipts.
+
+    The bracket records applied rows only for a completed, content-verified
+    rewrite; a disk-full/permission error leaves a rolled_back transaction row
+    so History does not falsely claim the facts were resolved.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Fact A.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+
+    class _Boom(Exception):
+        pass
+
+    try:
+        with mr.queue_resolution_multi(
+            queue,
+            [{"text": "Fact A.", "kind": "memory", "promoted": False}],
+            actor="operator",
+            source="pwa",
+            vault_root=tmp_path,
+        ):
+            # The rewrite never lands.
+            raise _Boom("disk full")
+    except _Boom:
+        pass
+
+    rows = [
+        r
+        for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    assert rows, "a terminal transaction row must be recorded"
+    assert rows[-1]["status"] == mr.ROLLED_BACK
+    assert all(r["status"] != mr.APPLIED for r in rows)
+    # The bullet is still present, so it was never resolved.
+    assert "Fact A." in queue.read_text(encoding="utf-8")
+
+
 def test_single_route_uses_a_prepared_receipt_before_the_rewrite(tmp_path):
     """The CLI wrapper is the model: a prepared row precedes the rewrite."""
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
