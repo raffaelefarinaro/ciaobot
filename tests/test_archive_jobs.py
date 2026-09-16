@@ -956,6 +956,54 @@ def test_startup_resume_blocks_a_missing_archive(tmp_path: Path) -> None:
     assert postprocess.get("blocked_reason")
 
 
+def test_startup_resumed_task_is_cancellable_by_delete(tmp_path: Path) -> None:
+    """A startup-resumed job must be retained so a delete can cancel it.
+
+    A resumed stage awaiting `update_project_doc` would otherwise write the
+    canonical doc after the chat was deleted, because `_cancel_archive_job`
+    only cancels `_archive_tasks`.
+    """
+    import asyncio as _asyncio
+
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    # Force a resumable job and a never-finishing run so we can inspect the
+    # retained handle.
+    job.mark("insights", aj.SUCCEEDED)
+    job.post_insights_revision = aj.archive_content_revision(archive)
+    job.save()
+
+    cancelled: list[bool] = []
+
+    async def _never_finishes(_chat_id: str, _job: object, _inputs: object, **kw: object) -> None:
+        try:
+            await _asyncio.sleep(3600)
+        except _asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    manager._run_job = _never_finishes  # type: ignore[assignment]
+
+    async def drive() -> None:
+        await manager.resume_interrupted_jobs(max_concurrency=1)
+        await _asyncio.sleep(0)
+        assert chat.chat_id in manager._archive_tasks
+        manager.delete_chat(chat.chat_id)
+        await _asyncio.sleep(0)
+
+    _asyncio.run(drive())
+
+    assert cancelled == [True]
+    assert chat.chat_id not in manager._archive_tasks
+
+
 
 
 def test_missing_workspace_owner_settles_proposals_as_skipped(

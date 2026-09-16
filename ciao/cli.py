@@ -2858,58 +2858,67 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # would silently delete whichever was tried first. Either way the outcome is
     # recorded against a proposal nobody named. One row or nothing.
     flattened = " ".join(needle.split())
-    raw_matches = find_proposal_matches(path, needle)
-    flat_matches = (
-        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
-    )
-    union = set(raw_matches) | set(flat_matches)
-    if len(union) > 1:
-        print(
-            f"{len(union)} memory proposals match {needle!r}; "
-            "pass a longer, unique substring.",
-            file=sys.stderr,
-        )
-        return 1
-    if not raw_matches and flat_matches:
-        needle = flattened
-    if not union:
-        print(
-            f"No unique memory proposal matched {needle!r} "
-            "(the text may be ambiguous or absent).",
-            file=sys.stderr,
-        )
-        return 1
-    # Resolve the matched row to its full parsed proposal text before the
-    # bracket: the caller may have named the fact with a unique *substring*, and
-    # recording that substring as `removed_text` made crash recovery's exact
-    # bullet match conclude the row was gone and settle the receipt applied
-    # while the proposal was still queued.
+    # Resolve the unique match and remove it under the queue lock, so the
+    # proposal the receipt names is the one this call actually removes: a
+    # concurrent archive or CLI writer landing between the match scan and the
+    # indexed reread could otherwise point the saved line at a different
+    # proposal. The body uses the *resolved full parsed text*, not the caller's
+    # substring, so the receipt and the removal agree.
+    from ciao.memory_receipts import queue_lock, queue_resolution
     from ciao.proposal_kinds import parse_bullet
 
-    resolved_text = needle
-    try:
-        target_line = path.read_text(encoding="utf-8").splitlines()[next(iter(union))]
-    except (OSError, IndexError, StopIteration):
-        target_line = ""
-    parsed = parse_bullet(target_line) if target_line else None
-    if parsed is not None:
+    with queue_lock(path):
+        raw_matches = find_proposal_matches(path, needle)
+        flat_matches = (
+            find_proposal_matches(path, flattened) if flattened != needle else raw_matches
+        )
+        union = set(raw_matches) | set(flat_matches)
+        if len(union) > 1:
+            print(
+                f"{len(union)} memory proposals match {needle!r}; "
+                "pass a longer, unique substring.",
+                file=sys.stderr,
+            )
+            return 1
+        if not union:
+            print(
+                f"No unique memory proposal matched {needle!r} "
+                "(the text may be ambiguous or absent).",
+                file=sys.stderr,
+            )
+            return 1
+        # The row is fixed while this lock is held, so its parsed identity is
+        # the one the removal below acts on.
+        try:
+            target_line = path.read_text(encoding="utf-8").splitlines()[
+                next(iter(union))
+            ]
+        except (OSError, IndexError, StopIteration):
+            target_line = ""
+        parsed = parse_bullet(target_line) if target_line else None
+        if parsed is None:
+            print(
+                f"No unique memory proposal matched {needle!r} "
+                "(the text may be ambiguous or absent).",
+                file=sys.stderr,
+            )
+            return 1
         resolved_text = parsed.text
-    # Bracket the removal with a receipt so a crash between the queue rewrite
-    # and the decision record is recoverable, and so the History surface can
-    # reverse a dismissal the curator made.
-    from ciao.memory_receipts import queue_resolution
-
-    with queue_resolution(
-        path,
-        removed_text=resolved_text,
-        kind="",
-        promoted=bool(args.promoted),
-        actor="agent",
-        source="cli",
-        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
-        vault_root=vault,
-    ):
-        removed = remove_proposal_by_substring(path, needle)
+        resolved_kind = parsed.kind
+        # Bracket the removal with a receipt so a crash between the queue
+        # rewrite and the decision record is recoverable, and so the History
+        # surface can reverse a dismissal the curator made.
+        with queue_resolution(
+            path,
+            removed_text=resolved_text,
+            kind=resolved_kind,
+            promoted=bool(args.promoted),
+            actor="agent",
+            source="cli",
+            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+            vault_root=vault,
+        ):
+            removed = remove_proposal_by_substring(path, resolved_text)
     if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "

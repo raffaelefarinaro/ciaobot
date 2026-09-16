@@ -4784,6 +4784,18 @@ class ProjectChatManager:
             )
             self._detached_tasks.add(task)
             task.add_done_callback(self._detached_tasks.discard)
+            # Also retain it as this chat's live archive task so a delete can
+            # cancel it. `_cancel_archive_job` cancels `_archive_tasks`, and a
+            # startup-resumed stage awaiting `update_project_doc` would
+            # otherwise write the canonical doc after the chat was deleted.
+            self._archive_tasks[job.chat_id] = task
+
+            def _drop_resumed(
+                _task: asyncio.Task, _chat_id: str = job.chat_id
+            ) -> None:
+                self._archive_tasks.pop(_chat_id, None)
+
+            task.add_done_callback(_drop_resumed)
             started += 1
         return started
 
