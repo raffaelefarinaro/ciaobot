@@ -1164,6 +1164,102 @@ def test_cli_dismiss_records_a_reversible_queue_receipt(tmp_path, monkeypatch):
     assert mr.is_undoable(receipts[-1])
 
 
+def test_cli_dismiss_records_the_full_text_for_a_substring_needle(
+    tmp_path, monkeypatch,
+):
+    """A unique-substring dismissal records the full bullet text.
+
+    Recording the substring made crash recovery's exact match conclude the row
+    was gone and settle the receipt applied while the proposal was still queued.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Keep every fact about the project.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(tmp_path / ".runtime"))
+    code = cli.main(
+        [
+            "memory-proposal-dismiss",
+            "--workspace",
+            str(tmp_path),
+            "--vault-root",
+            str(vault),
+            "every fact",  # a unique substring, not the full bullet text
+        ]
+    )
+    assert code == 0
+    receipts = [
+        r
+        for r in mr.read_receipts(mr.journal_path(vault, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    assert receipts
+    assert receipts[-1]["removed_text"] == "Keep every fact about the project."
+
+
+def test_cli_substring_dismissal_recovers_as_applied_only_after_removal(
+    tmp_path, monkeypatch,
+):
+    """The crash window must not settle applied while the bullet remains."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Keep every fact about the project.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(tmp_path / ".runtime"))
+    code = cli.main(
+        [
+            "memory-proposal-dismiss",
+            "--workspace",
+            str(tmp_path),
+            "--vault-root",
+            str(vault),
+            "every fact",
+        ]
+    )
+    assert code == 0
+    # Re-create the bullet to simulate a crash that never rewrote the queue,
+    # with the prepared receipt already on disk.
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Keep every fact about the project.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    receipt = [
+        r
+        for r in mr.read_receipts(mr.journal_path(vault, None))
+        if r["kind"] == "queue_resolve"
+    ][-1]
+    # Manually rewind the receipt to prepared so recovery runs against it.
+    mr._append(
+        mr.journal_path(vault, None),
+        {
+            "id": receipt["id"],
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": receipt["removed_text"],
+            "before_revision": receipt.get("before_revision", ""),
+            "before_text": receipt.get("before_text"),
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(vault, None))
+    settled = [r for r in result.reconciled if r["id"] == receipt["id"]]
+    assert settled and settled[0]["status"] == mr.ROLLED_BACK
+
+
 def test_recover_memory_journals_covers_every_workspace_vault(tmp_path):
     _client, config = _receipts_client(tmp_path)
     guide = Path(config.agent_root("personal")) / "CLAUDE.md"

@@ -2879,6 +2879,21 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    # Resolve the matched row to its full parsed proposal text before the
+    # bracket: the caller may have named the fact with a unique *substring*, and
+    # recording that substring as `removed_text` made crash recovery's exact
+    # bullet match conclude the row was gone and settle the receipt applied
+    # while the proposal was still queued.
+    from ciao.proposal_kinds import parse_bullet
+
+    resolved_text = needle
+    try:
+        target_line = path.read_text(encoding="utf-8").splitlines()[next(iter(union))]
+    except (OSError, IndexError, StopIteration):
+        target_line = ""
+    parsed = parse_bullet(target_line) if target_line else None
+    if parsed is not None:
+        resolved_text = parsed.text
     # Bracket the removal with a receipt so a crash between the queue rewrite
     # and the decision record is recoverable, and so the History surface can
     # reverse a dismissal the curator made.
@@ -2886,7 +2901,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
 
     with queue_resolution(
         path,
-        removed_text=needle,
+        removed_text=resolved_text,
         kind="",
         promoted=bool(args.promoted),
         actor="agent",
