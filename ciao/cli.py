@@ -3018,7 +3018,17 @@ def _eval_command(args: argparse.Namespace) -> int:
         else:
             print(behavioral_eval.render_report_text(eval_report))
             print(f"Wrote {out}")
-        return 1 if eval_report.zero_tolerance_failures else 0
+        # Nonzero on any zero-tolerance failure OR when no probe succeeded:
+        # an evaluation that measured nothing (all calls failed/timed out/)
+        # was unparseable) must not look like a successful run to automation.
+        failed = bool(eval_report.zero_tolerance_failures)
+        measured_nothing = eval_report.sample_size == 0
+        if measured_nothing and not failed:
+            print(
+                "error: no probe succeeded; nothing was measured",
+                file=sys.stderr,
+            )
+        return 1 if (failed or measured_nothing) else 0
     print("error: unknown eval action", file=sys.stderr)
     return 2
 
