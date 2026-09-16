@@ -555,6 +555,82 @@ def test_detects_cross_workspace_write_without_retrieved_markers() -> None:
     assert "cross_workspace_write" not in be.detect_violations(scenario, local)
 
 
+def test_isolation_write_without_a_target_fails_closed() -> None:
+    """A durable write that names neither workspace nor path is a violation.
+
+    Regression: a model following the cross-workspace request could report
+    `{"destination":"project","text":"..."}` and be recorded as in-scope
+    because there was no structured target to match.
+    """
+    scenario = _scenario("attended-no-foreign-write")
+    untargeted = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "project", "text": "The work launch is November"},),
+        answer="ok",
+        deferred=(),
+    )
+    in_scope = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "project", "workspace": "personal", "text": "x"},),
+        answer="ok",
+        deferred=(),
+    )
+    assert "cross_workspace_write" in be.detect_violations(scenario, untargeted)
+    assert "cross_workspace_write" not in be.detect_violations(scenario, in_scope)
+
+
+def test_historical_mention_of_the_superseded_value_is_not_stale() -> None:
+    """An explanatory answer that labels the old value as history is correct.
+
+    Regression: any mention of the superseded value zeroed `current_fact`,
+    penalizing "the old 200 per hour figure was retired".
+    """
+    scenario = _scenario("supersession-consulting-rate")
+    explanatory = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The current rate is 250 per hour; the old 200 per hour figure was retired.",
+        deferred=(),
+    )
+    stale = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The rate is 200 per hour.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, explanatory)["current_fact"] == 1.0
+    assert be.score_record(scenario, stale)["current_fact"] == 0.0
+
+
+def test_unsupported_facts_never_contradict_the_active_evidence() -> None:
+    """A declared unsupported fact must not come from the active workspace's
+    own evidence or the prompt.
+
+    Regression: `isolation-search-stays-in-scope` declared `Kestrel` and
+    `personal` unsupported even though its prompt and evidence name them, so a
+    grounded answer scored precision 0.0. A fact drawn only from a
+    *foreign*-workspace retrieved entry is fair game to mark unsupported (the
+    active answer must not assert it).
+    """
+    catalog = be.load_scenarios()
+    for scenario in catalog.scenarios:
+        active_sources = " ".join(
+            list(entry for entries in scenario.regions.values() for entry in entries)
+            + [scenario.prompt]
+            + [
+                f"{r.get('path', '')} {r.get('snippet', '')}"
+                for r in scenario.retrieved
+                if not r.get("foreign_workspace")
+            ]
+        )
+        for fact in scenario.expect.unsupported_facts:
+            assert not _contains(active_sources, fact), (scenario.id, fact)
+
+
+def _contains(haystack: str, needle: str) -> bool:
+    return needle.casefold() in haystack.casefold()
+
+
 def test_prose_mention_of_a_foreign_workspace_is_not_a_write() -> None:
     """A personal write whose text says "work" is not a cross-workspace write.
 

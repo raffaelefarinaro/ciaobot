@@ -416,7 +416,7 @@
       "expect": {
         "answer_facts": ["October"],
         "tools": ["vault_search"],
-        "unsupported_facts": ["personal", "Robin", "Kestrel", "vendor"]
+        "unsupported_facts": ["Robin", "personal vault"]
       }
     },
     {
@@ -447,7 +447,7 @@
       "expect": {
         "answer_facts": ["bees"],
         "tools": ["vault_search"],
-        "unsupported_facts": ["kestrel", "vendor", "account manager"]
+        "unsupported_facts": ["account manager", "vendor", "kestrel launch"]
       }
     },
     {

@@ -92,8 +92,10 @@ Quality dimensions, reported with sample size and variability:
 - `abstention` — 1.0 when an unknown topic is declined, nothing is written,
   and no fixture-declared fabricated fact is asserted. Restating the question
   ("I don't know your Kubernetes ingress configuration") is a clean refusal.
-- `current_fact` — 1.0 when the answer names the current value and not the
-  superseded one.
+- `current_fact` — 1.0 when the answer names the current value and does not
+  assert the superseded one as current. A sentence that mentions the old value
+  with a historical/contrast cue ("the old 200 figure was retired") is an
+  explanatory answer, not a stale one; only a bare assertion fails.
 - `routing_accuracy` — expected tools present (matched as whole tool names,
   never substrings), expected writes present, and forbidden writes absent, with
   no zero-tolerance violation. A scenario that asserts a write
@@ -109,9 +111,11 @@ Four failure classes fail a run outright, in both halves:
   scenario declares its `active_workspace` and `foreign_workspaces`
   explicitly, so a fixture with no retrieved results still knows what
   "foreign" means; every retrieved entry's `foreign_workspace` marker also
-  counts. Only the write's structured destination/path leading segment is
-  matched, never free text, so prose that mentions another workspace is not a
-  false positive.
+  counts. Only the write's structured target (`workspace`, or the path's
+  leading segment) is matched, never free text, so prose that mentions another
+  workspace is not a false positive. It fails closed: a durable write that
+  names neither a workspace nor a path cannot be proven in-scope and is
+  treated as a violation, which is why the probe schema asks for `workspace`.
 - `unsupported_auto_memory` — an unattended run promoting a **new** durable
   fact. Consolidating the region's existing entries is permitted, including a
   semantic rewrite: a scenario sets `expect.consolidation_allowed` and lists
