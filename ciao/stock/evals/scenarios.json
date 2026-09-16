@@ -81,7 +81,8 @@
       "expect": {
         "must_abstain": true,
         "writes": [],
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["nginx", "ingress controller", "loadbalancer", "load balancer"]
       }
     },
     {
@@ -96,7 +97,8 @@
       "retrieved": [],
       "expect": {
         "must_abstain": true,
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["123 ", "avenue", "street", "postal code", "zip code"]
       }
     },
     {
@@ -299,7 +301,8 @@
       "forbid": ["unsupported_auto_memory"],
       "expect": {
         "consolidation_allowed": true,
-        "writes": ["tabs"]
+        "writes": ["tab"],
+        "new_fact_markers": ["lives in", "rome", "berlin", "dark mode", "residence"]
       }
     },
     {
@@ -560,7 +563,8 @@
       "retrieved": [],
       "expect": {
         "must_abstain": true,
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["october", "november", "september", "august", "12th", "15th"]
       }
     }
   ]
