@@ -203,6 +203,55 @@ def test_save_reports_a_write_failure(tmp_path: Path, monkeypatch) -> None:
     assert job.save() is False
 
 
+def test_load_job_returns_none_for_a_non_numeric_version(tmp_path: Path) -> None:
+    """A malformed-but-valid manifest must not abort recovery.
+
+    `list_jobs`/startup recovery iterate every file; one nonnumeric version
+    value raising ValueError would prevent every other job from resuming.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.save()
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pipeline_version"] = "not-a-number"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert aj.load_job(tmp_path / ".runtime", job.job_id) is None
+    # And the directory listing still yields the other valid jobs.
+    good = _job(tmp_path, archive, chat_id="chat-2")
+    good.save()
+    listed = {j.job_id for j in aj.list_jobs(tmp_path / ".runtime")}
+    assert good.job_id in listed
+
+
+def test_settled_job_drops_the_session_payload(tmp_path: Path) -> None:
+    """A settled manifest must not retain the full filtered session JSONL."""
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.inputs["filtered_jsonl"] = "x" * 5000
+    job.mark("insights", aj.SUCCEEDED)
+    job.mark("trajectory", aj.SKIPPED, "no session input")
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert "filtered_jsonl" not in reloaded.inputs
+
+
+def test_unfinished_job_keeps_the_session_payload(tmp_path: Path) -> None:
+    """An unfinished insights/trajectory keeps the payload for the retry."""
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.inputs["filtered_jsonl"] = "payload"
+    job.mark("insights", aj.FAILED, "boom")
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.inputs.get("filtered_jsonl") == "payload"
+
+
 def test_insights_append_is_skipped_when_evidence_cannot_persist(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1206,6 +1206,7 @@ async def run_archive_pipeline(
             # that depended on this one stay pending and are retried together.
             continue
 
+    job.save()
     return job
 
 

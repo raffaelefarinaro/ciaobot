@@ -346,6 +346,22 @@ class ArchiveJob:
         """Every still-incomplete or blocked stage, regardless of attempts."""
         return self.unfinished()
 
+    def prune_settled_inputs(self) -> None:
+        """Drop the heavy session payload once no stage can still need it.
+
+        The filtered session JSONL (assistant thinking, full Write/Edit/Bash
+        inputs and results) is kept on the manifest only so insights and the
+        trajectory can run. Once those stages are settled — or impossible to
+        retry — the payload is dead weight that duplicates transcript data on
+        every archived chat, so it is removed. Kept while a stage that reads it
+        is still unfinished, so an explicit retry can still use it.
+        """
+        needs_payload = any(
+            self.status_of(n) in INCOMPLETE for n in ("insights", "trajectory")
+        )
+        if not needs_payload:
+            self.inputs.pop("filtered_jsonl", None)
+
     def mark(self, name: str, status: str, reason: str = "") -> None:
         stage = self.stage(name)
         if status == RUNNING:
@@ -475,6 +491,9 @@ class ArchiveJob:
         """
         if not self.runtime_root:
             return True
+        # Drop the heavy session payload once no stage can still read it, so a
+        # settled manifest never keeps a full transcript copy.
+        self.prune_settled_inputs()
         return save_job(Path(self.runtime_root), self)
 
 
@@ -496,7 +515,13 @@ def _lock_for(path: Path) -> threading.Lock:
 
 
 def load_job(runtime_root: Path, job_id: str) -> ArchiveJob | None:
-    """Read one manifest, or None when missing/invalid/out-of-version."""
+    """Read one manifest, or None when missing/invalid/out-of-version.
+
+    Every parse and schema step is guarded: a syntactically valid but malformed
+    record (a nonnumeric version, a wrong-typed field) returns None here instead
+    of raising, so `list_jobs`/startup recovery cannot be aborted by one bad
+    file.
+    """
     path = job_path(runtime_root, job_id)
     if not path.is_file():
         return None
@@ -507,11 +532,15 @@ def load_job(runtime_root: Path, job_id: str) -> ArchiveJob | None:
         return None
     if not isinstance(raw, dict):
         return None
-    if int(raw.get("manifest_version", 0) or 0) != MANIFEST_VERSION:
+    try:
+        if int(raw.get("manifest_version", 0) or 0) != MANIFEST_VERSION:
+            return None
+        if int(raw.get("pipeline_version", 0) or 0) != PIPELINE_VERSION:
+            return None
+        return ArchiveJob.from_dict(raw, runtime_root=runtime_root)
+    except (ValueError, TypeError):
+        logger.warning("archive jobs: malformed manifest %s", path)
         return None
-    if int(raw.get("pipeline_version", 0) or 0) != PIPELINE_VERSION:
-        return None
-    return ArchiveJob.from_dict(raw, runtime_root=runtime_root)
 
 
 def save_job(runtime_root: Path, job: ArchiveJob) -> bool:
