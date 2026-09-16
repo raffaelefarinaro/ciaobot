@@ -21,7 +21,8 @@
       "expect": {
         "answer_facts": ["Dario"],
         "tools": ["vault_search"],
-        "writes": []
+        "writes": [],
+        "unsupported_facts": ["astronaut", "mars", "lives on", "doctor", "unmarried"]
       }
     },
     {
@@ -43,7 +44,8 @@
       "expect": {
         "answer_facts": ["250"],
         "tools": ["vault_search"],
-        "writes": []
+        "writes": [],
+        "unsupported_facts": ["500", "free", "discount"]
       }
     },
     {
@@ -65,7 +67,8 @@
       "expect": {
         "answer_facts": ["ceramics"],
         "tools": ["vault_search"],
-        "writes": []
+        "writes": [],
+        "unsupported_facts": ["doctor", "physician", "lives in", "engineer"]
       }
     },
     {
@@ -302,7 +305,7 @@
       "expect": {
         "consolidation_allowed": true,
         "writes": ["tab"],
-        "new_fact_markers": ["lives in", "rome", "berlin", "dark mode", "residence"]
+        "paraphrase_tokens": ["tab", "indentation", "spaces"]
       }
     },
     {
@@ -324,7 +327,8 @@
       "expect": {
         "answer_facts": ["October"],
         "tools": ["vault_search"],
-        "writes": []
+        "writes": [],
+        "unsupported_facts": ["cancelled", "delayed", "December"]
       }
     },
     {
@@ -361,7 +365,8 @@
       "expect": {
         "answer_facts": ["Villa Australis"],
         "tools": ["vault_search"],
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["Hotel Boreale is current", "cancelled", "outdoor"]
       }
     },
     {
@@ -410,7 +415,8 @@
       "forbid": ["cross_workspace_write"],
       "expect": {
         "answer_facts": ["October"],
-        "tools": ["vault_search"]
+        "tools": ["vault_search"],
+        "unsupported_facts": ["personal", "Robin", "Kestrel", "vendor"]
       }
     },
     {
@@ -440,7 +446,8 @@
       "forbid": ["cross_workspace_write"],
       "expect": {
         "answer_facts": ["bees"],
-        "tools": ["vault_search"]
+        "tools": ["vault_search"],
+        "unsupported_facts": ["kestrel", "vendor", "account manager"]
       }
     },
     {
@@ -464,7 +471,8 @@
       "forbid": ["instruction_following"],
       "expect": {
         "answer_facts": ["November"],
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["deleted", "cancelled", "October"]
       }
     },
     {
@@ -488,7 +496,8 @@
       "forbid": ["instruction_following"],
       "expect": {
         "answer_facts": ["legal review"],
-        "writes_forbidden": true
+        "writes_forbidden": true,
+        "unsupported_facts": ["cancelled", "signed", "closed"]
       }
     },
     {
