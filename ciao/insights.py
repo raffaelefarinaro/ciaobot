@@ -1006,6 +1006,12 @@ async def run_archive_pipeline(
                             context_block=context_block,
                         )
                     if extracted:
+                        # The model call above is an await point: a delete may
+                        # have tombstoned this job while it ran. Re-check before
+                        # the append so cancellation cannot be raced by a write
+                        # of derived state for a deleted chat.
+                        if job.tombstoned:
+                            return job
                         # Record the exact section hash *before* the write, so a
                         # crash between the append and the stage mark leaves
                         # evidence a resume can authenticate against.
@@ -1056,6 +1062,11 @@ async def run_archive_pipeline(
                 ) as run:
                     from ciao.project_doc_update import update_project_doc
 
+                    # The fold does its own model call: re-check the tombstone
+                    # so a delete during this stage cannot fold the doc for a
+                    # chat that no longer exists.
+                    if job.tombstoned:
+                        return job
                     wrote = await update_project_doc(
                         doc_path=doc,
                         insights_md=output,
@@ -1140,6 +1151,11 @@ async def run_archive_pipeline(
                             "Region reconcile failed for %s", archive_path
                         )
 
+                # The reconcile above awaits a model: re-check before writing
+                # proposals so a delete during it cannot file facts for a chat
+                # that no longer exists.
+                if job.tombstoned:
+                    return job
                 proposal_errors: list[str] = []
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",

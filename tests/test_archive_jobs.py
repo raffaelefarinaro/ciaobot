@@ -595,6 +595,49 @@ def test_resume_skips_a_tombstoned_job(tmp_path: Path) -> None:
     assert result.tombstoned is True
 
 
+def test_delete_cancels_the_in_flight_archive_task(tmp_path: Path) -> None:
+    """Deleting a chat must cancel a stage that is mid-model-call.
+
+    The tombstone flag alone only stops the *next* stage; a task already
+    awaiting a model call would resume and write derived state for a deleted
+    chat. `_cancel_archive_job` must cancel the retained task.
+    """
+    import asyncio as _asyncio
+
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    manager._archive_jobs[chat.chat_id] = job
+
+    cancelled: list[bool] = []
+
+    async def _never_finishes() -> None:
+        try:
+            await _asyncio.sleep(3600)
+        except _asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    async def drive() -> None:
+        task = _asyncio.create_task(_never_finishes())
+        manager._archive_tasks[chat.chat_id] = task
+        await _asyncio.sleep(0)
+        manager.delete_chat(chat.chat_id)
+        await _asyncio.sleep(0)
+        assert task.cancelled() or task.cancelling()
+
+    _asyncio.run(drive())
+
+    assert cancelled == [True]
+    assert chat.chat_id not in manager._archive_tasks
+
+
 # ── Blocked / recoverable states ──────────────────────────────────────────
 
 

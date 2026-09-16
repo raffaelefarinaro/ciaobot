@@ -325,3 +325,52 @@ def test_retry_insights_reports_complete_when_only_insights_are_settled(
     # stages do not, so the resume must still start.
     assert status == "started"
     assert started
+
+
+def test_retry_resets_an_exhausted_insights_with_pending_dependents(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """An exhausted insights must be reset even when a dependent is pending.
+
+    `resumable()` is non-empty because the dependent stages are pending, so the
+    old guard skipped `reset_failed`; the launch then ran only work that
+    immediately waited for insights, making every user retry a silent no-op.
+    """
+    from ciao import archive_jobs as aj
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
+    chat.archive_path = str(archive.relative_to(tmp_path))
+
+    inputs = manager._job_inputs(chat, manager._projects[chat.project_id])
+    job = manager._new_job_for_chat(chat, inputs)
+    for _ in range(aj.MAX_AUTO_ATTEMPTS):
+        job.mark("insights", aj.RUNNING)
+        job.mark("insights", aj.FAILED, "boom")
+    # Dependents are pending, so `resumable()` is non-empty before the retry.
+    assert job.resumable()
+
+    launched: list[object] = []
+
+    async def fake_pipeline(job_arg: object, inputs_arg: dict, **kwargs: object) -> object:
+        launched.append(job_arg)
+        return job_arg
+
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
+
+    async def run() -> str:
+        return manager.retry_insights(chat_id)
+
+    status = asyncio.run(run())
+
+    assert status == "started"
+    assert launched
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("insights") == aj.PENDING
+    assert reloaded.stage("insights").attempts == 0

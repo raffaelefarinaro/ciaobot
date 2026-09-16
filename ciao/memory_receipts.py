@@ -298,6 +298,10 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+        # Trim while still holding the lock. Running it after the release let a
+        # concurrent append land between this trim's read and its os.replace,
+        # and the stale snapshot then silently deleted that newer receipt.
+        _trim_if_large(journal)
     finally:
         if fcntl is not None:
             try:
@@ -305,7 +309,6 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
             except OSError:
                 pass
         handle.close()
-    _trim_if_large(journal)
 
 
 def _trim_if_large(journal: Path) -> None:
@@ -789,6 +792,7 @@ def record_queue_resolution_batch(
     source: str,
     workspace: str = "",
     vault_root: Path | None = None,
+    undoable_first: bool = True,
 ) -> list[dict[str, Any]]:
     """Record one queue rewrite that removed several bullets.
 
@@ -799,6 +803,9 @@ def record_queue_resolution_batch(
     undo that would restore every other fact in the batch (and resurrect an
     accepted fact's bullet). Each item in ``removals`` carries ``text``,
     ``kind`` and ``promoted``.
+
+    ``undoable_first=False`` records every row non-undoable, for the bracket
+    that writes its own transaction-level undoable row instead.
 
     Returns the recorded receipts; never raises.
     """
@@ -817,12 +824,114 @@ def record_queue_resolution_batch(
                     vault_root=vault_root,
                     before_text=before_text,
                     after_text=after_text,
-                    undoable=index == 0,
+                    undoable=undoable_first and index == 0,
                 )
             )
         except Exception:  # noqa: BLE001 — recording must not break removal
             logger.debug("memory receipts: batch row failed", exc_info=True)
     return receipts
+
+
+@contextmanager
+def queue_resolution_multi(
+    proposals_path: Path,
+    removals: list[dict[str, Any]],
+    *,
+    actor: str,
+    source: str,
+    workspace: str = "",
+    vault_root: Path | None = None,
+):
+    """Bracket a multi-bullet queue rewrite with prepared then applied receipts.
+
+    The batch/sweep routes rewrite the queue and only then record receipts, so
+    a crash between the write and the record left no evidence at all: the
+    bullets were gone and startup recovery could not reconstruct the mutation.
+    This writes a single transaction-level ``prepared`` row (listing every
+    removed text) before the body's rewrite, and the applied row after it, so
+    :func:`recover_pending` reconciles an interrupted batch exactly as it does a
+    single resolution.
+
+    The queue lock is held for the whole block; the body is responsible for the
+    actual rewrite. ``removals`` items carry ``text`` and ``kind``. An empty
+    ``removals`` list yields without recording anything — there is no mutation
+    to bracket.
+    """
+    if not removals:
+        yield {}
+        return
+    with queue_lock(proposals_path):
+        try:
+            before = proposals_path.read_text(encoding="utf-8")
+        except OSError:
+            before = ""
+        texts = [str(r.get("text") or "") for r in removals]
+        rid = new_receipt_id(
+            f"{proposals_path}|queue_resolve_batch|"
+            f"{'|'.join(texts)}|{content_revision(before)}"
+        )
+        journal = journal_path(vault_root, proposals_path.parent)
+        base: dict[str, Any] = {
+            "id": rid,
+            "ts": _now(),
+            "actor": actor,
+            "source": source,
+            "workspace": workspace,
+            "kind": "queue_resolve",
+            "queue": str(proposals_path),
+            "action": "promoted"
+            if any(bool(r.get("promoted")) for r in removals)
+            else "dismissed",
+            "removed_texts": texts,
+            "removed_text": texts[0] if texts else "",
+            "promoted": any(bool(r.get("promoted")) for r in removals),
+            "batch": True,
+        }
+        try:
+            _append(journal, {**base, "status": PREPARED})
+        except Exception:  # noqa: BLE001 — the removal proceeds regardless
+            logger.debug("memory receipts: could not prepare batch receipt", exc_info=True)
+        try:
+            yield base
+        finally:
+            try:
+                after = proposals_path.read_text(encoding="utf-8")
+            except OSError:
+                after = ""
+            try:
+                record_queue_resolution_batch(
+                    proposals_path,
+                    removals,
+                    before_text=before,
+                    after_text=after,
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    # The transaction row below is the only undoable one; the
+                    # per-fact rows are history-only so undoing one cannot
+                    # restore the whole pre-batch file.
+                    undoable_first=False,
+                )
+            except Exception:  # noqa: BLE001 — recording must not break removal
+                logger.debug("memory receipts: batch receipt failed", exc_info=True)
+            # Settle the prepared transaction row with the whole-file images and
+            # the transaction-level outcome. It is the single undoable row.
+            settled = {
+                **base,
+                "before_revision": content_revision(before),
+                "after_revision": content_revision(after),
+                "before_text": _image(before),
+                "after_text": _image(after),
+                "kind": "queue_resolve",
+                "removed_texts": texts,
+                "removed_text": texts[0] if texts else "",
+                "status": APPLIED,
+            }
+            try:
+                _append(journal, settled)
+            except Exception:  # noqa: BLE001
+                logger.debug("memory receipts: batch settle failed", exc_info=True)
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────
@@ -936,8 +1045,17 @@ def _reconcile_queue(
     proposals_path: Path | None,
 ) -> dict[str, Any] | None:
     path = proposals_path or Path(str(receipt.get("queue", "")))
-    removed = str(receipt.get("removed_text", ""))
-    if not path.name or not removed:
+    if not path.name:
+        return None
+    # A batch prepared row lists every removed bullet; the removal landed only
+    # when all of them are gone. A single row names one ``removed_text``.
+    removed_texts = receipt.get("removed_texts")
+    if isinstance(removed_texts, list) and removed_texts:
+        needles = [str(t) for t in removed_texts if str(t)]
+    else:
+        single = str(receipt.get("removed_text", ""))
+        needles = [single] if single else []
+    if not needles:
         return None
     try:
         text = path.read_text(encoding="utf-8")
@@ -945,13 +1063,20 @@ def _reconcile_queue(
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
     from ciao.proposal_kinds import parse_bullet
 
-    present = any(
-        parse_bullet(line) is not None and removed in line
-        for line in text.splitlines()
-    )
-    if not present:
+    bullets = [
+        line for line in text.splitlines() if parse_bullet(line) is not None
+    ]
+    still_present = [
+        needle for needle in needles if any(needle in line for line in bullets)
+    ]
+    if not still_present:
         return _settle(journal, receipt, APPLIED, "bullet already removed")
-    return _settle(journal, receipt, ROLLED_BACK, "bullet still queued")
+    detail = (
+        f"{len(still_present)} batch bullet(s) still queued"
+        if len(needles) > 1
+        else "bullet still queued"
+    )
+    return _settle(journal, receipt, ROLLED_BACK, detail)
 
 
 def _settle(

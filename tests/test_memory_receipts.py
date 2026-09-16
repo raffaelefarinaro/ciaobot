@@ -244,6 +244,41 @@ def test_trim_drops_only_terminal_receipts(tmp_path, monkeypatch):
     assert rows == ["mrcpt_done_3", "mrcpt_done_4"]
 
 
+def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
+    """Trimming must run inside the append lock.
+
+    Otherwise a concurrent append can land after the trim reads the file and
+    before it replaces it, and the stale snapshot deletes that newer receipt.
+    The probe: intercept `_trim_if_large` and confirm the journal lock is still
+    held at that moment (a non-blocking exclusive flock must fail).
+    """
+    import fcntl
+
+    journal = _journal(tmp_path)
+    lock = journal.with_name(journal.name + ".lock")
+    observed: list[bool] = []
+
+    real_trim = mr._trim_if_large
+
+    def probe(path: Path) -> None:
+        with lock.open("a+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                observed.append(True)
+                return
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        observed.append(False)
+
+    monkeypatch.setattr(mr, "_trim_if_large", probe)
+    try:
+        mr._append(journal, {"id": "mrcpt_probe", "status": mr.APPLIED, "ts": "t"})
+    finally:
+        monkeypatch.setattr(mr, "_trim_if_large", real_trim)
+
+    assert observed == [True], "trim ran after the append lock was released"
+
+
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
     """A prepared receipt whose after-image is on disk settles to applied."""
     guide = _guide(tmp_path, memory=["fact one"])
@@ -735,6 +770,113 @@ def test_batch_undo_of_a_non_transaction_row_is_refused(tmp_path):
     ]
     # A single-item batch still records one undoable transaction row.
     assert len(rows) == 1 and mr.is_undoable(rows[0])
+
+
+def test_multi_bracket_prepares_before_the_rewrite(tmp_path):
+    """A crash between the batch rewrite and its record must stay recoverable.
+
+    `queue_resolution_multi` writes one transaction-level prepared row before
+    the body's rewrite. Simulating a crash after the write (body ran, applied
+    row never landed) leaves that prepared row, and recovery settles it APPLIED
+    because all its bullets are gone.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Fact A.  _(from: Decisions)_\n"
+        "- [profile] Fact B.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    # Simulate the crash: prepare, rewrite, then never record applied.
+    with mr.queue_resolution_multi(
+        queue,
+        [
+            {"text": "Fact A.", "kind": "memory", "promoted": False},
+            {"text": "Fact B.", "kind": "profile", "promoted": False},
+        ],
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    ) as base:
+        queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    # The bracket settles its transaction row and the per-fact rows.
+    prepared_ids = {
+        r["id"]
+        for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["status"] == mr.PREPARED
+    }
+    assert prepared_ids == set()
+
+    # Now the crash window: a prepared batch row whose bullets are already gone
+    # recovers to APPLIED.
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_batch_crash",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_texts": ["Fact A.", "Fact B."],
+            "batch": True,
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    assert "mrcpt_batch_crash" in [r["id"] for r in result.reconciled]
+
+
+def test_batch_recovery_rolled_back_when_a_bullet_remains(tmp_path):
+    """A batch prepared row is not APPLIED while any of its bullets is present."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [profile] Fact B.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_batch_partial",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_texts": ["Fact A.", "Fact B."],
+            "batch": True,
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_batch_partial"]
+    assert settled and settled[0]["status"] == mr.ROLLED_BACK
+
+
+def test_single_route_uses_a_prepared_receipt_before_the_rewrite(tmp_path):
+    """The CLI wrapper is the model: a prepared row precedes the rewrite."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Keep every fact.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    observed: list[list[str]] = []
+    with mr.queue_resolution(
+        queue,
+        removed_text="Keep every fact.",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    ):
+        # Inside the body, the prepared row is already on disk.
+        rows = mr.read_receipts(mr.journal_path(tmp_path, None))
+        observed.append([r["status"] for r in rows if r["kind"] == "queue_resolve"])
+        mp.remove_proposal_by_substring(queue, "Keep every fact.")
+
+    assert observed and observed[0] == [mr.PREPARED]
 
 
 def test_queue_recovery_applied_when_the_bullet_is_gone(tmp_path):

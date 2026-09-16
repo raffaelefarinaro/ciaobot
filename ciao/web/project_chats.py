@@ -1439,6 +1439,10 @@ class ProjectChatManager:
         # model extraction. Keyed by chat id; the on-disk manifest is the
         # durable copy and this map is only a read cache for the same process.
         self._archive_jobs: dict[str, Any] = {}
+        # The live post-archive task per chat, so a delete can cancel a stage
+        # that is currently awaiting a model call (the tombstone flag alone only
+        # stops the *next* stage).
+        self._archive_tasks: dict[str, asyncio.Task] = {}
         self._runtime_root = Path(config.state_path).parent
         # The loop the manager was constructed on, so job-run events arriving
         # from a worker thread can be marshalled back onto it before touching
@@ -4314,13 +4318,17 @@ class ProjectChatManager:
             return "no_archive"
         if job.tombstoned:
             return "complete"
+        if not job.unfinished():
+            return "complete"
+        # An explicit user retry is a deliberate action: always clear failed
+        # stages, blocks, and exhausted attempt budgets before launching, even
+        # when `resumable()` is nominally non-empty because a *dependent*
+        # pending stage kept it so. Otherwise an exhausted `insights` whose
+        # dependents are still pending would be skipped, and the launch would
+        # run only work that immediately waits for it — a silent no-op retry.
+        job.reset_failed(include_blocked=True)
         if not job.resumable():
-            # No stage is *automatically* eligible. An explicit user retry is a
-            # deliberate action, so it clears a block and a max-attempts
-            # exhaustion once; if nothing is actually unfinished, report it.
-            if not job.unfinished():
-                return "complete"
-            job.reset_failed(include_blocked=True)
+            return "complete"
         self._launch_job(chat_id, job, inputs)
         return "started"
 
@@ -4360,6 +4368,12 @@ class ProjectChatManager:
         """
         from ciao.archive_jobs import load_job, tombstone_job
 
+        # Cancel an in-flight stage first: a task awaiting a model call would
+        # otherwise resume after the delete and write derived state. The
+        # tombstone below then stops any next stage and any startup resume.
+        task = self._archive_tasks.pop(chat_id, None)
+        if task is not None and not task.done():
+            task.cancel()
         chat = self._chats.get(chat_id)
         job = self._archive_jobs.pop(chat_id, None)
         if job is None and chat is not None and chat.archive_path:
@@ -4594,11 +4608,21 @@ class ProjectChatManager:
         stages: list[str] | None = None,
     ) -> None:
         self._begin_postprocess(chat_id, list(stages or job.resumable()))
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._tracked_postprocess(
                 chat_id, self._run_job(chat_id, job, inputs, stages=stages)
             )
         )
+        # Retained so a delete can cancel an in-flight stage. The tombstone alone
+        # is not enough: a stage already awaiting a model call would otherwise
+        # resume and write derived state (append insights, fold the doc) after
+        # the chat was deleted.
+        self._archive_tasks[chat_id] = task
+
+        def _drop_finished(_task: asyncio.Task, _chat_id: str = chat_id) -> None:
+            self._archive_tasks.pop(_chat_id, None)
+
+        task.add_done_callback(_drop_finished)
 
     async def _run_job(
         self,
