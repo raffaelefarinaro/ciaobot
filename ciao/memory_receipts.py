@@ -682,6 +682,11 @@ def queue_resolution(
             "fact_text": removed_text,
             "removed_text": removed_text,
             "promoted": promoted,
+            # The before image and revision live on the prepared row so a
+            # crash-recovered receipt can still be undone: recovery fills in the
+            # after image/revision from disk, and `is_undoable` needs both.
+            "before_revision": content_revision(before),
+            "before_text": _image(before),
         }
         try:
             _append(journal, {**base, "status": PREPARED})
@@ -886,6 +891,10 @@ def queue_resolution_multi(
             "removed_text": texts[0] if texts else "",
             "promoted": any(bool(r.get("promoted")) for r in removals),
             "batch": True,
+            # Before image/revision on the prepared row so a crash-recovered
+            # batch receipt is still undoable.
+            "before_revision": content_revision(before),
+            "before_text": _image(before),
         }
         try:
             _append(journal, {**base, "status": PREPARED})
@@ -900,13 +909,8 @@ def queue_resolution_multi(
                 after = proposals_path.read_text(encoding="utf-8")
             except OSError:
                 after = ""
-            from ciao.proposal_kinds import parse_bullet
-
-            bullets = [
-                line for line in after.splitlines() if parse_bullet(line) is not None
-            ]
             all_gone = bool(texts) and not any(
-                any(needle in line for line in bullets) for needle in texts
+                _bullets_containing(after, needle) for needle in texts
             )
             if completed and all_gone:
                 # Only a completed, content-verified rewrite earns applied
@@ -1070,6 +1074,29 @@ def _reconcile_region(
     )
 
 
+def _bullets_containing(text: str, needle: str) -> bool:
+    """True when a parsed bullet's *text* equals ``needle`` exactly.
+
+    Compares parsed bullet text, not the raw line: a substring search reported
+    a removed ``Use Python`` as still queued while ``Use Python 3`` remained,
+    which rolled back a successful resolution. Matches on the same normalized
+    one-line form proposal identity uses.
+    """
+    from ciao.memory_proposals import _one_line
+    from ciao.proposal_kinds import parse_bullet
+
+    target = _one_line(str(needle))
+    if not target:
+        return False
+    for line in text.splitlines():
+        bullet = parse_bullet(line)
+        if bullet is None:
+            continue
+        if _one_line(bullet.text) == target:
+            return True
+    return False
+
+
 def _reconcile_queue(
     receipt: dict[str, Any],
     journal: Path,
@@ -1093,16 +1120,19 @@ def _reconcile_queue(
         text = path.read_text(encoding="utf-8")
     except OSError:
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
-    from ciao.proposal_kinds import parse_bullet
-
-    bullets = [
-        line for line in text.splitlines() if parse_bullet(line) is not None
-    ]
-    still_present = [
-        needle for needle in needles if any(needle in line for line in bullets)
-    ]
+    still_present = [n for n in needles if _bullets_containing(text, n)]
     if not still_present:
-        return _settle(journal, receipt, APPLIED, "bullet already removed")
+        # The rewrite landed. Populate the after image/revision from disk so a
+        # recovered receipt stays undoable: a prepared row carries only the
+        # before image, and `is_undoable` requires both.
+        settled_receipt = {
+            **receipt,
+            "after_revision": content_revision(text),
+            "after_text": _image(text),
+        }
+        settled = _settle(journal, settled_receipt, APPLIED, "bullet already removed")
+        _complete_outcome(settled_receipt)
+        return settled
     detail = (
         f"{len(still_present)} batch bullet(s) still queued"
         if len(needles) > 1
@@ -1126,15 +1156,63 @@ def _settle(
 
 
 def _complete_outcome(receipt: dict[str, Any]) -> None:
-    """Idempotently finish the decision record an interrupted apply missed."""
+    """Idempotently finish the decision record an interrupted apply missed.
+
+    Region receipts complete a promotion for the fact they wrote. Queue
+    receipts complete the dismissal/promotion sidecar entry the route or CLI
+    would have written after the receipt: a crash between the queue wrapper's
+    terminal row and that call otherwise left the resolved proposal re-filable
+    by the next archive pass.
+    """
     if receipt.get("outcome_recorded"):
         return
-    fact = str(receipt.get("fact_text", "")).strip()
+    fact = str(receipt.get("fact_text", "")).strip() or str(
+        receipt.get("removed_text", "")
+    ).strip()
     vault_root = receipt.get("vault_root")
-    workspace = str(receipt.get("workspace", ""))
     if not fact:
         return
     try:
+        if str(receipt.get("kind", "")) == "queue_resolve" or receipt.get("queue"):
+            from ciao.memory_proposals import record_dismissal, record_promotion
+
+            queue_raw = str(receipt.get("queue", ""))
+            queue = Path(queue_raw) if queue_raw else (
+                Path(str(vault_root)) / "Workspace" / "Memory-Proposals.md"
+                if vault_root
+                else None
+            )
+            if queue is None:
+                return
+            texts = receipt.get("removed_texts")
+            facts = (
+                [str(t) for t in texts if str(t)]
+                if isinstance(texts, list) and texts
+                else [fact]
+            )
+            promoted = bool(receipt.get("promoted"))
+            for item in facts:
+                if promoted:
+                    record_promotion(
+                        queue,
+                        text=item,
+                        kind=str(receipt.get("proposal_kind", "")),
+                        via=str(receipt.get("source", "")),
+                        source=str(receipt.get("source", "")),
+                        destination=str(receipt.get("destination", "")),
+                        outcome="written",
+                        once=True,
+                    )
+                else:
+                    record_dismissal(
+                        queue,
+                        text=item,
+                        kind=str(receipt.get("proposal_kind", "")),
+                        via=str(receipt.get("source", "")),
+                        source=str(receipt.get("source", "")),
+                        outcome=str(receipt.get("action", "")),
+                    )
+            return
         from ciao.memory_proposals import record_promotion
 
         if vault_root:

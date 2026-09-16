@@ -169,6 +169,61 @@ def test_tombstone_cannot_be_cleared_by_a_late_write(tmp_path: Path) -> None:
     assert reloaded.state == aj.TOMBSTONED
 
 
+def test_resumable_excludes_dependents_of_an_exhausted_insights(tmp_path: Path) -> None:
+    """An exhausted insights must not keep re-launching its dependents.
+
+    `project_doc_update` and `memory_proposals` need the insights text; with
+    `insights` out of automatic budget they would launch on every startup,
+    immediately skip for lack of output, and loop forever.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    for _ in range(aj.MAX_AUTO_ATTEMPTS):
+        job.mark("insights", aj.RUNNING)
+        job.mark("insights", aj.FAILED, "boom")
+
+    # Dependents are pending but not eligible while insights is exhausted.
+    assert job.status_of("project_doc_update") == aj.PENDING
+    assert job.resumable() == []
+    # The explicit retry still resets and reaches everything.
+    job.reset_failed(include_blocked=True)
+    assert "insights" in job.resumable()
+    assert job.stage("insights").attempts == 0
+
+
+def test_save_reports_a_write_failure(tmp_path: Path, monkeypatch) -> None:
+    """A manifest write failure must be visible to the caller.
+
+    The insights stage refuses to append when its pre-append evidence cannot be
+    persisted, so `save()` has to report the failure instead of swallowing it.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    monkeypatch.setattr(aj, "_write_raw", lambda path, payload: False)
+    assert job.save() is False
+
+
+def test_insights_append_is_skipped_when_evidence_cannot_persist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No durable evidence means no archive mutation."""
+    archive = _archive(tmp_path)
+
+    async def fake_call(body: str, model: str, **kwargs: object) -> str:
+        return "## Decisions\n- Chose sqlite. [idx=1]\n"
+
+    monkeypatch.setattr(insights, "_call_text_model", fake_call)
+    job = _job(tmp_path, archive)
+    monkeypatch.setattr(job, "save", lambda: False)
+    inputs = _job_inputs(tmp_path, archive)
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.FAILED
+    # The archive was not mutated without its recovery evidence.
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+
+
 def test_resumable_excludes_blocked_and_exhausted_stages(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     job = _job(tmp_path, archive)
@@ -189,6 +244,29 @@ def test_resumable_excludes_blocked_and_exhausted_stages(tmp_path: Path) -> None
     assert job.status_of("insights") == aj.PENDING
     assert job.status_of("memory_proposals") == aj.PENDING
     assert set(job.resumable()) == {"insights", "memory_proposals"}
+
+
+def test_resumable_excludes_dependents_of_an_exhausted_insights(tmp_path: Path) -> None:
+    """An exhausted insights must not keep re-launching its dependents.
+
+    `project_doc_update` and `memory_proposals` need the insights text; with
+    `insights` out of automatic budget they would launch on every startup,
+    immediately skip for lack of output, and loop forever.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    for _ in range(aj.MAX_AUTO_ATTEMPTS):
+        job.mark("insights", aj.RUNNING)
+        job.mark("insights", aj.FAILED, "boom")
+
+    # Dependents are pending but not eligible while insights is exhausted.
+    assert job.status_of("project_doc_update") == aj.PENDING
+    assert job.resumable() == []
+    # The explicit retry resets the budget, so insights is eligible again (and
+    # its dependents with it).
+    job.reset_failed(include_blocked=True)
+    assert job.stage("insights").attempts == 0
+    assert "insights" in job.resumable()
 
 
 # ── Stage resume: failure after each stage ────────────────────────────────

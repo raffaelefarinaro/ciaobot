@@ -352,8 +352,10 @@ def test_retry_resets_an_exhausted_insights_with_pending_dependents(
     for _ in range(aj.MAX_AUTO_ATTEMPTS):
         job.mark("insights", aj.RUNNING)
         job.mark("insights", aj.FAILED, "boom")
-    # Dependents are pending, so `resumable()` is non-empty before the retry.
-    assert job.resumable()
+    # An exhausted insights excludes its zero-attempt dependents from an
+    # *automatic* resume (they would immediately skip for lack of output).
+    assert job.resumable() == []
+    assert job.unfinished()
 
     launched: list[object] = []
 

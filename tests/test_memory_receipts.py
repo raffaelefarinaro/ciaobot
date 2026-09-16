@@ -853,6 +853,105 @@ def test_batch_recovery_rolled_back_when_a_bullet_remains(tmp_path):
     assert settled and settled[0]["status"] == mr.ROLLED_BACK
 
 
+def test_settlement_matches_a_bullet_text_exactly(tmp_path):
+    """A removed bullet whose text is a prefix of another must not be "present".
+
+    Removing ``Use Python`` while ``Use Python 3`` remains used a substring
+    search and rolled back the successful resolution.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Use Python 3.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_prefix",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "Use Python",
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_prefix"]
+    assert settled and settled[0]["status"] == mr.APPLIED
+
+
+def test_recovered_queue_receipt_stays_undoable(tmp_path, monkeypatch):
+    """A crash-recovered prepared receipt must retain its before image.
+
+    The prepared row carries ``before_text``/``before_revision``; recovery fills
+    the after image from disk, so ``is_undoable`` holds and the removed bullet
+    can be restored.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    before = (
+        "# Memory Proposals\n\n- [memory] Keep every fact.  _(from: Decisions)_\n"
+    )
+    after = "# Memory Proposals\n\n"
+    queue.write_text(before, encoding="utf-8")
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_recover_undo",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "Keep every fact.",
+            "before_revision": mr.content_revision(before),
+            "before_text": before,
+            "status": mr.PREPARED,
+        },
+    )
+    # The crash landed after the rewrite: the bullet is gone.
+    queue.write_text(after, encoding="utf-8")
+
+    result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    recovered = [r for r in result.reconciled if r["id"] == "mrcpt_recover_undo"]
+    assert recovered and recovered[0]["status"] == mr.APPLIED
+    assert mr.is_undoable(recovered[0]) is True
+
+    mr.undo_receipt("mrcpt_recover_undo", vault_root=tmp_path)
+    assert "Keep every fact." in queue.read_text(encoding="utf-8")
+
+
+def test_queue_recovery_completes_the_decision_sidecar(tmp_path):
+    """A resolved queue receipt must complete the dismissal sidecar.
+
+    A crash between the receipt's terminal row and the route's
+    `record_dismissal` call left the resolved proposal re-filable; recovery now
+    completes it.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    mr._append(
+        mr.journal_path(tmp_path, None),
+        {
+            "id": "mrcpt_sidecar",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "A resolved fact.",
+            "proposal_kind": "memory",
+            "promoted": False,
+            "action": "dismissed",
+            "status": mr.PREPARED,
+        },
+    )
+
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+
+    sidecar = mp.dismissed_log_path(queue)
+    assert sidecar.exists()
+    assert "A resolved fact." in sidecar.read_text(encoding="utf-8")
+
+
 def test_failed_batch_rewrite_is_not_recorded_applied(tmp_path):
     """A body that raises must not leave applied receipts.
 

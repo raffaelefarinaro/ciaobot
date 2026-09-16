@@ -1118,6 +1118,41 @@ def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, mo
 # ---- concurrent queue rewrites ---------------------------------------------
 
 
+def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A contended queue lock must not freeze the server.
+
+    `queue_lock` waits with a synchronous sleep; if the route held it inline
+    the event loop would stall for the wait. The rewrite helper must be
+    dispatched through `asyncio.to_thread`.
+    """
+    import asyncio
+
+    config = _config(tmp_path)
+    _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
+    client = _client(config)
+    row = next(
+        r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory"
+    )
+
+    from ciao.web import routes_api
+
+    real = routes_api._rewrite_queue_single
+    worker_threads: list[int] = []
+    main_thread = __import__("threading").get_ident()
+
+    def spy(*args, **kwargs):
+        worker_threads.append(__import__("threading").get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(routes_api, "_rewrite_queue_single", spy)
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert response.status_code == 200
+    assert worker_threads and worker_threads[0] != main_thread
+
+
 def test_a_shifted_line_index_does_not_delete_a_bystander():
     """The captured index is a hint, not an address.
 

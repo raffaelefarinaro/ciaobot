@@ -7478,6 +7478,162 @@ def _skill_proposals_dir(config, workspace: str) -> Path:
     return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
 
 
+def _sweep_queue_file(
+    queue: Path, cutoff, config, workspace: str
+) -> dict[str, Any]:
+    """Expire dated sections in one queue file, under the queue lock.
+
+    Runs in a worker thread (`asyncio.to_thread`) because `queue_lock` waits
+    with a synchronous sleep; doing that on the event loop would freeze every
+    other request while another writer holds the lock. Returns the count and,
+    when a rewrite landed, the per-fact fields the caller records.
+    """
+    from ciao.memory_receipts import queue_lock, queue_resolution_multi
+
+    result: dict[str, Any] = {
+        "removed": 0,
+        "changed": False,
+        "kinds": [],
+        "texts": [],
+        "sources": [],
+    }
+    with queue_lock(queue):
+        queue_before = queue.read_text(encoding="utf-8")
+        lines = queue_before.splitlines()
+        keep: list[str] = []
+        section_date = None
+        changed = False
+        swept_kinds: list[str] = []
+        swept_texts: list[str] = []
+        swept_sources: list[str] = []
+        for raw_line in lines:
+            m = _SECTION_DATE_RE.match(raw_line)
+            if m:
+                section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                keep.append(raw_line)
+                continue
+            bullet = proposal_kinds.parse_bullet(raw_line)
+            if bullet is not None and section_date is not None and section_date < cutoff:
+                changed = True
+                swept_kinds.append(bullet.kind)
+                swept_texts.append(bullet.text)
+                swept_sources.append(bullet.source)
+                continue
+            keep.append(raw_line)
+        if changed:
+            try:
+                vault_for_receipt = Path(config.workspace_vault_root(workspace))
+            except (AttributeError, ValueError):
+                vault_for_receipt = queue.parent.parent
+            queue_after = "\n".join(keep).rstrip() + "\n"
+            # One atomic rewrite, one transaction-level prepared/applied
+            # receipt pair (undoable as a whole) plus non-undoable per-fact
+            # history rows.
+            with queue_resolution_multi(
+                queue,
+                [
+                    {"text": text, "kind": kind, "promoted": False}
+                    for kind, text in zip(swept_kinds, swept_texts)
+                ],
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_for_receipt,
+            ):
+                queue.write_text(queue_after, encoding="utf-8")
+    result["changed"] = changed
+    result["removed"] = len(swept_texts)
+    result["kinds"] = swept_kinds
+    result["texts"] = swept_texts
+    result["sources"] = swept_sources
+    return result
+
+
+def _rewrite_queue_single(
+    queue: Path,
+    line_index: int,
+    raw: str,
+    removed_text: str,
+    kind: str,
+    promoted: bool,
+    workspace: str,
+    vault_root: Path,
+) -> bool:
+    """Remove one bullet under the queue lock and record its receipt.
+
+    Worker-thread body for the single-proposal route: `queue_lock` waits with a
+    synchronous sleep, so this must not run on the event loop. Returns whether
+    this call actually removed the bullet.
+    """
+    from ciao.memory_receipts import queue_lock, queue_resolution
+
+    with queue_lock(queue):
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        removed_ours = _remove_bullet_line(lines, line_index, raw)
+        if not removed_ours:
+            return False
+        with queue_resolution(
+            queue,
+            removed_text=removed_text,
+            kind=kind,
+            promoted=promoted,
+            actor="operator",
+            source="pwa",
+            workspace=workspace,
+            vault_root=vault_root,
+        ) as _receipt:
+            queue_after = "\n".join(lines).rstrip() + "\n"
+            queue.write_text(queue_after, encoding="utf-8")
+    return True
+
+
+def _rewrite_queue_batch(
+    queue: Path,
+    rows: list[dict[str, Any]],
+    keep_lines: set[int],
+    removals: list[dict[str, Any]],
+    workspace: str,
+    vault_root: Path,
+) -> set[str]:
+    """Remove batch rows under the queue lock and record the transaction.
+
+    Runs in a worker thread: `queue_lock` waits with a synchronous sleep, so
+    doing this on the event loop would freeze unrelated requests while another
+    writer holds the lock. Returns the ids whose bullets this call removed.
+    """
+    from ciao.memory_receipts import queue_lock, queue_resolution_multi
+
+    with queue_lock(queue):
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        # Highest index first so the lower ones stay valid, and each removal
+        # verifies the content at that index - a promotion above may have
+        # awaited a model call while another request rewrote this same file.
+        removed_here: set[str] = set()
+        for row in sorted(rows, key=lambda r: int(r.get("line", -1)), reverse=True):
+            if int(row.get("line", -1)) in keep_lines:
+                continue
+            if _remove_bullet_line(
+                lines, int(row.get("line", -1)), str(row.get("raw") or "")
+            ):
+                removed_here.add(row["id"])
+        queue_after = "\n".join(lines).rstrip() + "\n"
+        removed_removals = [
+            item
+            for item, row in zip(removals, rows)
+            if row["id"] in removed_here
+        ]
+        with queue_resolution_multi(
+            queue,
+            removed_removals,
+            actor="operator",
+            source="pwa",
+            workspace=workspace,
+            vault_root=vault_root,
+        ):
+            queue.write_text(queue_after, encoding="utf-8")
+    return removed_here
+
+
 def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
     """Drop the bullet *raw*, verifying the index before trusting it.
 
@@ -8074,68 +8230,23 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
     removed = 0
-    from ciao.memory_receipts import queue_lock, queue_resolution_multi
-
     for workspace in config.workspace_names():
         queue = _proposals_file(config, workspace)
         if not queue.is_file():
             continue
-        # Read, classify and rewrite under the queue lock so a concurrent
-        # managed writer (undo, another route, the curator CLI) cannot land in
-        # between and be silently overwritten.
-        with queue_lock(queue):
-            queue_before = queue.read_text(encoding="utf-8")
-            lines = queue_before.splitlines()
-            keep = []
-            section_date = None
-            changed = False
-            # Swept rows are collected and classified before the rewrite; the
-            # bracket below writes the prepared receipt so a crash between the
-            # rewrite and the applied record is still recoverable.
-            swept_kinds: list[str] = []
-            swept_texts: list[str] = []
-            swept_sources: list[str] = []
-            for raw_line in lines:
-                m = _SECTION_DATE_RE.match(raw_line)
-                if m:
-                    section_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-                    keep.append(raw_line)
-                    continue
-                bullet = proposal_kinds.parse_bullet(raw_line)
-                if bullet is not None and section_date is not None and section_date < cutoff:
-                    removed += 1
-                    changed = True
-                    swept_kinds.append(bullet.kind)
-                    swept_texts.append(bullet.text)
-                    swept_sources.append(bullet.source)
-                    continue
-                keep.append(raw_line)
-            if changed:
-                try:
-                    vault_for_receipt = Path(config.workspace_vault_root(workspace))
-                except (AttributeError, ValueError):
-                    vault_for_receipt = queue.parent.parent
-                queue_after = "\n".join(keep).rstrip() + "\n"
-                # One atomic rewrite, one transaction-level prepared/applied
-                # receipt pair (undoable as a whole) plus non-undoable
-                # per-fact history rows.
-                with queue_resolution_multi(
-                    queue,
-                    [
-                        {"text": text, "kind": kind, "promoted": False}
-                        for kind, text in zip(swept_kinds, swept_texts)
-                    ],
-                    actor="operator",
-                    source="pwa",
-                    workspace=workspace,
-                    vault_root=vault_for_receipt,
-                ):
-                    queue.write_text(queue_after, encoding="utf-8")
-        if changed:
+        # Read, classify and rewrite under the queue lock, off the event loop:
+        # `queue_lock` retries with a synchronous sleep while another writer
+        # holds it, so running it inline would stall every other request and
+        # WebSocket for the wait.
+        result = await asyncio.to_thread(
+            _sweep_queue_file, queue, cutoff, config, workspace
+        )
+        removed += result["removed"]
+        if result["changed"]:
             from ciao.memory_proposals import record_dismissal
 
             for swept_kind, swept_text, swept_source in zip(
-                swept_kinds, swept_texts, swept_sources
+                result["kinds"], result["texts"], result["sources"]
             ):
                 # Expiry is a decision too: without the text in the dedupe
                 # history, a curator pass that re-reads the same transcript
@@ -8148,7 +8259,7 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                     source=swept_source,
                     outcome="swept",
                 )
-            for kind in swept_kinds:
+            for kind in result["kinds"]:
                 if proposal_outcomes.is_extraction_kind(kind):
                     proposal_outcomes.record(
                         kind=kind, action="dismissed", workspace=workspace, via="pwa",
@@ -8313,9 +8424,8 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # rows. Undoing each fact's row separately restored the whole pre-batch
         # file and resurrected the other bullets (including accepted ones). The
         # bracket writes the prepared row before the rewrite so a crash between
-        # the write and the record is recoverable.
-        from ciao.memory_receipts import queue_lock, queue_resolution_multi
-
+        # the write and the record is recoverable. The locked transaction runs
+        # in a worker thread so a contended queue lock cannot stall the loop.
         try:
             vault_for_receipt = Path(config.workspace_vault_root(entry["workspace"]))
         except (AttributeError, ValueError):
@@ -8328,35 +8438,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
             }
             for row in entry["rows"]
         ]
-        with queue_lock(queue):
-            queue_before = queue.read_text(encoding="utf-8")
-            lines = queue_before.splitlines()
-            # Highest index first so the lower ones stay valid, and each removal
-            # verifies the content at that index - a promotion above may have
-            # awaited a model call while another request rewrote this same file.
-            removed_here: set[str] = set()
-            for row in sorted(
-                entry["rows"], key=lambda r: int(r.get("line", -1)), reverse=True
-            ):
-                if int(row.get("line", -1)) in keep_lines:
-                    continue
-                if _remove_bullet_line(lines, int(row.get("line", -1)), str(row.get("raw") or "")):
-                    removed_here.add(row["id"])
-            queue_after = "\n".join(lines).rstrip() + "\n"
-            removed_removals = [
-                item
-                for item, row in zip(removals, entry["rows"])
-                if row["id"] in removed_here
-            ]
-            with queue_resolution_multi(
-                queue,
-                removed_removals,
-                actor="operator",
-                source="pwa",
-                workspace=entry["workspace"],
-                vault_root=vault_for_receipt,
-            ):
-                queue.write_text(queue_after, encoding="utf-8")
+        removed_here = await asyncio.to_thread(
+            _rewrite_queue_batch,
+            queue,
+            entry["rows"],
+            keep_lines,
+            removals,
+            entry["workspace"],
+            vault_for_receipt,
+        )
         self_request_removed.update(removed_here)
         # Record THIS queue's outcomes immediately after its rewrite lands: a
         # later file failing to persist must not take already-persisted
@@ -8788,13 +8878,6 @@ async def proposal_action(request: Request) -> JSONResponse:
             )
 
     queue = Path(ctx["path"])
-    # A concurrent request, the undo path, or the CLI may have removed this
-    # bullet first; the loser must not rewrite the file around the winner's
-    # deletion, and only the request that actually removed the row records its
-    # outcome. Read/remove/rewrite under the queue lock so the winner's write
-    # cannot land between this read and this rewrite.
-    from ciao.memory_receipts import queue_lock, queue_resolution
-
     try:
         vault_for_receipt = Path(config.workspace_vault_root(ctx["workspace"]))
     except (AttributeError, ValueError):
@@ -8802,29 +8885,21 @@ async def proposal_action(request: Request) -> JSONResponse:
     # A concurrent request, the undo path, or the CLI may have removed this
     # bullet first; the loser must not rewrite the file around the winner's
     # deletion, and only the request that actually removes the row records its
-    # outcome (the winner already did). Hold the queue lock (reentrant) across
-    # the whole sequence, and write the prepared receipt *before* the rewrite so
-    # a crash between the two is still recoverable: bullet gone means the
-    # removal landed.
-    with queue_lock(queue):
-        queue_before = queue.read_text(encoding="utf-8")
-        lines = queue_before.splitlines()
-        removed_ours = _remove_bullet_line(
-            lines, ctx["line"], str(ctx["row"].get("raw") or "")
-        )
-        if removed_ours:
-            with queue_resolution(
-                queue,
-                removed_text=str(row.get("text") or ""),
-                kind=str(row.get("kind") or ""),
-                promoted=action == "accept",
-                actor="operator",
-                source="pwa",
-                workspace=ctx["workspace"],
-                vault_root=vault_for_receipt,
-            ) as _receipt:
-                queue_after = "\n".join(lines).rstrip() + "\n"
-                queue.write_text(queue_after, encoding="utf-8")
+    # outcome (the winner already did). The locked read/remove/rewrite runs in a
+    # worker thread so a contended queue lock cannot stall the event loop, and
+    # the prepared receipt is written before the rewrite so a crash between the
+    # two is still recoverable: bullet gone means the removal landed.
+    removed_ours = await asyncio.to_thread(
+        _rewrite_queue_single,
+        queue,
+        ctx["line"],
+        str(ctx["row"].get("raw") or ""),
+        str(row.get("text") or ""),
+        str(row.get("kind") or ""),
+        action == "accept",
+        ctx["workspace"],
+        vault_for_receipt,
+    )
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])

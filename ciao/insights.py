@@ -1014,11 +1014,17 @@ async def run_archive_pipeline(
                             return job
                         # Record the exact section hash *before* the write, so a
                         # crash between the append and the stage mark leaves
-                        # evidence a resume can authenticate against.
+                        # evidence a resume can authenticate against. If that
+                        # evidence cannot be persisted, do not mutate the
+                        # archive: a crash would otherwise leave a job that can
+                        # never authenticate its own append.
                         section = _format_section(extracted)
                         if section:
                             job.insights_append_revision = text_revision(section)
-                            job.save()
+                            if not job.save():
+                                raise RuntimeError(
+                                    "could not persist the insights append evidence"
+                                )
                         _append_section(archive_path, extracted)
                         output = extracted
                         logger.info("Appended session insights to %s", archive_path)

@@ -318,8 +318,22 @@ class ArchiveJob:
         a silent retry loop around a blocked precondition. A stage that has
         already used up its automatic attempts is excluded too — an explicit
         user retry clears that by resetting the stage to pending.
+
+        A dependent stage is also excluded while the predecessor it needs has
+        exhausted its automatic attempts. `project_doc_update` and
+        `memory_proposals` both consume the insights text, so with `insights`
+        out of budget they would be launched on every startup, immediately skip
+        for lack of output, and leave the manifest unchanged forever.
         """
         if any(self.status_of(n) == BLOCKED for n in PIPELINE_STAGES):
+            return []
+        exhausted = {
+            n
+            for n in PIPELINE_STAGES
+            if self.status_of(n) in INCOMPLETE
+            and self.stage(n).attempts >= MAX_AUTO_ATTEMPTS
+        }
+        if "insights" in exhausted:
             return []
         return [
             n
@@ -451,12 +465,17 @@ class ArchiveJob:
         )
         return job
 
-    def save(self) -> None:
-        # A job built by a direct caller (the legacy ``extract_and_append``,
-        # tests) has no runtime root and is intentionally in-memory only.
+    def save(self) -> bool:
+        """Persist the manifest; return True when the write landed.
+
+        Callers that are about to perform a stage mutation rely on the manifest
+        being durable *before* the mutation. A direct caller with no runtime
+        root (the legacy ``extract_and_append``, tests) is intentionally
+        in-memory only and reports success.
+        """
         if not self.runtime_root:
-            return
-        save_job(Path(self.runtime_root), self)
+            return True
+        return save_job(Path(self.runtime_root), self)
 
 
 # One lock per manifest file: the runner may update a job from an async task
@@ -495,8 +514,11 @@ def load_job(runtime_root: Path, job_id: str) -> ArchiveJob | None:
     return ArchiveJob.from_dict(raw, runtime_root=runtime_root)
 
 
-def save_job(runtime_root: Path, job: ArchiveJob) -> None:
-    """Atomically persist a manifest; never clear an existing tombstone."""
+def save_job(runtime_root: Path, job: ArchiveJob) -> bool:
+    """Atomically persist a manifest; never clear an existing tombstone.
+
+    Returns True when the write landed, False when it could not be written.
+    """
     path = job_path(runtime_root, job.job_id)
     with _lock_for(path):
         if not job.tombstoned:
@@ -509,7 +531,7 @@ def save_job(runtime_root: Path, job: ArchiveJob) -> None:
                     existing.get("blocked_reason") or "chat deleted"
                 )
         job.updated_at = _now()
-        _write_raw(path, job.to_dict())
+        return _write_raw(path, job.to_dict())
 
 
 def _read_raw(path: Path) -> dict[str, Any] | None:
@@ -570,12 +592,16 @@ def tombstone_job(
             job.state = TOMBSTONED
             job.blocked_reason = reason
         job.updated_at = _now()
-        _write_raw(path, job.to_dict())
-        return True
+        return _write_raw(path, job.to_dict())
 
 
-def _write_raw(path: Path, payload: dict[str, Any]) -> None:
-    """Atomic temp-file write of one manifest. Caller holds the file lock."""
+def _write_raw(path: Path, payload: dict[str, Any]) -> bool:
+    """Atomic temp-file write of one manifest. Caller holds the file lock.
+
+    Returns True when the replace landed. A write failure is reported rather
+    than swallowed so a caller can refuse to perform a stage mutation whose
+    recovery evidence did not persist.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     try:
@@ -583,12 +609,14 @@ def _write_raw(path: Path, payload: dict[str, Any]) -> None:
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         os.replace(tmp, path)
+        return True
     except OSError:
         logger.warning("archive jobs: could not write manifest %s", path, exc_info=True)
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 
 def list_jobs(runtime_root: Path) -> list[ArchiveJob]:
