@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from ciao import vault_index
+from ciao.async_reads import keyed_lock
 
 logger = logging.getLogger(__name__)
 
@@ -654,7 +655,15 @@ _HITS_KEEP_LINES = 2000
 
 
 def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
-    """Append one search's returned note paths to the hits log. Never raises."""
+    """Append one search's returned note paths to the hits log. Never raises.
+
+    The append and the size-cap rotation that follows are one critical section
+    under the log's lock: control-plane searches run in a bounded worker pool,
+    so distinct searches finish concurrently. An unlocked read/truncate-rewrite
+    could otherwise drop a record another worker had just appended, or leave a
+    half-written line, and `read_search_hit_paths` would then miss genuine
+    retrievals — marking stale notes as never retrieved.
+    """
     try:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         path = runtime_dir / SEARCH_HITS_NAME
@@ -663,11 +672,17 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
             "query": query[:200],
             "paths": paths[:50],
         }
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        if path.stat().st_size > _HITS_MAX_BYTES:
-            lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with keyed_lock(f"search-hits:{path}"):
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if path.stat().st_size > _HITS_MAX_BYTES:
+                lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
+                # Atomic replace, not an in-place truncating write: a reader
+                # never observes a half-rewritten file, and a failed write
+                # leaves the previous log intact.
+                tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                os.replace(tmp, path)
     except Exception:  # noqa: BLE001 — telemetry must never break search
         logger.debug("Could not record search hits", exc_info=True)
 
