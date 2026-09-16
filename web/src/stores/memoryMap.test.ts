@@ -124,6 +124,47 @@ describe('visibility', () => {
   })
 })
 
+describe('explicit path endpoints', () => {
+  test('start and end are named slots, so the order picked does not matter', () => {
+    const mm = seedChain()
+    mm.choosePathEndpoint('d', 'start')
+    mm.choosePathEndpoint('a', 'end')
+    expect(mm.pathStart).toBe('d')
+    expect(mm.pathEnd).toBe('a')
+    // a — b — c — d: the path is the whole chain regardless of which end the
+    // user named first.
+    expect([...mm.pathIds].sort()).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  test('choosing the same note for both slots keeps only one', () => {
+    const mm = seedChain()
+    mm.choosePathEndpoint('b', 'start')
+    mm.choosePathEndpoint('b', 'end')
+    expect(mm.pathStart).toBeNull()
+    expect(mm.pathEnd).toBe('b')
+  })
+
+  test('toggle fills start, then end, then restarts, for a single-button UI', () => {
+    const mm = seedChain()
+    mm.choosePathEndpoint('a', 'toggle')
+    expect([mm.pathStart, mm.pathEnd]).toEqual(['a', null])
+    mm.choosePathEndpoint('d', 'toggle')
+    expect([mm.pathStart, mm.pathEnd]).toEqual(['a', 'd'])
+    mm.choosePathEndpoint('b', 'toggle')
+    expect([mm.pathStart, mm.pathEnd]).toEqual(['b', null])
+  })
+
+  test('the hint names the next step in words, not just on a canvas', () => {
+    const mm = seedChain()
+    expect(mm.pathHint).toContain('start')
+    mm.choosePathEndpoint('a', 'start')
+    expect(mm.pathHint).toContain('Start:')
+    expect(mm.pathHint).toContain('end')
+    mm.choosePathEndpoint('d', 'end')
+    expect(mm.pathHint).toContain('4 notes')
+  })
+})
+
 describe('orphans', () => {
   test('hideOrphans drops unlinked notes from the graph', () => {
     const mm = seedChain()

@@ -72,6 +72,39 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('names every row checkbox by its kind and fact', async () => {
+    // A bare checkbox is announced as "checkbox" with no clue which proposal it
+    // selects; two rows were indistinguishable to a screen reader.
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'a', text: 'Remember the thing' }),
+        row({ id: 'b', kind: 'profile', text: 'Prefers concise answers' }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-row-check').map(c => c.attributes('aria-label'))
+    expect(labels).toEqual([
+      'Select memory: Remember the thing',
+      'Select profile: Prefers concise answers',
+    ])
+    // Unique, or the names do not distinguish the rows.
+    expect(new Set(labels).size).toBe(labels.length)
+    wrapper.unmount()
+  })
+
+  it('wraps the row checkbox in a 44px hit target', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const hit = wrapper.find('.pr-row-check-hit')
+    expect(hit.exists()).toBe(true)
+    expect(hit.find('input[type="checkbox"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('renders a no-signal rehome row as a question, not a pre-filled accept', async () => {
     apiGet.mockResolvedValue({ rows: [rehomeRow()] })
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })

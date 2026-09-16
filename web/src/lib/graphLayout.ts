@@ -249,20 +249,56 @@ export function nodeRadius(n: { degree: number }): number {
 }
 
 /**
- * The topmost node under a world-space point, or null.
+ * Minimum hit-test radius in world units so a pointer's target is at least
+ * `diameterPx` across in the same space as `scale`.
  *
- * Walked back to front so the node drawn last — the one visibly on top — is the
- * one a click lands on.
+ * `scale`, `worldToScreen`/`screenToWorld`, and the canvas backing store all
+ * work in *device* pixels, so `diameterPx` must be a device-pixel diameter — a
+ * CSS-pixel token has to be multiplied by `devicePixelRatio` first, or a 44px
+ * target shrinks to 22px at DPR 2. The painted node is `nodeRadius(n) * scale`
+ * on screen — about 13px across for a degree-1 node at the default fit scale —
+ * far below the 44px touch token, so a tap at fit zoom was likely to miss. Only
+ * coarse pointers get the floor; a mouse keeps the precise painted target.
  */
-export function hitTest<T extends SimNode>(nodes: readonly T[], wx: number, wy: number): T | null {
+export function minHitRadiusForScale(diameterDevicePx: number, scale: number): number {
+  return diameterDevicePx / 2 / Math.max(scale, 1e-6)
+}
+
+/**
+ * The node under a world-space point, or null.
+ *
+ * A painted hit is resolved first, back to front, so the node drawn last — the
+ * one visibly on top — wins for a precise pointer. When `minRadius` (world
+ * units) enlarges every target for a coarse pointer, an enlarged target can
+ * cover several nodes (a touch-sized radius is far wider than the layout gap),
+ * so among candidates outside a painted hit the *nearest centre* is chosen
+ * rather than whichever happens to be drawn last — a tap centred on one dot
+ * must never grab a neighbour that merely overlaps its expanded target.
+ */
+export function hitTest<T extends SimNode>(
+  nodes: readonly T[],
+  wx: number,
+  wy: number,
+  minRadius = 0,
+): T | null {
+  let nearest: T | null = null
+  let nearestDist = Infinity
   for (let i = nodes.length - 1; i >= 0; i--) {
     const n = nodes[i]
-    const r = nodeRadius(n) + 3
     const dx = n.x - wx
     const dy = n.y - wy
-    if (dx * dx + dy * dy <= r * r) return n
+    const d2 = dx * dx + dy * dy
+    const painted = nodeRadius(n) + 3
+    if (d2 <= painted * painted) return n
+    if (minRadius > painted) {
+      const r = Math.max(painted, minRadius)
+      if (d2 <= r * r && d2 < nearestDist) {
+        nearest = n
+        nearestDist = d2
+      }
+    }
   }
-  return null
+  return nearest
 }
 
 // ---------- label pressure ---------------------------------------------------
