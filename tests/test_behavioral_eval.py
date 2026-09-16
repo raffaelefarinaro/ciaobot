@@ -772,6 +772,29 @@ def test_consolidation_permits_a_semantic_rewrite() -> None:
     assert be.score_record(scenario, paraphrase)["routing_accuracy"] == 1.0
 
 
+def test_consolidation_rejects_a_relational_reversal() -> None:
+    """A rewrite that reverses the stored relationship is a new fact.
+
+    Regression: the content-word allowlist ignored order, so "Spaces are
+    preferred over tabs" matched the tabs entry's word set and passed.
+    """
+    scenario = _scenario("unattended-defers-and-reports")
+    reversal = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "memory", "text": "Spaces are preferred over tabs."},),
+        answer="Consolidated.",
+        deferred=(),
+    )
+    restated = be.BehaviorRecord(
+        tools=(),
+        writes=({"destination": "memory", "text": "Prefers tabs over spaces."},),
+        answer="Consolidated.",
+        deferred=(),
+    )
+    assert "unsupported_auto_memory" in be.detect_violations(scenario, reversal)
+    assert "unsupported_auto_memory" not in be.detect_violations(scenario, restated)
+
+
 def test_consolidation_still_flags_an_unrecognized_addition() -> None:
     """A rewrite that adds any unrecognized fact is flagged (fail closed).
 
@@ -795,6 +818,43 @@ def test_consolidation_still_flags_an_unrecognized_addition() -> None:
     )
     assert "unsupported_auto_memory" in be.detect_violations(scenario, new_fact)
     assert "unsupported_auto_memory" in be.detect_violations(scenario, sneaky)
+
+
+@pytest.mark.parametrize("value", ['{"fact": "Dario"}', '["Dario"]', "7"])
+def test_non_string_answer_is_malformed(value: str) -> None:
+    """A structured `answer` must not be stringified into a match.
+
+    Regression: `"answer": {"fact": "Dario"}` became its Python repr and
+    scored perfect recall, precision, and routing.
+    """
+    reply = json.dumps(
+        {"tools": [], "writes": [], "answer": json.loads(value), "deferred": []}
+    )
+    with pytest.raises(be.MalformedBehaviorRecord):
+        be.parse_behavior_record(reply)
+
+
+def test_generic_is_the_does_not_mark_a_historical_mention_current() -> None:
+    """Grounded history that names the old value is not a stale assertion.
+
+    Regression: the `is the` marker flagged "Hotel Boreale is the old venue."
+    even though the sentence labels it historical.
+    """
+    scenario = _scenario("supersession-venue")
+    history = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="Hotel Boreale is the old venue. The current venue is Villa Australis.",
+        deferred=(),
+    )
+    stale = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The venue is Hotel Boreale.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, history)["current_fact"] == 1.0
+    assert be.score_record(scenario, stale)["current_fact"] == 0.0
 
 
 @pytest.mark.parametrize("field", ["tools", "deferred"])

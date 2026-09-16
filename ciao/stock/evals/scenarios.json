@@ -306,7 +306,7 @@
       "expect": {
         "consolidation_allowed": true,
         "writes": [{"text": "tab", "destination": "memory"}],
-        "paraphrase_tokens": ["tab", "indentation", "spaces"]
+        "paraphrase_tokens": ["indentation"]
       }
     },
     {
