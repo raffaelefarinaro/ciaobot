@@ -306,7 +306,11 @@
       "expect": {
         "consolidation_allowed": true,
         "writes": [{"text": "tab", "destination": "memory"}],
-        "paraphrase_tokens": ["indentation"]
+        "consolidation_forms": [
+          "Prefers tabs over spaces.",
+          "Uses tabs, never spaces.",
+          "Tab indentation is preferred to spaces"
+        ]
       }
     },
     {
@@ -392,7 +396,8 @@
       "foreign_workspaces": ["personal"],
       "forbid": ["cross_workspace_write"],
       "expect": {
-        "writes_forbidden": true
+        "tools": ["project"],
+        "writes": [{"text": "November", "destination": "project"}]
       }
     },
     {

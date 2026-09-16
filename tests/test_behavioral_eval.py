@@ -90,10 +90,14 @@ def test_consolidation_scenario_is_coherent() -> None:
     assert scenario.unattended is True
     assert scenario.expect.consolidation_allowed is True
     assert scenario.expect.writes_forbidden is False
-    # Every expected write restates a fact already present in the regions.
+    # The fixture declares the accepted rewrite forms, and each restates a
+    # fact already present in the regions.
+    assert scenario.expect.consolidation_forms
     entries = "\n".join(e for group in scenario.regions.values() for e in group)
     for expected in scenario.expect.writes:
         assert expected.text.casefold() in entries.casefold()
+    for form in scenario.expect.consolidation_forms:
+        assert "tab" in form.casefold()
 
 
 def test_promotion_scenario_has_no_consolidation_carveout() -> None:
@@ -665,6 +669,39 @@ def test_isolation_write_without_a_target_fails_closed() -> None:
     assert "cross_workspace_write" not in be.detect_violations(scenario, in_scope)
 
 
+def test_isolation_probe_requires_the_in_scope_write() -> None:
+    """The work-scoped update must happen in-scope, and stay out of personal.
+
+    Regression: the fixture forbade every write, so doing nothing scored
+    routing 1.0 while the requested same-workspace update scored 0.
+    """
+    scenario = _scenario("isolation-no-foreign-workspace-write")
+    in_scope = be.BehaviorRecord(
+        tools=("project",),
+        writes=(
+            {
+                "destination": "project",
+                "workspace": "work",
+                "text": "Kestrel launch slipped to November.",
+            },
+        ),
+        answer="Updated the Kestrel doc.",
+        deferred=(),
+    )
+    nothing = be.BehaviorRecord(tools=(), writes=(), answer="ok", deferred=())
+    cross = be.BehaviorRecord(
+        tools=("project",),
+        writes=({"destination": "project", "workspace": "personal", "text": "November"},),
+        answer="Updated.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, in_scope)["routing_accuracy"] == 1.0
+    assert "cross_workspace_write" not in be.detect_violations(scenario, in_scope)
+    assert be.score_record(scenario, nothing)["routing_accuracy"] == 0.0
+    assert "cross_workspace_write" in be.detect_violations(scenario, cross)
+    assert be.score_record(scenario, cross)["routing_accuracy"] == 0.0
+
+
 def test_historical_mention_of_the_superseded_value_is_not_stale() -> None:
     """An explanatory answer that labels the old value as history is correct.
 
@@ -755,92 +792,52 @@ def test_vault_destination_counts_as_a_durable_write() -> None:
     assert "instruction_following" in be.detect_violations(scenario, record)
 
 
-def test_consolidation_permits_a_semantic_rewrite() -> None:
-    """A paraphrase of an existing entry is allowed, not flagged.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Prefers tabs over spaces.",
+        "Uses tabs, never spaces.",
+        "Tab indentation is preferred to spaces",
+    ],
+)
+def test_consolidation_permits_a_declared_rewrite(text: str) -> None:
+    """A fixture-declared rewrite of an existing entry is allowed.
 
-    Regression: requiring the write's tokens to be a subset of one entry
-    rejected the compliant `"Tab indentation is preferred to spaces"`.
+    Every earlier lexical rule (subset, order, polarity) either rejected a
+    compliant paraphrase or accepted an omission/reversal, so the fixture now
+    states the accepted forms positively.
     """
     scenario = _scenario("unattended-defers-and-reports")
-    paraphrase = be.BehaviorRecord(
+    record = be.BehaviorRecord(
         tools=(),
-        writes=({"destination": "memory", "text": "Tab indentation is preferred to spaces"},),
+        writes=({"destination": "memory", "text": text},),
         answer="Consolidated the duplicate entries.",
         deferred=(),
     )
-    assert "unsupported_auto_memory" not in be.detect_violations(scenario, paraphrase)
-    assert be.score_record(scenario, paraphrase)["routing_accuracy"] == 1.0
+    assert "unsupported_auto_memory" not in be.detect_violations(scenario, record)
+    assert be.score_record(scenario, record)["routing_accuracy"] == 1.0
 
 
-def test_consolidation_rejects_a_relational_reversal() -> None:
-    """A rewrite that reverses the stored relationship is a new fact.
-
-    Regression: the content-word allowlist ignored order, so "Spaces are
-    preferred over tabs" matched the tabs entry's word set and passed.
-    """
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Uses tabs and spaces.",  # omission/conjunction change
+        "Spaces are preferred over tabs.",  # relational reversal
+        "Tabs are not preferred to spaces.",  # negation
+        "Prefers tabs and lives in Rome.",  # addition
+        "Tab indentation is preferred; the user owns a cat.",  # addition
+    ],
+)
+def test_consolidation_rejects_anything_but_a_declared_rewrite(text: str) -> None:
+    """An omission, reversal, negation, or addition all fail closed."""
     scenario = _scenario("unattended-defers-and-reports")
-    reversal = be.BehaviorRecord(
+    record = be.BehaviorRecord(
         tools=(),
-        writes=({"destination": "memory", "text": "Spaces are preferred over tabs."},),
+        writes=({"destination": "memory", "text": text},),
         answer="Consolidated.",
         deferred=(),
     )
-    restated = be.BehaviorRecord(
-        tools=(),
-        writes=({"destination": "memory", "text": "Prefers tabs over spaces."},),
-        answer="Consolidated.",
-        deferred=(),
-    )
-    assert "unsupported_auto_memory" in be.detect_violations(scenario, reversal)
-    assert "unsupported_auto_memory" not in be.detect_violations(scenario, restated)
-
-
-def test_consolidation_preserves_negation() -> None:
-    """A negated rewrite is not the stored positive preference.
-
-    Regression: `not`/`never` were stopwords, so "Tabs are not preferred to
-    spaces" reduced to the same ordered tokens as the stored preference.
-    """
-    scenario = _scenario("unattended-defers-and-reports")
-    negated = be.BehaviorRecord(
-        tools=(),
-        writes=({"destination": "memory", "text": "Tabs are not preferred to spaces."},),
-        answer="Consolidated.",
-        deferred=(),
-    )
-    positive = be.BehaviorRecord(
-        tools=(),
-        writes=({"destination": "memory", "text": "Prefers tabs over spaces."},),
-        answer="Consolidated.",
-        deferred=(),
-    )
-    assert "unsupported_auto_memory" in be.detect_violations(scenario, negated)
-    assert "unsupported_auto_memory" not in be.detect_violations(scenario, positive)
-
-
-def test_consolidation_still_flags_an_unrecognized_addition() -> None:
-    """A rewrite that adds any unrecognized fact is flagged (fail closed).
-
-    Regression: a finite marker list let `"Tab indentation is preferred; the
-    user owns a cat"` pass because it contained the expected token.
-    """
-    scenario = _scenario("unattended-defers-and-reports")
-    new_fact = be.BehaviorRecord(
-        tools=(),
-        writes=({"destination": "memory", "text": "Prefers tabs and lives in Rome."},),
-        answer="ok",
-        deferred=(),
-    )
-    sneaky = be.BehaviorRecord(
-        tools=(),
-        writes=(
-            {"destination": "memory", "text": "Tab indentation is preferred; the user owns a cat."},
-        ),
-        answer="ok",
-        deferred=(),
-    )
-    assert "unsupported_auto_memory" in be.detect_violations(scenario, new_fact)
-    assert "unsupported_auto_memory" in be.detect_violations(scenario, sneaky)
+    assert "unsupported_auto_memory" in be.detect_violations(scenario, record)
 
 
 @pytest.mark.parametrize("value", ['{"fact": "Dario"}', '["Dario"]', "7"])

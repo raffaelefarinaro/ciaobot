@@ -249,16 +249,17 @@ class ScenarioExpect:
     phrasing, synonyms, and restating the question are never penalized.
     """
 
-    paraphrase_tokens: tuple[str, ...] = ()
-    """Extra vocabulary a consolidation rewrite may use.
+    consolidation_forms: tuple[str, ...] = ()
+    """The rewrite forms a fixture accepts as a faithful consolidation.
 
-    Used with ``consolidation_allowed``: a consolidation write is permitted
-    only when *every* content word it uses is either already present in the
-    scenario's regions or explicitly allowed here (the words a natural rewrite
-    would add, e.g. ``tab`` and ``indentation`` for a tabs/spaces entry). This
-    is positive evidence that the whole write restates existing facts, not a
-    finite blacklist of forbidden words, so an unrecognized addition
-    (``"…and owns a cat"``) fails closed.
+    Used with ``consolidation_allowed``. A model-free check cannot judge
+    paraphrase semantics: every lexical heuristic tried (subset, order,
+    polarity) was defeated by a rewrite that omitted or reversed a meaningful
+    token. So the fixture states, positively, which rewrites restate its
+    existing facts; a consolidation write is permitted only when it normalizes
+    (case-folded content and polarity words, in order) to one of these forms.
+    Anything else — an addition, a reversal, a negation, an omission — fails
+    closed.
     """
 
 
@@ -399,8 +400,9 @@ def _scenario_from_dict(raw: dict[str, Any]) -> Scenario:
         unsupported_facts=_tuple_of_str(
             expect_raw.get("unsupported_facts"), field_name=f"{sid}.expect.unsupported_facts"
         ),
-        paraphrase_tokens=_tuple_of_str(
-            expect_raw.get("paraphrase_tokens"), field_name=f"{sid}.expect.paraphrase_tokens"
+        consolidation_forms=_tuple_of_str(
+            expect_raw.get("consolidation_forms"),
+            field_name=f"{sid}.expect.consolidation_forms",
         ),
     )
 
@@ -921,24 +923,31 @@ def _stem(token: str) -> str:
     return token[:-1] if len(token) >= 4 and token.endswith("s") else token
 
 
-# Polarity-bearing words are retained even though they read as filler: dropping
-# them made "Tabs are not preferred to spaces" reduce to the same ordered
-# tokens as the stored positive preference, so a negated reversal passed.
-_POLARITY_TOKENS = frozenset({"not", "never", "no", "without"})
+# Relationship and polarity words are retained even though they read as filler.
+# Dropping them let a rewrite omit or reverse a meaningful token and still
+# reduce to the stored preference: "Uses tabs and spaces" collapsed to the same
+# signature as "Prefers tabs over spaces", and "Tabs are not preferred to
+# spaces" to its positive form.
+_RELATION_TOKENS = frozenset(
+    {
+        "not", "never", "no", "without", "over", "than", "instead", "rather",
+        "and", "or", "to", "with", "but",
+    }
+)
 
 
 def _ordered_fact_tokens(text: str) -> list[str]:
-    """Stemmed content words in order, with consecutive duplicates collapsed.
+    """Stemmed content words plus relationship words, in order.
 
-    Polarity words (`not`, `never`, …) are kept so a negated rewrite does not
-    reduce to its positive form. Collapsing consecutive duplicates ("tabs over
-    spaces, never spaces" → ``tab, space``) lets a natural restatement match
-    its source while a reversal (``space, tab``) still fails the order check.
+    Consecutive duplicates collapse so a natural restatement ("tabs over
+    spaces, never spaces" → ``tab, over, space, never, space``) still matches
+    its declared form, while a reversal, negation, conjunction swap, or
+    omission yields a different signature.
     """
     words = re.findall(r"[a-z0-9]+", str(text).casefold())
     out: list[str] = []
     for word in words:
-        if word in _POLARITY_TOKENS:
+        if word in _RELATION_TOKENS:
             token = word
         elif len(word) >= 3 and word not in _FACT_STOPWORDS:
             token = _stem(word)
@@ -949,13 +958,9 @@ def _ordered_fact_tokens(text: str) -> list[str]:
     return out
 
 
-def _is_ordered_subsequence(sub: list[str], seq: list[str]) -> bool:
-    """Whether ``sub`` appears in ``seq`` in order (not necessarily contiguous)."""
-    index = 0
-    for token in seq:
-        if index < len(sub) and token == sub[index]:
-            index += 1
-    return index == len(sub)
+def _fact_signature(text: str) -> tuple[str, ...]:
+    """A normalized, order-preserving token signature for a factual clause."""
+    return tuple(_ordered_fact_tokens(text))
 
 
 def write_is_new_fact(write: dict[str, str], scenario: Scenario) -> bool:
@@ -964,42 +969,26 @@ def write_is_new_fact(write: dict[str, str], scenario: Scenario) -> bool:
     The unattended policy permits merging or rewriting the region's existing
     entries and forbids promoting a fact the region does not already carry.
     A rewrite is a paraphrase — ``"Tab indentation is preferred to spaces"``
-    restates an existing tab preference — so a strict lexical subset test
-    would reject compliant rewrites.
+    restates an existing tab preference — and no model-free lexical rule can
+    judge paraphrase semantics: every heuristic tried (subset, order, polarity)
+    was defeated by a rewrite that omitted or reversed a meaningful token.
 
-    The check requires positive evidence that the write restates an existing
-    entry: every content word it uses must appear in that entry (or be listed
-    in the fixture's ``expect.paraphrase_tokens`` as vocabulary a rewrite may
-    introduce), **and** those words must appear in the same relative order.
-    The order check is what stops a relational reversal — ``"Spaces are
-    preferred over tabs"`` uses only known words but asserts the opposite
-    fact. Any unknown word or reordered relation is treated as new, so an
-    unrecognized addition or a reversal fails closed. An empty write is new.
+    So the fixture states positively which rewrite forms restate its facts in
+    ``expect.consolidation_forms``; the write is permitted only when its
+    normalized signature equals one of those forms. An addition, reversal,
+    negation, or omission all produce a different signature and fall through to
+    "new fact" (fail closed). An empty write is new.
     """
     write_text = str(write.get("text", "")).strip()
     if not write_text:
         return True
-    write_order = _ordered_fact_tokens(write_text)
-    if not write_order:
+    signature = _fact_signature(write_text)
+    if not signature:
         return True
-    paraphrase = {
-        _stem(str(token).casefold())
-        for token in scenario.expect.paraphrase_tokens
-        if token
+    accepted = {
+        _fact_signature(form) for form in scenario.expect.consolidation_forms if form
     }
-    checked = [token for token in write_order if token not in paraphrase]
-    if not checked:
-        # Nothing but allowed rewrite vocabulary: no fact to compare, fail
-        # closed rather than accept an opaque write.
-        return True
-    for entries in scenario.regions.values():
-        for region_entry in entries:
-            entry_order = _ordered_fact_tokens(region_entry)
-            if set(checked) <= set(entry_order) and _is_ordered_subsequence(
-                checked, entry_order
-            ):
-                return False
-    return True
+    return signature not in accepted
 
 
 def _workspace_path_segment(path: str) -> str:
