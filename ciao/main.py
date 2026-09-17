@@ -1245,7 +1245,21 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
-    app.state.shutdown_callbacks = [_shutdown_providers, _shutdown_background_runs]
+    async def _shutdown_vault_reads() -> None:
+        # Discard vault reads still queued for the off-loop executor (bounded,
+        # cancel_futures=True) so a restart is not held up by a backlog of
+        # full-vault scans left by disconnected callers; workers already
+        # running cannot be interrupted, but there are at most pool-width of
+        # them. Runs in the loop, so no await is needed.
+        from ciao.async_reads import shutdown_vault_read_executor
+
+        shutdown_vault_read_executor()
+
+    app.state.shutdown_callbacks = [
+        _shutdown_providers,
+        _shutdown_background_runs,
+        _shutdown_vault_reads,
+    ]
 
     try:
         await server.serve()

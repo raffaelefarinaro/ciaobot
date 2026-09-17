@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ciao import vault_index
+from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
     get_db_path,
@@ -655,7 +656,7 @@ class CiaoControlPlane:
         base = self._search_key_base()
         return base / ".runtime"
 
-    def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
+    async def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.
 
         Keys are stored relative to the install root so two agent roots holding
@@ -664,30 +665,51 @@ class CiaoControlPlane:
         the isolation used to be a side effect of the index prune deleting every
         other root's rows on each pass, which also meant switching workspace
         re-indexed the whole vault.
+
+        Scope is resolved on the calling thread so a bad principal fails fast;
+        the incremental index pass and the search itself run in a bounded worker,
+        which opens and closes its own SQLite connection there so a connection
+        never crosses threads. Identical in-flight searches coalesce.
         """
         root = self._vault_root(principal)
         base = self._search_key_base()
-        db_path = get_db_path(self._search_runtime_dir())
-        conn = sqlite3.connect(db_path)
-        try:
-            init_db(conn)
-            index_vault(conn, root, path_base=base)
-            rows = search_vault(
-                conn,
-                query,
-                limit=max(1, min(50, int(limit))),
-                path_prefix=vault_key_prefix(root, base),
-            )
-        finally:
-            conn.close()
-        # Retrieval telemetry for the decay-by-disuse audit: which notes recall
-        # actually uses. Best-effort; never blocks the search result.
-        record_search_hits(
-            Path(self.config.state_path).parent, query, [row["path"] for row in rows]
-        )
+        runtime_dir = self._search_runtime_dir() or (base / ".runtime")
+        bounded_limit = max(1, min(50, int(limit)))
+
+        def _search() -> list[dict[str, str]]:
+            # Install-owned database (SYS-03), resolved inside the worker so the
+            # connection and its path never cross threads.
+            db_path = get_db_path(self._search_runtime_dir())
+            conn = sqlite3.connect(db_path)
+            try:
+                # Serialize the write phase per database file. Distinct query
+                # keys run concurrently, but SQLite takes one file-level write
+                # lock, so two index passes against this database would race it
+                # and fail with "database is locked" once a scan outlasts the
+                # connection timeout. The search that follows is read-only and
+                # does not need the lock.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_vault(conn, root, path_base=base)
+                rows = search_vault(
+                    conn,
+                    query,
+                    limit=bounded_limit,
+                    path_prefix=vault_key_prefix(root, base),
+                )
+            finally:
+                conn.close()
+            # Retrieval telemetry for the decay-by-disuse audit: which notes
+            # recall actually uses. Best-effort, and appended here so the whole
+            # read (SQLite plus this write) stays in one worker.
+            record_search_hits(runtime_dir, query, [row["path"] for row in rows])
+            return rows
+
+        key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
+        rows = await run_read(key, _search)
         return _ok(rows)
 
-    def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
+    async def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.
 
         The index root is ``agent_vault_root(workspace)``, which is correct in
@@ -703,23 +725,37 @@ class CiaoControlPlane:
 
         The FTS index stays workspace-scoped: it backs ``vault_search``, whose
         isolation boundary is ``_vault_root(principal)``.
+
+        The scan and both SQLite index passes run together in a bounded worker;
+        the worker opens and closes its own connection so it never crosses
+        threads. Scope is resolved on the calling thread first.
         """
         search_root = self._vault_root(principal)
         index_root = self._entity_index_root(principal)
-        entries = vault_index.scan_vault(
-            index_root, workspace=self._index_stamp(principal)
-        )
-        vault_index.write_index_file(entries, index_root / "INDEX.md")
-        db_path = get_db_path(self._search_runtime_dir())
-        conn = sqlite3.connect(db_path)
-        try:
-            init_db(conn)
-            indexed, removed = index_vault(
-                conn, search_root, path_base=self._search_key_base()
-            )
-        finally:
-            conn.close()
-        return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
+        stamp = self._index_stamp(principal)
+        base = self._search_key_base()
+        runtime_dir = self._search_runtime_dir()
+
+        def _refresh() -> tuple[int, int, int]:
+            entries = vault_index.scan_vault(index_root, workspace=stamp)
+            vault_index.write_index_file(entries, index_root / "INDEX.md")
+            # Install-owned database (SYS-03), resolved inside the worker.
+            db_path = get_db_path(runtime_dir)
+            conn = sqlite3.connect(db_path)
+            try:
+                # Same database-file write lock as vault_search: an index
+                # refresh and a search can land on the same SQLite file, so the
+                # write phase is serialized per database.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    indexed, removed = index_vault(conn, search_root, path_base=base)
+            finally:
+                conn.close()
+            return len(entries), indexed, removed
+
+        key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}"
+        notes, indexed, removed = await run_read(key, _refresh)
+        return _ok({"notes": notes, "fts_indexed": indexed, "fts_removed": removed})
 
     # ---- vault review --------------------------------------------------
 

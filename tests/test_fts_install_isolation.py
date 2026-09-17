@@ -12,6 +12,7 @@ silently creating two indexes for one install.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,14 +85,15 @@ def test_two_installs_keep_independent_indexes(tmp_path: Path) -> None:
     plane_a = _plane(install_a)
     plane_b = _plane(install_b)
 
-    rows_a = plane_a.vault_search(_principal(), "findme-prod-personal")["data"]
-    rows_b = plane_b.vault_search(_principal(), "findme-dev-personal")["data"]
+    # `vault_search` is async (SYS-01): its index pass and query run in a worker.
+    rows_a = asyncio.run(plane_a.vault_search(_principal(), "findme-prod-personal"))["data"]
+    rows_b = asyncio.run(plane_b.vault_search(_principal(), "findme-dev-personal"))["data"]
 
     assert [r["path"] for r in rows_a] == ["personal/memory-vault/People/Personal.md"]
     assert [r["path"] for r in rows_b] == ["personal/memory-vault/People/Personal.md"]
 
     # Alternate again: the first install's rows survive the second's pass.
-    assert plane_a.vault_search(_principal(), "findme-prod-personal")["data"]
+    assert asyncio.run(plane_a.vault_search(_principal(), "findme-prod-personal"))["data"]
     assert fts_search.get_db_path(install_a.state_path.parent) != fts_search.get_db_path(
         install_b.state_path.parent
     )
@@ -109,8 +111,12 @@ def test_one_install_shares_one_prefixed_index_across_workspaces(tmp_path: Path)
     config = _install(tmp_path, "multi", workspaces=("personal", "work"))
     plane = _plane(config)
 
-    personal = plane.vault_search(_principal("personal"), "findme-multi-personal")["data"]
-    work = plane.vault_search(_principal("work"), "findme-multi-work")["data"]
+    personal = asyncio.run(
+        plane.vault_search(_principal("personal"), "findme-multi-personal")
+    )["data"]
+    work = asyncio.run(
+        plane.vault_search(_principal("work"), "findme-multi-work")
+    )["data"]
 
     assert [r["path"] for r in personal] == [
         "personal/memory-vault/People/Personal.md"
@@ -178,7 +184,9 @@ def test_legacy_global_cache_is_left_in_place_and_not_used(tmp_path: Path, monke
     before = note.read_text(encoding="utf-8")
 
     plane = _plane(config)
-    rows = plane.vault_search(_principal(), "findme-upgraded-personal")["data"]
+    rows = asyncio.run(
+        plane.vault_search(_principal(), "findme-upgraded-personal")
+    )["data"]
 
     install_db = fts_search.get_db_path(config.state_path.parent)
     assert install_db != legacy

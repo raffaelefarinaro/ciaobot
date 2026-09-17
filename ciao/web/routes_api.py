@@ -93,6 +93,7 @@ from ciao.vault_index import (
     strip_references,
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
+from ciao.async_reads import run_read
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
@@ -4472,9 +4473,12 @@ async def workspace_html(request: Request) -> Response:
 _VAULT_MD_EXCLUDE_DIRS = frozenset({"Logs", "Templates", ".obsidian"})
 
 
-async def vault_markdown_paths(request: Request) -> JSONResponse:
-    """Return workspace-relative paths to markdown files for link resolution."""
-    config = request.app.state.config
+def _collect_vault_markdown_paths(config) -> list[str]:
+    """Walk the allowed roots for markdown paths, relative to the workspace.
+
+    Synchronous on purpose: this whole traversal is one read operation that the
+    route hands to a bounded worker, so the event loop never runs it inline.
+    """
     workspace = config.workspace_root.resolve()
     paths: list[str] = []
     seen: set[str] = set()
@@ -4524,6 +4528,14 @@ async def vault_markdown_paths(request: Request) -> JSONResponse:
             seen.add(display)
             paths.append(display)
     paths.sort()
+    return paths
+
+
+async def vault_markdown_paths(request: Request) -> JSONResponse:
+    """Return workspace-relative paths to markdown files for link resolution."""
+    config = request.app.state.config
+    key = f"vault_markdown_paths:{config.workspace_root.resolve()}:{getattr(config, 'vault_root', '')}"
+    paths = await run_read(key, lambda: _collect_vault_markdown_paths(config))
     return JSONResponse({"paths": paths})
 
 
@@ -4640,12 +4652,12 @@ def _references_note(
     return False
 
 
-async def vault_backlinks(request: Request) -> JSONResponse:
-    """Return notes that link to the given markdown path (incoming links)."""
-    target_path = request.query_params.get("path", "").strip()
-    if not target_path:
-        return JSONResponse({"backlinks": []})
-    config = request.app.state.config
+def _collect_vault_backlinks(config, target_path: str) -> list[dict[str, str]]:
+    """Traverse candidate notes and return incoming links to ``target_path``.
+
+    The whole read — walk, index build, and per-note read/link parse — is one
+    synchronous operation for the route to hand to a bounded worker.
+    """
     workspace_root = config.workspace_root.resolve()
     candidates: list[tuple[Path, str]] = []
     seen_paths: set[str] = set()
@@ -4691,13 +4703,13 @@ async def vault_backlinks(request: Request) -> JSONResponse:
                 else (workspace_root / raw_target).resolve()
             )
         except (OSError, ValueError):
-            return JSONResponse({"backlinks": []})
+            return []
         resolved_target = next(
             (display for path, display in candidates if path == target_on_disk),
             None,
         )
     if resolved_target is None:
-        return JSONResponse({"backlinks": []})
+        return []
 
     index = _build_backlink_index(path_set)
     target_stem = Path(resolved_target).stem.casefold()
@@ -4723,7 +4735,21 @@ async def vault_backlinks(request: Request) -> JSONResponse:
         ):
             backlinks.append({"path": display_path, "title": md_path.stem})
             if len(backlinks) >= _BACKLINKS_LIMIT:
-                return JSONResponse({"backlinks": backlinks})
+                return backlinks
+    return backlinks
+
+
+async def vault_backlinks(request: Request) -> JSONResponse:
+    """Return notes that link to the given markdown path (incoming links)."""
+    target_path = request.query_params.get("path", "").strip()
+    if not target_path:
+        return JSONResponse({"backlinks": []})
+    config = request.app.state.config
+    key = (
+        f"vault_backlinks:{config.workspace_root.resolve()}:"
+        f"{getattr(config, 'vault_root', '')}:{target_path}"
+    )
+    backlinks = await run_read(key, lambda: _collect_vault_backlinks(config, target_path))
     return JSONResponse({"backlinks": backlinks})
 
 

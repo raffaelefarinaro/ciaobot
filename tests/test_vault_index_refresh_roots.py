@@ -13,6 +13,7 @@ is the per-workspace root, so it stays workspace-scoped.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,7 +62,7 @@ def plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_refresh_writes_the_shared_index_with_prefixed_paths(plane) -> None:
     control_plane, principal, vault = plane
 
-    result = control_plane.vault_index_refresh(principal)
+    result = asyncio.run(control_plane.vault_index_refresh(principal))
 
     assert result["ok"] is True
     index = (vault / "INDEX.md").read_text(encoding="utf-8")
@@ -82,7 +83,7 @@ def test_the_shared_index_keeps_each_entry_own_workspace(plane) -> None:
     control_plane, principal, vault = plane
     from ciao.vault_index import scan_vault
 
-    control_plane.vault_index_refresh(principal)
+    asyncio.run(control_plane.vault_index_refresh(principal))
 
     stamp = control_plane._index_stamp(principal)
     assert stamp == "", "a shared vault infers the workspace; it must not be stamped"
@@ -93,7 +94,7 @@ def test_the_shared_index_keeps_each_entry_own_workspace(plane) -> None:
 def test_refresh_does_not_write_a_per_workspace_index(plane) -> None:
     control_plane, principal, vault = plane
 
-    control_plane.vault_index_refresh(principal)
+    asyncio.run(control_plane.vault_index_refresh(principal))
 
     assert not (vault / "personal" / "INDEX.md").exists()
     assert not (vault / "work" / "INDEX.md").exists()
@@ -148,7 +149,7 @@ def test_refresh_writes_this_roots_index_after_the_re_rooting(
         token_id="t", chat_id="c", project_id="p", workspace="work", provider="claude"
     )
 
-    result = plane.vault_index_refresh(principal)
+    result = asyncio.run(plane.vault_index_refresh(principal))
 
     assert result["ok"] is True
     index = tmp_path / "work" / "memory-vault" / "INDEX.md"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -552,3 +553,103 @@ async def test_delete_and_archive_reclaim_opencode_sessions(
     opencode_archived.session_id = "opencode-archive-session"
     await pcm.archive_chat(opencode_archived.chat_id)
     assert deleted[-1] == ("opencode", "opencode-archive-session")
+
+
+@pytest.mark.asyncio
+async def test_archive_postprocess_indexes_under_the_shared_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #467 review: archive indexing must share the control-plane writer lock.
+
+    The control plane now runs index passes in bounded workers, so this
+    formerly loop-serialized archive writer can overlap them. It must take the
+    same per-database ``keyed_lock`` (and, since ``run_archive_postprocess`` is
+    called from async callers, run off the loop).
+    """
+    from ciao import async_reads, fts_search
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("archive-index", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="archive index chat")
+
+    locks: list[str] = []
+    indexed: list[Path] = []
+    real_keyed_lock = async_reads.keyed_lock
+
+    def _recording_keyed_lock(key: str):
+        locks.append(key)
+        return real_keyed_lock(key)
+
+    def _recording_index_file(conn, vault_root, file_path, *, path_base=None):
+        indexed.append(Path(file_path))
+        return True
+
+    monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
+    monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
+    monkeypatch.setattr("ciao.insights.extract_and_append", _noop_extract)
+
+    archive_path = tmp_path / "archive.md"
+    archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=archive_path,
+            session_id="session-index",
+            turn_count=1,
+            filtered_jsonl=None,
+        ),
+        chat,
+        project,
+    )
+    # The index write is dispatched as a tracked background task; let it run.
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if indexed:
+            break
+
+    assert indexed == [archive_path], "archive indexing did not run"
+    assert locks, "archive indexing did not take the shared FTS write lock"
+    assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+
+
+def test_synchronous_archive_indexing_is_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #467 review: a failed FTS update must not fail the archive.
+
+    A synchronous caller (CLI/test with no running loop) takes the inline
+    branch. Previously the indexing error propagated after the archive had
+    already succeeded; it must be swallowed and logged like the async branch.
+    """
+    from ciao import fts_search
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("best-effort", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="best effort chat")
+
+    def _explode(*_args: object, **_kwargs: object) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fts_search, "index_file", _explode)
+    monkeypatch.setattr("ciao.insights.extract_and_append", _noop_extract)
+
+    archive_path = tmp_path / "archive.md"
+    archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
+
+    # No running loop here: this forces the synchronous inline branch, which
+    # must not raise even though the optional index write fails.
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=archive_path,
+            session_id="session-best-effort",
+            turn_count=1,
+            filtered_jsonl=None,
+        ),
+        chat,
+        project,
+    )
+
+
+async def _noop_extract(**_kwargs: object) -> None:
+    return None

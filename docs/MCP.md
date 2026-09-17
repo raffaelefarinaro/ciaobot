@@ -150,6 +150,12 @@ skill surface (admin or redundant with native tools).
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
 | Workspace files | `file_surface` |
 
+`vault_search` does an incremental FTS index pass plus the query. That work runs
+in a bounded off-loop worker (`ciao/async_reads.py`), so a large-vault scan does
+not stall the event loop that serves other MCP calls and `/ws/chat` keepalives.
+Identical concurrent searches coalesce into one scan, and each worker owns its
+SQLite connection for its whole lifetime.
+
 **Sub-day recurrence** is `schedule` with `frequency="interval"` and
 `interval_minutes`. Combined with `chat_id` it keeps one conversation going and
 inherits that chat's model and mode; combined with `project_id` it opens a
