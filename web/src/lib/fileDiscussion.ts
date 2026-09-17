@@ -41,6 +41,7 @@ export async function startFileDiscussion(
 ): Promise<ChatInfo | null> {
   if (!path) return null
   const previous = store.activeWorkspace
+  const previousChatId = store.activeChatId
   const target = workspace || previous
   // Resolved through the store's own lookup rather than a fourth copy of the
   // `is_auto && name === 'General'` predicate, and resolved BEFORE the switch:
@@ -70,8 +71,18 @@ export async function startFileDiscussion(
   } catch (e) {
     // The switch is committed before the POST, so a rejected creation would
     // otherwise leave the app scoped to a workspace the user never asked for,
-    // on the home screen, with nothing to show for the click but a toast.
-    if (target !== previous) await store.switchWorkspace(previous)
+    // with nothing to show for the click but a toast. Putting the workspace
+    // back is not enough: `switchWorkspace` disconnected the previous chat's
+    // socket and cleared it, so the user would land on the home screen having
+    // lost the conversation they were in. `switchChat` restores that chat —
+    // and its workspace with it, through `ensureWorkspaceForChat`.
+    if (target !== previous) {
+      if (previousChatId && store.chats.some(c => c.chat_id === previousChatId)) {
+        await store.switchChat(previousChatId)
+      } else {
+        await store.switchWorkspace(previous)
+      }
+    }
     store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
     return null
   }

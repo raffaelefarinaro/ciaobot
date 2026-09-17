@@ -9,6 +9,8 @@ interface FakeProject { project_id: string; name: string; workspace: string; is_
 function makeStore(overrides: Record<string, unknown> = {}) {
   const store = {
     activeWorkspace: 'personal',
+    activeChatId: 'chat-before' as string | null,
+    chats: [{ chat_id: 'chat-before' }],
     projects: [
       { project_id: 'p-personal', name: 'General', workspace: 'personal', is_auto: true },
       { project_id: 'p-work', name: 'General', workspace: 'work', is_auto: true },
@@ -20,12 +22,23 @@ function makeStore(overrides: Record<string, unknown> = {}) {
         p => p.workspace === ws && p.is_auto && p.name === 'General',
       ) ?? null,
     switchWorkspace: vi.fn(),
+    switchChat: vi.fn(),
     createChat: vi.fn(async () => ({ chat_id: 'c1' })),
     pinFile: vi.fn(),
     pushErrorToast: vi.fn(),
     ...overrides,
   }
-  store.switchWorkspace.mockImplementation(async (ws: string) => { store.activeWorkspace = ws })
+  // The real `switchWorkspace` clears the active chat; `switchChat` puts both
+  // the chat and its workspace back. The fakes have to model that, or a
+  // restore that only fixes the workspace would still pass.
+  store.switchWorkspace.mockImplementation(async (ws: string) => {
+    store.activeWorkspace = ws
+    store.activeChatId = null
+  })
+  store.switchChat.mockImplementation(async (chatId: string) => {
+    store.activeWorkspace = 'personal'
+    store.activeChatId = chatId
+  })
   return store
 }
 
@@ -93,7 +106,10 @@ describe('startFileDiscussion', () => {
     expect(store.activeWorkspace).toBe('personal')
   })
 
-  it('puts the workspace back when the cross-workspace creation fails', async () => {
+  it('puts the chat the user was in back when the cross-workspace creation fails', async () => {
+    // Reversing the workspace alone is not a restore: the switch out
+    // disconnected and cleared the active chat, so the user would be left on
+    // the home screen having lost the conversation they were in.
     const store = makeStore({
       createChat: vi.fn(async () => { throw new Error('offline') }),
     })
@@ -104,6 +120,25 @@ describe('startFileDiscussion', () => {
     })
 
     expect(chat).toBeNull()
+    expect(store.switchChat).toHaveBeenCalledWith('chat-before')
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBe('chat-before')
+  })
+
+  it('falls back to the workspace when there was no chat to return to', async () => {
+    const store = makeStore({
+      activeChatId: null,
+      chats: [],
+      createChat: vi.fn(async () => { throw new Error('offline') }),
+    })
+    const chat = await startFileDiscussion(asStore(store), {
+      path: 'w/n.md',
+      seed: 'hello',
+      workspace: 'work',
+    })
+
+    expect(chat).toBeNull()
+    expect(store.switchChat).not.toHaveBeenCalled()
     expect(store.switchWorkspace.mock.calls.map(c => c[0])).toEqual(['work', 'personal'])
     expect(store.activeWorkspace).toBe('personal')
   })
