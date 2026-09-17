@@ -1162,7 +1162,7 @@ import { workspaceLabel } from '../lib/workspaceLabel'
 import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
-import { formatFileComments } from '../lib/commentContext'
+import { startFileDiscussion } from '../lib/fileDiscussion'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1321,18 +1321,7 @@ async function discussGuide(): Promise<void> {
   await discussFileInChat(path, `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?`)
 }
 async function discussFileInChat(path: string, prompt?: string): Promise<void> {
-  const ws = store.activeWorkspace
-  const general = store.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
-  if (!general) { store.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
-  const title = `Discuss ${path.split('/').pop() || path}`
-  const base = prompt || `Let's discuss the file \`${path}\`.`
-  const pendingComments = store.fileComments[path] ?? []
-  const seed = pendingComments.length ? `${base}\n\n${formatFileComments(pendingComments)}` : base
-  try {
-    const chat = await store.createChat(general.project_id, title, seed)
-    // Pin the file so the new chat opens split-view with it visible.
-    store.pinFile(chat.chat_id, path)
-  } catch (e) { store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e)) }
+  await startFileDiscussion(store, { path, seed: prompt || `Let's discuss the file \`${path}\`.` })
 }
 // Expose for template's generic file discuss (also used by FileViewerModal/PinnedFilePanel via a shared helper fallback)
 // and for the guide card's "Discuss" button.

@@ -7,6 +7,7 @@ import type { VaultReviewCandidate, VaultTrashedNote } from '../lib/types'
 import { candidateLeaf, signalReasons, verificationLabel } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
+import { startFileDiscussion } from '../lib/fileDiscussion'
 
 const store = useVaultReviewStore()
 const projectStore = useProjectStore()
@@ -124,6 +125,56 @@ async function openNote(path: string) {
 
 function verifyLabelOf(candidate: VaultReviewCandidate): string {
   return verificationLabel(candidate.evidence.age_days, candidate.evidence.last_update)
+}
+
+// One chat at a time: the button is on every row, and a double-click used to
+// be able to open two chats about the same note before the first returned.
+const chatBusy = ref(false)
+
+/** What the queue knows about a candidate, as a sentence the agent can read.
+ *
+ * The row already shows all of it; repeating it in the message means the chat
+ * starts from the same evidence the decision is being made on, without the
+ * agent having to re-derive why curation flagged the note.
+ */
+function discussPrompt(candidate: VaultReviewCandidate): string {
+  const reasons = signalReasons(candidate.signals)
+  const facts = [candidate.evidence.type, verifyLabelOf(candidate)]
+  const backlinks = candidate.evidence.backlinks.length
+  facts.push(backlinks ? `${backlinks} backlink${backlinks === 1 ? '' : 's'}` : 'no backlinks')
+  if (candidate.evidence.bridge) facts.push('it bridges two clusters')
+  const duplicates = candidate.evidence.duplicate_group.filter(p => p !== candidate.path)
+  if (duplicates.length) facts.push(`possible duplicates: ${duplicates.slice(0, 3).join(', ')}`)
+  return (
+    `I am deciding whether to retire \`${candidate.path}\` from the ` +
+    `${candidate.workspace} vault.\n\n` +
+    `Curation flagged it because ${reasons.join('; ') || 'it looked stale'}. ` +
+    `It is ${facts.join(' · ')}.\n\n` +
+    'Read the note and tell me what would be lost if it went, and whether ' +
+    'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
+    'anything — I will pick Still true, Retire, or Later myself.'
+  )
+}
+
+/** Open a chat about this candidate, with the note pinned beside it.
+ *
+ * The candidate stays queued and nothing is sent: the message lands in the
+ * composer as a draft so the specific question — "what links to this?", "is
+ * this the same person as X?" — can replace it before it goes anywhere.
+ */
+async function discussRow(candidate: VaultReviewCandidate) {
+  if (chatBusy.value) return
+  chatBusy.value = true
+  try {
+    await startFileDiscussion(projectStore, {
+      path: candidate.path,
+      workspace: candidate.workspace,
+      title: `Retire ${candidateLeaf(candidate.path)}?`,
+      seed: discussPrompt(candidate),
+    })
+  } finally {
+    chatBusy.value = false
+  }
 }
 
 async function keepRow(candidate: VaultReviewCandidate) {
@@ -276,6 +327,13 @@ function trashedDate(note: VaultTrashedNote): string {
             title="Record that you re-linked this note elsewhere"
             @click="linkFixedRow(candidate)"
           >Link fixed</button>
+          <button
+            type="button"
+            class="btn-small btn-chip"
+            :disabled="chatBusy"
+            title="Open a chat about this note before deciding"
+            @click="discussRow(candidate)"
+          >Talk about it</button>
         </div>
       </li>
     </ul>

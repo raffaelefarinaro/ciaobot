@@ -312,7 +312,7 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
-import { formatFileComments } from '../lib/commentContext'
+import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -1278,19 +1278,13 @@ async function openExternally(): Promise<void> {
 async function discussInChat(): Promise<void> {
   const path = store.path
   if (!path) return
-  const ws = projectsStore.activeWorkspace
-  const general = projectsStore.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
-  if (!general) { projectsStore.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
-  const title = `Discuss ${path.split('/').pop() || path}`
-  const pendingComments = projectsStore.fileComments[path] ?? []
-  const seed = pendingComments.length
-    ? `Let's discuss the file \`${path}\`.\n\n${formatFileComments(pendingComments)}`
+  // Comments pending on this file are appended by startFileDiscussion; the
+  // "help me understand" nudge only fits the case where there are none.
+  const seed = projectsStore.fileComments[path]?.length
+    ? `Let's discuss the file \`${path}\`.`
     : `Let's discuss the file \`${path}\`. Help me understand, review, or improve it.`
-  try {
-    const chat = await projectsStore.createChat(general.project_id, title, seed)
-    projectsStore.pinFile(chat.chat_id, path)
-    await store.close(true)
-  } catch (e) { projectsStore.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e)) }
+  const chat = await startFileDiscussion(projectsStore, { path, seed })
+  if (chat) await store.close(true)
 }
 
 // Download the currently-open file. For images we hand the browser the
