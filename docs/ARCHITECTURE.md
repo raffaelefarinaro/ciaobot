@@ -52,6 +52,7 @@ ciao/                          Python backend (Starlette).
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude/opencode provider approval policies and Ciaobot's auto-approved MCP control plane.
   tool_path.py                 Resolve external CLI tools against the user's real login-shell PATH (Homebrew, nvm, `~/.local/bin`). The terminal-PATH probe spawns an interactive login shell (~0.74s), so it is cached against a fingerprint of the files such a shell reads — the rc candidates plus `$ZDOTDIR`'s, `/etc/paths`, `/etc/paths.d/*` and `$SHELL` — rather than a TTL: the setup wizard polls every 2s and a saved rc file must still be picked up on the next poll. Concurrent probes share one spawn.
+  git_proc.py                  Timeout-safe git subprocess spawning shared by `git_sync` and `local_session`: git runs in its own process group so a timeout kills the forked `ssh` too, and the child is reaped and its pipes closed (a bare `proc.kill()` leaked 2 fds per timeout — issue #470).
   git_sync.py                  Startup git pull / merge-before-push helpers.
   local_session.py             Current-branch git sync flow (LocalSessionManager): preflight, commit + pull + push, conflict chat.
   node_state.py                Node identity and host/client role state for multi-device mode (`active`/`standby` migrated to `host`/`client`).

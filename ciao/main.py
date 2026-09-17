@@ -947,6 +947,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # remote skip this gracefully.
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
+        backoff_reason,
         has_origin_remote,
         is_diverged_backup,
         push_branch,
@@ -967,21 +968,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             )
             return
         logger.info("Working on branch '%s'", branch)
-        # Credential failures cannot self-heal (there is no TTY to prompt
-        # under launchd), so retrying at the normal cadence is pure waste.
-        auth_markers = (
-            "could not read username",
-            "authentication failed",
-            "invalid username or token",
-            "permission denied (publickey",
-        )
-        auth_backoff_multiplier = 12
+        backoff_multiplier = 12
         last_failure_detail: str | None = None
         repeated_failures = 0
-        auth_backoff = False
+        # Set when the failure cannot self-heal at the normal cadence: bad
+        # credentials, or a remote that is simply unreachable. Both back off to
+        # the hourly multiplier; only a successful push clears it.
+        failure_backoff = False
+        last_loop_error: str | None = None
+        repeated_loop_errors = 0
         # Set once push_branch falls back to a per-commit backup ref because
         # the shared branch has a real merge conflict with origin. Backs off
-        # the cadence the same way auth_backoff does: retrying a merge that
+        # the cadence the same way failure_backoff does: retrying a merge that
         # will conflict the same way every 30s is pure waste, and the backup
         # ref push is idempotent (its name is derived from the HEAD sha), so
         # slower retries do not lose any coverage — only a fast-forwardable
@@ -991,7 +989,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             try:
                 await asyncio.sleep(
                     BACKUP_PUSH_INTERVAL
-                    * (auth_backoff_multiplier if (auth_backoff or diverged_backoff) else 1)
+                    * (backoff_multiplier if (failure_backoff or diverged_backoff) else 1)
                 )
                 async with job_runs.track(
                     "branch_backup", "Branch backup",
@@ -1027,35 +1025,58 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                             logger.info("Branch backup push recovered.")
                         last_failure_detail = None
                         repeated_failures = 0
-                        auth_backoff = False
+                        failure_backoff = False
                         continue
                     if detail == last_failure_detail:
                         repeated_failures += 1
                         run.skip("same failure as previous backup attempt")
                         run.extra["repeat_count"] = repeated_failures
-                        is_auth = any(
-                            marker in detail.lower() for marker in auth_markers
-                        )
-                        if is_auth and repeated_failures >= 3 and not auth_backoff:
-                            auth_backoff = True
-                            logger.warning(
-                                "Branch backup authentication keeps failing; "
-                                "retrying hourly instead. Store credentials to "
-                                "resume (e.g. `gh auth setup-git`, or switch "
-                                "the remote to SSH).",
-                            )
+                        reason = backoff_reason(detail)
+                        if reason and repeated_failures >= 3 and not failure_backoff:
+                            failure_backoff = True
+                            if reason == "auth":
+                                logger.warning(
+                                    "Branch backup authentication keeps failing; "
+                                    "retrying hourly instead. Store credentials to "
+                                    "resume (e.g. `gh auth setup-git`, or switch "
+                                    "the remote to SSH).",
+                                )
+                            else:
+                                logger.warning(
+                                    "Branch backup keeps timing out; origin looks "
+                                    "unreachable. Retrying hourly until it answers.",
+                                )
                         logger.debug("Branch backup push still failing: %s", detail)
                         continue
                     last_failure_detail = detail
                     repeated_failures = 1
-                    auth_backoff = False
+                    failure_backoff = False
                     run.status = "error"
                     run.error = detail
                     logger.warning("Branch backup push failed: %s", detail)
             except asyncio.CancelledError:
                 break
-            except Exception:
-                logger.exception("Branch backup push failed")
+            except Exception as exc:
+                # One persistent fault fires every tick. Logging a full
+                # traceback each time buried the real signal under megabytes of
+                # identical frames (issue #470 reported 1387 copies over two
+                # days), so an unchanged error is counted, not re-dumped.
+                signature = f"{type(exc).__name__}: {exc}"
+                if signature == last_loop_error:
+                    repeated_loop_errors += 1
+                    logger.debug(
+                        "Branch backup push failed again (%dx): %s",
+                        repeated_loop_errors, signature,
+                    )
+                else:
+                    if repeated_loop_errors > 1:
+                        logger.warning(
+                            "Previous branch backup error repeated %d times.",
+                            repeated_loop_errors,
+                        )
+                    last_loop_error = signature
+                    repeated_loop_errors = 1
+                    logger.exception("Branch backup push failed")
 
     asyncio.create_task(_branch_backup_loop())
 
