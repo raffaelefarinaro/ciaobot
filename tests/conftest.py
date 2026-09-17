@@ -77,6 +77,17 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_queue_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep proposal-queue lock files out of the shared system temp directory.
+
+    Queue locks live outside the vault by design; without this they would
+    accumulate in ``/tmp/ciao-queue-locks`` across the suite and could collide
+    between tests that reuse a path.
+    """
+    monkeypatch.setenv("CIAO_QUEUE_LOCK_DIR", str(tmp_path / "queue-locks"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_job_runs(tmp_path: Path) -> None:
     """Isolate job runs recording by pointing to a temp directory for every test.
 

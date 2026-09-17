@@ -2876,7 +2876,7 @@ describe('postprocessingChats (home tidying list)', () => {
     expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
   })
 
-  test('insightsFailedChats lists only settled chats whose insights step errored', () => {
+  test('insightsFailedChats lists settled chats with unfinished stages', () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p1', workspace: 'work' },
@@ -2884,14 +2884,15 @@ describe('postprocessingChats (home tidying list)', () => {
     ] as unknown as typeof store.projects
     store.chats = [
       { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'error' } } } },
+      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] } } },
       { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
       { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'ok' } } } },
       { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'skipped' } } } },
       { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
     ] as unknown as typeof store.chats
-    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed'])
+    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed', 'c-partial'])
     // Workspace counts follow the project → workspace mapping.
-    expect(store.workspaceInsightsFailedCount('work')).toBe(1)
+    expect(store.workspaceInsightsFailedCount('work')).toBe(2)
     expect(store.workspaceInsightsFailedCount('personal')).toBe(0)
   })
 })
@@ -2902,6 +2903,42 @@ describe('retryInsights', () => {
     apiPost.mockResolvedValue({ status: 'started' })
     await store.retryInsights('c1')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/retry-insights')
+  })
+
+  test('folds the returned manifest onto the chat record', async () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'A', archived: true, postprocess: { state: 'done', steps: {} } },
+    ] as unknown as typeof store.chats
+    apiPost.mockResolvedValue({
+      status: 'started',
+      job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+    })
+    await store.retryInsights('c1')
+    expect(store.chatPostprocess('c1')?.state).toBe('incomplete')
+    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual(['memory_proposals'])
+  })
+
+  test('clears a stale incomplete state when the server reports completion', async () => {
+    const store = useProjectStore()
+    store.chats = [
+      {
+        chat_id: 'c1', project_id: 'p1', title: 'A', archived: true,
+        postprocess: {
+          state: 'incomplete',
+          job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+        },
+      },
+    ] as unknown as typeof store.chats
+    // The completion event was missed, so the client still thinks work remains;
+    // the server now confirms nothing is unfinished.
+    apiPost.mockResolvedValue({
+      status: 'complete',
+      job: { job_id: 'j', state: 'done', unfinished: [] },
+    })
+    await store.retryInsights('c1')
+    expect(store.chatPostprocess('c1')?.state).toBe('done')
+    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual([])
   })
 })
 

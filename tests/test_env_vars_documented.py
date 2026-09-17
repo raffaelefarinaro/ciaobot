@@ -29,6 +29,7 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_NODE_ID": "internal multi-device node identification marker",
     "CIAO_BOOTSTRAP_LAUNCHD_HANDOFF": "internal marker for desktop-owned bootstrap handoff to launchd",
     "CIAO_LAUNCH_AGENTS_DIR": "test-only override keeping the suite out of the real ~/Library/LaunchAgents",
+    "CIAO_QUEUE_LOCK_DIR": "test-only override for where proposal-queue lock files live (kept out of the vault so it stays byte-identical)",
 }
 
 

@@ -43,13 +43,33 @@ class ProviderService:
         provider: str = "",
         *,
         agent_root: Path | None = None,
+        workspace: str = "",
     ) -> None:
         self._config = config
         self._agent_root = agent_root
+        # The logical workspace this service's provider runs in. Used to resolve
+        # the owning vault so an automatic prune's receipt lands in the journal
+        # the receipts API and startup recovery actually scan, rather than the
+        # guide-local fallback under the agent root.
+        self._workspace = workspace
         self._provider: ProviderImpl | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
             self._ensure_provider(provider)
+
+    def _prune_vault_root(self) -> Path | None:
+        """The owning workspace's vault, or None when it cannot be resolved.
+
+        Best-effort: a broken registry entry leaves the receipt on the
+        guide-local fallback journal, which discovery still reconciles.
+        """
+        workspace = self._workspace
+        if not workspace:
+            return None
+        try:
+            return Path(self._config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError, OSError):
+            return None
 
     def _ensure_provider(self, provider: str) -> ProviderImpl:
         """Create the provider instance on first use based on provider name."""
@@ -96,7 +116,11 @@ class ProviderService:
                 if self._agent_root is not None
                 else Path(getattr(self._config, "workspace_root", "."))
             )
-            result = prune_expired_entries(guide_root / "CLAUDE.md")
+            result = prune_expired_entries(
+                guide_root / "CLAUDE.md",
+                vault_root=self._prune_vault_root(),
+                workspace=self._workspace,
+            )
             memory_changed = bool(
                 result.get("removed", {}).get("memory", 0)
                 or result.get("removed", {}).get("profile", 0)

@@ -896,6 +896,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         if swept:
             logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
 
+        # Resume post-archive pipelines the previous process left incomplete.
+        # Stages still marked "running" at load were interrupted (the task died
+        # with the old process); they become retryable here and only the
+        # unfinished local work is re-run, never model extraction that already
+        # landed. Bounded concurrency so a large backlog cannot stampede the
+        # provider or the disk.
+        try:
+            resumed = await pcm.resume_interrupted_jobs(max_concurrency=2)
+            if resumed:
+                logger.info("Resuming %d interrupted archive job(s)", resumed)
+        except Exception:
+            logger.exception("Archive job resume failed")
+
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from

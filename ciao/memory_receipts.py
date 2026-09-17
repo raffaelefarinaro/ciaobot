@@ -52,6 +52,8 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -102,6 +104,16 @@ class UndoUnsupported(MemoryReceiptError):
     """The receipt has no before image or an operation this protocol cannot reverse."""
 
 
+class QueueReceiptUnavailable(MemoryReceiptError):
+    """The receipt journal could not record a prepared row.
+
+    Raised before a queue rewrite so a mutation never proceeds without durable
+    recovery evidence. Retryable: the journal may become writable again.
+    """
+
+    retryable = True
+
+
 # ── Digest / id helpers ───────────────────────────────────────────────────
 
 
@@ -148,6 +160,158 @@ def journal_path(vault_root: Path | None, guide: Path | None = None) -> Path:
     raise MemoryReceiptError("a vault root or a guide path is required")
 
 
+QUEUE_LOCK_TIMEOUT_S = 30.0
+"""How long a managed queue write waits for the queue lock before failing.
+
+Bounded like the guide lock so a wedged holder cannot pin a request forever,
+and long enough that ordinary concurrency never trips it.
+"""
+
+# Queue locks live outside the vault. The lock sits beside the queue today only
+# because it was simplest, but the vault is user-owned content: a stray
+# ``*.lock`` there pollutes the tree and broke the re-rooting round-trip's
+# byte-identical invariant. Keep the lock file in a stable per-install
+# directory keyed by the resolved queue path, so the vault stays untouched.
+_QUEUE_LOCK_DIR_ENV = "CIAO_QUEUE_LOCK_DIR"
+
+
+def _queue_lock_path(resolved_key: str) -> Path:
+    """A lock file for a queue path, outside the vault it guards.
+
+    Uses ``CIAO_QUEUE_LOCK_DIR`` when set (tests pin it), else a per-user
+    directory under the system temp root. Deterministic in the resolved queue
+    path so every process and thread guarding the same queue picks the same
+    lock. The uid component keeps two local accounts from colliding on a shared
+    ``/tmp``.
+    """
+    base = os.environ.get(_QUEUE_LOCK_DIR_ENV, "").strip()
+    if base:
+        root = Path(base)
+    else:
+        try:
+            uid = os.getuid()
+        except AttributeError:  # pragma: no cover - non-POSIX
+            uid = 0
+        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{uid}"
+    digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()[:32]
+    return root / f"{digest}.lock"
+
+
+def write_queue_atomically(path: Path, text: str) -> None:
+    """Replace a proposal queue via a temp file and ``os.replace``.
+
+    In-place ``write_text`` truncates before it writes, so a partial write or an
+    error mid-write can lose unrelated proposals permanently. A same-directory
+    temp file plus an atomic rename means a reader (or a crash) sees either the
+    complete old file or the complete new one. Callers must hold
+    :func:`queue_lock` for the path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.write.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+# Re-entrancy depth per resolved queue path for the current thread. A wrapper
+# (`queue_resolution`) holds the lock across a body that calls a writer
+# (`remove_proposal_by_substring`) which also takes it; the inner acquire must
+# not try to flock the same file again (that would deadlock against ourselves).
+_QUEUE_LOCK_DEPTH = threading.local()
+
+
+class QueueLockError(RuntimeError):
+    """The proposal queue lock could not be acquired.
+
+    Deliberately fatal to the write it guards, exactly like
+    :class:`ciao.memory_tool.MemoryLockError`: a caller that swallowed this and
+    wrote anyway would reintroduce the lost-update race the lock exists to
+    prevent.
+    """
+
+    retryable = True
+
+
+@contextmanager
+def queue_lock(
+    proposals_path: Path, *, timeout_s: float = QUEUE_LOCK_TIMEOUT_S
+):
+    """Serialize a read-check-replace on one proposal queue file.
+
+    The undo path re-reads the queue, compares its revision against the
+    receipt's after image, and only then replaces the file. Without a lock the
+    check and the replace are not atomic: another writer can land in between,
+    and the stale replacement silently discards that update. Every managed
+    queue writer (``append_proposals``, ``remove_proposal_by_substring``, the
+    PWA batch/sweep/single routes, and :func:`_undo_queue`) takes this same
+    lock, so the revision check is meaningful across processes and threads.
+
+    Re-entrant within one thread so a wrapper can hold it across a body that
+    calls a writer which takes it again; the cross-process guard is the
+    ``flock`` held by the outermost acquire.
+
+    A lock that cannot be taken raises :class:`QueueLockError`; callers must let
+    it propagate rather than fall through to an unlocked write.
+    """
+    import fcntl
+    import time
+
+    try:
+        key = str(proposals_path.resolve())
+    except OSError:
+        key = str(proposals_path)
+    depths = getattr(_QUEUE_LOCK_DEPTH, "depths", None)
+    if depths is None:
+        depths = {}
+        _QUEUE_LOCK_DEPTH.depths = depths
+    if depths.get(key, 0) > 0:
+        # Already held by this thread; the outermost acquire owns the flock.
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+
+    lock_path = _queue_lock_path(key)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+", encoding="utf-8")
+    except OSError as exc:
+        raise QueueLockError(f"could not open queue lock {lock_path}: {exc}") from exc
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise QueueLockError(
+                    f"queue lock {lock_path} is held; the write was not applied"
+                )
+            time.sleep(0.05)
+        except OSError as exc:
+            handle.close()
+            raise QueueLockError(f"could not lock {lock_path}: {exc}") from exc
+    depths[key] = 1
+    try:
+        yield
+    finally:
+        depths.pop(key, None)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
 def _append(journal: Path, payload: dict[str, Any]) -> None:
     """Append one receipt row, serialized across processes and fsynced."""
     journal.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +330,10 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+        # Trim while still holding the lock. Running it after the release let a
+        # concurrent append land between this trim's read and its os.replace,
+        # and the stale snapshot then silently deleted that newer receipt.
+        _trim_if_large(journal)
     finally:
         if fcntl is not None:
             try:
@@ -173,7 +341,6 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
             except OSError:
                 pass
         handle.close()
-    _trim_if_large(journal)
 
 
 def _trim_if_large(journal: Path) -> None:
@@ -183,16 +350,30 @@ def _trim_if_large(journal: Path) -> None:
         lines = journal.read_text(encoding="utf-8", errors="replace").splitlines()
         # Keep the newest rows, but never drop a non-terminal receipt: an
         # interrupted operation must stay recoverable until it settles.
+        #
+        # An id's effective status is its *last* row anywhere in the journal,
+        # not just in the retained tail. A `prepared` row with no terminal row
+        # can sit before the cut, so computing pending ids from the retained
+        # lines alone found nothing and the trim silently dropped the
+        # unresolved receipt. Fold the whole journal first, then refuse to trim
+        # while any id that would lose a line is still non-terminal.
         kept = lines[-KEEP_LINES:]
-        dropped_ids = {
-            json.loads(line).get("id")
-            for line in lines[:-KEEP_LINES]
-            if line.strip()
-        }
+        dropped_lines = lines[:-KEEP_LINES]
+        last_status: dict[str, object] = {}
+        for line in lines:
+            row = _safe_row(line)
+            if row is None:
+                continue
+            rid = str(row.get("id", ""))
+            if rid:
+                last_status[rid] = row.get("status")
         pending_ids = {
-            json.loads(line).get("id")
-            for line in kept
-            if line.strip() and json.loads(line).get("status") not in _TERMINAL
+            rid for rid, status in last_status.items() if status not in _TERMINAL
+        }
+        dropped_ids = {
+            str(row.get("id", ""))
+            for row in (_safe_row(line) for line in dropped_lines)
+            if row is not None and row.get("id")
         }
         if dropped_ids & pending_ids:
             return
@@ -201,6 +382,17 @@ def _trim_if_large(journal: Path) -> None:
         os.replace(tmp, journal)
     except Exception:  # noqa: BLE001 — trimming is best-effort
         logger.debug("memory receipts: trim failed", exc_info=True)
+
+
+def _safe_row(line: str) -> dict[str, Any] | None:
+    """Parse one journal line into a row, or None when it is unusable."""
+    if not line.strip():
+        return None
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return row if isinstance(row, dict) else None
 
 
 def read_receipts(journal: Path) -> list[dict[str, Any]]:
@@ -250,9 +442,16 @@ def is_undoable(receipt: dict[str, Any]) -> bool:
     Legacy or unsupported rows — no image, an unknown kind, a non-``applied``
     status — are view-only. The History surface must render them without an
     Undo affordance rather than pretending the change is reversible.
+
+    ``undoable`` lets a multi-row batch record per-fact history rows without
+    offering an undo on each: one row carries the transaction's whole-file
+    before image, and the rest are explicitly ``undoable=False``. Without it,
+    undoing any one row restored the whole pre-batch file and resurrected every
+    fact the batch had removed.
     """
     return (
         receipt.get("status") == APPLIED
+        and receipt.get("undoable", True) is not False
         and str(receipt.get("kind", "")) in UNDOABLE_KINDS
         and receipt.get("before_text") is not None
         and receipt.get("after_text") is not None
@@ -432,12 +631,20 @@ def record_queue_resolution(
     vault_root: Path | None = None,
     before_text: str | None = None,
     after_text: str | None = None,
+    undoable: bool = True,
 ) -> dict[str, Any]:
     """Record an already-performed queue bullet removal as a receipt.
 
     Prefer :func:`queue_resolution`, which brackets the file rewrite with a
     ``prepared`` row so a crash mid-rewrite is recoverable. This entry point
     remains for callers that only want to record a completed removal.
+
+    ``undoable=False`` records a per-fact history row without a reversible
+    before image. A multi-row batch uses it for every fact except one: the
+    batch is a single atomic file rewrite, so exactly one row may carry the
+    whole-file before image. Marking each row undoable let undoing any one of
+    them restore the whole pre-batch file and resurrect every fact the batch
+    had removed.
 
     Returns the effective receipt. Never raises: a receipt is a record, and
     failing to record one must not fail the removal it describes.
@@ -455,6 +662,7 @@ def record_queue_resolution(
             before_text=before_text,
             after_text=after_text,
             status=APPLIED,
+            undoable=undoable,
         )
     except Exception:  # noqa: BLE001 — recording must not break removal
         logger.debug("memory receipts: queue receipt failed", exc_info=True)
@@ -480,36 +688,60 @@ def queue_resolution(
     reconciled by :func:`recover_pending` on the next startup by asking whether
     the bullet is still present: gone means the removal landed, present means
     it did not.
+
+    The queue lock is held for the whole block, so the ``prepared`` before
+    image this records cannot be made stale by a concurrent writer landing
+    between the read and the body's rewrite.
     """
-    try:
-        before = proposals_path.read_text(encoding="utf-8")
-    except OSError:
-        before = ""
-    rid = new_receipt_id(
-        f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
-    )
-    journal = journal_path(vault_root, proposals_path.parent)
-    base: dict[str, Any] = {
-        "id": rid,
-        "ts": _now(),
-        "actor": actor,
-        "source": source,
-        "workspace": workspace,
-        "kind": "queue_resolve",
-        "queue": str(proposals_path),
-        "action": "promoted" if promoted else "dismissed",
-        "fact_text": removed_text,
-        "removed_text": removed_text,
-        "promoted": promoted,
-    }
-    try:
-        _append(journal, {**base, "status": PREPARED})
-    except Exception:  # noqa: BLE001 — the removal proceeds regardless
-        logger.debug("memory receipts: could not prepare queue receipt", exc_info=True)
-    try:
-        yield base
-    finally:
+    with queue_lock(proposals_path):
         try:
+            before = proposals_path.read_text(encoding="utf-8")
+        except OSError:
+            before = ""
+        rid = new_receipt_id(
+            f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
+        )
+        journal = journal_path(vault_root, proposals_path.parent)
+        base: dict[str, Any] = {
+            "id": rid,
+            "ts": _now(),
+            "actor": actor,
+            "source": source,
+            "workspace": workspace,
+            "kind": "queue_resolve",
+            "queue": str(proposals_path),
+            "action": "promoted" if promoted else "dismissed",
+            "fact_text": removed_text,
+            "removed_text": removed_text,
+            "promoted": promoted,
+            # The proposal kind is part of the recovery identity: removing
+            # `[memory] Use Python` must not be blocked by a remaining
+            # `[profile] Use Python`.
+            "proposal_kind": kind,
+            # The before image and revision live on the prepared row so a
+            # crash-recovered receipt can still be undone: recovery fills in the
+            # after image/revision from disk, and `is_undoable` needs both.
+            "before_revision": content_revision(before),
+            "before_text": _image(before),
+        }
+        # The prepared row is the crash-safety boundary for this rewrite: if it
+        # cannot be persisted, a crash after the queue replacement would remove
+        # the proposals with nothing for recovery or History to find. Abort
+        # instead of proceeding without durable evidence.
+        try:
+            _append(journal, {**base, "status": PREPARED})
+        except Exception as exc:  # noqa: BLE001 — no evidence, no mutation
+            logger.error(
+                "memory receipts: could not prepare queue receipt for %s: %s",
+                proposals_path,
+                exc,
+            )
+            raise QueueReceiptUnavailable(
+                "the receipt journal could not record a prepared row"
+            ) from exc
+        try:
+            yield base
+        finally:
             _write_queue_receipt(
                 proposals_path,
                 removed_text=removed_text,
@@ -525,8 +757,6 @@ def queue_resolution(
                 receipt_id=rid,
                 prepared=True,
             )
-        except Exception:  # noqa: BLE001 — recording must not break removal
-            logger.debug("memory receipts: queue receipt failed", exc_info=True)
 
 
 def _write_queue_receipt(
@@ -544,6 +774,7 @@ def _write_queue_receipt(
     status: str,
     receipt_id: str | None = None,
     prepared: bool = False,
+    undoable: bool = True,
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -579,6 +810,12 @@ def _write_queue_receipt(
         "after_text": _image(after),
         "status": status,
     }
+    if not undoable:
+        # A per-fact history row for a batch that already records its
+        # transaction-level before image on one row. It must not offer an undo:
+        # restoring the whole pre-batch file from every row resurrected facts
+        # the batch had removed.
+        receipt["undoable"] = False
     if prepared:
         # The caller already wrote the ``prepared`` row; this is its
         # confirmation. A bullet that is still queued means the intended
@@ -592,6 +829,207 @@ def _write_queue_receipt(
     journal = journal_path(vault_root, proposals_path.parent)
     _append(journal, receipt)
     return receipt
+
+
+def record_queue_resolution_batch(
+    proposals_path: Path,
+    removals: list[dict[str, Any]],
+    *,
+    before_text: str,
+    after_text: str,
+    actor: str,
+    source: str,
+    workspace: str = "",
+    vault_root: Path | None = None,
+    undoable_first: bool = True,
+) -> list[dict[str, Any]]:
+    """Record one queue rewrite that removed several bullets.
+
+    The batch is a single atomic file rewrite, so it is one transaction: the
+    first row carries the whole-file before/after images and is the only
+    undoable receipt. The remaining facts get history rows with
+    ``undoable=False`` so the History list still shows them without offering an
+    undo that would restore every other fact in the batch (and resurrect an
+    accepted fact's bullet). Each item in ``removals`` carries ``text``,
+    ``kind`` and ``promoted``.
+
+    ``undoable_first=False`` records every row non-undoable, for the bracket
+    that writes its own transaction-level undoable row instead.
+
+    Returns the recorded receipts; never raises.
+    """
+    receipts: list[dict[str, Any]] = []
+    for index, removal in enumerate(removals):
+        try:
+            receipts.append(
+                record_queue_resolution(
+                    proposals_path,
+                    removed_text=str(removal.get("text") or ""),
+                    kind=str(removal.get("kind") or ""),
+                    promoted=bool(removal.get("promoted")),
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    before_text=before_text,
+                    after_text=after_text,
+                    undoable=undoable_first and index == 0,
+                )
+            )
+        except Exception:  # noqa: BLE001 — recording must not break removal
+            logger.debug("memory receipts: batch row failed", exc_info=True)
+    return receipts
+
+
+@contextmanager
+def queue_resolution_multi(
+    proposals_path: Path,
+    removals: list[dict[str, Any]],
+    *,
+    actor: str,
+    source: str,
+    workspace: str = "",
+    vault_root: Path | None = None,
+):
+    """Bracket a multi-bullet queue rewrite with prepared then applied receipts.
+
+    The batch/sweep routes rewrite the queue and only then record receipts, so
+    a crash between the write and the record left no evidence at all: the
+    bullets were gone and startup recovery could not reconstruct the mutation.
+    This writes a single transaction-level ``prepared`` row (listing every
+    removed text) before the body's rewrite, and the applied row after it, so
+    :func:`recover_pending` reconciles an interrupted batch exactly as it does a
+    single resolution.
+
+    The queue lock is held for the whole block; the body is responsible for the
+    actual rewrite. ``removals`` items carry ``text`` and ``kind``. An empty
+    ``removals`` list yields without recording anything — there is no mutation
+    to bracket.
+    """
+    if not removals:
+        yield {}
+        return
+    with queue_lock(proposals_path):
+        try:
+            before = proposals_path.read_text(encoding="utf-8")
+        except OSError:
+            before = ""
+        texts = [str(r.get("text") or "") for r in removals]
+        removal_kinds = [str(r.get("kind") or "") for r in removals]
+        rid = new_receipt_id(
+            f"{proposals_path}|queue_resolve_batch|"
+            f"{'|'.join(texts)}|{content_revision(before)}"
+        )
+        journal = journal_path(vault_root, proposals_path.parent)
+        base: dict[str, Any] = {
+            "id": rid,
+            "ts": _now(),
+            "actor": actor,
+            "source": source,
+            "workspace": workspace,
+            "kind": "queue_resolve",
+            "queue": str(proposals_path),
+            "action": "promoted"
+            if any(bool(r.get("promoted")) for r in removals)
+            else "dismissed",
+            "removed_texts": texts,
+            "removed_text": texts[0] if texts else "",
+            "removed_kinds": removal_kinds,
+            "promoted": any(bool(r.get("promoted")) for r in removals),
+            "batch": True,
+            # Before image/revision on the prepared row so a crash-recovered
+            # batch receipt is still undoable.
+            "before_revision": content_revision(before),
+            "before_text": _image(before),
+        }
+        # Abort before the rewrite when the crash-safety boundary cannot be
+        # persisted; see `queue_resolution`.
+        try:
+            _append(journal, {**base, "status": PREPARED})
+        except Exception as exc:  # noqa: BLE001 — no evidence, no mutation
+            logger.error(
+                "memory receipts: could not prepare batch receipt for %s: %s",
+                proposals_path,
+                exc,
+            )
+            raise QueueReceiptUnavailable(
+                "the receipt journal could not record a prepared row"
+            ) from exc
+        completed = False
+        try:
+            yield base
+            completed = True
+        finally:
+            try:
+                after = proposals_path.read_text(encoding="utf-8")
+            except OSError:
+                after = ""
+            all_gone = bool(texts) and not any(
+                _bullets_match(after, text, removal_kinds[i] if i < len(removal_kinds) else "")
+                for i, text in enumerate(texts)
+            )
+            if completed and all_gone:
+                # Only a completed, content-verified rewrite earns applied
+                # rows. The body raising (disk full, permission error) leaves
+                # the prepared row for startup recovery instead of falsely
+                # claiming the facts were accepted or dismissed.
+                try:
+                    record_queue_resolution_batch(
+                        proposals_path,
+                        removals,
+                        before_text=before,
+                        after_text=after,
+                        actor=actor,
+                        source=source,
+                        workspace=workspace,
+                        vault_root=vault_root,
+                        # The transaction row below is the only undoable one;
+                        # the per-fact rows are history-only so undoing one
+                        # cannot restore the whole pre-batch file.
+                        undoable_first=False,
+                    )
+                except Exception:  # noqa: BLE001 — recording must not break removal
+                    logger.debug("memory receipts: batch receipt failed", exc_info=True)
+                settled = {
+                    **base,
+                    "before_revision": content_revision(before),
+                    "after_revision": content_revision(after),
+                    "before_text": _image(before),
+                    "after_text": _image(after),
+                    "kind": "queue_resolve",
+                    "removed_texts": texts,
+                    "removed_text": texts[0] if texts else "",
+                    "status": APPLIED,
+                }
+                try:
+                    _append(journal, settled)
+                except Exception:  # noqa: BLE001
+                    logger.debug("memory receipts: batch settle failed", exc_info=True)
+            elif content_revision(after) == content_revision(before):
+                # A completed rewrite that removed nothing left the queue at its
+                # exact before-image, so there is nothing to recover: settle it
+                # rolled_back now.
+                try:
+                    _append(
+                        journal,
+                        {
+                            **base,
+                            "before_revision": content_revision(before),
+                            "after_revision": content_revision(after),
+                            "before_text": _image(before),
+                            "after_text": _image(after),
+                            "status": ROLLED_BACK,
+                            "detail": "batch rewrite removed nothing",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("memory receipts: batch rollback failed", exc_info=True)
+            # Otherwise (`write_text` raised mid-way, or only some bullets are
+            # gone) leave the prepared row non-terminal: the queue may match
+            # neither image, and startup recovery is the one place that can
+            # classify it as applied, rolled_back or conflict. Writing a
+            # terminal rollback here would make recovery skip a file that may
+            # have lost unrelated proposals.
 
 
 # ── Recovery ──────────────────────────────────────────────────────────────
@@ -685,9 +1123,17 @@ def _reconcile_region(
         return _settle(journal, receipt, CONFLICT, "; ".join(d.message for d in diags))
     current = content_revision(serialize_entries(entries))
     if current == str(receipt.get("after_revision", "")):
-        settled = _settle(journal, receipt, APPLIED, "recovered after crash")
-        _complete_outcome(receipt)
-        return settled
+        # Complete the decision sidecar *before* the terminal row: a crash
+        # between the two would otherwise leave a terminal `applied` receipt
+        # that recovery skips, so the fact could be re-filed by the next pass.
+        if not _complete_outcome(receipt):
+            # The sidecar is temporarily unwritable: keep the receipt
+            # non-terminal so a later pass retries instead of skipping it.
+            return None
+        return _settle(
+            journal, receipt, APPLIED, "recovered after crash",
+            outcome_completed=True,
+        )
     if current == str(receipt.get("before_revision", "")):
         return _settle(journal, receipt, ROLLED_BACK, "write never landed")
     return _settle(
@@ -698,6 +1144,40 @@ def _reconcile_region(
     )
 
 
+def _bullets_match(text: str, needle: str, kind: str = "") -> bool:
+    """True when a parsed bullet matches ``needle`` (exactly) and ``kind``.
+
+    Compares parsed bullet text, not the raw line: a substring search reported
+    a removed ``Use Python`` as still queued while ``Use Python 3`` remained,
+    which rolled back a successful resolution. When the receipt names a
+    proposal kind, the bullet's kind must match too, so removing
+    ``[memory] Use Python`` is not blocked by a remaining ``[profile] Use
+    Python``. A receipt with no kind (the CLI's free-substring path) falls back
+    to text-only matching.
+    """
+    from ciao.memory_proposals import _one_line
+    from ciao.proposal_kinds import parse_bullet
+
+    target = _one_line(str(needle))
+    if not target:
+        return False
+    wanted_kind = str(kind or "").strip().lower()
+    for line in text.splitlines():
+        bullet = parse_bullet(line)
+        if bullet is None:
+            continue
+        if wanted_kind and bullet.kind.lower() != wanted_kind:
+            continue
+        if _one_line(bullet.text) == target:
+            return True
+    return False
+
+
+def _bullets_containing(text: str, needle: str) -> bool:
+    """Back-compat shim: exact text match with no kind constraint."""
+    return _bullets_match(text, needle)
+
+
 def _reconcile_queue(
     receipt: dict[str, Any],
     journal: Path,
@@ -705,26 +1185,66 @@ def _reconcile_queue(
     proposals_path: Path | None,
 ) -> dict[str, Any] | None:
     path = proposals_path or Path(str(receipt.get("queue", "")))
-    removed = str(receipt.get("removed_text", ""))
-    if not path.name or not removed:
+    if not path.name:
+        return None
+    # A batch prepared row lists every removed bullet; the removal landed only
+    # when all of them are gone. A single row names one ``removed_text``.
+    removed_texts = receipt.get("removed_texts")
+    kinds = receipt.get("removed_kinds")
+    if isinstance(removed_texts, list) and removed_texts:
+        kinds_list = kinds if isinstance(kinds, list) else []
+        needles = [
+            (str(t), str(kinds_list[i]) if i < len(kinds_list) else "")
+            for i, t in enumerate(removed_texts)
+            if str(t)
+        ]
+    else:
+        single = str(receipt.get("removed_text", ""))
+        single_kind = str(receipt.get("proposal_kind", ""))
+        needles = [(single, single_kind)] if single else []
+    if not needles:
         return None
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
-    from ciao.proposal_kinds import parse_bullet
-
-    present = any(
-        parse_bullet(line) is not None and removed in line
-        for line in text.splitlines()
+    still_present = [
+        needle for needle, kind in needles if _bullets_match(text, needle, kind)
+    ]
+    if not still_present:
+        # The rewrite landed. Populate the after image/revision from disk so a
+        # recovered receipt stays undoable: a prepared row carries only the
+        # before image, and `is_undoable` requires both. Complete the decision
+        # sidecar *before* the terminal row so a crash between the two stays
+        # recoverable (a terminal row would be skipped by the next pass).
+        settled_receipt = {
+            **receipt,
+            "after_revision": content_revision(text),
+            "after_text": _image(text),
+        }
+        if not _complete_outcome(settled_receipt):
+            # The sidecar is temporarily unwritable: keep the receipt
+            # non-terminal so a later pass retries instead of skipping it.
+            return None
+        return _settle(
+            journal, settled_receipt, APPLIED, "bullet already removed",
+            outcome_completed=True,
+        )
+    detail = (
+        f"{len(still_present)} batch bullet(s) still queued"
+        if len(needles) > 1
+        else "bullet still queued"
     )
-    if not present:
-        return _settle(journal, receipt, APPLIED, "bullet already removed")
-    return _settle(journal, receipt, ROLLED_BACK, "bullet still queued")
+    return _settle(journal, receipt, ROLLED_BACK, detail)
 
 
 def _settle(
-    journal: Path, receipt: dict[str, Any], status: str, detail: str
+    journal: Path,
+    receipt: dict[str, Any],
+    status: str,
+    detail: str,
+    *,
+    outcome_completed: bool | None = None,
 ) -> dict[str, Any]:
     settled = {
         **{k: v for k, v in receipt.items() if k != "v"},
@@ -733,26 +1253,85 @@ def _settle(
         "detail": detail,
         "settled_at": _now(),
     }
+    if outcome_completed is not None:
+        settled["outcome_recorded"] = outcome_completed
     _append(journal, settled)
     return settled
 
 
-def _complete_outcome(receipt: dict[str, Any]) -> None:
-    """Idempotently finish the decision record an interrupted apply missed."""
+def _complete_outcome(receipt: dict[str, Any]) -> bool:
+    """Idempotently finish the decision record an interrupted apply missed.
+
+    Region receipts complete a promotion for the fact they wrote. Queue
+    receipts complete the dismissal/promotion sidecar entry the route or CLI
+    would have written after the receipt: a crash between the queue wrapper's
+    terminal row and that call otherwise left the resolved proposal re-filable
+    by the next archive pass.
+
+    Every write is ``once=True``, so a recovery pass that reruns this (because
+    a prior crash landed between the sidecar write and the terminal row) cannot
+    append a duplicate decision. Returns whether the sidecar now reflects the
+    decision, so a terminal row can record the outcome as durably completed.
+    """
     if receipt.get("outcome_recorded"):
-        return
-    fact = str(receipt.get("fact_text", "")).strip()
+        return True
+    fact = str(receipt.get("fact_text", "")).strip() or str(
+        receipt.get("removed_text", "")
+    ).strip()
     vault_root = receipt.get("vault_root")
-    workspace = str(receipt.get("workspace", ""))
     if not fact:
-        return
+        return True
     try:
+        if str(receipt.get("kind", "")) == "queue_resolve" or receipt.get("queue"):
+            from ciao.memory_proposals import record_dismissal, record_promotion
+
+            queue_raw = str(receipt.get("queue", ""))
+            queue = Path(queue_raw) if queue_raw else (
+                Path(str(vault_root)) / "Workspace" / "Memory-Proposals.md"
+                if vault_root
+                else None
+            )
+            if queue is None:
+                # Nothing to write to, so there is no outstanding obligation: a
+                # later pass would have the same answer. Treat as complete.
+                return True
+            texts = receipt.get("removed_texts")
+            facts = (
+                [str(t) for t in texts if str(t)]
+                if isinstance(texts, list) and texts
+                else [fact]
+            )
+            promoted = bool(receipt.get("promoted"))
+            for item in facts:
+                if promoted:
+                    record_promotion(
+                        queue,
+                        text=item,
+                        kind=str(receipt.get("proposal_kind", "")),
+                        via=str(receipt.get("source", "")),
+                        source=str(receipt.get("source", "")),
+                        destination=str(receipt.get("destination", "")),
+                        outcome="written",
+                        once=True,
+                    )
+                else:
+                    record_dismissal(
+                        queue,
+                        text=item,
+                        kind=str(receipt.get("proposal_kind", "")),
+                        via=str(receipt.get("source", "")),
+                        source=str(receipt.get("source", "")),
+                        outcome=str(receipt.get("action", "")),
+                        once=True,
+                    )
+            return True
         from ciao.memory_proposals import record_promotion
 
         if vault_root:
             queue = Path(str(vault_root)) / "Workspace" / "Memory-Proposals.md"
         else:
-            return
+            # No vault to complete the record in; nothing outstanding.
+            return True
         record_promotion(
             queue,
             text=fact,
@@ -762,8 +1341,10 @@ def _complete_outcome(receipt: dict[str, Any]) -> None:
             outcome="written",
             once=True,
         )
+        return True
     except Exception:  # noqa: BLE001 — completing the record is best-effort
         logger.debug("memory receipts: could not complete outcome", exc_info=True)
+        return False
 
 
 # ── Undo ──────────────────────────────────────────────────────────────────
@@ -876,24 +1457,31 @@ def _undo_queue(
     actor: str,
     source: str,
 ) -> dict[str, Any]:
-    """Restore the queue file to its before image when it has not moved since."""
+    """Restore the queue file to its before image when it has not moved since.
+
+    Read, revision check and replace happen under :func:`queue_lock`, so a
+    concurrent managed writer cannot land between them. Without the lock the
+    revision check proved nothing: another update could arrive after the check
+    and before ``os.replace``, and the undo would silently discard it.
+    """
     path = Path(str(receipt.get("queue", "")))
     if not path.name:
         raise UndoUnsupported("receipt names no queue")
-    try:
-        current = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise MemoryReceiptError(f"queue unreadable: {exc}") from exc
-    if content_revision(current) != str(receipt.get("after_revision", "")):
-        raise RevisionConflict(
-            "the queue changed after this operation; undo was refused"
-        )
     before = receipt.get("before_text")
     if before is None:
         raise UndoUnsupported("receipt carries no queue image")
-    tmp = path.with_name(f".{path.name}.undo.tmp")
-    tmp.write_text(str(before), encoding="utf-8")
-    os.replace(tmp, path)
+    with queue_lock(path):
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise MemoryReceiptError(f"queue unreadable: {exc}") from exc
+        if content_revision(current) != str(receipt.get("after_revision", "")):
+            raise RevisionConflict(
+                "the queue changed after this operation; undo was refused"
+            )
+        tmp = path.with_name(f".{path.name}.undo.tmp")
+        tmp.write_text(str(before), encoding="utf-8")
+        os.replace(tmp, path)
     undone = {
         **{k: v for k, v in receipt.items() if k != "v"},
         "status": UNDONE,
@@ -966,6 +1554,26 @@ def receipt_journal_candidates(config: Any) -> list[Path]:
             key = ""
         if key and key not in seen:
             journals.append(journal_path(Path(vault_root), None))
+    # The guide-local fallback journal. A managed write that reaches
+    # ``journal_path`` with no vault root (a provider prune whose caller passes
+    # only the guide) records beside that guide's ``Workspace/`` folder. Include
+    # every agent root's fallback journal so those receipts are still discovered
+    # and reconciled after a crash.
+    targets = getattr(config, "agent_root_targets", None)
+    try:
+        roots = list(targets()) if callable(targets) else []
+    except Exception:  # noqa: BLE001 — a broken registry must not block startup
+        roots = []
+    for root, _name in roots:
+        try:
+            fallback = journal_path(None, Path(root) / "CLAUDE.md")
+        except MemoryReceiptError:
+            continue
+        key = str(fallback)
+        if key in seen:
+            continue
+        seen.add(key)
+        journals.append(fallback)
     return journals
 
 

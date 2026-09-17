@@ -327,6 +327,41 @@ def test_prune_expired_entries_keeps_native_guide_storage(tmp_path: Path) -> Non
     assert entries == ["keep this", "keep malformed [expires: tomorrow]"]
 
 
+def test_prune_with_vault_root_records_the_receipt_in_the_vault_journal(
+    tmp_path: Path,
+) -> None:
+    """An automatic prune must write where recovery and the API scan.
+
+    The provider path passes the owning vault so the receipt lands in
+    ``<vault>/Workspace/Memory-Receipts.jsonl`` rather than the guide-local
+    fallback the discovery surfaces do not scan.
+    """
+    import datetime
+
+    from ciao import memory_receipts as mr
+
+    vault = tmp_path / "memory-vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    guide = _guide_with_regions(
+        tmp_path / "CLAUDE.md",
+        memory=mt.serialize_entries(["remove this [expires: 2020-01-01]"]),
+    )
+    result = mt.prune_expired_entries(
+        guide,
+        today=datetime.date(2026, 8, 16),
+        vault_root=vault,
+        workspace="client",
+    )
+    assert result["ok"] is True
+    journal = mr.journal_path(vault, None)
+    assert journal.exists()
+    rows = [r for r in mr.read_receipts(journal) if r["kind"] == "prune_expired"]
+    assert rows and rows[-1]["status"] == mr.APPLIED
+    assert rows[-1]["workspace"] == "client"
+    # The guide-local fallback was not used.
+    assert not (guide.parent / "Workspace" / mr.RECEIPTS_NAME).exists()
+
+
 def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     result = mt.update_region(

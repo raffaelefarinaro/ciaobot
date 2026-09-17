@@ -198,15 +198,36 @@ export interface ChatInfo {
   postprocess?: ChatPostprocess | null
 }
 
+/** One stage of the persisted archive-job manifest (ciao/archive_jobs.py). */
+export interface ArchiveJobStep {
+  status: 'ok' | 'error' | 'skipped' | 'blocked' | 'pending' | 'running'
+  reason?: string
+  attempts?: number
+}
+
+/** The postprocess-friendly view of an archive job manifest. */
+export interface ArchiveJobView {
+  job_id: string
+  state: 'running' | 'incomplete' | 'blocked' | 'done' | 'tombstoned'
+  tombstoned?: boolean
+  blocked_reason?: string
+  /** Stages still pending/failed/blocked, in execution order. */
+  unfinished?: string[]
+  steps?: Record<string, ArchiveJobStep>
+  updated_at?: string
+}
+
 /** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
 export interface ChatPostprocessStep {
   status: 'ok' | 'error' | 'skipped'
   extra?: Record<string, unknown>
+  /** Manifest projection: pending/running/blocked/ok/skipped/error. */
+  manifest_status?: ArchiveJobStep['status']
 }
 
 export interface ChatPostprocess {
   /** 'running' while the pipeline task is alive; 'done' once it settles. */
-  state: 'running' | 'done'
+  state: 'running' | 'done' | 'incomplete' | 'blocked'
   /** Job id of the step that is running, or the last one that ran. */
   step?: string
   /** Steps that can run for this chat, in execution order. */
@@ -217,6 +238,10 @@ export interface ChatPostprocess {
   updated_at?: string
   /** Set when a server restart killed the pipeline mid-flight. */
   interrupted?: boolean
+  /** Persisted manifest view, once the job settles or loads. */
+  job?: ArchiveJobView | null
+  /** Human-readable reason a job is blocked. */
+  blocked_reason?: string
 }
 
 export interface ChatRetryInfo {

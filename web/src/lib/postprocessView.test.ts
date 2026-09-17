@@ -3,9 +3,10 @@ import {
   isPostprocessing,
   postprocessFailed,
   postprocessLabel,
-  postprocessNeedsInsights,
+  postprocessNeedsRetry,
   postprocessOutcomes,
   postprocessSummary,
+  postprocessUnfinished,
   tidyingSummary,
 } from './postprocessView'
 import type { ChatPostprocess } from './types'
@@ -131,6 +132,31 @@ describe('postprocessSummary', () => {
   it('is empty for a chat archived before this existed', () => {
     expect(postprocessSummary(null)).toBe('')
   })
+
+  it('reports partial completion as unfinished work, not success', () => {
+    // The whole point of the manifest: a crash after insights must not read
+    // as "everything settled cleanly".
+    const pp: ChatPostprocess = {
+      state: 'incomplete',
+      steps: { insights: { status: 'ok' } },
+      job: {
+        job_id: 'j',
+        state: 'incomplete',
+        unfinished: ['project_doc_update', 'memory_proposals'],
+      },
+    }
+    expect(postprocessSummary(pp)).toBe(
+      'insights added · project doc, memory proposals not finished',
+    )
+  })
+
+  it('names the blocked reason when a job needs attention', () => {
+    const pp: ChatPostprocess = {
+      state: 'blocked',
+      blocked_reason: 'archive content changed since the job was created',
+    }
+    expect(postprocessSummary(pp)).toBe('archive content changed since the job was created')
+  })
 })
 
 describe('postprocessFailed', () => {
@@ -141,19 +167,39 @@ describe('postprocessFailed', () => {
   })
 })
 
-describe('postprocessNeedsInsights', () => {
-  it('is true only for a settled pipeline whose insights step failed', () => {
-    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
+describe('postprocessNeedsRetry', () => {
+  it('is true for a settled pipeline that still has work', () => {
+    expect(
+      postprocessNeedsRetry({
+        state: 'incomplete',
+        steps: { insights: { status: 'ok' }, memory_proposals: { status: 'error' } },
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+      }),
+    ).toBe(true)
+    expect(postprocessNeedsRetry({ state: 'blocked' })).toBe(true)
+    // Back-compat: a legacy record with an errored insights step.
+    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
+  })
+
+  it('is false while running or when everything settled', () => {
     // A running pipeline is still trying, not a retry case.
-    expect(postprocessNeedsInsights(running('insights'))).toBe(false)
-    // Insights skipped (e.g. the archive predates the pipeline) is not
-    // something a retry button would fix.
-    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'skipped' } } })).toBe(false)
-    // Insights succeeded — nothing to retry.
-    expect(postprocessNeedsInsights({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
-    // A different step failing (say the project doc) is not an insights failure.
-    expect(postprocessNeedsInsights({ state: 'done', steps: { project_doc_update: { status: 'error' } } })).toBe(false)
-    expect(postprocessNeedsInsights(null)).toBe(false)
+    expect(postprocessNeedsRetry(running('insights'))).toBe(false)
+    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
+    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'skipped' } } })).toBe(false)
+    expect(postprocessNeedsRetry(null)).toBe(false)
+  })
+})
+
+describe('postprocessUnfinished', () => {
+  it('reads the manifest unfinished list', () => {
+    expect(
+      postprocessUnfinished({
+        state: 'incomplete',
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+      }),
+    ).toEqual(['memory_proposals'])
+    expect(postprocessUnfinished({ state: 'done' })).toEqual([])
+    expect(postprocessUnfinished(null)).toEqual([])
   })
 })
 

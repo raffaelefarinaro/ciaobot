@@ -15,9 +15,10 @@ import {
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
-import { isPostprocessing, postprocessNeedsInsights } from '../lib/postprocessView'
+import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
+  ArchiveJobView,
   ProjectInfo,
   ChatInfo,
   ChatPostprocess,
@@ -987,14 +988,14 @@ export const useProjectStore = defineStore('projects', () => {
     return chatsMatching(c => isPostprocessing(c.postprocess))
   }
 
-  /** Archived chats whose insights extraction failed and can be retried. */
+  /** Archived chats whose post-archive pipeline still has unfinished stages. */
   function insightsFailedChats(): ChatInfo[] {
-    return chatsMatching(c => postprocessNeedsInsights(c.postprocess))
+    return chatsMatching(c => postprocessNeedsRetry(c.postprocess))
   }
 
   /** Insights-failed count for one workspace, for the home lane header. */
   function workspaceInsightsFailedCount(ws: WorkspaceName): number {
-    return workspaceCountMatching(ws, c => postprocessNeedsInsights(c.postprocess))
+    return workspaceCountMatching(ws, c => postprocessNeedsRetry(c.postprocess))
   }
 
   function projectPostprocessingCount(projectId: string): number {
@@ -1037,7 +1038,13 @@ export const useProjectStore = defineStore('projects', () => {
       const pp = chat.postprocess
       if (!pp) continue
       if (pp.state === 'running' && !running.has(chat.chat_id)) {
-        chat.postprocess = { ...pp, state: 'done', step: '' }
+        // The server is not running this pipeline. Use the manifest to tell a
+        // clean settle from an interrupted one: an unfinished job stays
+        // retryable rather than being reported as done.
+        const state = pp.job?.unfinished?.length
+          ? (pp.job.state === 'blocked' ? 'blocked' : 'incomplete')
+          : 'done'
+        chat.postprocess = { ...pp, state, step: '' }
       }
     }
   }
@@ -2670,15 +2677,45 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
-  /** Re-run session-insights extraction for one archived chat (text-mode). */
+  /** Resume the unfinished post-archive steps for one archived chat. */
   async function retryInsights(chatId: string): Promise<void> {
-    const res = await api.post<{ status: string }>(`/api/chats/${chatId}/retry-insights`)
+    const res = await api.post<{ status: string; job?: ArchiveJobView | null }>(
+      `/api/chats/${chatId}/retry-insights`,
+    )
     const status = res?.status
-    if (status === 'already_has') {
-      pushToast({ chat_id: '', title: 'Insights already added', body: 'This chat already has a Session insights section.' })
-    } else if (status === 'running') {
+    if (res?.job) applyArchiveJob(chatId, res.job)
+    if (status === 'running') {
       pushToast({ chat_id: '', title: 'Already tidying', body: 'This chat is already being processed.' })
+    } else if (status === 'complete') {
+      pushToast({ chat_id: '', title: 'Nothing to finish', body: 'Every post-archive step is already complete.' })
+    } else if (status === 'blocked') {
+      pushToast({
+        chat_id: '',
+        title: 'Cannot resume yet',
+        body: res?.job?.blocked_reason || 'This chat needs attention before its unfinished steps can run.',
+      })
     }
+  }
+
+  /** Fold a manifest view onto the chat's postprocess record. */
+  function applyArchiveJob(chatId: string, job: ArchiveJobView | null | undefined) {
+    if (!job) return
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat) return
+    const pp: ChatPostprocess = { ...(chat.postprocess || { state: 'done' }) }
+    pp.job = job
+    if (job.unfinished?.length) {
+      if (pp.state !== 'running') {
+        pp.state = job.state === 'blocked' ? 'blocked' : 'incomplete'
+      }
+    } else if (pp.state === 'incomplete' || pp.state === 'blocked') {
+      // The server confirmed nothing is unfinished (e.g. a completion event was
+      // missed). Clear a stale incomplete/blocked state, or the UI keeps
+      // showing "not finished" and a retry control forever.
+      pp.state = 'done'
+      pp.step = ''
+    }
+    chat.postprocess = pp
   }
 
   function replaceChat(chat: ChatInfo) {

@@ -416,3 +416,24 @@ def test_build_and_persist_returns_none_for_empty_input(tmp_path: Path) -> None:
         filtered_jsonl="",
         archive_path=tmp_path / "x.md",
     ) is None
+
+
+def test_build_and_persist_reports_a_write_failure(tmp_path: Path, monkeypatch) -> None:
+    """A persistence failure must be distinguishable from an empty input."""
+    filtered = json.dumps({"session_id": "s", "messages": []})
+    errors: list[str] = []
+
+    def boom(trajectory: dict) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tb, "write_trajectory", boom)
+    out = tb.build_and_persist_trajectory(
+        session_id="sess-fail",
+        filtered_jsonl=filtered,
+        archive_path=tmp_path / "x.md",
+        error_out=errors,
+    )
+
+    assert out is None
+    assert errors and "disk full" in errors[-1]
+

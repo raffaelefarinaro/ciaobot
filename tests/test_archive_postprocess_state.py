@@ -232,7 +232,7 @@ def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:
 # ── retry_insights ───────────────────────────────────────────────────────
 
 
-def test_retry_insights_starts_a_text_mode_pipeline(tmp_path: Path, monkeypatch) -> None:
+def test_retry_insights_starts_a_resume_pipeline(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
@@ -244,19 +244,16 @@ def test_retry_insights_starts_a_text_mode_pipeline(tmp_path: Path, monkeypatch)
 
     called: dict[str, object] = {}
 
-    async def fake_retry_insights_for_chat(**kwargs: object) -> bool:
-        called.update(kwargs)
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> object:
+        called.update(inputs)
         archive.write_text(
             archive.read_text(encoding="utf-8")
             + "\n\n<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- x\n",
             encoding="utf-8",
         )
-        return True
+        return job
 
-    monkeypatch.setattr(
-        "ciao.insights.retry_insights_for_chat",
-        fake_retry_insights_for_chat,
-    )
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
 
     async def run() -> str:
         return manager.retry_insights(chat_id)
@@ -295,9 +292,10 @@ def test_retry_insights_is_noop_when_pipeline_already_running(
     assert manager.retry_insights(chat_id) == "running"
 
 
-def test_retry_insights_is_noop_when_archive_already_has_insights(
+def test_retry_insights_reports_complete_when_only_insights_are_settled(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    """Insights-settled is not "complete": the fold/proposals can still resume."""
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
@@ -305,10 +303,76 @@ def test_retry_insights_is_noop_when_archive_already_has_insights(
     chat.archived = True
     archive = tmp_path / "archive.md"
     archive.write_text(
-        "# chat\n\n## Session insights\n\n- existing\n", encoding="utf-8"
+        "# chat\n\n<!-- ciao:session-insights -->\n## Session insights\n\n- existing\n",
+        encoding="utf-8",
     )
     chat.archive_path = str(archive.relative_to(tmp_path))
 
-    status = manager.retry_insights(chat_id)
-    assert status == "already_has"
-    assert manager.postprocessing_chat_ids() == []
+    started: list[dict] = []
+
+    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> object:
+        started.append(inputs)
+        return job
+
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
+
+    async def run() -> str:
+        return manager.retry_insights(chat_id)
+
+    status = asyncio.run(run())
+
+    # The regression the ticket names: insights already exist, but the later
+    # stages do not, so the resume must still start.
+    assert status == "started"
+    assert started
+
+
+def test_retry_resets_an_exhausted_insights_with_pending_dependents(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """An exhausted insights must be reset even when a dependent is pending.
+
+    `resumable()` is non-empty because the dependent stages are pending, so the
+    old guard skipped `reset_failed`; the launch then ran only work that
+    immediately waited for insights, making every user retry a silent no-op.
+    """
+    from ciao import archive_jobs as aj
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    chat.archived = True
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
+    chat.archive_path = str(archive.relative_to(tmp_path))
+
+    inputs = manager._job_inputs(chat, manager._projects[chat.project_id])
+    job = manager._new_job_for_chat(chat, inputs)
+    for _ in range(aj.MAX_AUTO_ATTEMPTS):
+        job.mark("insights", aj.RUNNING)
+        job.mark("insights", aj.FAILED, "boom")
+    # An exhausted insights excludes its zero-attempt dependents from an
+    # *automatic* resume (they would immediately skip for lack of output).
+    assert job.resumable() == []
+    assert job.unfinished()
+
+    launched: list[object] = []
+
+    async def fake_pipeline(job_arg: object, inputs_arg: dict, **kwargs: object) -> object:
+        launched.append(job_arg)
+        return job_arg
+
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
+
+    async def run() -> str:
+        return manager.retry_insights(chat_id)
+
+    status = asyncio.run(run())
+
+    assert status == "started"
+    assert launched
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("insights") == aj.PENDING
+    assert reloaded.stage("insights").attempts == 0

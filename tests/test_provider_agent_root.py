@@ -161,3 +161,33 @@ def test_provider_service_without_agent_root_uses_workspace_root(
     service._ensure_provider("claude")
 
     assert spy_factory["root"] == cfg.workspace_root
+
+
+def test_provider_service_threads_the_workspace_for_prune_receipts(
+    tmp_path: Path,
+) -> None:
+    """The service resolves the owning vault so a prune receipt is discoverable."""
+    cfg = _make_custom_workspace_config(tmp_path)
+    service = ProviderService(cfg, provider="claude", workspace="client")
+
+    assert service._prune_vault_root() == cfg.workspace_vault_root("client")
+
+
+def test_provider_service_without_workspace_has_no_prune_vault(tmp_path: Path) -> None:
+    cfg = _make_custom_workspace_config(tmp_path)
+    service = ProviderService(cfg, provider="claude")
+    assert service._prune_vault_root() is None
+
+
+def test_manager_threads_the_chat_workspace_into_the_provider(
+    tmp_path: Path, spy_factory: dict[str, Any]
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    manager = _make_manager(tmp_path, config)
+    project = manager.create_project("Feature", workspace="client")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    service = manager._get_provider(chat.chat_id)
+
+    assert service._workspace == "client"
+    assert service._prune_vault_root() == config.workspace_vault_root("client")

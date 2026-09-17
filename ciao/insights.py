@@ -712,170 +712,394 @@ async def extract_and_append(
     text_mode: bool = False,
     guide_path: Path | None = None,
 ) -> None:
-    """Call the model with the filtered transcript and append insights to the archive.
+    """Run the post-archive pipeline for one archive (stage-resumable).
 
-    When ``text_mode`` is set, ``filtered_jsonl`` is ignored and the rendered
-    archive markdown itself is used as the extraction input (the same fallback
-    the backfill task uses for archives whose raw session JSONL is gone). This
-    is the recovery path for a retried archive: the JSONL is deleted at archive
-    time, so a failed extraction can only be re-attempted against the archive
-    text.
+    This is a thin, backward-compatible wrapper over
+    :func:`run_archive_pipeline`. It builds an in-memory
+    :class:`~ciao.archive_jobs.ArchiveJob`, seeds the stage plan from the
+    arguments, and runs every stage. The resumable path used by
+    ``ProjectChatManager`` supplies a persisted manifest instead, so a crash
+    between stages can be repaired without re-running model extraction — see
+    ``ciao/archive_jobs.py``.
 
-    Idempotent: skips if the archive already contains a Session insights
-    section. Retries once on failure (30s delay), then logs and skips.
-    Always swallows exceptions — this runs as a fire-and-forget task and
-    must never crash the route or leave the archive corrupted.
-
-    The model call goes through ``run_oneshot``, which dispatches to the
-    runtime provider that owns the model (Claude Code or opencode) or
-    to the bundled Apple helper.
-
-    When ``trajectories_enabled" and ``session_id`` are set, a JSON
-    trajectory is written to ``~/.ciao/trajectories/YYYY-MM/`` after the
-    insights section is appended. The trajectory uses the model output
-    to populate decisions/errors/user_corrections and the filtered JSONL
-    to populate tools_used/skills_loaded/turns. ``trajectory_meta`` may
-    carry ``context``, ``project_id``, ``chat_id``, ``task_summary``,
-    ``workspace``; missing keys default to empty strings.
-
-    ``project_doc_path`` (workspace-root-relative or absolute) points at the
-    chat's canonical project doc; when set and the extracted insights carry
-    Decisions or Open loops, the doc is updated in place right away via
-    :mod:`ciao.project_doc_update` instead of waiting for the nightly
-    curation schedule.
-
-    ``proposal_vault_root`` must be the archive owner's registry-resolved vault.
-    When ownership is unavailable, proposal persistence is skipped rather than
-    filing one workspace's facts into another workspace's queue.
+    ``text_mode`` uses the rendered archive markdown as the extraction input
+    when the raw session JSONL is gone (the retry/backfill recovery path).
+    Extraction is skipped when the archive already carries a real insights
+    section; the later stages still run, which is the whole point of the
+    resume: an archive whose insights landed but whose project fold or memory
+    writes did not must still be repairable.
     """
-    output = ""
-    # Every live surface keys post-archive work by chat, and `track` reads this
-    # out of the `extra` it is given at entry (not from the handle mid-block),
-    # so it has to be resolved before the first tracked step opens.
-    chat_id = str((trajectory_meta or {}).get("chat_id") or "")
-    # The project-doc fold runs before memory proposals, and the proposal step
-    # needs its outcome: facts the fold consumed must not also be queued for a
-    # region, while facts it skipped stay reviewable. Both are hoisted because
-    # the proposal step runs in the `finally` below.
-    doc_fold_wrote = False
-    resolved_doc_path = ""
-    # Hoisted for the reconcile step in the `finally`: an exception before
-    # `_resolve_insights_call` would otherwise leave it unbound there.
-    effective_model = model
+    from ciao.archive_jobs import ArchiveJob
+
+    job = ArchiveJob(
+        job_id="",
+        chat_id=str((trajectory_meta or {}).get("chat_id") or ""),
+        archive_path=str(archive_path),
+        runtime_root="",
+    )
+    inputs = _pipeline_inputs(
+        archive_path=archive_path,
+        filtered_jsonl=filtered_jsonl,
+        config=config,
+        model=model,
+        session_id=session_id,
+        trajectory_meta=trajectory_meta,
+        workspace_root=workspace_root,
+        vault_root=vault_root,
+        proposal_vault_root=proposal_vault_root,
+        trajectories_enabled=trajectories_enabled,
+        memory_proposals_enabled=memory_proposals_enabled,
+        provider=provider,
+        project_doc_path=project_doc_path,
+        text_mode=text_mode,
+        guide_path=guide_path,
+    )
+    job.inputs = {k: v for k, v in inputs.items() if k not in ("guide_path", "workspace_root", "vault_root", "proposal_vault_root")}
+    await run_archive_pipeline(job, inputs)
+
+
+def _pipeline_inputs(
+    *,
+    archive_path: Path,
+    filtered_jsonl: str,
+    config,
+    model: str,
+    session_id: str,
+    trajectory_meta: dict[str, str] | None,
+    workspace_root: Path | None,
+    vault_root: Path | None,
+    proposal_vault_root: Path | None,
+    trajectories_enabled: bool,
+    memory_proposals_enabled: bool,
+    provider: str,
+    project_doc_path: str,
+    text_mode: bool,
+    guide_path: Path | None,
+) -> dict[str, Any]:
+    """The resolved per-run inputs a stage needs, frozen once per invocation.
+
+    Kept in one dict so the manager can persist the JSON-safe subset on the
+    manifest and hand it back on the next resume: the model/provider are pinned
+    at first run so a resume after a model change does not silently rewrite the
+    archive with a different model, while paths are re-resolved from the live
+    config by the caller when they must not be frozen.
+    """
+    return {
+        "archive_path": archive_path,
+        "filtered_jsonl": filtered_jsonl,
+        "config": config,
+        "model": model,
+        "session_id": session_id,
+        "trajectory_meta": dict(trajectory_meta or {}),
+        "workspace_root": workspace_root,
+        "vault_root": vault_root,
+        "proposal_vault_root": proposal_vault_root,
+        "trajectories_enabled": trajectories_enabled,
+        "memory_proposals_enabled": memory_proposals_enabled,
+        "provider": provider,
+        "project_doc_path": project_doc_path,
+        "text_mode": text_mode,
+        "guide_path": guide_path,
+    }
+
+
+def _insights_body_from_archive(archive_path: Path) -> str:
+    """The existing appended insights body, or '' when there is none."""
     try:
-        if not archive_path.exists():
-            logger.warning("Archive path %s missing, skipping insights", archive_path)
-            return
-        if _has_insights_section(archive_path):
-            logger.info("Archive %s already has insights, skipping", archive_path)
-            return
+        text = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    location = locate_insights_section(text)
+    if location is None:
+        return ""
+    return text[location[1]:].strip()
 
-        effective_model, provider, note = _resolve_insights_call(
-            config, model, provider=provider
+
+def _record_post_insights_revision(job: Any, archive_path: Path) -> None:
+    """Pin the archive revision the downstream stages will consume.
+
+    Insights is the only stage that rewrites the archive. Recording the
+    revision right after it settles gives a downstream-only resume a real
+    expected value to compare against, so an edit to the transcript or its
+    insights section between insights succeeding and a later resume is
+    detected instead of silently folded into the project doc and proposals.
+    """
+    from ciao.archive_jobs import archive_content_revision
+
+    revision = archive_content_revision(archive_path)
+    if revision:
+        job.post_insights_revision = revision
+
+
+async def run_archive_pipeline(
+    job: Any,
+    inputs: dict[str, Any],
+    *,
+    stages: list[str] | None = None,
+) -> Any:
+    """Execute the requested pipeline stages, recording each on the manifest.
+
+    ``stages`` defaults to the job's resumable set. Each stage re-derives its
+    own prior completion from the archive/destinations (the same guards the old
+    all-in-one function used), so running a stage twice is safe: insights is a
+    no-op when the section exists, the doc fold has its equal-content guard, the
+    trajectory overwrites its own file, and proposals/reconcile dedupe against
+    the queue, sidecar and region.
+
+    Stages are independent where the old code made them so. A failed insights
+    stage leaves the project fold and memory proposals *pending* (they need its
+    text), while the trajectory still runs — mirroring the old ``finally`` that
+    always wrote one. A single failing stage is recorded ``failed`` and never
+    crashes the caller.
+    """
+    from ciao.archive_jobs import (
+        FAILED,
+        RUNNING,
+        SKIPPED,
+        SUCCEEDED,
+        TOMBSTONED,
+        text_revision,
+    )
+
+    if job.tombstoned or job.state == TOMBSTONED:
+        logger.info(
+            "Archive pipeline skipped for %s: job tombstoned", job.archive_path
         )
-        async with job_runs.track(
-            "insights", "Session insights", model=effective_model,
-            extra={
-                "archive": archive_path.name,
-                "session_id": session_id,
-                "chat_id": chat_id,
-            },
-        ) as run:
-            if note:
-                run.extra["fallback"] = note
-                logger.info("Insights %s", note)
-            # Fact-augmented extraction: code fetches the workspace's
-            # current memory entries and entity roster; the model stays
-            # sandboxed (docs/MEMORY_DESIGN.md).
-            context_block = _known_context_block(guide_path, proposal_vault_root)
-            if text_mode:
-                output, model_error = await _run_text_model_with_retry(
-                    archive_path=archive_path,
-                    model=effective_model,
-                    provider=provider,
-                    cwd=workspace_root,
-                    context_block=context_block,
-                )
-            else:
-                output, model_error = await _run_model_with_retry(
-                    filtered_jsonl=filtered_jsonl,
-                    model=effective_model,
-                    provider=provider,
-                    cwd=workspace_root,
-                    context_block=context_block,
-                )
-            if output:
-                _append_section(archive_path, output)
-                logger.info("Appended session insights to %s", archive_path)
-            elif model_error:
-                run.status = "error"
-                run.error = model_error
-            else:
-                # The call came back clean with nothing in it. That is the
-                # right answer for a transcript that holds no durable signal —
-                # a no-op nightly curation, a one-line scheduled run — and it
-                # is what the system prompt asks for: omit empty sections, and
-                # never lift a maintenance session's own machinery as fact. A
-                # model that obeys both has nothing left to write. Reporting it
-                # as a failure put "insights failed" and a retry button on rows
-                # whose retry can only ever come back empty; a skip lets the
-                # settled line say "nothing durable to save" instead.
-                run.skip("no durable signal in this session")
+        return job
 
-        # Canonical project doc: fold Decisions/Open loops into the chat's
-        # project doc while the insights are fresh. The nightly curation
-        # schedule remains the cross-chat consolidator.
-        if output and project_doc_path:
-            # `effective_model` is still the Apple sentinel when insights ran
-            # on-device, and update_project_doc has no Apple branch — it would
-            # hand the literal id to a cloud runner, which fails with "there's
-            # an issue with the selected model (apple)". Fold the doc with the
-            # configured model instead; the insights themselves are already
-            # extracted at this point.
-            doc_model = effective_model
-            if native_sidecar.is_apple_model(doc_model):
-                doc_model = (config.insights_model or "").strip() or "sonnet"
+    archive_path: Path = inputs["archive_path"]
+    chat_id = job.chat_id
+    order = list(stages) if stages is not None else job.resumable()
+    if not order:
+        return job
+
+    if not archive_path.exists():
+        # A resume whose archive is gone is blocked, not failed: the file may
+        # come back (a restore) and a retry should then succeed.
+        for name in order:
+            job.block(name, "archive file is missing")
+        job.save()
+        return job
+
+    job.started = True
+    config = inputs["config"]
+    model = str(inputs.get("model") or "")
+    provider = str(inputs.get("provider") or "claude")
+    filtered_jsonl = str(inputs.get("filtered_jsonl") or "")
+    session_id = str(inputs.get("session_id") or "")
+    workspace_root = inputs.get("workspace_root")
+    vault_root = inputs.get("vault_root")
+    proposal_vault_root = inputs["proposal_vault_root"]
+    guide_path = inputs.get("guide_path")
+    trajectory_meta = dict(inputs.get("trajectory_meta") or {})
+    trajectories_enabled = bool(inputs.get("trajectories_enabled", True))
+    memory_proposals_enabled = bool(inputs.get("memory_proposals_enabled", True))
+    project_doc_path = str(inputs.get("project_doc_path") or "")
+    text_mode = bool(inputs.get("text_mode", False))
+
+    # Carry the cross-stage facts on the manifest so a resume reconstructs the
+    # same decisions the original run would have made.
+    output = str(job.inputs.get("insights_output") or "")
+    doc_fold_wrote = bool(job.inputs.get("doc_fold_wrote", False))
+    resolved_doc_path = str(job.inputs.get("resolved_doc_path") or "")
+    effective_model = str(job.inputs.get("effective_model") or model)
+    effective_provider = str(job.inputs.get("effective_provider") or provider)
+    if not output and _has_insights_section(archive_path):
+        output = _insights_body_from_archive(archive_path)
+
+    for name in order:
+        if job.tombstoned:
+            return job
+        if job.status_of(name) in (SUCCEEDED, SKIPPED):
+            continue
+
+        # ── Eligibility: a dependent stage waits for the text it needs ─────
+        if name in ("project_doc_update", "memory_proposals"):
+            # Both stages consume the extraction's text. While insights is
+            # still pending/running (or failed), leave them pending so a resume
+            # runs them once the text exists.
+            if not output and not job.is_settled("insights"):
+                continue
+        if name == "project_doc_update":
+            if not (output and project_doc_path):
+                job.mark(
+                    name,
+                    SKIPPED,
+                    "no insights text" if not output else "no canonical project doc",
+                )
+                job.save()
+                continue
+        if name == "memory_proposals":
+            if proposal_vault_root is None:
+                # A chat that runs in a workspace but whose vault root cannot be
+                # resolved is a broken owner: the facts are real and fileable
+                # once the registry is fixed, so this is blocked/recoverable,
+                # not a silent skip. A chat with no workspace at all (General)
+                # legitimately has no queue to write to.
+                if memory_proposals_enabled and trajectory_meta.get("workspace"):
+                    job.block(name, "workspace owner unavailable")
+                else:
+                    job.mark(name, SKIPPED, "workspace owner unavailable")
+                job.save()
+                continue
+            if not (memory_proposals_enabled and output):
+                job.mark(
+                    name,
+                    SKIPPED,
+                    "memory proposals disabled"
+                    if not memory_proposals_enabled
+                    else "no insights text",
+                )
+                job.save()
+                continue
+        if name == "trajectory" and not (
+            trajectories_enabled and session_id and filtered_jsonl
+        ):
+            job.mark(name, SKIPPED, "no session input or trajectories disabled")
+            job.save()
+            continue
+
+        try:
+            job.mark(name, RUNNING)
+            job.save()
+
+            if name == "insights":
+                if _has_insights_section(archive_path):
+                    output = output or _insights_body_from_archive(archive_path)
+                    job.inputs["insights_output"] = output
+                    job.mark(name, SKIPPED, "archive already has insights")
+                    _record_post_insights_revision(job, archive_path)
+                    job.save()
+                    continue
+                effective_model, effective_provider, note = _resolve_insights_call(
+                    config, model, provider=provider
+                )
+                job.inputs["effective_model"] = effective_model
+                job.inputs["effective_provider"] = effective_provider
+                model_error = ""
+                async with job_runs.track(
+                    "insights", "Session insights", model=effective_model,
+                    extra={
+                        "archive": archive_path.name,
+                        "session_id": session_id,
+                        "chat_id": chat_id,
+                    },
+                ) as run:
+                    if note:
+                        run.extra["fallback"] = note
+                        logger.info("Insights %s", note)
+                    context_block = _known_context_block(guide_path, proposal_vault_root)
+                    if text_mode:
+                        extracted, model_error = await _run_text_model_with_retry(
+                            archive_path=archive_path,
+                            model=effective_model,
+                            provider=effective_provider,
+                            cwd=workspace_root,
+                            context_block=context_block,
+                        )
+                    else:
+                        extracted, model_error = await _run_model_with_retry(
+                            filtered_jsonl=filtered_jsonl,
+                            model=effective_model,
+                            provider=effective_provider,
+                            cwd=workspace_root,
+                            context_block=context_block,
+                        )
+                    if extracted:
+                        # The model call above is an await point: a delete may
+                        # have tombstoned this job while it ran. Re-check before
+                        # the append so cancellation cannot be raced by a write
+                        # of derived state for a deleted chat.
+                        if job.tombstoned:
+                            return job
+                        # Record the exact section hash *before* the write, so a
+                        # crash between the append and the stage mark leaves
+                        # evidence a resume can authenticate against. If that
+                        # evidence cannot be persisted, do not mutate the
+                        # archive: a crash would otherwise leave a job that can
+                        # never authenticate its own append.
+                        section = _format_section(extracted)
+                        if section:
+                            job.insights_append_revision = text_revision(section)
+                            if not job.save():
+                                raise RuntimeError(
+                                    "could not persist the insights append evidence"
+                                )
+                        _append_section(archive_path, extracted)
+                        output = extracted
+                        logger.info("Appended session insights to %s", archive_path)
+                    elif model_error:
+                        run.status = "error"
+                        run.error = model_error
+                    else:
+                        run.skip("no durable signal in this session")
+                if model_error:
+                    # Keep the exact upstream reason; the runner records the
+                    # stage failed so a retry resumes here.
+                    raise RuntimeError(model_error)
+                job.inputs["insights_output"] = output
+                if output:
+                    job.mark(name, SUCCEEDED)
+                else:
+                    job.mark(name, SKIPPED, "no durable signal in this session")
+                _record_post_insights_revision(job, archive_path)
+                job.save()
+                continue
+
+            if name == "project_doc_update":
+                doc_model = effective_model
                 if native_sidecar.is_apple_model(doc_model):
-                    doc_model = "sonnet"
-            try:
-                from ciao.project_doc_update import update_project_doc
-
+                    doc_model = (config.insights_model or "").strip() or "sonnet"
+                    if native_sidecar.is_apple_model(doc_model):
+                        doc_model = "sonnet"
                 doc = Path(project_doc_path)
                 if not doc.is_absolute() and workspace_root is not None:
                     doc = workspace_root / project_doc_path
                 resolved_doc_path = str(doc)
+                wrote = False
+                # `False` alone is ambiguous: the helper returns it both for a
+                # legitimate no-op (NO_CHANGES, guards) and for a provider or
+                # write failure. The error list separates the two so a real
+                # failure stays retryable instead of settling as success.
+                doc_errors: list[str] = []
                 async with job_runs.track(
-                    "project_doc_update", "Project doc update",
-                    model=doc_model,
-                    extra={
-                        "doc": str(doc),
-                        "archive": archive_path.name,
-                        "chat_id": chat_id,
-                    },
+                    "project_doc_update", "Project doc update", model=doc_model,
+                    extra={"doc": str(doc), "archive": archive_path.name, "chat_id": chat_id},
                 ) as run:
+                    from ciao.project_doc_update import update_project_doc
+
+                    # The fold does its own model call: re-check the tombstone
+                    # so a delete during this stage cannot fold the doc for a
+                    # chat that no longer exists.
+                    if job.tombstoned:
+                        return job
                     wrote = await update_project_doc(
                         doc_path=doc,
                         insights_md=output,
                         model=doc_model,
-                        provider=provider,
+                        provider=effective_provider,
                         cwd=workspace_root,
+                        error_out=doc_errors,
                     )
                     run.extra["wrote"] = wrote
-                    doc_fold_wrote = wrote
-                    if not wrote:
+                    if doc_errors:
+                        run.status = "error"
+                        run.error = doc_errors[-1]
+                    elif not wrote:
                         run.skip("no material changes for the project doc")
-            except Exception:  # noqa: BLE001 — never crash the loop
-                logger.exception(
-                    "Project doc update failed for %s", project_doc_path
-                )
-    except Exception:  # noqa: BLE001 — fire-and-forget, never crash the loop
-        logger.exception("Insights extraction failed for %s", archive_path)
-    finally:
-        if trajectories_enabled and session_id and filtered_jsonl:
-            try:
+                if doc_errors:
+                    raise RuntimeError(doc_errors[-1])
+                doc_fold_wrote = wrote
+                job.inputs["doc_fold_wrote"] = doc_fold_wrote
+                job.inputs["resolved_doc_path"] = resolved_doc_path
+                job.mark(name, SUCCEEDED)
+                job.save()
+                continue
+
+            if name == "trajectory":
                 from ciao.trajectory_builder import build_and_persist_trajectory
 
-                meta = trajectory_meta or {}
+                trajectory_errors: list[str] = []
                 with job_runs.track_sync(
                     "trajectory", "Trajectory capture",
                     extra={"session_id": session_id, "chat_id": chat_id},
@@ -885,43 +1109,39 @@ async def extract_and_append(
                         filtered_jsonl=filtered_jsonl,
                         archive_path=archive_path,
                         insights_text=output or "",
-                        context=meta.get("context", ""),
-                        project_id=meta.get("project_id", ""),
-                        chat_id=meta.get("chat_id", ""),
-                        task_summary=meta.get("task_summary", ""),
-                        workspace=meta.get("workspace", ""),
+                        context=trajectory_meta.get("context", ""),
+                        project_id=trajectory_meta.get("project_id", ""),
+                        chat_id=trajectory_meta.get("chat_id", ""),
+                        task_summary=trajectory_meta.get("task_summary", ""),
+                        workspace=trajectory_meta.get("workspace", ""),
                         workspace_root=workspace_root,
+                        error_out=trajectory_errors,
                     )
                     if path:
                         run.extra["path"] = str(path)
+                    elif trajectory_errors:
+                        run.status = "error"
+                        run.error = trajectory_errors[-1]
                     else:
                         run.skip("empty session / no trajectory written")
-            except Exception:  # noqa: BLE001 — never crash the loop
-                logger.exception(
-                    "Trajectory persist failed for session %s", session_id
-                )
-        # Memory proposals: scan the freshly-appended insights section and
-        # route each fact to its destination. Confident, state-shaped facts
-        # are auto-applied straight to their destination (CLAUDE.md regions,
-        # People notes, Learnings); `[project]` facts the doc fold consumed
-        # are dropped; everything unsure or failed waits in
-        # ``Workspace/Memory-Proposals.md``.
-        if (
-            memory_proposals_enabled
-            and proposal_vault_root is not None
-            and output
-        ):
-            try:
+                if trajectory_errors:
+                    # Eligibility already proved the input was non-empty, so a
+                    # None here is a parse/persist failure, not "nothing to do".
+                    raise RuntimeError(trajectory_errors[-1])
+                job.mark(name, SUCCEEDED)
+                job.save()
+                continue
+
+            if name == "memory_proposals":
                 from ciao.memory_proposals import (
                     plan_region_reconcile,
                     proposals_from_archive,
                 )
 
                 # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
-                # model call per region compares the new facts against the
-                # region's current entries so near-duplicates update the old
-                # entry instead of piling up beside it. Best-effort — any
-                # failure degrades to the plain append path below.
+                # model call per region. Best-effort — a failure degrades to
+                # the plain append path and is never recorded as a stage
+                # failure on its own.
                 region_decisions = None
                 if guide_path is not None:
                     try:
@@ -929,7 +1149,7 @@ async def extract_and_append(
                             archive_path,
                             guide_path,
                             model=effective_model,
-                            provider=provider,
+                            provider=effective_provider,
                             cwd=workspace_root,
                         )
                     except Exception:  # noqa: BLE001 — reconcile is optional
@@ -937,17 +1157,17 @@ async def extract_and_append(
                             "Region reconcile failed for %s", archive_path
                         )
 
+                # The reconcile above awaits a model: re-check before writing
+                # proposals so a delete during it cannot file facts for a chat
+                # that no longer exists.
+                if job.tombstoned:
+                    return job
+                proposal_errors: list[str] = []
                 with job_runs.track_sync(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name, "chat_id": chat_id},
                 ) as run:
-                    # The count is what the archived chat reports back to the
-                    # user ("3 memory proposals"); a bare bool cannot say that.
                     proposal_stats: dict[str, int] = {}
-                    # The guide is the archive owner's workspace agent root,
-                    # threaded from the caller: region auto-promotion must
-                    # write the workspace the chat ran in, never an
-                    # install-root file.
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
@@ -957,20 +1177,37 @@ async def extract_and_append(
                         project_doc_path=resolved_doc_path,
                         project_fold_wrote=doc_fold_wrote,
                         region_decisions=region_decisions,
-                        workspace=(trajectory_meta or {}).get("workspace", ""),
+                        workspace=trajectory_meta.get("workspace", ""),
+                        error_out=proposal_errors,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
                     run.extra["promoted"] = proposal_stats.get("promoted", 0)
-            except Exception:  # noqa: BLE001 — fire-and-forget, never crash
-                logger.exception(
-                    "Memory proposals failed for %s", archive_path
-                )
-        elif memory_proposals_enabled and output:
-            logger.info(
-                "Memory proposals skipped for %s: workspace owner unavailable",
-                archive_path,
+                    if proposal_errors:
+                        run.status = "error"
+                        run.error = proposal_errors[-1]
+                if proposal_errors:
+                    # A queue that could not be written, or a raise inside the
+                    # helper, means unapplied facts were not queued: keep the
+                    # stage retryable rather than settling it.
+                    raise RuntimeError(proposal_errors[-1])
+                job.mark(name, SUCCEEDED)
+                job.save()
+                continue
+
+        except Exception as exc:  # noqa: BLE001 — never crash the caller
+            logger.exception(
+                "Archive pipeline stage %s failed for %s", name, archive_path
             )
+            job.mark(name, FAILED, f"{type(exc).__name__}: {exc}"[:400])
+            job.save()
+            # Keep going: a later independent stage (the trajectory) must still
+            # get its chance, exactly as the old `finally` guaranteed. Stages
+            # that depended on this one stay pending and are retried together.
+            continue
+
+    job.save()
+    return job
 
 
 async def retry_insights_for_chat(
@@ -1098,12 +1335,28 @@ def _indent_body_fences(text: str) -> str:
     )
 
 
-def _append_section(path: Path, body: str) -> None:
+def _format_section(body: str) -> str:
+    """The exact insights section ``_append_section`` writes, or '' for empty."""
     text = _indent_body_fences(body.strip())
     if not text:
-        return
+        return ""
+    return f"{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n"
+
+
+def _append_section(path: Path, body: str) -> str:
+    """Append the insights section; return the exact section text written.
+
+    The returned string is the section from its stamp onward — exactly what
+    ``locate_insights_section`` points at — so a caller can record its hash as
+    crash-recovery evidence: a resume authenticates the on-disk section against
+    it instead of trusting any tail that follows a matching prefix.
+    """
+    section = _format_section(body)
+    if not section:
+        return ""
     with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n")
+        f.write(f"\n\n{section}")
+    return section
 
 
 async def _run_model_with_retry(
