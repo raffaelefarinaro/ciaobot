@@ -385,6 +385,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_PUBLIC_PRIVATE_PATTERNS`: comma-separated private string patterns used by `ciao public-preflight scan` when a `--private-patterns` file is not supplied. Intended for public extraction checks, not normal runtime.
 - `CIAO_ALLOW_LAUNCH_AGENT_REPOINT`: set to `1`/`true`/`yes` (case-insensitive) to allow `setup_workspace`/`_write_launchd_plist` and `ciao setup` to repoint the live `~/Library/LaunchAgents/com.ciao.server.plist` to a different workspace without `confirm_repoint=True`/`--yes`. For automation that intentionally moves the install; leave unset for the safe default (refuse). `CIAO_LAUNCH_AGENTS_DIR` (test-only) already isolates the suite by redirecting the plist location.
+- `CIAO_EVAL_MAX_CALLS`: hard call ceiling for one `ciao eval run` (the bounded model-backed behavioral probe). Default `40`. The runner stops claiming new probes at the ceiling and records the remainder as `budget_exhausted` rather than continuing to spend. The deterministic `ciao eval contracts` half never calls a model and ignores it.
+- `CIAO_EVAL_MAX_COST_USD`: hard estimated-cost ceiling (USD) for one `ciao eval run`. Default `2.0`. `run_oneshot` returns text rather than a cost, so cost is enforced as a declared per-call upper bound (`calls × CIAO_EVAL_COST_PER_CALL_USD`); the report records the estimate used.
+- `CIAO_EVAL_COST_PER_CALL_USD`: the declared per-call upper-bound cost used to enforce `CIAO_EVAL_MAX_COST_USD`. Default `0.05`. Raise it when the evaluated model is materially more expensive per call so the ceiling stays honest.
 
 **Note:** `ciao gws-auth-helper` is the helper for headless `gws` auth when the keyring backend fails.
 

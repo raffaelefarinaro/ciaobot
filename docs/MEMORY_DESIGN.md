@@ -129,3 +129,11 @@ LongMemEval's: knowledge updates, temporal reasoning, abstention.
 `tests/test_memory_eval.py` pins those deterministically over a fixture
 vault; `docs/MEMORY_EVAL.md` carries the sandboxed live-vault probe runbook.
 Every recall failure observed in the wild becomes a fixture case first.
+
+Retrieval is only half the question: the deterministic eval cannot tell
+whether the assistant *uses* results well, and a prompt or provider change can
+alter auto-saving, tool selection, unattended behavior, or source handling
+while it stays green. `docs/BEHAVIORAL_EVAL.md` and `ciao/behavioral_eval.py`
+add versioned behavioral evaluations for that half — synthetic scenarios with
+baseline/candidate reports tied to exact prompt and provider versions, plus a
+model-free contract check that carries the CI gate.
