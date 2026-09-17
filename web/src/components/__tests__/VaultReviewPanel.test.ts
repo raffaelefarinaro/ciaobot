@@ -5,8 +5,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import VaultReviewPanel from '../VaultReviewPanel.vue'
 import { useVaultReviewStore } from '../../stores/vaultReview'
+import { useProjectStore } from '../../stores/projects'
 import { pendingConfirm } from '../../lib/confirm'
-import type { VaultReviewCandidate, VaultTrashedNote } from '../../lib/types'
+import type { ChatInfo, ProjectInfo, VaultReviewCandidate, VaultTrashedNote } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -36,6 +37,19 @@ function candidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCa
     disposition: '',
     deferred_until: '',
     ...overrides,
+  }
+}
+
+function generalProject(): ProjectInfo {
+  return {
+    project_id: 'p-general',
+    name: 'General',
+    workspace: 'personal',
+    context: '',
+    created_at: '2026-09-01T00:00:00Z',
+    order: 0,
+    vault_folder: '',
+    is_auto: true,
   }
 }
 
@@ -193,6 +207,38 @@ describe('VaultReviewPanel', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
     vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  it('opens a seeded discussion chat with the note pinned, and decides nothing', async () => {
+    // "Talk about it" is the only action here that must NOT touch the queue:
+    // the candidate stays flagged until the user picks a disposition, and the
+    // prompt is a draft so their own question can replace it before sending.
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    const pinFile = vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    apiPost.mockClear()
+
+    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await flushPromises()
+
+    expect(createChat).toHaveBeenCalledTimes(1)
+    const [projectId, title, seed] = createChat.mock.calls[0]
+    expect(projectId).toBe('p-general')
+    expect(title).toBe('Retire Mo?')
+    expect(seed).toContain('memory-vault/People/Mo.md')
+    expect(seed).toContain('no other note links to it')
+    expect(seed).toContain('I will pick Still true, Retire, or Later myself')
+    expect(pinFile).toHaveBeenCalledWith('c-new', 'memory-vault/People/Mo.md')
+    // No disposition was recorded: the row is still in the queue.
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.findAll('.vr-row')).toHaveLength(1)
     wrapper.unmount()
   })
 
