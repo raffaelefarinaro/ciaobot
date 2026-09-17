@@ -104,6 +104,16 @@ class UndoUnsupported(MemoryReceiptError):
     """The receipt has no before image or an operation this protocol cannot reverse."""
 
 
+class QueueReceiptUnavailable(MemoryReceiptError):
+    """The receipt journal could not record a prepared row.
+
+    Raised before a queue rewrite so a mutation never proceeds without durable
+    recovery evidence. Retryable: the journal may become writable again.
+    """
+
+    retryable = True
+
+
 # ── Digest / id helpers ───────────────────────────────────────────────────
 
 
@@ -714,31 +724,39 @@ def queue_resolution(
             "before_revision": content_revision(before),
             "before_text": _image(before),
         }
+        # The prepared row is the crash-safety boundary for this rewrite: if it
+        # cannot be persisted, a crash after the queue replacement would remove
+        # the proposals with nothing for recovery or History to find. Abort
+        # instead of proceeding without durable evidence.
         try:
             _append(journal, {**base, "status": PREPARED})
-        except Exception:  # noqa: BLE001 — the removal proceeds regardless
-            logger.debug("memory receipts: could not prepare queue receipt", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — no evidence, no mutation
+            logger.error(
+                "memory receipts: could not prepare queue receipt for %s: %s",
+                proposals_path,
+                exc,
+            )
+            raise QueueReceiptUnavailable(
+                "the receipt journal could not record a prepared row"
+            ) from exc
         try:
             yield base
         finally:
-            try:
-                _write_queue_receipt(
-                    proposals_path,
-                    removed_text=removed_text,
-                    kind=kind,
-                    promoted=promoted,
-                    actor=actor,
-                    source=source,
-                    workspace=workspace,
-                    vault_root=vault_root,
-                    before_text=before,
-                    after_text=None,
-                    status=APPLIED,
-                    receipt_id=rid,
-                    prepared=True,
-                )
-            except Exception:  # noqa: BLE001 — recording must not break removal
-                logger.debug("memory receipts: queue receipt failed", exc_info=True)
+            _write_queue_receipt(
+                proposals_path,
+                removed_text=removed_text,
+                kind=kind,
+                promoted=promoted,
+                actor=actor,
+                source=source,
+                workspace=workspace,
+                vault_root=vault_root,
+                before_text=before,
+                after_text=None,
+                status=APPLIED,
+                receipt_id=rid,
+                prepared=True,
+            )
 
 
 def _write_queue_receipt(
@@ -924,10 +942,19 @@ def queue_resolution_multi(
             "before_revision": content_revision(before),
             "before_text": _image(before),
         }
+        # Abort before the rewrite when the crash-safety boundary cannot be
+        # persisted; see `queue_resolution`.
         try:
             _append(journal, {**base, "status": PREPARED})
-        except Exception:  # noqa: BLE001 — the removal proceeds regardless
-            logger.debug("memory receipts: could not prepare batch receipt", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — no evidence, no mutation
+            logger.error(
+                "memory receipts: could not prepare batch receipt for %s: %s",
+                proposals_path,
+                exc,
+            )
+            raise QueueReceiptUnavailable(
+                "the receipt journal could not record a prepared row"
+            ) from exc
         completed = False
         try:
             yield base
@@ -1096,9 +1123,14 @@ def _reconcile_region(
         return _settle(journal, receipt, CONFLICT, "; ".join(d.message for d in diags))
     current = content_revision(serialize_entries(entries))
     if current == str(receipt.get("after_revision", "")):
-        settled = _settle(journal, receipt, APPLIED, "recovered after crash")
-        _complete_outcome(receipt)
-        return settled
+        # Complete the decision sidecar *before* the terminal row: a crash
+        # between the two would otherwise leave a terminal `applied` receipt
+        # that recovery skips, so the fact could be re-filed by the next pass.
+        completed = _complete_outcome(receipt)
+        return _settle(
+            journal, receipt, APPLIED, "recovered after crash",
+            outcome_completed=completed,
+        )
     if current == str(receipt.get("before_revision", "")):
         return _settle(journal, receipt, ROLLED_BACK, "write never landed")
     return _settle(
@@ -1179,15 +1211,19 @@ def _reconcile_queue(
     if not still_present:
         # The rewrite landed. Populate the after image/revision from disk so a
         # recovered receipt stays undoable: a prepared row carries only the
-        # before image, and `is_undoable` requires both.
+        # before image, and `is_undoable` requires both. Complete the decision
+        # sidecar *before* the terminal row so a crash between the two stays
+        # recoverable (a terminal row would be skipped by the next pass).
         settled_receipt = {
             **receipt,
             "after_revision": content_revision(text),
             "after_text": _image(text),
         }
-        settled = _settle(journal, settled_receipt, APPLIED, "bullet already removed")
-        _complete_outcome(settled_receipt)
-        return settled
+        completed = _complete_outcome(settled_receipt)
+        return _settle(
+            journal, settled_receipt, APPLIED, "bullet already removed",
+            outcome_completed=completed,
+        )
     detail = (
         f"{len(still_present)} batch bullet(s) still queued"
         if len(needles) > 1
@@ -1197,7 +1233,12 @@ def _reconcile_queue(
 
 
 def _settle(
-    journal: Path, receipt: dict[str, Any], status: str, detail: str
+    journal: Path,
+    receipt: dict[str, Any],
+    status: str,
+    detail: str,
+    *,
+    outcome_completed: bool | None = None,
 ) -> dict[str, Any]:
     settled = {
         **{k: v for k, v in receipt.items() if k != "v"},
@@ -1206,11 +1247,13 @@ def _settle(
         "detail": detail,
         "settled_at": _now(),
     }
+    if outcome_completed is not None:
+        settled["outcome_recorded"] = outcome_completed
     _append(journal, settled)
     return settled
 
 
-def _complete_outcome(receipt: dict[str, Any]) -> None:
+def _complete_outcome(receipt: dict[str, Any]) -> bool:
     """Idempotently finish the decision record an interrupted apply missed.
 
     Region receipts complete a promotion for the fact they wrote. Queue
@@ -1218,15 +1261,20 @@ def _complete_outcome(receipt: dict[str, Any]) -> None:
     would have written after the receipt: a crash between the queue wrapper's
     terminal row and that call otherwise left the resolved proposal re-filable
     by the next archive pass.
+
+    Every write is ``once=True``, so a recovery pass that reruns this (because
+    a prior crash landed between the sidecar write and the terminal row) cannot
+    append a duplicate decision. Returns whether the sidecar now reflects the
+    decision, so a terminal row can record the outcome as durably completed.
     """
     if receipt.get("outcome_recorded"):
-        return
+        return True
     fact = str(receipt.get("fact_text", "")).strip() or str(
         receipt.get("removed_text", "")
     ).strip()
     vault_root = receipt.get("vault_root")
     if not fact:
-        return
+        return True
     try:
         if str(receipt.get("kind", "")) == "queue_resolve" or receipt.get("queue"):
             from ciao.memory_proposals import record_dismissal, record_promotion
@@ -1238,7 +1286,7 @@ def _complete_outcome(receipt: dict[str, Any]) -> None:
                 else None
             )
             if queue is None:
-                return
+                return False
             texts = receipt.get("removed_texts")
             facts = (
                 [str(t) for t in texts if str(t)]
@@ -1266,14 +1314,15 @@ def _complete_outcome(receipt: dict[str, Any]) -> None:
                         via=str(receipt.get("source", "")),
                         source=str(receipt.get("source", "")),
                         outcome=str(receipt.get("action", "")),
+                        once=True,
                     )
-            return
+            return True
         from ciao.memory_proposals import record_promotion
 
         if vault_root:
             queue = Path(str(vault_root)) / "Workspace" / "Memory-Proposals.md"
         else:
-            return
+            return False
         record_promotion(
             queue,
             text=fact,
@@ -1283,8 +1332,10 @@ def _complete_outcome(receipt: dict[str, Any]) -> None:
             outcome="written",
             once=True,
         )
+        return True
     except Exception:  # noqa: BLE001 — completing the record is best-effort
         logger.debug("memory receipts: could not complete outcome", exc_info=True)
+        return False
 
 
 # ── Undo ──────────────────────────────────────────────────────────────────

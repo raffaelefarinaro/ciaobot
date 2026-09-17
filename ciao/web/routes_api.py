@@ -43,6 +43,7 @@ from ciao import desktop_build
 from ciao import provider_registry
 from ciao import vault_rehome
 from ciao.jsonio import write_private_text
+from ciao.memory_receipts import QueueReceiptUnavailable
 from ciao.memory_tool import resolve_region
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.native_sessions import live_sessions_for_workspace
@@ -8250,9 +8251,19 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         # `queue_lock` retries with a synchronous sleep while another writer
         # holds it, so running it inline would stall every other request and
         # WebSocket for the wait.
-        result = await asyncio.to_thread(
-            _sweep_queue_file, queue, cutoff, config, workspace
-        )
+        try:
+            result = await asyncio.to_thread(
+                _sweep_queue_file, queue, cutoff, config, workspace
+            )
+        except QueueReceiptUnavailable as exc:
+            return JSONResponse(
+                {
+                    "error": "the memory receipt journal is unavailable; "
+                    "no proposals were removed",
+                    "detail": str(exc),
+                },
+                status_code=503,
+            )
         removed += result["removed"]
         if result["changed"]:
             from ciao.memory_proposals import record_dismissal
@@ -8450,15 +8461,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
             }
             for row in entry["rows"]
         ]
-        removed_here = await asyncio.to_thread(
-            _rewrite_queue_batch,
-            queue,
-            entry["rows"],
-            keep_lines,
-            removals,
-            entry["workspace"],
-            vault_for_receipt,
-        )
+        try:
+            removed_here = await asyncio.to_thread(
+                _rewrite_queue_batch,
+                queue,
+                entry["rows"],
+                keep_lines,
+                removals,
+                entry["workspace"],
+                vault_for_receipt,
+            )
+        except QueueReceiptUnavailable as exc:
+            return JSONResponse(
+                {
+                    "error": "the memory receipt journal is unavailable; "
+                    "no proposals were removed",
+                    "detail": str(exc),
+                },
+                status_code=503,
+            )
         self_request_removed.update(removed_here)
         # Record THIS queue's outcomes immediately after its rewrite lands: a
         # later file failing to persist must not take already-persisted
@@ -8901,17 +8922,28 @@ async def proposal_action(request: Request) -> JSONResponse:
     # worker thread so a contended queue lock cannot stall the event loop, and
     # the prepared receipt is written before the rewrite so a crash between the
     # two is still recoverable: bullet gone means the removal landed.
-    removed_ours = await asyncio.to_thread(
-        _rewrite_queue_single,
-        queue,
-        ctx["line"],
-        str(ctx["row"].get("raw") or ""),
-        str(row.get("text") or ""),
-        str(row.get("kind") or ""),
-        action == "accept",
-        ctx["workspace"],
-        vault_for_receipt,
-    )
+    try:
+        removed_ours = await asyncio.to_thread(
+            _rewrite_queue_single,
+            queue,
+            ctx["line"],
+            str(ctx["row"].get("raw") or ""),
+            str(row.get("text") or ""),
+            str(row.get("kind") or ""),
+            action == "accept",
+            ctx["workspace"],
+            vault_for_receipt,
+        )
+    except QueueReceiptUnavailable as exc:
+        return JSONResponse(
+            {
+                "error": "the memory receipt journal is unavailable; "
+                "the proposal was not removed",
+                "detail": str(exc),
+                "id": pid,
+            },
+            status_code=503,
+        )
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])

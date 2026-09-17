@@ -978,6 +978,67 @@ def test_queue_recovery_completes_the_decision_sidecar(tmp_path):
     assert "A resolved fact." in sidecar.read_text(encoding="utf-8")
 
 
+def test_recovery_completes_the_sidecar_before_the_terminal_row(
+    tmp_path, monkeypatch,
+):
+    """A crash between the sidecar write and the terminal row stays recoverable.
+
+    The old order appended `applied` first, so a process exit before the
+    dismissal sidecar landed left a terminal receipt the next recovery pass
+    skipped — the resolved proposal could then be filed again. Completion now
+    happens before the terminal row, and the terminal row records
+    `outcome_recorded`.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    journal = mr.journal_path(tmp_path, None)
+    mr._append(
+        journal,
+        {
+            "id": "mrcpt_order",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "A resolved fact.",
+            "proposal_kind": "memory",
+            "promoted": False,
+            "action": "dismissed",
+            "status": mr.PREPARED,
+        },
+    )
+
+    # Simulate a crash the moment the sidecar is completed: the terminal row
+    # never lands.
+    real_append = mr._append
+
+    def crash_on_terminal(path, payload):
+        if payload.get("status") == mr.APPLIED and payload.get("recovered"):
+            raise OSError("crash before terminal row")
+        return real_append(path, payload)
+
+    monkeypatch.setattr(mr, "_append", crash_on_terminal)
+    # `recover_pending` is per-row best-effort: it logs the failure and moves on.
+    mr.recover_pending(journal=journal)
+    monkeypatch.setattr(mr, "_append", real_append)
+
+    # The decision sidecar landed even though the terminal row did not.
+    sidecar = mp.dismissed_log_path(queue)
+    assert sidecar.exists() and "A resolved fact." in sidecar.read_text(encoding="utf-8")
+    # The receipt is still non-terminal (no applied row was written).
+    assert mr.find_receipt(journal, "mrcpt_order")["status"] == mr.PREPARED
+
+    # The next pass re-runs completion — idempotently, because every write is
+    # `once=True` — and finally records the terminal row.
+    result = mr.recover_pending(journal=journal)
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_order"]
+    assert settled and settled[0]["status"] == mr.APPLIED
+    assert settled[0].get("outcome_recorded") is True
+    # Exactly one dismissal row for the fact.
+    sidecar_text = sidecar.read_text(encoding="utf-8")
+    assert sidecar_text.count("A resolved fact.") == 1
+
+
 def test_settlement_distinguishes_bullets_of_the_same_text_by_kind(tmp_path):
     """Removing ``[memory] Use Python`` is not blocked by ``[profile] Use Python``.
 
@@ -1117,6 +1178,66 @@ def test_partial_queue_rewrite_is_left_for_recovery(tmp_path):
     # APPLIED) instead of finding a terminal row and skipping it.
     result = mr.recover_pending(journal=journal)
     assert [r["id"] for r in result.reconciled] == [rows[-1]["id"]]
+
+
+def test_batch_rewrite_aborts_when_the_prepared_row_cannot_persist(
+    tmp_path, monkeypatch,
+):
+    """No durable prepared row means no queue mutation.
+
+    The prepared row is the crash-safety boundary for a batch rewrite; if the
+    journal cannot record it, a crash after the queue replacement would remove
+    the proposals with nothing for recovery or History to find.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    original = "# Memory Proposals\n\n- [memory] Fact A.  _(from: Decisions)_\n"
+    queue.write_text(original, encoding="utf-8")
+
+    def boom(journal, payload):
+        raise OSError("journal read-only")
+
+    monkeypatch.setattr(mr, "_append", boom)
+
+    with pytest.raises(mr.QueueReceiptUnavailable):
+        with mr.queue_resolution_multi(
+            queue,
+            [{"text": "Fact A.", "kind": "memory", "promoted": False}],
+            actor="operator",
+            source="pwa",
+            vault_root=tmp_path,
+        ):
+            # The body must never run: the wrapper aborts before yielding.
+            queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    assert queue.read_text(encoding="utf-8") == original
+
+
+def test_single_resolution_aborts_when_the_prepared_row_cannot_persist(
+    tmp_path, monkeypatch,
+):
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    original = "# Memory Proposals\n\n- [memory] Fact A.  _(from: Decisions)_\n"
+    queue.write_text(original, encoding="utf-8")
+
+    monkeypatch.setattr(
+        mr, "_append", lambda journal, payload: (_ for _ in ()).throw(OSError("nope"))
+    )
+
+    with pytest.raises(mr.QueueReceiptUnavailable):
+        with mr.queue_resolution(
+            queue,
+            removed_text="Fact A.",
+            kind="memory",
+            promoted=False,
+            actor="operator",
+            source="cli",
+            vault_root=tmp_path,
+        ):
+            queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    assert queue.read_text(encoding="utf-8") == original
 
 
 def test_single_route_uses_a_prepared_receipt_before_the_rewrite(tmp_path):

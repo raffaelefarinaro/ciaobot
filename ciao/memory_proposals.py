@@ -1284,6 +1284,7 @@ def record_dismissal(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
 
@@ -1315,6 +1316,7 @@ def record_dismissal(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        once=once,
     )
 
 

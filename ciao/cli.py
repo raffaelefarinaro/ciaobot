@@ -2908,17 +2908,27 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         # Bracket the removal with a receipt so a crash between the queue
         # rewrite and the decision record is recoverable, and so the History
         # surface can reverse a dismissal the curator made.
-        with queue_resolution(
-            path,
-            removed_text=resolved_text,
-            kind=resolved_kind,
-            promoted=bool(args.promoted),
-            actor="agent",
-            source="cli",
-            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
-            vault_root=vault,
-        ):
-            removed = remove_proposal_by_substring(path, resolved_text)
+        from ciao.memory_receipts import QueueReceiptUnavailable
+
+        try:
+            with queue_resolution(
+                path,
+                removed_text=resolved_text,
+                kind=resolved_kind,
+                promoted=bool(args.promoted),
+                actor="agent",
+                source="cli",
+                workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+                vault_root=vault,
+            ):
+                removed = remove_proposal_by_substring(path, resolved_text)
+        except QueueReceiptUnavailable as exc:
+            print(
+                f"the memory receipt journal is unavailable; "
+                f"the proposal was not removed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
     if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
