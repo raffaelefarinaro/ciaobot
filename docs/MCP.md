@@ -105,7 +105,7 @@ holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/opencode session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
-- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage, `memory_update` for a typed bounded edit, and the proposal tools for review/dismissal.
+- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage and `memory_update` for a typed bounded edit (the region cap is advisory — the write goes through and reports `over_cap`). Review, accept, and dismiss the proposals queue through the PWA; the one deliberate CLI exception is `ciao memory-proposal-add` / `ciao memory-proposals` / `ciao memory-proposal-dismiss`, which the nightly curation agent drives because one shell command beats a synchronous MCP round-trip per row.
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
   replicate.
@@ -140,7 +140,7 @@ skill surface (admin or redundant with native tools).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
+| Bounded memory | `memory_status`, `memory_update` (cap is advisory; proposals are reviewed in the PWA, or via the curation agent's CLI exception: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
 | Vault | `vault_search`, `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
 | Google Workspace | `gws_status` (read-only connection/token health) |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |

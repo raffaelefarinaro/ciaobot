@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ciao import job_runs, native_sidecar
+from ciao.memory_policy import UNATTENDED_MARKER as _UNATTENDED_MARKER
 
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
@@ -69,9 +70,8 @@ def resolve_insights_model(
 # The capsule marker an unattended (schedule/automation) turn carries in its
 # injected context. It survives into the raw session JSONL as part of the user
 # message, so extraction can tell a real user turn from the machinery that
-# fired it. See ciao/context/capsule.py.
-_UNATTENDED_MARKER = "unattended=true; this turn was fired automatically"
-
+# fired it. The value lives in ciao/memory_policy.py with the rest of the
+# policy, so the capsule and the extractor cannot disagree on the marker.
 _INSIGHTS_HEADER = "## Session insights"
 # Written by _append_section immediately before the header so the real
 # appended section is distinguishable from a transcript that merely quotes

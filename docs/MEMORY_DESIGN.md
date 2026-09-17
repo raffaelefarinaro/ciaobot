@@ -34,11 +34,15 @@ Ciaobot the core is the two fenced regions in each agent root's `CLAUDE.md`
 session; the long tail is the vault plus archived transcripts behind
 `vault_search` (SQLite FTS5).
 
-The core is hard-capped because an always-injected memory has a real cost:
+The core is deliberately small because an always-injected memory has a real cost:
 it spends context on every turn and, worse, it asserts itself before the
 user says a word — Simon Willison's critique of ChatGPT's dossier (casual
 experiments leaking into serious work) is the canonical failure. Small and
-legible beats large and clever here.
+legible beats large and clever here. Its character budget is *advisory* rather
+than enforced: a write always goes through and reports `over_cap`, because a
+refused write does not shrink the region, it only hides the fact — bounding is
+the job of consolidation during memory curation. The same policy is stated
+once in `ciao/memory_policy.py` and pinned by tests.
 
 The long tail keeps **verbatim transcripts as the store of record**, with
 extracted insights as an index over them — never a replacement. The two
@@ -59,7 +63,7 @@ outperforms any pipeline that summarizes those sources away.
 | Age is evidence, not a defect | Generative Agents' recency scoring (arXiv:2304.03442); MemoryBank decay | `memory-audit` reports aging (`as-of` ≥ 90d, learned ≥ 180d, per-type note horizons) as *informational* findings the nightly curator re-verifies — nothing expires automatically except explicit `[expires:]` |
 | Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `vault_search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
 | Consolidate episodes into cited rules | Generative Agents' reflection: derived memories cite their sources | Learnings entries carry `[key] [first → last] (xN) — sources: chat ids`; recurrence counting is mechanical, promotion at x3 cites its episodes; connections only among retrieved items |
-| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; NEW region facts always pass a human review (proposals queue) — unattended runs may only consolidate, under the undo-log rule |
+| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; archive time auto-applies NEW region facts only when they are confident and state-shaped, an attended "remember" is explicit, and the unattended curator never promotes a new region fact — it may only consolidate what is already there, under the undo-log rule |
 | The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | System-schedule chats keep insights (audit trail) but cannot write memory; extraction prompts refuse machinery rules; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND→OR fallback for zero-hit multi-word queries; system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
 | Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure is one stock skill (`memory-curation`); the schedule prompt only dispatches; tests pin the contract to the skill file |

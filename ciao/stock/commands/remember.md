@@ -20,7 +20,7 @@ Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X �
 
 If the user explicitly wants it live immediately, write it where step 2 routed it — the destination does not change just because the review step is skipped:
 
-- `memory`/`profile` → edit the `ciao:memory` / `ciao:profile` bounded region in the workspace guide, or use `memory_update` (the typed path enforces the cap). Search the region for a superseded entry first and replace it rather than appending; separate entries with `§`.
+- `memory`/`profile` → edit the `ciao:memory` / `ciao:profile` bounded region in the workspace guide, or use `memory_update`. The region cap is advisory on every path — the write goes through and reports `over_cap`; nothing refuses it and nothing shrinks the region, which is what consolidation is for. Search the region for a superseded entry first and replace it rather than appending; separate entries with `§`.
 - `project` → the project's canonical doc.
 - `people` → that person's note in `People/`.
 - `learnings` → `Workspace/Learnings.md` under `## Active`.

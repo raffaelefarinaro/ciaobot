@@ -784,12 +784,12 @@ def migrate_region_caps(
     """Restamp region markers carrying a known shipped default cap.
 
     ``ensure_regions`` never rewrites existing markers, so guides can end up
-    advertising a cap number the runtime does not enforce: a pre-3000 guide
+    advertising a cap number the runtime does not apply: a pre-3000 guide
     still says ``cap=2200``, and a freshly seeded guide says ``cap=3000``
     even when an explicit limit overrides the shipped default. Any marker
     whose cap is a KNOWN shipped default (the former or the current one) is
-    restamped to the EFFECTIVE limit so the guide advertises what the runtime
-    actually enforces: ``char_limit`` when the caller resolved configuration (including
+    restamped to the EFFECTIVE advisory budget so the guide advertises what the
+    runtime actually uses: ``char_limit`` when the caller resolved configuration (including
     a workspace ``.env``, which this module cannot see), else an explicit
     ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
     default. Any other marker value is an intentional custom cap and is never
