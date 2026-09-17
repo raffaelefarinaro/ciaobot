@@ -5935,6 +5935,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
+    generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,

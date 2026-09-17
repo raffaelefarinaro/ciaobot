@@ -40,16 +40,19 @@ export async function startFileDiscussion(
   { path, seed, title, workspace }: FileDiscussionOptions,
 ): Promise<ChatInfo | null> {
   if (!path) return null
-  const target = workspace || store.activeWorkspace
-  if (target !== store.activeWorkspace) {
-    await store.switchWorkspace(target)
-  }
-  const general = store.projects.find(
-    p => p.workspace === target && p.is_auto && p.name === 'General',
-  )
+  const previous = store.activeWorkspace
+  const target = workspace || previous
+  // Resolved through the store's own lookup rather than a fourth copy of the
+  // `is_auto && name === 'General'` predicate, and resolved BEFORE the switch:
+  // a workspace with no General project must not drag the app out of the one
+  // the user is actually in.
+  const general = store.generalProject(target)
   if (!general) {
     store.pushErrorToast('Cannot start chat', `No General project found in the ${target} workspace.`)
     return null
+  }
+  if (target !== previous) {
+    await store.switchWorkspace(target)
   }
   // Comments left on the file in the viewer are part of what the user wants to
   // say about it, so they ride along with the opening message.
@@ -65,6 +68,10 @@ export async function startFileDiscussion(
     store.pinFile(chat.chat_id, path)
     return chat
   } catch (e) {
+    // The switch is committed before the POST, so a rejected creation would
+    // otherwise leave the app scoped to a workspace the user never asked for,
+    // on the home screen, with nothing to show for the click but a toast.
+    if (target !== previous) await store.switchWorkspace(previous)
     store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
     return null
   }

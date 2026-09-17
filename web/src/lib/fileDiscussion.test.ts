@@ -4,14 +4,21 @@ import { startFileDiscussion } from './fileDiscussion'
 type StoreArg = Parameters<typeof startFileDiscussion>[0]
 
 /** The slice of the project store the helper actually touches. */
+interface FakeProject { project_id: string; name: string; workspace: string; is_auto: boolean }
+
 function makeStore(overrides: Record<string, unknown> = {}) {
   const store = {
     activeWorkspace: 'personal',
     projects: [
       { project_id: 'p-personal', name: 'General', workspace: 'personal', is_auto: true },
       { project_id: 'p-work', name: 'General', workspace: 'work', is_auto: true },
-    ],
+    ] as FakeProject[],
     fileComments: {} as Record<string, unknown[]>,
+    // Mirrors the store's own helper, which the real one resolves through.
+    generalProject: (ws: string): FakeProject | null =>
+      (store.projects as FakeProject[]).find(
+        p => p.workspace === ws && p.is_auto && p.name === 'General',
+      ) ?? null,
     switchWorkspace: vi.fn(),
     createChat: vi.fn(async () => ({ chat_id: 'c1' })),
     pinFile: vi.fn(),
@@ -69,6 +76,36 @@ describe('startFileDiscussion', () => {
       'Cannot start chat',
       'No General project found in the personal workspace.',
     )
+  })
+
+  it('stays in the current workspace when the target has no General project', async () => {
+    const store = makeStore({
+      projects: [{ project_id: 'p-personal', name: 'General', workspace: 'personal', is_auto: true }],
+    })
+    const chat = await startFileDiscussion(asStore(store), {
+      path: 'a/b.md',
+      seed: 'hello',
+      workspace: 'work',
+    })
+
+    expect(chat).toBeNull()
+    expect(store.switchWorkspace).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
+  it('puts the workspace back when the cross-workspace creation fails', async () => {
+    const store = makeStore({
+      createChat: vi.fn(async () => { throw new Error('offline') }),
+    })
+    const chat = await startFileDiscussion(asStore(store), {
+      path: 'w/n.md',
+      seed: 'hello',
+      workspace: 'work',
+    })
+
+    expect(chat).toBeNull()
+    expect(store.switchWorkspace.mock.calls.map(c => c[0])).toEqual(['work', 'personal'])
+    expect(store.activeWorkspace).toBe('personal')
   })
 
   it('surfaces a failed creation as a toast and pins nothing', async () => {
