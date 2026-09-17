@@ -1654,3 +1654,106 @@ def test_mcp_memory_update_lock_failure_is_retryable_not_success(tmp_path, monke
     assert guide.read_text(encoding="utf-8") == before
 
 
+
+
+def test_queue_resolution_applies_when_a_longer_bullet_survives(tmp_path):
+    """A removed bullet whose text prefixes a surviving one still reads APPLIED.
+
+    The confirmation used to be `removed_text in line` over the raw file, so
+    the remaining `Use Python 3 here.` made the removed `Use Python` look
+    still-queued and the receipt settled ROLLED_BACK — a terminal status, so
+    startup recovery skips it and History shows a landed resolution as neither
+    applied nor undoable.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Use Python  _(from: Alpha)_\n"
+        "- [memory] Use Python 3 here.  _(from: Beta)_\n",
+        encoding="utf-8",
+    )
+    # The removal disambiguates by source suffix, which is the only unique
+    # needle for a row whose text is a prefix of its neighbour's.
+    with mr.queue_resolution(
+        queue,
+        removed_text="Use Python",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        assert mp.remove_proposal_by_substring(queue, "(from: Alpha)") is not None
+
+    remaining = queue.read_text(encoding="utf-8")
+    assert "Use Python 3 here." in remaining
+    assert "(from: Alpha)" not in remaining
+
+    receipts = [
+        r for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    latest = receipts[-1]
+    assert latest["bullet_present"] is False
+    assert latest["status"] == mr.APPLIED
+    assert mr.is_undoable(latest)
+
+
+def test_queue_resolution_rolls_back_when_the_bullet_really_remains(tmp_path):
+    """The guard must still fire when the removal genuinely did not land."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Use Python  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    with mr.queue_resolution(
+        queue,
+        removed_text="Use Python",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        pass  # the removal never happens
+
+    receipts = [
+        r for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    latest = receipts[-1]
+    assert latest["bullet_present"] is True
+    assert latest["status"] == mr.ROLLED_BACK
+
+
+def test_queue_resolution_kind_distinguishes_identical_text(tmp_path):
+    """Same text under a different kind must not block the confirmation."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Use Python  _(from: Decisions)_\n"
+        "- [profile] Use Python  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    with mr.queue_resolution(
+        queue,
+        removed_text="Use Python",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        mp.remove_proposal_by_substring(queue, "- [memory] Use Python")
+
+    receipts = [
+        r for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ]
+    latest = receipts[-1]
+    assert latest["bullet_present"] is False
+    assert latest["status"] == mr.APPLIED

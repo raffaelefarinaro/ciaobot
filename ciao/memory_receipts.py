@@ -820,9 +820,12 @@ def _write_queue_receipt(
         # The caller already wrote the ``prepared`` row; this is its
         # confirmation. A bullet that is still queued means the intended
         # removal did not land, whatever else changed the file around it.
-        present = any(
-            removed_text in line for line in after.splitlines()
-        )
+        #
+        # Matched through `_bullets_match` (parsed text plus kind), not a raw
+        # substring: `removed_text in line` reported a removed `Use Python` as
+        # still queued while `Use Python 3` remained, so a resolution that
+        # actually landed was journaled `rolled_back` and lost its undo.
+        present = _bullets_match(after, removed_text, kind)
         receipt["bullet_present"] = present
         if present:
             receipt["status"] = ROLLED_BACK

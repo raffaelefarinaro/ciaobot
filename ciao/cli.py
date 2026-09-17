@@ -2862,8 +2862,10 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # proposal the receipt names is the one this call actually removes: a
     # concurrent archive or CLI writer landing between the match scan and the
     # indexed reread could otherwise point the saved line at a different
-    # proposal. The body uses the *resolved full parsed text*, not the caller's
-    # substring, so the receipt and the removal agree.
+    # proposal. The receipt names the *resolved full parsed text* while the
+    # removal re-uses the needle form that matched (see `removal_needle`
+    # below), so both name the same row without the remover having to match on
+    # a text that is a prefix of another queued bullet's.
     from ciao.memory_receipts import queue_lock, queue_resolution
     from ciao.proposal_kinds import parse_bullet
 
@@ -2905,6 +2907,15 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             return 1
         resolved_text = parsed.text
         resolved_kind = parsed.kind
+        # The removal keeps using the caller's needle (in whichever form
+        # matched), not the resolved text: `remove_proposal_by_substring`
+        # matches substrings over whole lines, so handing it the row's full
+        # text refuses to remove a row whose text is a prefix of another
+        # queued bullet's — exactly the row the union above just resolved
+        # uniquely. The receipt still names the resolved text.
+        removal_needle = needle
+        if not raw_matches and flat_matches:
+            removal_needle = flattened
         # Bracket the removal with a receipt so a crash between the queue
         # rewrite and the decision record is recoverable, and so the History
         # surface can reverse a dismissal the curator made.
@@ -2921,7 +2932,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
                 vault_root=vault,
             ):
-                removed = remove_proposal_by_substring(path, resolved_text)
+                removed = remove_proposal_by_substring(path, removal_needle)
         except QueueReceiptUnavailable as exc:
             print(
                 f"the memory receipt journal is unavailable; "

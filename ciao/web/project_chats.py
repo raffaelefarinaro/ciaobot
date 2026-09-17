@@ -3954,7 +3954,8 @@ class ProjectChatManager:
         # job: a running task would otherwise finish and write derived memory
         # for a chat that no longer exists, and a startup resume could revive
         # it. The tombstone is durable even if the in-process task is mid-write.
-        self._cancel_archive_job(chat_id)
+        # The row is already out of `self._chats`, so hand it over explicitly.
+        self._cancel_archive_job(chat_id, chat)
         self._save(reason="user_chat_delete")
         self._events.publish({
             "type": "chat_deleted",
@@ -4358,13 +4359,20 @@ class ProjectChatManager:
             return None
         return manifest_view(job)
 
-    def _cancel_archive_job(self, chat_id: str) -> None:
+    def _cancel_archive_job(
+        self, chat_id: str, chat: ChatInfo | None = None
+    ) -> None:
         """Tombstone a deleted chat's archive job and stop its live task.
 
         Called on explicit delete. The tombstone is the durable half: it is
         written even when the manifest does not exist yet, and ``save_job``
         refuses to clear it, so a task that finishes after this point (or a
         startup resume on the next boot) cannot recreate work for the chat.
+
+        ``chat`` is passed in because ``delete_chat`` pops the row from the
+        registry first: looking it up here found nothing, so the on-disk
+        manifest lookup and the "no manifest yet" tombstone were both dead and
+        a deleted chat could leave a live job record behind.
         """
         from ciao.archive_jobs import load_job, tombstone_job
 
@@ -4374,7 +4382,8 @@ class ProjectChatManager:
         task = self._archive_tasks.pop(chat_id, None)
         if task is not None and not task.done():
             task.cancel()
-        chat = self._chats.get(chat_id)
+        if chat is None:
+            chat = self._chats.get(chat_id)
         job = self._archive_jobs.pop(chat_id, None)
         if job is None and chat is not None and chat.archive_path:
             from ciao.archive_jobs import new_job_id
@@ -4750,6 +4759,12 @@ class ProjectChatManager:
                     stage.status = "pending"
                     if stage.attempts >= MAX_AUTO_ATTEMPTS:
                         stage.attempts = 0
+            # The per-stage writes above bypass `mark`, so the job-level state
+            # is still the dead process's "running". Recompute it before the
+            # save, or a job this pass does not resume (its chat is gone, or it
+            # is out of attempts) reports a pipeline that will never move as
+            # still in flight.
+            job._refresh_state()
             job.save()
             chat = self._chats.get(job.chat_id)
             if chat is None or not chat.archived:

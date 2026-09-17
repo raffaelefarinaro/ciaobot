@@ -1298,3 +1298,98 @@ def test_retry_route_reports_complete_when_nothing_is_unfinished(
     assert resp.status_code == 200
     assert resp.json()["status"] == "complete"
 
+
+
+def test_deleting_a_chat_tombstones_a_job_not_in_the_process_cache(
+    tmp_path: Path,
+) -> None:
+    """The on-disk manifest lookup must actually run on delete.
+
+    `_cancel_archive_job` looked the chat up in `self._chats`, but `delete_chat`
+    pops it first, so the lookup always returned None and both fallbacks (the
+    manifest reload and the "no manifest yet" tombstone) were dead code. A job
+    whose manifest is on disk but not cached — e.g. one a startup resume
+    skipped as not resumable — survived the delete untombstoned.
+    """
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    # Simulate a fresh process: the manifest is on disk, nothing is cached.
+    manager._archive_jobs.clear()
+    assert aj.load_job(manager._runtime_root, job.job_id).tombstoned is False
+
+    assert manager.delete_chat(chat.chat_id) is True
+
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.tombstoned is True
+
+
+def test_deleting_a_chat_tombstones_before_any_manifest_exists(
+    tmp_path: Path,
+) -> None:
+    """The "no manifest yet" race guard the docstring promises must fire."""
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    job_id = aj.new_job_id(chat.chat_id, chat.archive_path)
+    assert aj.load_job(manager._runtime_root, job_id) is None
+
+    assert manager.delete_chat(chat.chat_id) is True
+
+    tombstoned = aj.load_job(manager._runtime_root, job_id)
+    assert tombstoned is not None
+    assert tombstoned.tombstoned is True
+
+
+def test_resume_recomputes_state_for_a_job_it_does_not_resume(
+    tmp_path: Path,
+) -> None:
+    """A job the resume pass skips must not persist the dead process's state.
+
+    `resume_interrupted_jobs` rewrites stage statuses directly rather than
+    through `mark()`, so `_refresh_state()` never ran and the job-level
+    `state: "running"` from the process that died was saved as-is. For a job
+    this pass does not resume, `/api/chats/{id}/archive-job` then reported a
+    pipeline that will never move as still in flight.
+    """
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    stages = [n for n in aj.PIPELINE_STAGES if n in job.stages]
+    assert len(stages) >= 2, "fixture needs at least two planned stages"
+    job.mark(stages[0], aj.FAILED, "provider error")
+    job.stage(stages[0]).attempts = aj.MAX_AUTO_ATTEMPTS
+    job.mark(stages[1], aj.RUNNING)
+    job.save()
+    assert aj.load_job(manager._runtime_root, job.job_id).state == aj.RUNNING
+
+    # The chat row is gone, so the pass rewrites the stages and skips the job.
+    manager._chats.pop(chat.chat_id)
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of(stages[1]) == aj.PENDING
+    assert reloaded.state != aj.RUNNING
+    assert reloaded.state == "incomplete"
