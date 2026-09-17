@@ -4862,24 +4862,41 @@ class ProjectChatManager:
             if expected:
                 job = self._new_job_for_chat(chat, inputs)
                 # Stages that cannot run for this chat settle as skipped now, so
-                # the manifest is an accurate plan even before the task starts.
+                # the manifest is an accurate plan even before the task starts
+                # and a stage that was intentionally never planned is not left
+                # pending (which would read as "incomplete" and offer a retry).
                 if not run_insights:
+                    # Extraction is disabled or there is no transcript, so all
+                    # three insights-dependent stages are settled together.
                     job.mark("insights", SKIPPED, "insights disabled or no transcript")
-                elif not inputs["project_doc_path"]:
-                    job.mark("project_doc_update", SKIPPED, "no canonical project doc")
+                    job.mark(
+                        "project_doc_update", SKIPPED, "no insights extraction planned"
+                    )
+                    job.mark(
+                        "memory_proposals", SKIPPED, "no insights extraction planned"
+                    )
+                else:
+                    if not inputs["project_doc_path"]:
+                        job.mark(
+                            "project_doc_update", SKIPPED, "no canonical project doc"
+                        )
+                    if inputs["proposal_vault_root"] is None:
+                        if inputs["trajectory_meta"].get("workspace"):
+                            # The chat runs in a workspace but its vault root did
+                            # not resolve: recoverable once the registry is fixed.
+                            job.block(
+                                "memory_proposals", "workspace owner unavailable"
+                            )
+                        else:
+                            job.mark(
+                                "memory_proposals",
+                                SKIPPED,
+                                "workspace owner unavailable",
+                            )
                 if not trajectories_enabled:
                     job.mark(
                         "trajectory", SKIPPED, "no session input or trajectories disabled"
                     )
-                if run_insights and inputs["proposal_vault_root"] is None:
-                    if inputs["trajectory_meta"].get("workspace"):
-                        # The chat runs in a workspace but its vault root did not
-                        # resolve: recoverable once the registry is fixed.
-                        job.block("memory_proposals", "workspace owner unavailable")
-                    else:
-                        job.mark(
-                            "memory_proposals", SKIPPED, "workspace owner unavailable"
-                        )
                 job.save()
 
                 self._begin_postprocess(chat_id, expected)

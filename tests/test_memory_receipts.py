@@ -1039,6 +1039,47 @@ def test_recovery_completes_the_sidecar_before_the_terminal_row(
     assert sidecar_text.count("A resolved fact.") == 1
 
 
+def test_recovery_stays_recoverable_when_the_sidecar_write_fails(
+    tmp_path, monkeypatch,
+):
+    """A temporarily unwritable sidecar must not produce a terminal row.
+
+    `_complete_outcome` returns False when the sidecar write raises; settlement
+    must then leave the receipt non-terminal so the next pass retries, instead
+    of marking it applied and skipping the decision forever.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+    journal = mr.journal_path(tmp_path, None)
+    mr._append(
+        journal,
+        {
+            "id": "mrcpt_sidecar_fail",
+            "ts": mr._now(),
+            "kind": "queue_resolve",
+            "queue": str(queue),
+            "removed_text": "A resolved fact.",
+            "proposal_kind": "memory",
+            "promoted": False,
+            "action": "dismissed",
+            "status": mr.PREPARED,
+        },
+    )
+
+    monkeypatch.setattr(mr, "_complete_outcome", lambda receipt: False)
+    result = mr.recover_pending(journal=journal)
+
+    assert result.reconciled == []
+    # Still non-terminal, so a later pass retries it.
+    assert mr.find_receipt(journal, "mrcpt_sidecar_fail")["status"] == mr.PREPARED
+
+    monkeypatch.undo()
+    result = mr.recover_pending(journal=journal)
+    settled = [r for r in result.reconciled if r["id"] == "mrcpt_sidecar_fail"]
+    assert settled and settled[0]["status"] == mr.APPLIED
+
+
 def test_settlement_distinguishes_bullets_of_the_same_text_by_kind(tmp_path):
     """Removing ``[memory] Use Python`` is not blocked by ``[profile] Use Python``.
 

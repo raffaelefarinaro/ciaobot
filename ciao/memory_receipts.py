@@ -1126,10 +1126,13 @@ def _reconcile_region(
         # Complete the decision sidecar *before* the terminal row: a crash
         # between the two would otherwise leave a terminal `applied` receipt
         # that recovery skips, so the fact could be re-filed by the next pass.
-        completed = _complete_outcome(receipt)
+        if not _complete_outcome(receipt):
+            # The sidecar is temporarily unwritable: keep the receipt
+            # non-terminal so a later pass retries instead of skipping it.
+            return None
         return _settle(
             journal, receipt, APPLIED, "recovered after crash",
-            outcome_completed=completed,
+            outcome_completed=True,
         )
     if current == str(receipt.get("before_revision", "")):
         return _settle(journal, receipt, ROLLED_BACK, "write never landed")
@@ -1219,10 +1222,13 @@ def _reconcile_queue(
             "after_revision": content_revision(text),
             "after_text": _image(text),
         }
-        completed = _complete_outcome(settled_receipt)
+        if not _complete_outcome(settled_receipt):
+            # The sidecar is temporarily unwritable: keep the receipt
+            # non-terminal so a later pass retries instead of skipping it.
+            return None
         return _settle(
             journal, settled_receipt, APPLIED, "bullet already removed",
-            outcome_completed=completed,
+            outcome_completed=True,
         )
     detail = (
         f"{len(still_present)} batch bullet(s) still queued"
@@ -1286,7 +1292,9 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
                 else None
             )
             if queue is None:
-                return False
+                # Nothing to write to, so there is no outstanding obligation: a
+                # later pass would have the same answer. Treat as complete.
+                return True
             texts = receipt.get("removed_texts")
             facts = (
                 [str(t) for t in texts if str(t)]
@@ -1322,7 +1330,8 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
         if vault_root:
             queue = Path(str(vault_root)) / "Workspace" / "Memory-Proposals.md"
         else:
-            return False
+            # No vault to complete the record in; nothing outstanding.
+            return True
         record_promotion(
             queue,
             text=fact,

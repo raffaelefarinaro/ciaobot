@@ -622,8 +622,46 @@ def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
     assert job.status_of("memory_proposals") == aj.SUCCEEDED
 
 
+def test_insights_disabled_settles_both_dependent_stages_skipped(
+    tmp_path: Path,
+) -> None:
+    """With extraction disabled, the fold and proposals are not left pending.
+
+    They were intentionally never planned (there is no insights text to consume);
+    leaving them pending made the manifest read `incomplete` and offered a retry
+    for stages that can never run for this chat.
+    """
+    archive = _archive(tmp_path)
+    manager = _manager(tmp_path, insights_enabled=False)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+
+    async def drive() -> object:
+        manager.run_archive_postprocess(
+            chat.chat_id,
+            ArchiveOutcome(
+                path=archive, session_id="sess-1", turn_count=1,
+                filtered_jsonl="line",
+            ),
+            chat,
+            project,
+        )
+        await asyncio.sleep(0)
+        return manager._archive_jobs[chat.chat_id]
+
+    job = asyncio.run(drive())
+    assert job.status_of("insights") == aj.SKIPPED
+    assert job.status_of("project_doc_update") == aj.SKIPPED
+    assert job.status_of("memory_proposals") == aj.SKIPPED
+
+
 
 # ── Idempotency: no duplicates on retry ───────────────────────────────────
+
+
+def test_retry_does_not_duplicate_proposal_rows(tmp_path: Path) -> None:
     archive = _stamped_archive(
         tmp_path,
         "## Decisions\n- Chose X over Y because reasons. [review]\n",
