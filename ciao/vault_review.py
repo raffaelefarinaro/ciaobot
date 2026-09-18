@@ -23,7 +23,13 @@ from typing import Any, cast
 from ciao.vault_index import TEMP_PREFIX_NAME_CHARS, canonical_type, scan_vault
 from ciao.vault_lint import is_template_stem, run_validation
 
-RETENTION_DAYS = 30
+# No retention window. A `RETENTION_DAYS = 30` constant sat here unread while
+# three strings in the panel promised a note would be restorable "for 30 days"
+# and one implied it could not be deleted before then — a policy with no
+# purge behind it and no gate in `delete_permanently`. Enforcing it would have
+# been the wrong repair: an automatic purge is the one thing this workflow
+# refuses to do everywhere else, since the trash exists so that nothing leaves
+# the vault unattended. Trashed notes stay until someone deletes them.
 MAX_CANDIDATES = 5
 REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "deleted"})
 # No ``archive``: nothing here moves or marks an archived note, so accepting it
@@ -39,7 +45,16 @@ REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "de
 # re-linked the note from somewhere else — a repair nobody makes by hand, so
 # the button was a third way to say "not now" wearing a claim about the vault.
 # Historical ledger rows still carry it and still suppress; see ``_suppressed``.
-DISPOSITIONS = frozenset({"keep", "trash", "restore", "delete"})
+# ``reopen`` undoes a ``keep``. It is the only way back into the queue: a kept
+# note is suppressed until its bytes change, and the archetypal `weak_provenance`
+# candidate — a note with no frontmatter — cannot be stamped at all, so `keep`
+# clears its row while `memory-audit` and the Memory Map go on flagging it. That
+# left the one irreversible act in a workflow whose whole claim is reversibility.
+#
+# ``vanished`` is written by the system, not a person: a note that left the
+# vault by an ordinary file deletion simply stops being scanned, so the ledger —
+# which presents itself as the durable record of what left — recorded nothing.
+DISPOSITIONS = frozenset({"keep", "reopen", "trash", "restore", "delete", "vanished"})
 DECISION_DISPOSITIONS = frozenset({"keep"})
 _SUPERSEDED_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 # Where a note is allowed to say it was superseded: its frontmatter and its
@@ -172,6 +187,10 @@ def _suppressed(decision: dict[str, Any]) -> bool:
     # suppress: a note the user already cleared must not reappear because the
     # button behind it was retired. The content-hash guard above re-raises it
     # the moment the note is edited, exactly as it does for `keep`.
+    #
+    # `reopen` and `vanished` are absent by design. `reopen` exists to undo a
+    # `keep`, so it must not suppress; `vanished` records that a note left the
+    # vault, and if the file comes back it deserves to be judged again.
     return disposition in {"keep", "improve_link", "trash", "delete"}
 
 
@@ -219,8 +238,28 @@ def _excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
 
 
 def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[str, dict[str, Any]]) -> None:
+    """Refresh the readable projection of the pending queue.
+
+    The header used to say the file was "generated from the append-only
+    ledger", which names the wrong source: the rows come from a live scan of
+    the vault, and the ledger only decides which of them are suppressed. The
+    distinction matters to anyone reading this file to find out what the queue
+    holds — a note deleted outside the workflow leaves the scan silently and no
+    ledger row says so.
+
+    The stamp is the other half. Nothing rewrites this file between runs, so a
+    reader has no way to tell a queue refreshed a minute ago from one left by
+    the nightly pass before a day of edits.
+    """
     _workspace_dir(root)
-    lines = ["# Vault Review", "", "Pending note-review candidates. This file is generated from the append-only ledger.", ""]
+    lines = [
+        "# Vault Review",
+        "",
+        f"Pending note-review candidates, from a scan of the vault at {_now()}.",
+        "Suppressed candidates are filtered out using `Vault-Review.jsonl`; this",
+        "file is a projection and is rewritten whole on every run.",
+        "",
+    ]
     for item in candidates:
         decision = decisions.get(item.candidate_id, {})
         if decision.get("content_hash") == item.content_hash and _suppressed(decision):
@@ -369,8 +408,54 @@ def _generate_candidates(
     active = [item for item in candidates if not _suppressed(decisions.get(item.candidate_id, {})) or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
     result = active[: max(1, min(int(max_candidates), 50))]
     if write_queue:
+        _record_vanished(root, workspace, decisions)
         _write_queue(root, result, decisions)
     return result
+
+
+def _record_vanished(root: Path, workspace: str, decisions: dict[str, dict[str, Any]]) -> None:
+    """Close the ledger's account of notes that left outside this workflow.
+
+    A note deleted with an ordinary file delete just stops being scanned: it
+    drops out of the queue with no row explaining why, while the ledger goes on
+    presenting itself as the durable record of what left the vault. One
+    `vanished` row per candidate says what actually happened.
+
+    Written only when the caller is already allowed to write — a listing that
+    appends to the ledger is not the read-only listing it claims to be. Guarded
+    on the latest row per candidate, so a note stays recorded once however many
+    times the nightly pass runs afterwards, and a file that comes back is
+    scanned and judged again like any other.
+    """
+    for candidate_id_value, decision in decisions.items():
+        if str(decision.get("workspace") or "") != workspace:
+            continue
+        # `trash` and `delete` already say where the note went; `vanished` would
+        # be a second, vaguer answer to a question the ledger has answered.
+        if decision.get("disposition") in {"trash", "delete", "vanished"}:
+            continue
+        path = str(decision.get("path") or "")
+        try:
+            note = (root / Path(path).relative_to("memory-vault")).resolve()
+        except ValueError:
+            continue
+        if not note.is_relative_to(root) or note.exists():
+            continue
+        _append(
+            root,
+            {
+                "candidate_id": candidate_id_value,
+                "workspace": workspace,
+                "path": path,
+                "content_hash": str(decision.get("content_hash") or ""),
+                "disposition": "vanished",
+                # Not a decision anybody made here: the note was removed by some
+                # other means, and the row is a record, not an instruction.
+                "actor": "system",
+                "status": "deleted",
+                "deferred_until": "",
+            },
+        )
 
 
 def generate_candidates(
@@ -581,6 +666,75 @@ def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *,
         candidate.workspace, candidate.path, candidate.content_hash
     )
     return result
+
+
+def list_cleared(root: Path, *, workspace: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Notes cleared with `keep` that are still in the vault, newest first.
+
+    The panel's way back in. A `keep` is suppressed by content hash, so short of
+    editing the note there was no route from "I cleared that by mistake" to the
+    row returning — and the note with no frontmatter, the one `keep` cannot
+    stamp, is exactly the note a user is most likely to clear by mistake.
+
+    Only `keep` rows appear. A trashed note has its own tab, and a note that has
+    since been edited is already back in the queue on its own.
+    """
+    root = Path(root).resolve()
+    items: list[dict[str, Any]] = []
+    for decision in _latest_decisions(root).values():
+        if decision.get("disposition") != "keep":
+            continue
+        if str(decision.get("workspace") or "") != workspace:
+            continue
+        path = str(decision.get("path") or "")
+        try:
+            note = (root / Path(path).relative_to("memory-vault")).resolve()
+        except ValueError:
+            continue
+        # Gone, or edited since: the first belongs to `vanished`, the second is
+        # already un-suppressed and back in the queue under a new hash.
+        if not note.is_file() or not note.is_relative_to(root):
+            continue
+        if content_hash(note.read_bytes()) != decision.get("content_hash"):
+            continue
+        items.append(
+            {
+                "candidate_id": str(decision.get("candidate_id") or ""),
+                "workspace": workspace,
+                "path": path,
+                "content_hash": str(decision.get("content_hash") or ""),
+                "decided_at": str(decision.get("timestamp") or ""),
+            }
+        )
+    items.sort(key=lambda item: item["decided_at"], reverse=True)
+    return items[: max(1, min(int(limit), 100))]
+
+
+def reopen_note(root: Path, candidate_id_value: str, *, workspace: str, actor: str = "user") -> dict[str, Any]:
+    """Undo a `keep`, putting the note back in front of whoever cleared it.
+
+    Appends rather than rewrites: the ledger is the audit trail, so the record
+    is "kept, then reopened", not a `keep` that never happened.
+    """
+    _validate_candidate_id(candidate_id_value)
+    root = Path(root).resolve()
+    decision = _latest_decisions(root).get(candidate_id_value)
+    if not decision or str(decision.get("workspace") or "") != workspace:
+        raise ValueError("cleared candidate not found")
+    if decision.get("disposition") != "keep":
+        raise ValueError("only a kept note can be reopened")
+    row = {
+        "candidate_id": candidate_id_value,
+        "workspace": workspace,
+        "path": str(decision.get("path") or ""),
+        "content_hash": str(decision.get("content_hash") or ""),
+        "disposition": "reopen",
+        "actor": actor,
+        "status": "candidate",
+        "deferred_until": "",
+    }
+    _append(root, row)
+    return row
 
 
 def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -> dict[str, Any]:

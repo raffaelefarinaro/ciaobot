@@ -3,7 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import type { VaultReviewCandidate, VaultTrashedNote } from '../lib/types'
+import type { VaultReviewCandidate, VaultTrashedNote,
+  VaultClearedNote } from '../lib/types'
 import { candidateLeaf, signalReasons, verificationLabel } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
@@ -247,9 +248,13 @@ async function keepRow(candidate: VaultReviewCandidate) {
 }
 
 async function trashRow(candidate: VaultReviewCandidate) {
-  // No confirm here: trash is reversible for 30 days and one click restores
-  // it. The confirm budget is spent on permanent deletion instead.
+  // No confirm here: trash is reversible and one click restores it. The
+  // confirm budget is spent on permanent deletion instead.
   await store.trash(workspace.value, candidate.candidate_id)
+}
+
+async function reopenRow(note: VaultClearedNote) {
+  await store.reopen(workspace.value, note.candidate_id)
 }
 
 async function restoreRow(note: VaultTrashedNote) {
@@ -272,6 +277,11 @@ function trashedTitle(note: VaultTrashedNote): string {
 function trashedDate(note: VaultTrashedNote): string {
   if (!note.trashed_at) return ''
   return note.trashed_at.slice(0, 10)
+}
+
+function clearedDate(note: VaultClearedNote): string {
+  if (!note.decided_at) return ''
+  return note.decided_at.slice(0, 10)
 }
 </script>
 
@@ -299,7 +309,7 @@ function trashedDate(note: VaultTrashedNote): string {
         Stale notes the nightly curation flagged. <strong>Still true</strong> clears the
         row and stamps the note as verified today (a note with no frontmatter has
         nothing to stamp, and says so); <strong>Retire</strong> moves it to the
-        Trash tab, where one click brings it back for 30 days. <strong>Talk about it</strong>
+        Trash tab, where one click brings it back. <strong>Talk about it</strong>
         opens a chat with the note pinned and decides nothing — on a note nothing links
         to, it goes looking for the notes that should link to it, which is what actually
         clears that flag. Leaving a row alone keeps it here. Nothing here deletes
@@ -378,13 +388,52 @@ function trashedDate(note: VaultTrashedNote): string {
           </div>
         </li>
       </ul>
+
+      <!-- The way back from a "Still true". A keep is suppressed by content
+           hash, so short of editing the note there was no route from clearing
+           a row by mistake to getting it back — and the note `keep` cannot
+           stamp, the one with no frontmatter, is the likeliest mistake. Closed
+           by default: it is a correction, not part of the pass. -->
+      <details v-if="store.cleared.length" class="vr-cleared">
+        <summary class="vr-cleared-summary">
+          Recently cleared ({{ store.cleared.length }})
+        </summary>
+        <p class="vr-hint vr-cleared-hint">
+          Notes you marked <strong>Still true</strong>. They stay out of the queue until
+          the note changes; <strong>Add back</strong> returns one now.
+        </p>
+        <ul class="vr-rows">
+          <li
+            v-for="note in store.cleared"
+            :key="note.candidate_id"
+            class="vr-row"
+            :class="{ 'vr-row--busy': store.isBusy(note.candidate_id) }"
+          >
+            <div class="vr-row-body">
+              <div class="vr-row-top">
+                <span class="vr-title">{{ candidateLeaf(note.path) }}</span>
+              </div>
+              <p class="vr-meta">{{ note.path }}<span v-if="clearedDate(note)"> · cleared {{ clearedDate(note) }}</span></p>
+            </div>
+            <div class="vr-actions">
+              <button
+                type="button"
+                class="btn-small btn-chip"
+                :disabled="store.isBusy(note.candidate_id)"
+                title="Put this note back in the review queue"
+                @click="reopenRow(note)"
+              >{{ store.isBusy(note.candidate_id) ? 'working…' : 'Add back' }}</button>
+            </div>
+          </li>
+        </ul>
+      </details>
     </template>
 
     <section v-else class="vr-trash" aria-label="Trash">
-      <p class="vr-hint">Retired notes stay restorable for 30 days. Restore is one click; permanent deletion asks first.</p>
+      <p class="vr-hint">Retired notes stay here until you delete them — nothing is purged on a timer. Restore is one click; permanent deletion asks first.</p>
       <p v-if="!store.trashed.length" class="vr-empty">
-        Nothing retired yet. A note you retire from the To review tab waits here for
-        30 days before it can be deleted for good.
+        Nothing retired yet. A note you retire from the To review tab waits here until
+        you restore it or delete it for good.
       </p>
       <ul v-else class="vr-rows">
         <li
@@ -457,6 +506,31 @@ function trashedDate(note: VaultTrashedNote): string {
   color: var(--fg2);
   font-size: 0.9rem;
   padding: var(--space-4) 0;
+}
+
+/* A correction, not part of the pass: quieter than the queue above it, and
+   separated by a rule so the two lists never read as one. */
+.vr-cleared {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.vr-cleared-summary {
+  cursor: pointer;
+  color: var(--fg2);
+  font-size: 0.85rem;
+  padding: var(--space-1) 0;
+}
+
+.vr-cleared-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.vr-cleared-hint {
+  margin: var(--space-2) 0 var(--space-3);
 }
 
 .vr-error {

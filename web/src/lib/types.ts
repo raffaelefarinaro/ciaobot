@@ -1291,8 +1291,18 @@ export interface VaultReviewDecisionResult {
     | 'not_applicable'
 }
 
+/** One note cleared with `keep` and still in the vault, from `include=cleared`. */
+export interface VaultClearedNote {
+  candidate_id: string
+  workspace: string
+  path: string
+  content_hash: string
+  decided_at: string
+}
+
 export interface VaultReviewResponse {
   candidates: VaultReviewCandidate[]
   trashed?: VaultTrashedNote[]
+  cleared?: VaultClearedNote[]
   result?: VaultReviewDecisionResult
 }
