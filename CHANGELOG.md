@@ -39,6 +39,8 @@
 - fix(review): make the stamp failure message true, and the guards reach (`23a958dd`)
 - fix(receipts): keep a redone resolution from erasing the one it replaced (`00b6f09c`)
 - fix(review): make the retirement workflow keep the promises it prints (`e8d4cce6`)
+- fix(eval,archive): close the approval-bypass holes the evaluator missed (`d167c8ac`)
+- fix(review): stop the ledger recording notes that never left (`434cfd78`)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
