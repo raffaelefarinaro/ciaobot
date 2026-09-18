@@ -659,9 +659,27 @@ def _write_raw(path: Path, payload: dict[str, Any]) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     try:
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        # Owner-only, and created that way rather than chmod-ed afterwards so
+        # the payload is never briefly world-readable. An unfinished job's
+        # manifest carries `filtered_jsonl` — the conversation itself, with
+        # full tool inputs and results — and `Path.write_text` under the usual
+        # 022 umask made that 0644, which `os.replace` then preserved on the
+        # manifest. Another local account could read private workspace data
+        # out of `.runtime/archive_jobs`.
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            # Explicit: O_CREAT leaves the mode alone on a temp file left
+            # behind by an older build.
+            os.fchmod(descriptor, 0o600)
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        except BaseException:
+            # Only reachable before `fdopen` takes ownership of the descriptor;
+            # closing it after would double-close and could shut an unrelated
+            # file that had since been given the same number.
+            os.close(descriptor)
+            raise
+        with handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
         os.replace(tmp, path)
         return True
     except OSError:
