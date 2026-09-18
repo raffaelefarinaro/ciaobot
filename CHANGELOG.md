@@ -42,6 +42,7 @@
 - fix(eval,archive): close the approval-bypass holes the evaluator missed (`d167c8ac`)
 - fix(review): stop the ledger recording notes that never left (`434cfd78`)
 - fix(receipts): settle a removal by count, and check the journal before promoting (`795dd48b`)
+- fix(archive): keep job manifests private, and block the stage being resumed (`04e19aa6`)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
