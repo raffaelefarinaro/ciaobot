@@ -306,6 +306,13 @@ def _generate_candidates(
         # `type: Person` is not in `_LOOKUP_TYPES`, and `type: hackathon-log`
         # aliases to `journal`. Display keeps the raw value.
         canon_type = canonical_type(note_type) or note_type
+        # Case-folded only, deliberately NOT alias-resolved: `analysis` aliases
+        # to `reference`, and an orphaned analysis document is a real finding —
+        # the exemption's rationale ("nothing links to a person or a bookmark
+        # as a matter of course") does not hold for one. Aliases are still
+        # resolved for `_RECORD_TYPES`, where every alias of `journal` really
+        # is a dated record.
+        lookup_type = note_type.strip().lower()
         signals: list[str] = []
         if path in orphans and not entry.related:
             signals.append("unlinked")
@@ -318,7 +325,7 @@ def _generate_candidates(
             signals.append("weak_provenance")
         if not signals:
             continue
-        if canon_type in _LOOKUP_TYPES and signals == ["unlinked"]:
+        if lookup_type in _LOOKUP_TYPES and signals == ["unlinked"]:
             continue
         digest = content_hash(raw)
         evidence = {
@@ -387,6 +394,24 @@ _FRONTMATTER_DELIM = "---"
 _UPDATED_KEY_RE = re.compile(r"^updated:\s*(.*)$")
 
 
+def _already_current(text: str, today: str) -> bool:
+    """Whether the note's frontmatter already carries today's ``updated:``."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
+        return False
+    close = next(
+        (i for i in range(1, len(lines)) if lines[i].strip() == _FRONTMATTER_DELIM),
+        None,
+    )
+    if close is None:
+        return False
+    for index in range(1, close):
+        match = _UPDATED_KEY_RE.match(lines[index])
+        if match:
+            return match.group(1).strip().strip("\"'") == today
+    return False
+
+
 def _stamp_updated(text: str, today: str) -> str | None:
     """Return *text* with frontmatter ``updated:`` set to *today*.
 
@@ -430,8 +455,8 @@ def _stamp_updated(text: str, today: str) -> str | None:
 
 def _reverify(
     root: Path, candidate: ReviewCandidate, today: str
-) -> tuple[str, bool]:
-    """Stamp the note as verified today; return ``(hash, stamped)``.
+) -> tuple[str, str]:
+    """Stamp the note as verified today; return ``(hash, status)``.
 
     *Still true* used to write a ledger row and nothing else, so it cleared the
     queue while leaving the note exactly as unverified as it was — the Memory
@@ -458,7 +483,7 @@ def _reverify(
     try:
         raw = note.read_bytes()
     except OSError:
-        return candidate.content_hash, False
+        return candidate.content_hash, "not_stampable"
     if content_hash(raw) != candidate.content_hash:
         raise ValueError("candidate changed or no longer exists; regenerate the review")
     try:
@@ -468,15 +493,24 @@ def _reverify(
         # rewrite every undecodable byte as U+FFFD — a destructive edit to a
         # note imported from a latin-1 source. Reading signals may be lossy;
         # a rewrite may not.
-        return candidate.content_hash, False
+        return candidate.content_hash, "not_stampable"
+    if _already_current(text, today):
+        # Verified today already — the opposite outcome from "could not be
+        # stamped", and collapsing the two would make the UI warn about a note
+        # that is perfectly stamped.
+        return candidate.content_hash, "already_current"
     stamped = _stamp_updated(text, today)
     if stamped is None:
-        return candidate.content_hash, False
+        return candidate.content_hash, "not_stampable"
     payload = stamped.encode("utf-8")
     with tempfile.NamedTemporaryFile(
         "wb",
         dir=note.parent,
-        prefix=f".{note.name}.",
+        # Truncated: the prefix exists for debuggability, but a full note name
+        # near NAME_MAX plus the dot, 8 random chars and ".tmp" would raise
+        # ENAMETOOLONG where the old fixed "tmp" prefix never could — and
+        # `record_decision` does not catch OSError.
+        prefix=f".{note.name[:64]}.",
         suffix=".tmp",
         delete=False,
     ) as handle:
@@ -494,16 +528,16 @@ def _reverify(
     except OSError:
         pass
     os.replace(temporary, note)
-    return content_hash(payload), True
+    return content_hash(payload), "stamped"
 
 
 def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *, actor: str = "user", now: datetime | None = None) -> dict[str, Any]:
     if disposition not in DECISION_DISPOSITIONS:
         raise ValueError(f"unsupported vault review disposition: {disposition}")
     digest = candidate.content_hash
-    stamped = False
+    stamp_status = "not_applicable"
     if disposition == "keep":
-        digest, stamped = _reverify(
+        digest, stamp_status = _reverify(
             root, candidate, (now or datetime.now(UTC)).date().isoformat()
         )
     # The POST-stamp hash, so the row suppresses the note as it now stands. The
@@ -522,7 +556,12 @@ def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *,
     # recomputed from the POST-stamp hash, so an agent reusing it for a
     # follow-up `inspect`/`trash` would get `candidate_not_found`.
     result: dict[str, Any] = dict(row)
-    result["stamped"] = stamped
+    # `stamped` is the plain yes/no the UI needs to stop promising a date it
+    # did not write; `stamp_status` separates the two very different reasons
+    # for a no — "already verified today" is a success, "nothing to stamp" is
+    # the half-working case worth telling the user about.
+    result["stamped"] = stamp_status == "stamped"
+    result["stamp_status"] = stamp_status
     result["previous_candidate_id"] = candidate_id(
         candidate.workspace, candidate.path, candidate.content_hash
     )

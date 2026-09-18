@@ -1588,41 +1588,58 @@ watch(() => mm.selectedId, (id) => {
     else document.querySelector<HTMLElement>('.mm-canvas-wrap, .mm-list-wrap')?.focus()
   })
 })
+// Hoisted: constructing a collator per comparison is roughly an order of
+// magnitude slower than `<`, and this list re-sorts on every search keystroke.
+const listCollator = new Intl.Collator(undefined, { sensitivity: 'base' })
+
+// The number of days the "Checked" cell is actually showing. `ageLabelOf`
+// falls back to mtime when a note has no `updated:` frontmatter, so sorting on
+// `ageDays` alone pinned a note displaying "3y" below one displaying "2mo" —
+// the same display/sort mismatch fixed for the Type column, on exactly the
+// stale notes triage exists to surface. Only a node with nothing to show at
+// all (`ageLabelOf` returns '') sorts last.
+function sortableAgeDays(n: MemoryGraphNode): number | null {
+  if (!mm.ageLabelOf(n)) return null
+  return n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
+}
+
 const sortedVisibleNodes = computed(() => {
-  const arr = [...mm.visibleNodes]
-  arr.sort((a, b) => {
+  const key = sortKey.value
+  const dir = sortDir.value
+  // Precomputed once per node rather than per comparison: categoryLabelFor
+  // walks into personSubtype, which allocates a Set from the node's tags.
+  const decorated = mm.visibleNodes.map((n) => ({
+    n,
+    label: key === 'type' ? categoryLabelFor(n) : '',
+    age: key === 'age' ? sortableAgeDays(n) : null,
+  }))
+  decorated.sort((x, y) => {
     let av: string | number
     let bv: string | number
-    if (sortKey.value === 'degree') { av = a.degree; bv = b.degree }
-    else if (sortKey.value === 'age') {
+    if (key === 'degree') { av = x.n.degree; bv = y.n.degree }
+    else if (key === 'age') {
       // Undated notes sort last in BOTH directions. A MAX_SAFE_INTEGER
       // sentinel only held while ascending, so the second click — the one
-      // that actually gives oldest-first triage — floated every undated note
-      // above the genuinely stale ones it was meant to surface.
-      const an = a.ageDays ?? null
-      const bn = b.ageDays ?? null
-      if (an === null && bn === null) return 0
-      if (an === null) return 1
-      if (bn === null) return -1
-      av = an; bv = bn
-    } else if (sortKey.value === 'type') {
-      // The cell renders categoryLabelFor, not the raw type: every person note
-      // is type 'person' while the label splits them into six groups, so
-      // sorting the raw value left that whole block unordered while aria-sort
-      // told a screen reader it was sorted.
-      av = categoryLabelFor(a); bv = categoryLabelFor(b)
-    } else { av = (a as any)[sortKey.value] || ''; bv = (b as any)[sortKey.value] || '' }
+      // that actually gives oldest-first triage — floated them above the
+      // genuinely stale ones it was meant to surface.
+      if (x.age === null && y.age === null) return 0
+      if (x.age === null) return 1
+      if (y.age === null) return -1
+      av = x.age; bv = y.age
+    } else if (key === 'type') {
+      av = x.label; bv = y.label
+    } else { av = (x.n as any)[key] || ''; bv = (y.n as any)[key] || '' }
     if (typeof av === 'string' && typeof bv === 'string') {
-      // localeCompare, not `<`: raw comparison orders by code point, so every
+      // Collator, not `<`: raw comparison orders by code point, so every
       // capitalised title sorts ahead of every lowercase one ('Zebra' < 'apple')
       // and a vault mixing both spellings reads as unsorted.
-      return av.localeCompare(bv, undefined, { sensitivity: 'base' }) * sortDir.value
+      return listCollator.compare(av, bv) * dir
     }
-    if (av < bv) return -1 * sortDir.value
-    if (av > bv) return 1 * sortDir.value
+    if (av < bv) return -1 * dir
+    if (av > bv) return 1 * dir
     return 0
   })
-  return arr
+  return decorated.map((d) => d.n)
 })
 
 // ---------- lifecycle ----------

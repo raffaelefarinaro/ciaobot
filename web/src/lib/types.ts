@@ -1271,7 +1271,18 @@ export interface VaultTrashedNote {
   trashed_at: string
 }
 
+export interface VaultReviewDecisionResult {
+  candidate_id: string
+  /** The id the caller asked about; `candidate_id` is recomputed post-stamp. */
+  previous_candidate_id?: string
+  /** True only when an `updated:` date was actually written to the note. */
+  stamped?: boolean
+  /** 'stamped' | 'already_current' | 'not_stampable' | 'not_applicable' */
+  stamp_status?: string
+}
+
 export interface VaultReviewResponse {
   candidates: VaultReviewCandidate[]
   trashed?: VaultTrashedNote[]
+  result?: VaultReviewDecisionResult
 }

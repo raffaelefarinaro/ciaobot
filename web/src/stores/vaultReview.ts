@@ -5,6 +5,7 @@ import type {
   VaultReviewCandidate,
   VaultReviewResponse,
   VaultTrashedNote,
+  VaultReviewDecisionResult,
 } from '../lib/types'
 
 export type VaultReviewDisposition = 'keep' | 'improve_link'
@@ -30,6 +31,12 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const error = ref('')
+  // Set when an action succeeded but did not do everything its label claims —
+  // "Still true" on a note with no frontmatter clears the row without writing
+  // a date. Silence there left the button looking broken: the row went away
+  // while `memory-audit` and the Memory Map badge kept flagging the note.
+  const notice = ref('')
+  const lastResult = ref<VaultReviewDecisionResult | null>(null)
   const loadedWorkspace = ref<string | null>(null)
   let fetchPromise: Promise<void> | null = null
   let fetchWorkspace: string | null = null
@@ -116,10 +123,13 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   async function mutate(workspace: string, id: string, body: Record<string, unknown>): Promise<boolean> {
     setBusy(id, true)
     error.value = ''
+    notice.value = ''
+    lastResult.value = null
     try {
       const data = await api.post<VaultReviewResponse & { ok: boolean }>(
         reviewUrl(workspace, false), body,
       )
+      lastResult.value = data?.result ?? null
       if (data && Array.isArray(data.candidates)) {
         // Only adopt it for the workspace we asked about: the user may have
         // switched scopes while the POST was in flight, and a late response
@@ -162,7 +172,14 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     id: string,
     disposition: VaultReviewDisposition,
   ): Promise<boolean> {
-    return mutate(workspace, id, { action: 'decide', candidate_id: id, disposition })
+    const ok = await mutate(workspace, id, { action: 'decide', candidate_id: id, disposition })
+    if (ok && disposition === 'keep' && lastResult.value?.stamp_status === 'not_stampable') {
+      notice.value =
+        'The row is cleared, but this note has no frontmatter to stamp, so its ' +
+        'verified date is unchanged — it will keep showing as needing review ' +
+        'until you add frontmatter to it.'
+    }
+    return ok
   }
 
   /** Retire a note into the reversible 30-day trash. */
@@ -188,6 +205,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     loading,
     isBusy,
     error,
+    notice,
     loadedWorkspace,
     fetch,
     ensureLoaded,

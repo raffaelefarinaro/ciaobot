@@ -38,6 +38,18 @@ watch(
   },
 )
 
+// An action that succeeded but did not do everything its label promises. Not
+// an error — the row really is cleared — so it takes the auto-dismissing info
+// variant rather than the persistent error toast.
+watch(
+  () => store.notice,
+  (message) => {
+    if (!message) return
+    projectStore.pushToast({ chat_id: '', title: 'Nothing to stamp', body: message, variant: 'info' })
+    store.notice = ''
+  },
+)
+
 onMounted(() => {
   // `ensureLoaded`, not `fetch`: the panel is a `v-if` sibling of the
   // proposals panel, so every tab flip remounts it and a plain fetch would
@@ -244,8 +256,9 @@ function trashedDate(note: VaultTrashedNote): string {
 
     <template v-if="props.section !== 'trash'">
       <p class="vr-hint">
-        Stale notes the nightly curation flagged. <strong>Still true</strong> stamps the
-        note as verified today and clears the row; <strong>Retire</strong> moves it to the
+        Stale notes the nightly curation flagged. <strong>Still true</strong> clears the
+        row and stamps the note as verified today (a note with no frontmatter has
+        nothing to stamp, and says so); <strong>Retire</strong> moves it to the
         Trash tab, where one click brings it back for 30 days. <strong>Link fixed</strong>
         clears it because you have since linked it from somewhere else, and changes nothing
         in the note. Leaving a row alone keeps it here. Nothing here deletes permanently
@@ -305,7 +318,7 @@ function trashedDate(note: VaultTrashedNote): string {
               type="button"
               class="btn-small btn-primary"
               :disabled="store.isBusy(candidate.candidate_id)"
-              title="Set this note's updated date to today and clear the row"
+              title="Clear the row, and stamp the note's updated date as today when it has frontmatter to stamp"
               @click="keepRow(candidate)"
             >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
             <button

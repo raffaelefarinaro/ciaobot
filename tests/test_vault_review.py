@@ -573,9 +573,9 @@ def test_reverify_refuses_to_rewrite_a_note_that_is_not_utf8(tmp_path: Path) -> 
         priority=0.0,
     )
 
-    digest, stamped = review._reverify(tmp_path, candidate, "2026-09-18")
+    digest, status = review._reverify(tmp_path, candidate, "2026-09-18")
 
-    assert stamped is False
+    assert status == "not_stampable"
     assert digest == candidate.content_hash
     assert path.read_bytes() == raw  # not rewritten with U+FFFD
 
@@ -642,3 +642,77 @@ def test_record_type_filter_follows_type_aliases(tmp_path: Path) -> None:
 
     candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
     assert all("superseded_language" not in c.signals for c in candidates)
+
+
+def test_keep_reports_a_note_that_was_already_verified_today(
+    tmp_path: Path,
+) -> None:
+    """"Already current" is a success, not the half-working case.
+
+    Collapsing it into the same `stamped: False` as "no frontmatter" would make
+    the UI warn about a note that is perfectly stamped.
+    """
+    today = datetime.now(UTC).date().isoformat()
+    path = tmp_path / "Ideas" / "fresh.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: note\nupdated: {today}\n---\nAn unlinked note.\n",
+        encoding="utf-8",
+    )
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["stamp_status"] == "already_current"
+    assert result["stamped"] is False
+
+
+def test_keep_distinguishes_nothing_to_stamp(tmp_path: Path) -> None:
+    """The case the UI must speak up about."""
+    path = tmp_path / "Ideas" / "bare.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Bare\n\nNo frontmatter here.\n", encoding="utf-8")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["stamp_status"] == "not_stampable"
+    assert result["stamped"] is False
+
+
+def test_an_orphaned_analysis_note_is_still_queued(tmp_path: Path) -> None:
+    """Alias resolution must not widen the lookup-type exemption.
+
+    `analysis` aliases to `reference`, which is in `_LOOKUP_TYPES` — but the
+    exemption's rationale ("nothing links to a person or a bookmark as a matter
+    of course") does not hold for an analysis document, and dropping it would
+    silently remove a real finding from the queue.
+    """
+    path = tmp_path / "Resources" / "Q3 analysis.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: analysis\nupdated: 2026-09-18\ntags: [q3]\n---\nOrphaned.\n",
+        encoding="utf-8",
+    )
+
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert [c.path for c in candidates] == ["memory-vault/Resources/Q3 analysis.md"]
+    assert list(candidates[0].signals) == ["unlinked"]
+
+
+def test_keep_survives_a_very_long_note_filename(tmp_path: Path) -> None:
+    """The temp prefix is truncated, so it cannot push past NAME_MAX.
+
+    `record_decision` does not catch OSError and the MCP layer only catches
+    ValueError, so an ENAMETOOLONG here surfaced as an unhandled exception.
+    """
+    stem = "x" * 180
+    path = tmp_path / "Ideas" / f"{stem}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\ntype: note\n---\nAn unlinked note.\n", encoding="utf-8")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["stamp_status"] == "stamped"
+    assert "updated:" in path.read_text(encoding="utf-8")

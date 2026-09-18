@@ -375,3 +375,99 @@ describe('MemoryMapView keyboard and touch access', () => {
     wrapper.unmount()
   })
 })
+
+/**
+ * List sorting.
+ *
+ * Every case here is a column that sorted a different value from the one its
+ * cell renders, which `aria-sort` then described as sorted. None of it had
+ * coverage, so CI would not have caught any of them.
+ */
+describe('MemoryMapView list sorting', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    apiGet.mockReset()
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return Promise.resolve(sortPayload())
+      return Promise.resolve({})
+    })
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.activeWorkspace = 'personal'
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+  })
+
+  afterEach(async () => {
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const nowSec = Math.floor(Date.now() / 1000)
+
+  function sortPayload() {
+    return {
+      nodes: [
+        // Lowercase title: a code-point sort puts it after every capital.
+        { id: 'apple', title: 'apple notes', type: 'note', tags: [], aliases: [], description: '', workspace: 'personal', degree: 1, mtime: nowSec, updated: '2026-01-01', stale: false, age_days: 10 },
+        { id: 'zebra', title: 'Zebra notes', type: 'note', tags: [], aliases: [], description: '', workspace: 'personal', degree: 1, mtime: nowSec, updated: '2026-01-01', stale: false, age_days: 20 },
+        // No `updated:` — ageDays null, but a three-year-old mtime, so the
+        // Checked cell still shows an age.
+        { id: 'old', title: 'Ancient note', type: 'note', tags: [], aliases: [], description: '', workspace: 'personal', degree: 1, mtime: nowSec - 3 * 365 * 86400, updated: '', stale: false, age_days: null },
+      ],
+      edges: [{ source: 'apple', target: 'zebra' }],
+    }
+  }
+
+  async function mountSortableList() {
+    const wrapper = await mountView()
+    await flushPromises()
+    const mm = useMemoryMapStore()
+    mm.view = 'list'
+    await nextTick()
+    return { wrapper, mm }
+  }
+
+  function titles(wrapper: ReturnType<typeof mount>): string[] {
+    return wrapper.findAll('.mm-title-btn').map((b) => b.text())
+  }
+
+  function sortButton(wrapper: ReturnType<typeof mount>, label: string) {
+    return wrapper.findAll('.mm-sort').find((b) => b.text().startsWith(label))!
+  }
+
+  it('sorts titles case-insensitively', async () => {
+    // Name is the default sort key, so the list is already sorted ascending.
+    const { wrapper } = await mountSortableList()
+
+    const order = titles(wrapper)
+    // 'apple notes' must not be exiled below every capitalised title.
+    expect(order.indexOf('Ancient note')).toBeLessThan(order.indexOf('apple notes'))
+    expect(order.indexOf('apple notes')).toBeLessThan(order.indexOf('Zebra notes'))
+  })
+
+  it('opens the Checked column oldest-first, for triage', async () => {
+    const { wrapper } = await mountSortableList()
+    await sortButton(wrapper, 'Checked').trigger('click')
+    await nextTick()
+
+    // The three-year-old note is the stalest, so it leads on the first click.
+    expect(titles(wrapper)[0]).toBe('Ancient note')
+  })
+
+  it('ranks an undated note by the age its cell displays', async () => {
+    const { wrapper } = await mountSortableList()
+    const checked = sortButton(wrapper, 'Checked')
+    await checked.trigger('click')
+    await nextTick()
+    await checked.trigger('click') // newest-first
+    await nextTick()
+
+    // Sorting on ageDays alone pinned it last in BOTH directions, below notes
+    // whose cells showed a far more recent age.
+    expect(titles(wrapper).at(-1)).toBe('Ancient note')
+  })
+})
