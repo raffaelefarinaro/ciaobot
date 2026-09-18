@@ -5,13 +5,14 @@ import type {
   VaultReviewCandidate,
   VaultReviewResponse,
   VaultTrashedNote,
+  VaultClearedNote,
   VaultReviewDecisionResult,
 } from '../lib/types'
 
 export type VaultReviewDisposition = 'keep'
 
-function reviewUrl(workspace: string, includeTrashed: boolean): string {
-  const query = `workspace=${encodeURIComponent(workspace)}${includeTrashed ? '&include=trashed' : ''}`
+function reviewUrl(workspace: string, includeLists: boolean): string {
+  const query = `workspace=${encodeURIComponent(workspace)}${includeLists ? '&include=trashed,cleared' : ''}`
   return `/api/vault/review?${query}`
 }
 
@@ -28,6 +29,10 @@ function reviewUrl(workspace: string, includeTrashed: boolean): string {
 export const useVaultReviewStore = defineStore('vaultReview', () => {
   const candidates = ref<VaultReviewCandidate[]>([])
   const trashed = ref<VaultTrashedNote[]>([])
+  // Notes cleared with "Still true" that are still in the vault. The panel's
+  // only route back into the queue: a keep is suppressed by content hash, so
+  // without this, undoing one meant editing the note.
+  const cleared = ref<VaultClearedNote[]>([])
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const error = ref('')
@@ -92,6 +97,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         if (seq !== fetchSeq) return
         candidates.value = data.candidates ?? []
         trashed.value = data.trashed ?? []
+        cleared.value = data.cleared ?? []
         loadedWorkspace.value = workspace
       } catch (e) {
         if (seq !== fetchSeq) return
@@ -152,6 +158,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           }
           candidates.value = data.candidates
           trashed.value = data.trashed ?? []
+          cleared.value = data.cleared ?? []
           loadedWorkspace.value = workspace
         }
       } else {
@@ -202,7 +209,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     return ok
   }
 
-  /** Retire a note into the reversible 30-day trash. */
+  /** Retire a note into the reversible trash. */
   async function trash(workspace: string, id: string): Promise<boolean> {
     return mutate(workspace, id, { action: 'trash', candidate_id: id })
   }
@@ -210,6 +217,11 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   /** Bring a trashed note back to its original path. */
   async function restore(workspace: string, id: string): Promise<boolean> {
     return mutate(workspace, id, { action: 'restore', candidate_id: id })
+  }
+
+  /** Put a cleared note back in the queue, undoing its `keep`. */
+  async function reopen(workspace: string, id: string): Promise<boolean> {
+    return mutate(workspace, id, { action: 'reopen', candidate_id: id })
   }
 
   /** Permanently delete a trashed note. The server requires the exact
@@ -222,6 +234,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   return {
     candidates,
     trashed,
+    cleared,
+    reopen,
     loading,
     isBusy,
     error,

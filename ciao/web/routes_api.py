@@ -4925,13 +4925,29 @@ async def vault_review(request: Request) -> JSONResponse:
         # The trash view renders the reversible trash, which candidate
         # generation can never return: a trashed note is no longer in the
         # vault. Same read-only contract as the candidate listing itself.
-        if "trashed" in {part.strip() for part in request.query_params.get("include", "").split(",")}:
+        include = {part.strip() for part in request.query_params.get("include", "").split(",")}
+        # The way back in from a `keep`. Same read-only contract: a listing.
+        if "cleared" in include:
+            review_body["cleared"] = await asyncio.to_thread(
+                functools.partial(review.list_cleared, root, workspace=workspace)
+            )
+        if "trashed" in include:
             review_body["trashed"] = await asyncio.to_thread(
                 functools.partial(review.list_trashed, root, workspace=workspace)
             )
         return JSONResponse(review_body)
 
     candidate_id_value = str(payload.get("candidate_id", "") or "")
+    # `reopen` addresses a candidate that is, by definition, no longer in the
+    # generated list, so it cannot go through the lookup below.
+    if action == "reopen":
+        try:
+            result = await asyncio.to_thread(
+                functools.partial(review.reopen_note, root, candidate_id_value, workspace=workspace)
+            )
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
     if action in {"restore", "delete"}:
         try:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
@@ -4980,7 +4996,14 @@ async def _vault_review_snapshot(root: Path, workspace: str) -> dict[str, Any]:
     trashed = await asyncio.to_thread(
         functools.partial(review.list_trashed, root, workspace=workspace)
     )
-    return {"candidates": [item.as_dict() for item in candidates], "trashed": trashed}
+    cleared = await asyncio.to_thread(
+        functools.partial(review.list_cleared, root, workspace=workspace)
+    )
+    return {
+        "candidates": [item.as_dict() for item in candidates],
+        "trashed": trashed,
+        "cleared": cleared,
+    }
 
 
 async def vault_delete_note(request: Request) -> JSONResponse:

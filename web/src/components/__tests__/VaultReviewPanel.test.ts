@@ -100,7 +100,7 @@ describe('VaultReviewPanel', () => {
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(apiGet).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed')
+    expect(apiGet).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed,cleared')
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)
     expect(wrapper.text()).toContain('Mo')
     expect(wrapper.text()).toContain('no other note links to it')
@@ -244,6 +244,52 @@ describe('VaultReviewPanel', () => {
     // No disposition was recorded: the row is still in the queue.
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('offers a way back from a keep, and hides the section when nothing was cleared', async () => {
+    // A keep is suppressed by content hash, so without this the only route
+    // back into the queue was editing the note.
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [], cleared: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.find('.vr-cleared').exists()).toBe(false)
+
+    const store = useVaultReviewStore()
+    store.cleared = [{
+      candidate_id: 'cleared01cleared01cleared',
+      workspace: 'personal',
+      path: 'memory-vault/People/Mo.md',
+      content_hash: 'deadbeef',
+      decided_at: '2026-09-18T10:00:00+00:00',
+    }]
+    await flushPromises()
+
+    expect(wrapper.find('.vr-cleared').exists()).toBe(true)
+    expect(wrapper.find('.vr-cleared').text()).toContain('cleared 2026-09-18')
+    apiPost.mockClear()
+    apiPost.mockResolvedValue({ ok: true, candidates: [], trashed: [], cleared: [] })
+    await buttonByText(wrapper, 'Add back').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
+      action: 'reopen',
+      candidate_id: 'cleared01cleared01cleared',
+    })
+    wrapper.unmount()
+  })
+
+  it('no longer promises a 30-day retention the engine does not enforce', async () => {
+    apiGet.mockResolvedValue({ candidates: [], trashed: [], cleared: [] })
+    const wrapper = mount(VaultReviewPanel, {
+      props: { section: 'trash' },
+      global: { plugins: [pinia] },
+    })
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).not.toContain('30 days')
+    expect(text).toContain('until you delete them')
     wrapper.unmount()
   })
 

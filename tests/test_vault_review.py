@@ -504,6 +504,108 @@ def test_still_true_refuses_a_note_that_changed_under_it(tmp_path: Path) -> None
         record_decision(tmp_path, candidate, disposition="keep")
 
 
+def test_reopen_puts_a_kept_note_back_in_the_queue(tmp_path: Path) -> None:
+    """`keep` was the one irreversible act in a reversible workflow."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    result = record_decision(tmp_path, candidate, disposition="keep")
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
+
+    # The stamp changed the note, so the live candidate id is the post-stamp one.
+    cleared = review.list_cleared(tmp_path, workspace="personal")
+    assert [item["path"] for item in cleared] == ["memory-vault/Ideas/Loose.md"]
+    assert cleared[0]["candidate_id"] == result["candidate_id"]
+
+    review.reopen_note(tmp_path, cleared[0]["candidate_id"], workspace="personal")
+    again = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert [c.path for c in again] == ["memory-vault/Ideas/Loose.md"]
+    # And it leaves the audit trail intact: kept, then reopened.
+    assert [r["disposition"] for r in review.read_ledger(tmp_path)] == ["keep", "reopen"]
+
+
+def test_reopen_refuses_anything_that_was_not_kept(tmp_path: Path) -> None:
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    review.trash_note(tmp_path, candidate)
+    with pytest.raises(ValueError):
+        review.reopen_note(tmp_path, candidate.candidate_id, workspace="personal")
+    with pytest.raises(ValueError):
+        review.reopen_note(tmp_path, "0" * 24, workspace="personal")
+
+
+def test_cleared_list_drops_notes_that_left_or_changed(tmp_path: Path) -> None:
+    """A note already back in the queue must not also offer to be added back."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+    assert len(review.list_cleared(tmp_path, workspace="personal")) == 1
+
+    _note(tmp_path, "Ideas/Loose.md", "Edited, so it is queued again on its own.")
+    assert review.list_cleared(tmp_path, workspace="personal") == []
+
+    (tmp_path / "Ideas" / "Loose.md").unlink()
+    assert review.list_cleared(tmp_path, workspace="personal") == []
+
+
+def test_a_note_deleted_outside_the_workflow_is_recorded(tmp_path: Path) -> None:
+    """The ledger claims to record what left the vault; it used to miss this."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    (tmp_path / "Ideas" / "Loose.md").unlink()
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+    rows = [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+    assert [r["path"] for r in rows] == ["memory-vault/Ideas/Loose.md"]
+    assert rows[0]["actor"] == "system"
+
+    # Once, however often the nightly pass runs afterwards.
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+    assert len([r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]) == 1
+
+
+def test_a_read_only_listing_never_writes_a_vanished_row(tmp_path: Path) -> None:
+    """A listing that appends to the ledger is not the listing it claims to be."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+    (tmp_path / "Ideas" / "Loose.md").unlink()
+
+    generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+def test_a_vanished_note_that_comes_back_is_judged_again(tmp_path: Path) -> None:
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    review.trash_note(tmp_path, candidate)
+    # Trash already says where it went, so no `vanished` row is added for it.
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+    # Recreated with different bytes, so it is a different note to the ledger
+    # and gets judged on its own. Restoring byte-identical content keeps the
+    # trash row's suppression, which is the same content-hash contract `keep`
+    # has — the UI's Restore appends its own row and does not rely on this.
+    _note(tmp_path, "Ideas/Loose.md", "Written again, from scratch.")
+    again = generate_candidates(tmp_path, workspace="personal", write_queue=True)
+    assert [c.path for c in again] == ["memory-vault/Ideas/Loose.md"]
+
+
+def test_the_queue_projection_names_its_real_source(tmp_path: Path) -> None:
+    """It said "generated from the append-only ledger"; it is a vault scan."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+    text = review.queue_path(tmp_path).read_text(encoding="utf-8")
+    assert "from a scan of the vault at" in text
+    assert "generated from the append-only ledger" not in text
+
+
+def test_no_retention_window_is_claimed_in_code(tmp_path: Path) -> None:
+    """The constant promised a purge that never existed; the trash is kept."""
+    assert not hasattr(review, "RETENTION_DAYS")
+
+
 # ── release review fixes ─────────────────────────────────────────────────────
 
 

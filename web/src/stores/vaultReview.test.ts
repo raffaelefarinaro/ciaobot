@@ -58,7 +58,7 @@ describe('vaultReview store', () => {
 
     await store.fetch('personal')
 
-    expect(get).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed')
+    expect(get).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed,cleared')
     expect(store.candidates).toHaveLength(1)
     expect(store.trashed).toHaveLength(1)
     expect(store.loadedWorkspace).toBe('personal')

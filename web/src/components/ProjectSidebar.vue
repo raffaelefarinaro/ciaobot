@@ -400,12 +400,34 @@
         </button>
       </div>
 
+      <!-- Retirements is a different queue from Proposals, and this column used
+           to report the proposals one whatever tab was open: a panel showing
+           five notes to review sat beside "0 of 0 shown". The stats follow the
+           tab, and the proposals-only search and kind chips stay with it. -->
+      <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
+        <h3>Retirements</h3>
+        <div class="mm-stat-grid mm-stat-grid--3">
+          <div class="mm-stat">
+            <div class="n">{{ retirementScoped }}</div>
+            <div class="l">to review</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ retirementTrashed }}</div>
+            <div class="l">in trash</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ retirementSignals }}</div>
+            <div class="l">signals</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Review: the same shape as the memory map's sidebar — stats, a search,
            then chips that both report and filter. The kind filter used to be a
            segmented control in the panel header while this column sat empty,
            which put the queue's controls somewhere different from every other
            memory view's. -->
-      <div v-if="mode === 'proposals'" class="mm-sidebar-scroll">
+      <div v-else-if="mode === 'proposals'" class="mm-sidebar-scroll">
         <template v-if="proposals.loading">
           <h3>Queue</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
@@ -1152,6 +1174,7 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
+import { useVaultReviewStore } from '../stores/vaultReview'
 import { isLightTheme } from '../lib/theme'
 import ChatSignals from './ChatSignals.vue'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
@@ -1173,10 +1196,27 @@ const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
+const vaultReview = useVaultReviewStore()
 
 // Review-queue figures for the sidebar. Scoped counts come from the store so
 // they use the same workspace rule as the list — a chip that disagreed with the
 // rows under it would be worse than no chip.
+// Retirement counts mirror `retirementCount`/`trashCount` in MemoryMapView:
+// the store holds one workspace at a time, so a load for another workspace
+// must read as zero here rather than as the previous workspace's queue.
+const retirementLoaded = computed(() => vaultReview.loadedWorkspace === store.activeWorkspace)
+const retirementScoped = computed(() => (retirementLoaded.value ? vaultReview.candidates.length : 0))
+const retirementTrashed = computed(() => (retirementLoaded.value ? vaultReview.trashed.length : 0))
+// Distinct reasons across the queue, not a sum: one note flagged unlinked and
+// weak_provenance is two signals on one row, and the number is there to say
+// what kind of work the queue holds.
+const retirementSignals = computed(() => {
+  if (!retirementLoaded.value) return 0
+  const seen = new Set<string>()
+  for (const c of vaultReview.candidates) for (const s of c.signals) seen.add(s)
+  return seen.size
+})
+
 const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
 const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
 const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
