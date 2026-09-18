@@ -1583,3 +1583,78 @@ def test_a_stage_does_not_run_when_its_start_cannot_be_recorded(
     assert called == [], "the stage must not run once its start could not be recorded"
 
 
+
+
+def test_a_manifest_is_written_owner_only(tmp_path: Path) -> None:
+    """An unfinished job's manifest carries the conversation itself.
+
+    `filtered_jsonl` holds the transcript with full tool inputs and results, and
+    `Path.write_text` under the usual 022 umask created the temp file 0644,
+    which `os.replace` preserved — so another local account could read private
+    workspace data out of `.runtime/archive_jobs`.
+    """
+    import stat
+
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    assert job.save() is True
+
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_manifest_rewrite_does_not_widen_an_existing_temp_file(
+    tmp_path: Path,
+) -> None:
+    """O_CREAT leaves the mode alone, so a stale 0644 temp must be corrected."""
+    import stat
+
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stale = path.with_name(f".{path.name}.tmp")
+    stale.write_text("{}", encoding="utf-8")
+    stale.chmod(0o644)
+
+    assert job.save() is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_changed_archive_blocks_the_pending_stage_not_a_settled_one(
+    tmp_path: Path,
+) -> None:
+    """Blocking must name the stage this resume was asked to run.
+
+    `project_doc_update` was blocked unconditionally once insights had settled,
+    whatever `stages` held. Retrying only `memory_proposals` therefore
+    overwrote the audit state of a fold that had already succeeded and left the
+    genuinely pending stage untouched — and an explicit retry, which clears
+    blocks, then reset the fold and could run it a second time.
+    """
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+
+    # Insights and the fold both landed; only the proposals stage is left.
+    job.mark("insights", aj.SUCCEEDED)
+    if "project_doc_update" in job.stages:
+        job.mark("project_doc_update", aj.SUCCEEDED)
+    job.save()
+
+    archive.write_text("# chat\n\nsomething else entirely\n", encoding="utf-8")
+
+    asyncio.run(
+        manager._run_job(chat.chat_id, job, inputs, stages=["memory_proposals"])
+    )
+
+    if "project_doc_update" in job.stages:
+        assert job.status_of("project_doc_update") == aj.SUCCEEDED, (
+            "a settled stage must keep its audit state"
+        )
+    assert job.status_of("memory_proposals") == aj.BLOCKED

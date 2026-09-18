@@ -4707,15 +4707,26 @@ class ProjectChatManager:
                 recorded,
                 expected_append_revision=expected_append,
             ):
-                stage = (
-                    "insights"
-                    if insights_pending
-                    else "project_doc_update"
-                )
-                job.block(
-                    stage,
-                    "archive content changed since the job was created",
-                )
+                if insights_pending:
+                    blocked = ["insights"]
+                else:
+                    # Whatever this resume was actually asked to run and has
+                    # not settled — not a hardcoded stage. Blocking
+                    # `project_doc_update` unconditionally overwrote the audit
+                    # state of a fold that had already succeeded while leaving
+                    # the genuinely pending stage untouched, so a retry reset
+                    # the fold and could run it a second time.
+                    requested = list(stages) if stages else list(job.resumable())
+                    blocked = [
+                        name
+                        for name in requested
+                        if job.status_of(name) in (PENDING, RUNNING)
+                    ] or list(job.unfinished())
+                for name in blocked:
+                    job.block(
+                        name,
+                        "archive content changed since the job was created",
+                    )
                 job.save()
                 return
             await run_archive_pipeline(job, inputs, stages=stages)
