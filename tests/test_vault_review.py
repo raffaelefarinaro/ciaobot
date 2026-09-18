@@ -1021,6 +1021,29 @@ def test_a_genuinely_deleted_note_is_still_recorded_as_vanished(
     assert "vanished" in _dispositions(tmp_path)
 
 
+def test_identical_twins_suppress_the_vanished_row(tmp_path: Path) -> None:
+    """Documents the content-match boundary: identical twins share one hash.
+
+    Two byte-identical notes have the same content hash, so deleting one
+    externally leaves the survivor's hash in the scan and no `vanished` row is
+    recorded for the deleted twin. Telling them apart would need per-path
+    revision history, which the ledger deliberately does not keep.
+    """
+    body = "---\ntype: note\n---\nAn unlinked note.\n"
+    first = tmp_path / "Ideas" / "Loose.md"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text(body, encoding="utf-8")
+    second = tmp_path / "Ideas" / "Twin.md"
+    second.write_text(body, encoding="utf-8")
+    for candidate in generate_candidates(tmp_path, workspace="personal"):
+        record_decision(tmp_path, candidate, disposition="keep")
+    first.unlink()
+
+    generate_candidates(tmp_path, workspace="personal")
+
+    assert "vanished" not in _dispositions(tmp_path)
+
+
 def test_list_cleared_survives_an_unreadable_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

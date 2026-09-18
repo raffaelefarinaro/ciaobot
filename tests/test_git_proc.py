@@ -77,7 +77,47 @@ async def test_timeout_does_not_leak_file_descriptors(
     # Allow the event loop a tick to finish any deferred transport teardown.
     await asyncio.sleep(0.1)
     leaked = _open_fd_count() - baseline
-    assert leaked <= 2, f"leaked {leaked} descriptors across 10 timeouts"
+    assert leaked <= 0, f"leaked {leaked} descriptors across 10 timeouts"
+
+
+@pytest.mark.asyncio
+async def test_cancel_reaps_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling a run (e.g. server shutdown) must reap like a timeout.
+
+    Without cleanup on ``CancelledError`` the forked grandchild survives and
+    the pipes stay open — the same two-fd leak as issue #470.
+    """
+    pid_file = tmp_path / "grandchild.pid"
+    env = _fake_git(
+        tmp_path,
+        f'sleep 300 &\necho $! > "{pid_file}"\nexec sleep 300',
+    )
+    monkeypatch.setenv("PATH", env["PATH"])
+
+    # One warm-up call so any lazily-created loop internals are already open.
+    await run_git(tmp_path, "push", timeout=0.3)
+    baseline = _open_fd_count()
+
+    task = asyncio.ensure_future(run_git(tmp_path, "push", timeout=30.0))
+    await asyncio.sleep(0.5)  # let git and its grandchild spawn
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.1)
+    leaked = _open_fd_count() - baseline
+    assert leaked <= 0, f"leaked {leaked} descriptors on cancel"
+
+    grandchild = int(pid_file.read_text().strip())
+    for _ in range(50):
+        if not _alive(grandchild):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        os.kill(grandchild, signal.SIGKILL)  # don't leave it behind
+        pytest.fail(f"grandchild {grandchild} survived the cancel")
 
 
 @pytest.mark.asyncio

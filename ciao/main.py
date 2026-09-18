@@ -1026,6 +1026,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                         last_failure_detail = None
                         repeated_failures = 0
                         failure_backoff = False
+                        # A success closes any open exception episode too: without
+                        # this, the same fault recurring later is logged at debug
+                        # as a continuation of the pre-success sequence instead
+                        # of a fresh traceback.
+                        last_loop_error = None
+                        repeated_loop_errors = 0
                         continue
                     if detail == last_failure_detail:
                         repeated_failures += 1
@@ -1284,10 +1290,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # cancel_futures=True) so a restart is not held up by a backlog of
         # full-vault scans left by disconnected callers; workers already
         # running cannot be interrupted, but there are at most pool-width of
-        # them. Runs in the loop, so no await is needed.
+        # them. `close()` polls with time.sleep, so it runs in a worker
+        # thread: awaiting it inline would stall the remaining teardown (and
+        # the loop) for up to the timeout.
         from ciao.async_reads import shutdown_vault_read_executor
 
-        shutdown_vault_read_executor()
+        await asyncio.to_thread(shutdown_vault_read_executor)
 
     app.state.shutdown_callbacks = [
         _shutdown_providers,
