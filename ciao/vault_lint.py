@@ -69,8 +69,9 @@ def duplicate_key(stem: str) -> str:
     """The name two notes share when they are the same note under two spellings.
 
     Case, accents, and separator style are all dropped: what is left is the
-    letters of the name. Exported because the review queue's explanation of a
-    `possible_duplicate` has to group by exactly the key that produced it.
+    letters of the name. Named rather than inlined so the duplicate grouping
+    has one definition — anything reporting a `possible_duplicate` must group
+    by exactly the key that produced it.
     """
     folded = unicodedata.normalize("NFKD", stem.casefold())
     stripped = "".join(ch for ch in folded if not unicodedata.combining(ch))

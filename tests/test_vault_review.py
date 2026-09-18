@@ -491,3 +491,154 @@ def test_improve_link_does_not_claim_a_verification(tmp_path: Path) -> None:
     candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
     record_decision(tmp_path, candidate, disposition="improve_link")
     assert note.read_text(encoding="utf-8") == before
+
+
+# ── release review fixes ─────────────────────────────────────────────────────
+
+
+def test_keep_preserves_the_note_file_mode(tmp_path: Path) -> None:
+    """A temp file lands at 0600; os.replace would tighten the note silently.
+
+    `vault_index.apply_edits` carries the old mode over for exactly this
+    reason. On a vault shared over a group-readable mount, or synced by
+    another user or daemon, one click of "Still true" otherwise makes the
+    note unreadable to it.
+    """
+    import os
+    import stat
+
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    note = tmp_path / "Ideas" / "Loose.md"
+    os.chmod(note, 0o644)
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["stamped"] is True
+    assert stat.S_IMODE(note.stat().st_mode) == 0o644
+
+
+def test_keep_leaves_no_stray_temp_file_name_in_the_vault(tmp_path: Path) -> None:
+    """The temp file is hidden and suffixed, so a crash leaves an obvious artifact."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    leftovers = [p.name for p in (tmp_path / "Ideas").iterdir()]
+    assert leftovers == ["Loose.md"]
+
+
+def test_keep_reports_when_there_was_no_frontmatter_to_stamp(
+    tmp_path: Path,
+) -> None:
+    """A note with no frontmatter is the archetypal weak_provenance candidate.
+
+    The row still clears — the user said the note is fine — but the caller must
+    not be told a date was written, or the button promises a stamp that
+    `memory-audit` and the Memory Map badge go on contradicting.
+    """
+    path = tmp_path / "Ideas" / "loose.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Loose thought\n\nSomething I wrote once.\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    assert "weak_provenance" in candidate.signals
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["stamped"] is False
+    assert path.read_bytes() == before
+
+
+def test_reverify_refuses_to_rewrite_a_note_that_is_not_utf8(tmp_path: Path) -> None:
+    """errors="replace" on a read is fine; writing the result back is not.
+
+    Driven through `_reverify` directly: `scan_vault` never yields a note it
+    cannot decode, so this guard is defensive — but the rewrite it prevents
+    would replace every undecodable byte with U+FFFD in the user's own file.
+    """
+    path = tmp_path / "Ideas" / "latin.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = "---\ntype: note\n---\nCaf\xe9 notes\n".encode("latin-1")
+    path.write_bytes(raw)
+
+    candidate = review.ReviewCandidate(
+        candidate_id="x" * 24,
+        workspace="personal",
+        path="memory-vault/Ideas/latin.md",
+        content_hash=content_hash(raw),
+        signals=["weak_provenance"],
+        evidence={},
+        priority=0.0,
+    )
+
+    digest, stamped = review._reverify(tmp_path, candidate, "2026-09-18")
+
+    assert stamped is False
+    assert digest == candidate.content_hash
+    assert path.read_bytes() == raw  # not rewritten with U+FFFD
+
+
+def test_keep_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    """The contract is that every other byte survives."""
+    path = tmp_path / "Ideas" / "crlf.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"---\r\ntype: note\r\ntitle: X\r\n---\r\nBody\r\n")
+
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    body = path.read_bytes()
+    assert b"updated:" in body
+    assert b"\n" not in body.replace(b"\r\n", b"")  # no bare LF anywhere
+
+
+def test_keep_returns_the_candidate_id_the_caller_asked_about(
+    tmp_path: Path,
+) -> None:
+    """`candidate_id` is recomputed from the post-stamp hash, so it changes."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+
+    result = record_decision(tmp_path, candidate, disposition="keep")
+
+    assert result["previous_candidate_id"] == candidate.candidate_id
+    assert result["candidate_id"] != candidate.candidate_id
+
+
+def test_lookup_type_filter_survives_a_capitalised_type(tmp_path: Path) -> None:
+    """The filter guards a queue whose terminal action is deletion.
+
+    `type: Person` must not slip past it on spelling alone — that is the
+    41-of-50 `People/*.md` case the filter exists for.
+    """
+    path = tmp_path / "People" / "A.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Provenance present, so `unlinked` is the sole signal — which is exactly
+    # the case the lookup-type filter is supposed to drop.
+    path.write_text(
+        "---\ntype: Person\nupdated: 2026-09-18\ntags: [people]\n---\n"
+        "An unlinked note.\n",
+        encoding="utf-8",
+    )
+
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
+
+
+def test_record_type_filter_follows_type_aliases(tmp_path: Path) -> None:
+    """`hackathon-log` aliases to journal, which is never superseded."""
+    from ciao.vault_index import canonical_type
+
+    if canonical_type("hackathon-log") != "journal":
+        pytest.skip("alias not configured in this vault vocabulary")
+    path = tmp_path / "Journal" / "2026-07-24.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: hackathon-log\nupdated: 2026-07-24\ntags: [a]\n---\n"
+        "All open items moved to Monday.\n",
+        encoding="utf-8",
+    )
+
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert all("superseded_language" not in c.signals for c in candidates)

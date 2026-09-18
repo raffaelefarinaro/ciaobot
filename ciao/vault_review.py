@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from ciao.vault_index import scan_vault
+from ciao.vault_index import canonical_type, scan_vault
 from ciao.vault_lint import is_template_stem, run_validation
 
 RETENTION_DAYS = 30
@@ -300,19 +300,25 @@ def _generate_candidates(
             continue
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
+        # `entry.type` is the raw frontmatter string. The two type filters below
+        # decide whether a note may be queued at all — in a queue whose terminal
+        # action is deletion — so they must not be defeated by a spelling:
+        # `type: Person` is not in `_LOOKUP_TYPES`, and `type: hackathon-log`
+        # aliases to `journal`. Display keeps the raw value.
+        canon_type = canonical_type(note_type) or note_type
         signals: list[str] = []
         if path in orphans and not entry.related:
             signals.append("unlinked")
         group = duplicate_by_path.get(path)
         if group:
             signals.append("possible_duplicate")
-        if note_type not in _RECORD_TYPES and _says_it_was_superseded(text):
+        if canon_type not in _RECORD_TYPES and _says_it_was_superseded(text):
             signals.append("superseded_language")
         if not (entry.updated or entry.tags or entry.aliases):
             signals.append("weak_provenance")
         if not signals:
             continue
-        if note_type in _LOOKUP_TYPES and signals == ["unlinked"]:
+        if canon_type in _LOOKUP_TYPES and signals == ["unlinked"]:
             continue
         digest = content_hash(raw)
         evidence = {
@@ -402,7 +408,13 @@ def _stamp_updated(text: str, today: str) -> str | None:
     )
     if close is None:
         return None
-    stamped = f"updated: {today}"
+    # Splitting on "\n" leaves a CRLF file's "\r" on every line, so a bare
+    # "updated: …" would be the one LF-terminated line in the block. Harmless
+    # to YAML, but it makes the note a whole-file diff the next time a
+    # CRLF-normalising editor saves it — and the contract above is that every
+    # other byte survives.
+    eol = "\r" if lines[0].endswith("\r") else ""
+    stamped = f"updated: {today}{eol}"
     for index in range(1, close):
         match = _UPDATED_KEY_RE.match(lines[index])
         if not match:
@@ -416,8 +428,10 @@ def _stamp_updated(text: str, today: str) -> str | None:
     return "\n".join(lines[:close] + [stamped] + lines[close:])
 
 
-def _reverify(root: Path, candidate: ReviewCandidate, today: str) -> str:
-    """Stamp the note as verified today; return its hash afterwards.
+def _reverify(
+    root: Path, candidate: ReviewCandidate, today: str
+) -> tuple[str, bool]:
+    """Stamp the note as verified today; return ``(hash, stamped)``.
 
     *Still true* used to write a ledger row and nothing else, so it cleared the
     queue while leaving the note exactly as unverified as it was — the Memory
@@ -427,6 +441,16 @@ def _reverify(root: Path, candidate: ReviewCandidate, today: str) -> str:
     The note's own hash is re-read first, for the same reason `trash_note`
     checks it: a note edited since the queue was generated is a different note,
     and stamping it would claim a verification of text nobody looked at.
+
+    ``stamped`` is False when there was nothing to write — no frontmatter to
+    stamp, an unterminated block, undecodable bytes, or a date already set to
+    today. The caller still records the decision, because the user's intent
+    ("this note is fine, stop asking") is honoured either way; it must not
+    claim the stamp landed. A note with **no frontmatter** is the archetypal
+    `weak_provenance` candidate, so reporting that case honestly is the
+    difference between a button that half-worked and one that looks broken:
+    the row clears while `memory-audit` and the Memory Map badge go on
+    flagging the note, with no way to get it back into the queue.
     """
     note = (root / Path(candidate.path).relative_to("memory-vault")).resolve()
     if not note.is_relative_to(Path(root).resolve()):
@@ -434,28 +458,54 @@ def _reverify(root: Path, candidate: ReviewCandidate, today: str) -> str:
     try:
         raw = note.read_bytes()
     except OSError:
-        return candidate.content_hash
+        return candidate.content_hash, False
     if content_hash(raw) != candidate.content_hash:
         raise ValueError("candidate changed or no longer exists; regenerate the review")
-    stamped = _stamp_updated(raw.decode("utf-8", errors="replace"), today)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Decoding with errors="replace" and writing the result back would
+        # rewrite every undecodable byte as U+FFFD — a destructive edit to a
+        # note imported from a latin-1 source. Reading signals may be lossy;
+        # a rewrite may not.
+        return candidate.content_hash, False
+    stamped = _stamp_updated(text, today)
     if stamped is None:
-        return candidate.content_hash
+        return candidate.content_hash, False
     payload = stamped.encode("utf-8")
-    with tempfile.NamedTemporaryFile("wb", dir=note.parent, delete=False) as handle:
+    with tempfile.NamedTemporaryFile(
+        "wb",
+        dir=note.parent,
+        prefix=f".{note.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
         temporary = Path(handle.name)
+    # A fresh temp file lands at 0600 and os.replace would silently tighten the
+    # rewritten note's permissions; carry the old mode over, exactly as
+    # `vault_index.apply_edits` does. A vault on a group-readable mount, or one
+    # synced by another user or daemon, otherwise becomes unreadable to it
+    # after a single click of "Still true".
+    try:
+        os.chmod(temporary, note.stat().st_mode & 0o7777)
+    except OSError:
+        pass
     os.replace(temporary, note)
-    return content_hash(payload)
+    return content_hash(payload), True
 
 
 def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *, actor: str = "user", now: datetime | None = None) -> dict[str, Any]:
     if disposition not in DECISION_DISPOSITIONS:
         raise ValueError(f"unsupported vault review disposition: {disposition}")
     digest = candidate.content_hash
+    stamped = False
     if disposition == "keep":
-        digest = _reverify(root, candidate, (now or datetime.now(UTC)).date().isoformat())
+        digest, stamped = _reverify(
+            root, candidate, (now or datetime.now(UTC)).date().isoformat()
+        )
     # The POST-stamp hash, so the row suppresses the note as it now stands. The
     # pre-stamp hash would name a version that no longer exists on disk, and the
     # candidate would come straight back with its own decision not matching it.
@@ -465,7 +515,18 @@ def record_decision(root: Path, candidate: ReviewCandidate, disposition: str, *,
     # when snoozing existed still parses against it.
     row = {"candidate_id": candidate_id(candidate.workspace, candidate.path, digest), "workspace": candidate.workspace, "path": candidate.path, "content_hash": digest, "disposition": disposition, "actor": actor, "status": "reviewed", "deferred_until": ""}
     _append(root, row)
-    return row
+    # The ledger row is the durable record and keeps its existing shape; the
+    # two extra fields are for the caller only. `stamped` lets the UI stop
+    # promising a date it did not write, and `previous_candidate_id` returns
+    # the id the caller actually asked about — `candidate_id` above is
+    # recomputed from the POST-stamp hash, so an agent reusing it for a
+    # follow-up `inspect`/`trash` would get `candidate_not_found`.
+    result: dict[str, Any] = dict(row)
+    result["stamped"] = stamped
+    result["previous_candidate_id"] = candidate_id(
+        candidate.workspace, candidate.path, candidate.content_hash
+    )
+    return result
 
 
 def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -> dict[str, Any]:

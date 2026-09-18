@@ -1517,7 +1517,9 @@ const sortDir = ref(1)
 type SortKey = 'title' | 'type' | 'degree' | 'age'
 function setSort(key: SortKey) {
   if (sortKey.value === key) sortDir.value *= -1
-  else { sortKey.value = key; sortDir.value = 1 }
+  // Age opens oldest-first: the point of sorting by age is triage, and a
+  // larger ageDays is an older note, so that is the descending direction.
+  else { sortKey.value = key; sortDir.value = key === 'age' ? -1 : 1 }
 }
 function sortCaret(key: SortKey): string {
   if (sortKey.value !== key) return ''
@@ -1593,10 +1595,29 @@ const sortedVisibleNodes = computed(() => {
     let bv: string | number
     if (sortKey.value === 'degree') { av = a.degree; bv = b.degree }
     else if (sortKey.value === 'age') {
-      // Oldest first by default: the point of sorting by age is triage.
-      av = a.ageDays ?? Number.MAX_SAFE_INTEGER
-      bv = b.ageDays ?? Number.MAX_SAFE_INTEGER
+      // Undated notes sort last in BOTH directions. A MAX_SAFE_INTEGER
+      // sentinel only held while ascending, so the second click — the one
+      // that actually gives oldest-first triage — floated every undated note
+      // above the genuinely stale ones it was meant to surface.
+      const an = a.ageDays ?? null
+      const bn = b.ageDays ?? null
+      if (an === null && bn === null) return 0
+      if (an === null) return 1
+      if (bn === null) return -1
+      av = an; bv = bn
+    } else if (sortKey.value === 'type') {
+      // The cell renders categoryLabelFor, not the raw type: every person note
+      // is type 'person' while the label splits them into six groups, so
+      // sorting the raw value left that whole block unordered while aria-sort
+      // told a screen reader it was sorted.
+      av = categoryLabelFor(a); bv = categoryLabelFor(b)
     } else { av = (a as any)[sortKey.value] || ''; bv = (b as any)[sortKey.value] || '' }
+    if (typeof av === 'string' && typeof bv === 'string') {
+      // localeCompare, not `<`: raw comparison orders by code point, so every
+      // capitalised title sorts ahead of every lowercase one ('Zebra' < 'apple')
+      // and a vault mixing both spellings reads as unsorted.
+      return av.localeCompare(bv, undefined, { sensitivity: 'base' }) * sortDir.value
+    }
     if (av < bv) return -1 * sortDir.value
     if (av > bv) return 1 * sortDir.value
     return 0
