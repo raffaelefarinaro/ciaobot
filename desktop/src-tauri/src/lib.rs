@@ -201,8 +201,7 @@ fn create_desktop_drop_grant(
         // the follow-up import with "invalid desktop drop grant", a 400 the
         // user cannot act on; surfacing the no-files condition here instead
         // shows the real problem in the composer.
-        return Err("No files were dropped: the drag did not contain file items."
-            .to_string());
+        return Err("No files were dropped: the drag did not contain file items.".to_string());
     }
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant_dir = runtime_root.join("desktop-drop-grants");
