@@ -8090,6 +8090,31 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     promoted: dict[str, Any] = {}
     if action == "accept":
+        # Checked BEFORE any promotion. The queue rewrite below is what raises
+        # `QueueReceiptUnavailable`, and it runs last — so an unwritable
+        # journal returned 503 with the region already written, the doc already
+        # folded or the learning already appended, and the row still queued.
+        # The retry then did it a second time.
+        _accept_queue = Path(ctx["path"])
+        try:
+            _accept_vault = Path(config.workspace_vault_root(ctx["workspace"]))
+        except (AttributeError, ValueError):
+            _accept_vault = _accept_queue.parent.parent
+        # Aliased: a route handler in this module is also named
+        # `memory_receipts`, which shadows the module at function scope.
+        from ciao import memory_receipts as _receipts
+
+        if not _receipts.journal_writable(
+            _receipts.journal_path(_accept_vault, _accept_queue.parent)
+        ):
+            return JSONResponse(
+                {
+                    "error": "the memory receipt journal is unavailable; "
+                    "the proposal was not accepted",
+                    "id": pid,
+                },
+                status_code=503,
+            )
         accept = proposal_kinds.accept_for(row["kind"])
         if accept.action == "move_file":
             target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())

@@ -1842,3 +1842,67 @@ def test_new_receipt_id_is_unchanged_without_a_journal(tmp_path):
     first = mr.new_receipt_id("a|b|c")
     assert first == mr.new_receipt_id("a|b|c")
     assert first != mr.new_receipt_id("a|b|d")
+
+
+def test_removing_one_of_two_identical_bullets_settles_applied(tmp_path):
+    """A surviving twin is not proof the removal failed.
+
+    A queue may legitimately hold two identical bullets of the same kind —
+    `_stable_proposal_id` supports exactly that with occurrence indexes — and
+    testing mere presence in the after-image recorded the successful removal
+    as `rolled_back`: terminal, so startup recovery skips it and History drops
+    the undo. The occurrence count going down is the real evidence.
+    """
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Use Python\n- [memory] Use Python\n",
+        encoding="utf-8",
+    )
+    with mr.queue_resolution(
+        queue, removed_text="Use Python", kind="memory", promoted=False,
+        actor="operator", source="cli", vault_root=tmp_path,
+    ):
+        lines = queue.read_text(encoding="utf-8").splitlines()
+        lines.remove("- [memory] Use Python")
+        queue.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert queue.read_text(encoding="utf-8").count("- [memory] Use Python") == 1
+    latest = [
+        r for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ][-1]
+    assert latest["bullet_present"] is False
+    assert latest["status"] == mr.APPLIED
+    assert mr.is_undoable(latest)
+
+
+def test_a_removal_that_never_happened_still_rolls_back(tmp_path):
+    """Counting must not blunt the guard it replaces."""
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Use Python\n- [memory] Use Python\n",
+        encoding="utf-8",
+    )
+    with mr.queue_resolution(
+        queue, removed_text="Use Python", kind="memory", promoted=False,
+        actor="operator", source="cli", vault_root=tmp_path,
+    ):
+        pass  # nothing removed
+
+    latest = [
+        r for r in mr.read_receipts(mr.journal_path(tmp_path, None))
+        if r["kind"] == "queue_resolve"
+    ][-1]
+    assert latest["status"] == mr.ROLLED_BACK
+
+
+def test_journal_writable_reports_an_unusable_journal(tmp_path):
+    """The accept path's pre-flight: fail before mutating, not after."""
+    good = tmp_path / "Workspace" / "Memory-Receipts.jsonl"
+    assert mr.journal_writable(good) is True
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+    assert mr.journal_writable(blocked / "Workspace" / "R.jsonl") is False
