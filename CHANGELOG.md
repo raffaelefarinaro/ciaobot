@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.17.0 - 2026-09-18
+
+### Added
+- feat(review): talk about a retirement candidate before deciding (`30b86eff`)
+- feat(review): make the retirement queue precise enough to act on (`68be35aa`)
+- feat(review): retire the improve_link disposition (`63eac1be`)
+- feat(review): send an unlinked row hunting for its missing links (`c86ed809`)
+
+### Changed
+- Merge pull request #439 from raffaelefarinaro/chore/sync-develop-v0.16.1 (`2df522a4`)
+- Merge pull request #442 from raffaelefarinaro/raffaelefarinaro/fix-issue-440-deepseek (`6bbb2996`)
+- Merge pull request #443 from raffaelefarinaro/raffaelefarinaro/fix-issue-441-deepseek (`0a76bd73`)
+- SYS-03: isolate FTS database by install (`55658067`)
+- UX-02: separate proposal queue states (`47d5f667`)
+- AI-05: fail safe on lock loss (`5e4351f9`)
+- UX-01: make memory map keyboard and touch accessible (`28ce7f38`)
+- AI-01: document memory and unattended execution policy (`3d125949`)
+- SYS-01: bound heavy vault reads off loop (`6cc43925`)
+- AI-04: add behavioral evaluations (`8ccee63b`)
+- AI-02: make archive processing resumable (`b5a17cb2`)
+- Merge pull request #475 from raffaelefarinaro/raffaelefarinaro/retirement-discuss (`2498929d`)
+- style(desktop): cargo fmt the empty-drop guard (`06478e50`)
+- refactor(web): extract the proposal queue's domain logic from routes_api (`e07b93f6`)
+
+### Fixed
+- fix(schedules): log classifier parse failures as warnings, not tracebacks (`b4215148`)
+- fix(config): align auto_sync_on_start fallback with disabled default (`576110c5`)
+- fix(config): fail closed on non-affirmative auto-sync values (`f7987ec9`)
+- fix(review): resolve General before switching workspace, and put it back (`b3b55497`)
+- fix(review): restore the chat, not just the workspace, on a failed switch (`1c56cdc9`)
+- fix(git): stop leaking file descriptors when a git command times out (`68ba7326`)
+- fix(memory,archive): release review fixes, with regressions (`a11664c4`)
+- fix(archive): make deleting an archived chat stick (`1bb511e6`)
+- fix(archive): repair jobs already stuck, not just new ones (`2ea1c053`)
+- fix(review): stop "Still true" from damaging the note it verifies (`357581c7`)
+- fix(review): finish the "nothing to stamp" signal and the list sorting (`2eb53562`)
+- fix(review): make the stamp failure message true, and the guards reach (`23a958dd`)
+
+### Maintenance
+- chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
+- chore(deps): patch sharp and vitest for the open advisories (`debf4519`)
+- docs(pwa): drop the retired defer disposition from the review route (`0ffaebf3`)
+- docs(capabilities): qualify what keep actually stamps (`d229f0b2`)
+
 ## v0.16.1 - 2026-09-05
 
 ### Changed
