@@ -3956,6 +3956,7 @@ class ProjectChatManager:
         # it. The tombstone is durable even if the in-process task is mid-write.
         # The row is already out of `self._chats`, so hand it over explicitly.
         self._cancel_archive_job(chat_id, chat)
+        self._delete_archived_transcript(chat_id)
         self._save(reason="user_chat_delete")
         self._events.publish({
             "type": "chat_deleted",
@@ -4359,6 +4360,45 @@ class ProjectChatManager:
             return None
         return manifest_view(job)
 
+    def _delete_archived_transcript(self, chat_id: str) -> None:
+        """Remove a deleted chat's archived transcript directory.
+
+        Without this, an explicit delete does not stick. `_discover_archived_chats`
+        treats ``<logs_root>/Chats`` as the source of truth and re-imports any
+        directory that is not in the registry, so the very next `list_projects()`
+        poll brought the chat back — with the same ``chat_id`` and
+        ``archive_path``, hence the same `new_job_id`, which `_cancel_archive_job`
+        had just tombstoned for good. The resurrected chat could therefore never
+        run insights, the project-doc fold, trajectories or memory proposals
+        again, and `retry_insights` reported "complete" for a pipeline that had
+        never run.
+
+        Scoped to this chat's own directory under the derived transcript
+        archive: that tree is Ciaobot-generated, one directory per chat, and the
+        user asked for this chat to be deleted. Everything else in the vault is
+        left alone.
+        """
+        chats_root = self._config.logs_root / "Chats"
+        chat_dir = chats_root / chat_id
+        # Defend the path: `chat_id` reaching a filesystem join must not escape
+        # the archive root, whatever it contains.
+        try:
+            resolved = chat_dir.resolve()
+            if resolved.parent != chats_root.resolve():
+                return
+        except OSError:
+            return
+        if not resolved.is_dir():
+            return
+        import shutil
+
+        try:
+            shutil.rmtree(resolved)
+        except OSError:
+            logger.warning(
+                "Could not delete archived transcript for %s", chat_id, exc_info=True
+            )
+
     def _cancel_archive_job(
         self, chat_id: str, chat: ChatInfo | None = None
     ) -> None:
@@ -4404,6 +4444,8 @@ class ProjectChatManager:
                 self._runtime_root,
                 new_job_id(chat_id, chat.archive_path),
                 reason="chat deleted",
+                chat_id=chat_id,
+                archive_path=chat.archive_path,
             )
 
     # ── Archive job wiring ────────────────────────────────────────────────

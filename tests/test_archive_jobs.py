@@ -1393,3 +1393,112 @@ def test_resume_recomputes_state_for_a_job_it_does_not_resume(
     assert reloaded.status_of(stages[1]) == aj.PENDING
     assert reloaded.state != aj.RUNNING
     assert reloaded.state == "incomplete"
+
+
+def test_deleting_an_archived_chat_removes_its_transcript(tmp_path: Path) -> None:
+    """Delete must stick: the archive is the source of truth for discovery.
+
+    `_discover_archived_chats` re-imports any `<logs_root>/Chats/chat-*` that is
+    not in the registry, so leaving the transcript behind brought the chat back
+    on the next `list_projects()` poll — with the same chat_id and archive_path,
+    hence the same `new_job_id`, which the delete had just tombstoned for good.
+    The resurrected chat could then never run any archive stage again.
+    """
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+
+    chat_dir = manager._config.logs_root / "Chats" / chat.chat_id / "claude"
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    transcript = chat_dir / "2026-09-17T10-00-00.md"
+    transcript.write_text(
+        "---\ntitle: A chat\nworkspace: work\n---\n\n# A chat\n\nbody\n",
+        encoding="utf-8",
+    )
+    chat.archived = True
+    chat.archive_path = str(transcript.relative_to(manager._config.workspace_root))
+    manager._save()
+
+    assert manager.delete_chat(chat.chat_id) is True
+    assert not (manager._config.logs_root / "Chats" / chat.chat_id).exists()
+
+    # The next poll must not bring it back.
+    manager.list_projects()
+    assert chat.chat_id not in manager._chats
+
+
+def test_deleting_a_live_chat_leaves_other_transcripts_alone(tmp_path: Path) -> None:
+    """Only the deleted chat's own directory goes."""
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    keep = manager.create_chat(project.project_id, title="Keep")
+    drop = manager.create_chat(project.project_id, title="Drop")
+
+    for chat in (keep, drop):
+        d = manager._config.logs_root / "Chats" / chat.chat_id / "claude"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "t.md").write_text(
+            f"---\ntitle: {chat.title}\nworkspace: work\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        chat.archived = True
+        chat.archive_path = str(
+            (d / "t.md").relative_to(manager._config.workspace_root)
+        )
+    manager._save()
+
+    assert manager.delete_chat(drop.chat_id) is True
+    assert not (manager._config.logs_root / "Chats" / drop.chat_id).exists()
+    assert (manager._config.logs_root / "Chats" / keep.chat_id).is_dir()
+
+
+def test_synthesised_tombstone_records_the_chat_it_belongs_to(
+    tmp_path: Path,
+) -> None:
+    """A tombstone with empty fields is an untraceable file nothing collects."""
+    manager = _manager(tmp_path)
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    job_id = aj.new_job_id(chat.chat_id, chat.archive_path)
+    assert aj.load_job(manager._runtime_root, job_id) is None
+
+    assert manager.delete_chat(chat.chat_id) is True
+
+    tombstoned = aj.load_job(manager._runtime_root, job_id)
+    assert tombstoned is not None and tombstoned.tombstoned is True
+    assert tombstoned.chat_id == chat.chat_id
+    assert tombstoned.archive_path == chat.archive_path
+
+
+def test_started_is_set_once_a_stage_actually_runs(tmp_path: Path) -> None:
+    """`started` distinguishes a planned job from one that died mid-pipeline."""
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    assert job.started is False
+    # A freshly planned, all-pending job is legitimately "running".
+    assert job.state == aj.RUNNING
+
+    stages = [n for n in aj.PIPELINE_STAGES if n in job.stages]
+    job.mark(stages[0], aj.RUNNING)
+    assert job.started is True
+    job.save()
+    assert aj.load_job(tmp_path / ".runtime", job.job_id).started is True
+
+
+def test_a_died_mid_pipeline_job_reads_incomplete_not_running(
+    tmp_path: Path,
+) -> None:
+    """The stuck-spinner case: pending work on a started job is not in flight."""
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    stages = [n for n in aj.PIPELINE_STAGES if n in job.stages]
+    job.mark(stages[0], aj.RUNNING)
+    # The process dies here; a resume resets the stage to pending.
+    job.stage(stages[0]).status = aj.PENDING
+    job._refresh_state()
+    assert job.state == "incomplete"

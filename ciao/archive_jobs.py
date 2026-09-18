@@ -372,6 +372,12 @@ class ArchiveJob:
         stage = self.stage(name)
         if status == RUNNING:
             stage.attempts += 1
+            # The runner has begun executing stages, which is exactly what
+            # `started` documents. Nothing ever set it, so it was always False
+            # and `_refresh_state` could not tell a planned all-pending job
+            # from one whose process died mid-pipeline: both read "running",
+            # and the PWA showed a spinner nothing would ever clear.
+            self.started = True
         stage.status = status
         if reason:
             stage.reason = reason
@@ -599,7 +605,8 @@ def create_job(
 
 
 def tombstone_job(
-    runtime_root: Path, job_id: str, *, reason: str = "chat deleted"
+    runtime_root: Path, job_id: str, *, reason: str = "chat deleted",
+    chat_id: str = "", archive_path: str = "",
 ) -> bool:
     """Mark a job's chat as deleted so no resume can revive it.
 
@@ -607,6 +614,11 @@ def tombstone_job(
     write its manifest after the delete, and ``save_job`` must then refuse to
     clear the flag. Writes under the file lock directly, rather than through
     :meth:`ArchiveJob.save`, because the lock is not reentrant.
+
+    ``chat_id`` and ``archive_path`` are recorded on a synthesised tombstone so
+    the manifest can be traced back to a chat. Nothing garbage-collects
+    ``.runtime/archive_jobs/``, and a tombstone with empty fields is an opaque
+    file no operator or log line can explain.
     """
     path = job_path(runtime_root, job_id)
     with _lock_for(path):
@@ -614,8 +626,8 @@ def tombstone_job(
         if raw is None:
             job = ArchiveJob(
                 job_id=job_id,
-                chat_id="",
-                archive_path="",
+                chat_id=chat_id,
+                archive_path=archive_path,
                 runtime_root=str(runtime_root),
                 tombstoned=True,
                 state=TOMBSTONED,

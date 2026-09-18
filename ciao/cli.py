@@ -2984,8 +2984,12 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             via="agent",
         )
     if args.json:
+        # `text` is the resolved bullet, not the caller's needle: a row can be
+        # dismissed by a disambiguating fragment (`(from: Alpha)`), and handing
+        # an automation that fragment back as the dismissed fact is wrong. It
+        # matches `removed_text` on the receipt.
         json.dump(
-            {"removed": True, "text": needle, "workspace": str(workspace)},
+            {"removed": True, "text": removed_text, "workspace": str(workspace)},
             sys.stdout,
         )
         sys.stdout.write("\n")
