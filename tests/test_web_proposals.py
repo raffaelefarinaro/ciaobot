@@ -18,9 +18,10 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.web import proposal_service
 from ciao.web import routes_api
+from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
-    _scan_proposal_rows,
     dismiss_older_than,
     list_proposals,
     proposal_action,
@@ -769,8 +770,8 @@ def test_no_leak_warning_once_each_workspace_owns_its_guide(tmp_path: Path) -> N
     config = _default_vault(tmp_path)
     _rerooted(config, tmp_path)
 
-    assert routes_api._leak_warning(config, "memory", "work") is False
-    assert routes_api._leak_warning(config, "profile", "work") is False
+    assert proposal_service._leak_warning(config, "memory", "work") is False
+    assert proposal_service._leak_warning(config, "profile", "work") is False
 
 
 def test_a_shared_guide_still_warns(tmp_path: Path) -> None:
@@ -780,9 +781,9 @@ def test_a_shared_guide_still_warns(tmp_path: Path) -> None:
 
     reset_reroot_cache()   # no receipt: shared layout
 
-    assert routes_api._leak_warning(config, "memory", "work") is True
+    assert proposal_service._leak_warning(config, "memory", "work") is True
     # The primary workspace's own row is where the guide belongs, so no warning.
-    assert routes_api._leak_warning(config, "memory", "personal") is False
+    assert proposal_service._leak_warning(config, "memory", "personal") is False
 
 
 def test_a_rehome_never_warns_in_either_layout(tmp_path: Path) -> None:
@@ -791,9 +792,9 @@ def test_a_rehome_never_warns_in_either_layout(tmp_path: Path) -> None:
     from ciao.config import reset_reroot_cache
 
     reset_reroot_cache()
-    assert routes_api._leak_warning(config, "rehome", "work") is False
+    assert proposal_service._leak_warning(config, "rehome", "work") is False
     _rerooted(config, tmp_path)
-    assert routes_api._leak_warning(config, "rehome", "work") is False
+    assert proposal_service._leak_warning(config, "rehome", "work") is False
 
 
 def test_an_already_moved_row_clears_instead_of_erroring(tmp_path: Path) -> None:
@@ -1083,7 +1084,7 @@ def test_a_batch_row_removed_by_another_request_records_nothing(
     client = _client(config)
     row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
 
-    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    monkeypatch.setattr(proposal_service, "_remove_bullet_line", lambda *a, **k: False)
     response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
 
     assert response.status_code == 200
@@ -1105,7 +1106,7 @@ def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, mo
     client = _client(config)
     row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
 
-    monkeypatch.setattr(routes_api, "_remove_bullet_line", lambda *a, **k: False)
+    monkeypatch.setattr(proposal_service, "_remove_bullet_line", lambda *a, **k: False)
     response = client.post(f"/api/proposals/{row['id']}/dismiss")
 
     assert response.status_code == 200
@@ -1138,7 +1139,7 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
 
     from ciao.web import routes_api
 
-    real = routes_api._rewrite_queue_single
+    real = proposal_service._rewrite_queue_single
     worker_threads: list[int] = []
     main_thread = __import__("threading").get_ident()
 
@@ -1146,7 +1147,7 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
         worker_threads.append(__import__("threading").get_ident())
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(routes_api, "_rewrite_queue_single", spy)
+    monkeypatch.setattr(proposal_service, "_rewrite_queue_single", spy)
     response = client.post(f"/api/proposals/{row['id']}/dismiss")
 
     assert response.status_code == 200
@@ -1162,7 +1163,7 @@ def test_a_shifted_line_index_does_not_delete_a_bystander():
     every later index, so deleting by index alone took out an UNRELATED
     proposal and left the accepted one sitting in the queue.
     """
-    from ciao.web.routes_api import _remove_bullet_line
+    from ciao.web.proposal_service import _remove_bullet_line
 
     # The bullet was at index 1 when it was scanned; a concurrent dismiss has
     # since removed the line above it, so index 1 now holds someone else.
@@ -1174,7 +1175,7 @@ def test_a_shifted_line_index_does_not_delete_a_bystander():
 
 def test_removing_a_bullet_that_is_already_gone_is_a_no_op():
     """Whoever removed it got there first; nothing else may be taken instead."""
-    from ciao.web.routes_api import _remove_bullet_line
+    from ciao.web.proposal_service import _remove_bullet_line
 
     lines = ["- [memory] someone else's"]
 

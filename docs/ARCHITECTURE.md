@@ -127,6 +127,7 @@ ciao/                          Python backend (Starlette).
     routes_mcp.py              MCP Settings HTTP endpoints (status, usage, env keys, project servers, tool probe).
     routes_push.py             Web Push notification routes.
     routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).
+    proposal_service.py        Proposal-queue domain logic behind the proposal routes: scanning the per-workspace `Workspace/Memory-Proposals.md` queue and `Workspace/Skill-Proposals/` folder, the locked single/batch queue rewrites, re-home signalling and moves, and the promotions an accept performs (region write, doc fold, people note, learnings append). routes_api.py imports it as a module and keeps request parsing, authorization, and response mapping.
     agent_assets.py            Agent-facing instruction/subagent/command asset endpoints and OS audit.
     commands.py                Slash-command listing and rate-limit endpoints.
     connection_tracker.py      Tracks live WebSocket connections for the node connected-clients list.
@@ -137,7 +138,8 @@ ciao/                          Python backend (Starlette).
     push.py                    PushManager: bounded notification log, Web Push publishing, and cross-device read-clear controls.
   # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
   # handlers without a domain home; new domains get their own routes_*.py rather than growing
-  # routes_api.py. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
+  # routes_api.py. Domain logic a handler needs belongs in a service module beside it
+  # (proposal_service.py), not inline in the handler. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
 
 web/                           Vue 3 PWA frontend.
