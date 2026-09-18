@@ -1502,3 +1502,49 @@ def test_a_died_mid_pipeline_job_reads_incomplete_not_running(
     job.stage(stages[0]).status = aj.PENDING
     job._refresh_state()
     assert job.state == "incomplete"
+
+
+def test_started_is_inferred_for_a_manifest_written_before_the_flag(
+    tmp_path: Path,
+) -> None:
+    """Jobs already stuck mid-pipeline must be repaired, not just new ones.
+
+    Every manifest written before `mark` began setting `started` carries
+    `started: false`. Reading the flag literally would leave exactly the jobs
+    the fix targets showing a spinner forever, so it is inferred from stage
+    attempts — which only `mark(..., RUNNING)` increments.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    stages = [n for n in aj.PIPELINE_STAGES if n in job.stages]
+    job.mark(stages[0], aj.RUNNING)
+    job.save()
+
+    # Rewrite the manifest the way the previous release left it.
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["started"] = False
+    raw["state"] = aj.RUNNING
+    raw["stages"][stages[0]]["status"] = aj.PENDING
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.started is True
+    reloaded._refresh_state()
+    assert reloaded.state == "incomplete"
+
+
+def test_a_never_run_manifest_is_still_planned_not_incomplete(
+    tmp_path: Path,
+) -> None:
+    """The inference must not mistake a freshly planned job for a dead one."""
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    job.save()
+
+    reloaded = aj.load_job(tmp_path / ".runtime", job.job_id)
+    assert reloaded is not None
+    assert reloaded.started is False
+    reloaded._refresh_state()
+    assert reloaded.state == aj.RUNNING

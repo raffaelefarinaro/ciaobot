@@ -4390,8 +4390,6 @@ class ProjectChatManager:
             return
         if not resolved.is_dir():
             return
-        import shutil
-
         try:
             shutil.rmtree(resolved)
         except OSError:

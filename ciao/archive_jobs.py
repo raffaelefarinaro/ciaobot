@@ -484,7 +484,14 @@ class ArchiveJob:
             created_at=str(raw.get("created_at", "")),
             updated_at=str(raw.get("updated_at", "")),
             state=str(raw.get("state", RUNNING)),
-            started=bool(raw.get("started", False)),
+            # Inferred, not just read: manifests written before `mark` began
+            # setting this all carry `started: false`, so a job already stuck
+            # mid-pipeline would never be repaired by the flag alone — it would
+            # keep reading "running" and keep showing a spinner nothing clears.
+            # `attempts` is incremented only by `mark(..., RUNNING)`, so a
+            # non-zero count is exactly the evidence that the runner began.
+            started=bool(raw.get("started", False))
+            or any(s.attempts > 0 for s in stages.values()),
             tombstoned=bool(raw.get("tombstoned", False)),
             blocked_reason=str(raw.get("blocked_reason", "")),
             last_error=str(raw.get("last_error", "")),
