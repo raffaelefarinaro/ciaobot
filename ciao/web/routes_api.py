@@ -4908,7 +4908,10 @@ async def vault_review(request: Request) -> JSONResponse:
         action = str(payload.get("action", "") or "")
     # A GET must not write to the vault: only the POST actions that already
     # mutate refresh the readable `Workspace/Vault-Review.md` projection.
-    if action in {"restore", "delete"}:
+    # `reopen` belongs here too: it looks its row up in the ledger, never in
+    # `candidates`, so the pre-action scan was thrown away — and that scan
+    # reads every note in the vault three times, twice per click.
+    if action in {"restore", "delete", "reopen"}:
         candidates = []
     else:
         candidates = await asyncio.to_thread(

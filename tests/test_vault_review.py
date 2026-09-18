@@ -958,3 +958,113 @@ def test_an_invalid_disposition_does_not_rewrite_the_queue(
     # The valid set is named, so an agent on a stale instruction can recover.
     assert "keep" in str(caught.value)
     assert not queue.exists()
+
+
+# ── vanished rows and list_cleared cost (release review) ────────────────────
+
+
+def _kept_note(tmp_path: Path) -> Path:
+    note = tmp_path / "Ideas" / "Loose.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntype: note\n---\nAn unlinked note.\n", encoding="utf-8")
+    candidate = generate_candidates(tmp_path, workspace="personal")[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+    return note
+
+
+def _dispositions(tmp_path: Path) -> list[str]:
+    return [str(r.get("disposition")) for r in read_ledger(tmp_path)]
+
+
+def test_a_renamed_note_is_not_recorded_as_vanished(tmp_path: Path) -> None:
+    """A rename leaves the old path empty; the note never left the vault.
+
+    `candidate_id` carries the content hash, so the per-candidate guard did not
+    see the stale `keep` row for the old path — and the ledger claimed the note
+    "left the vault by an ordinary file deletion" while it sat there renamed.
+    """
+    note = _kept_note(tmp_path)
+    note.rename(note.parent / "Renamed.md")
+
+    generate_candidates(tmp_path, workspace="personal")
+
+    assert "vanished" not in _dispositions(tmp_path)
+
+
+def test_a_trashed_note_is_not_also_recorded_as_vanished(tmp_path: Path) -> None:
+    """The ledger must not answer the same question twice, differently.
+
+    Keep a note, edit it, retire it: the `trash` row lands under the new hash
+    while the stale `keep` sits under the old one, and the old row produced a
+    `vanished` for a note that is in the trash offering Restore.
+    """
+    note = _kept_note(tmp_path)
+    note.write_text("---\ntype: note\n---\nEdited.\n", encoding="utf-8")
+    trash_note(tmp_path, generate_candidates(tmp_path, workspace="personal")[0])
+
+    generate_candidates(tmp_path, workspace="personal")
+
+    dispositions = _dispositions(tmp_path)
+    assert "trash" in dispositions
+    assert "vanished" not in dispositions
+
+
+def test_a_genuinely_deleted_note_is_still_recorded_as_vanished(
+    tmp_path: Path,
+) -> None:
+    """The narrowing must not silence the case the row exists for."""
+    note = _kept_note(tmp_path)
+    note.unlink()
+
+    generate_candidates(tmp_path, workspace="personal")
+
+    assert "vanished" in _dispositions(tmp_path)
+
+
+def test_list_cleared_survives_an_unreadable_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unreadable note drops its own row, not the whole endpoint.
+
+    `list_cleared` runs unprotected from the GET handler and from every
+    mutation's snapshot, so an unguarded read took the candidate list, the
+    trash list and every mutation response down with it.
+    """
+    _kept_note(tmp_path)
+
+    real = Path.read_bytes
+
+    def boom(self: Path) -> bytes:
+        if self.name == "Loose.md":
+            raise OSError("permission denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+
+    assert review.list_cleared(tmp_path, workspace="personal") == []
+
+
+def test_list_cleared_reads_only_as_far_as_the_page(tmp_path: Path) -> None:
+    """Hashing every kept note ran hundreds of reads to return twenty rows."""
+    for index in range(12):
+        note = tmp_path / "Ideas" / f"Note{index:02d}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(f"---\ntype: note\n---\nNote {index}.\n", encoding="utf-8")
+    for candidate in generate_candidates(tmp_path, workspace="personal", max_candidates=50):
+        record_decision(tmp_path, candidate, disposition="keep")
+
+    reads: list[str] = []
+    real = Path.read_bytes
+
+    def counting(self: Path) -> bytes:
+        reads.append(self.name)
+        return real(self)
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "read_bytes", counting)
+        rows = review.list_cleared(tmp_path, workspace="personal", limit=3)
+
+    assert len(rows) == 3
+    assert len(reads) == 3, f"read {len(reads)} notes to return 3 rows"

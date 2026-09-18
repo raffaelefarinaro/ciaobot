@@ -326,6 +326,11 @@ def _generate_candidates(
                 incoming[target_path].append(source)
     today = (now or datetime.now(UTC)).date()
     candidates: list[ReviewCandidate] = []
+    # What the vault actually holds right now, by path and by content. A note
+    # renamed in an editor leaves its old path but never left the vault, and
+    # `_record_vanished` must not say otherwise.
+    present_paths: set[str] = set()
+    present_digests: set[str] = set()
     for entry in entries:
         path = str(entry.path)
         if any(part.casefold() == "workspace" for part in Path(path).parts):
@@ -340,6 +345,8 @@ def _generate_candidates(
             raw = disk_path.read_bytes()
         except (OSError, ValueError):
             continue
+        present_paths.add(path)
+        present_digests.add(content_hash(raw))
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
         # `entry.type` is the raw frontmatter string. The two type filters below
@@ -408,12 +415,18 @@ def _generate_candidates(
     active = [item for item in candidates if not _suppressed(decisions.get(item.candidate_id, {})) or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
     result = active[: max(1, min(int(max_candidates), 50))]
     if write_queue:
-        _record_vanished(root, workspace, decisions)
+        _record_vanished(root, workspace, decisions, present_paths, present_digests)
         _write_queue(root, result, decisions)
     return result
 
 
-def _record_vanished(root: Path, workspace: str, decisions: dict[str, dict[str, Any]]) -> None:
+def _record_vanished(
+    root: Path,
+    workspace: str,
+    decisions: dict[str, dict[str, Any]],
+    present_paths: set[str],
+    present_digests: set[str],
+) -> None:
     """Close the ledger's account of notes that left outside this workflow.
 
     A note deleted with an ordinary file delete just stops being scanned: it
@@ -422,19 +435,39 @@ def _record_vanished(root: Path, workspace: str, decisions: dict[str, dict[str, 
     `vanished` row per candidate says what actually happened.
 
     Written only when the caller is already allowed to write — a listing that
-    appends to the ledger is not the read-only listing it claims to be. Guarded
-    on the latest row per candidate, so a note stays recorded once however many
-    times the nightly pass runs afterwards, and a file that comes back is
-    scanned and judged again like any other.
+    appends to the ledger is not the read-only listing it claims to be.
+
+    Three guards, because ``candidate_id`` carries the content hash and a note
+    therefore has a *different* id per revision. Guarding on the candidate id
+    alone wrote rows that were simply false:
+
+    * **Path, not candidate.** A note kept under one hash, edited, then retired
+      has a `trash` row under the new id and a stale `keep` under the old one —
+      which then produced a `vanished` row for a note sitting in the trash,
+      offering Restore, while the audit trail said it had vanished.
+    * **Still on disk.** The same stale row fires for any path that later
+      disappears, so the check must be against what this scan actually found.
+    * **Still in the vault under another name.** A rename leaves the old path
+      empty; the note never left. Matching the recorded content hash against
+      what the scan read tells a move from a deletion.
     """
+    terminal_paths = {
+        str(row.get("path") or "")
+        for row in decisions.values()
+        if row.get("disposition") in {"trash", "delete", "vanished"}
+    }
     for candidate_id_value, decision in decisions.items():
         if str(decision.get("workspace") or "") != workspace:
             continue
+        path = str(decision.get("path") or "")
         # `trash` and `delete` already say where the note went; `vanished` would
         # be a second, vaguer answer to a question the ledger has answered.
-        if decision.get("disposition") in {"trash", "delete", "vanished"}:
+        if path in terminal_paths:
             continue
-        path = str(decision.get("path") or "")
+        if path in present_paths:
+            continue
+        if str(decision.get("content_hash") or "") in present_digests:
+            continue
         try:
             note = (root / Path(path).relative_to("memory-vault")).resolve()
         except ValueError:
@@ -680,12 +713,26 @@ def list_cleared(root: Path, *, workspace: str, limit: int = 20) -> list[dict[st
     since been edited is already back in the queue on its own.
     """
     root = Path(root).resolve()
+    wanted = max(1, min(int(limit), 100))
+    # Ordered before anything is read, then read only far enough to fill the
+    # page. Hashing every kept note first meant a whole-file read per cleared
+    # note on every GET *and* inside every mutation's snapshot — hundreds of
+    # reads to return twenty rows, in a module whose other passes go to some
+    # length to avoid exactly that.
+    rows = sorted(
+        (
+            row
+            for row in _latest_decisions(root).values()
+            if row.get("disposition") == "keep"
+            and str(row.get("workspace") or "") == workspace
+        ),
+        key=lambda row: str(row.get("timestamp") or ""),
+        reverse=True,
+    )
     items: list[dict[str, Any]] = []
-    for decision in _latest_decisions(root).values():
-        if decision.get("disposition") != "keep":
-            continue
-        if str(decision.get("workspace") or "") != workspace:
-            continue
+    for decision in rows:
+        if len(items) >= wanted:
+            break
         path = str(decision.get("path") or "")
         try:
             note = (root / Path(path).relative_to("memory-vault")).resolve()
@@ -695,7 +742,16 @@ def list_cleared(root: Path, *, workspace: str, limit: int = 20) -> list[dict[st
         # already un-suppressed and back in the queue under a new hash.
         if not note.is_file() or not note.is_relative_to(root):
             continue
-        if content_hash(note.read_bytes()) != decision.get("content_hash"):
+        try:
+            digest = content_hash(note.read_bytes())
+        except OSError:
+            # One unreadable note (permissions, a broken symlink, a delete
+            # racing the is_file check) must drop its own row, not 500 the
+            # whole review endpoint — this runs unprotected from the GET
+            # handler and from every mutation's snapshot, so the panel would
+            # go blank rather than lose a row.
+            continue
+        if digest != decision.get("content_hash"):
             continue
         items.append(
             {
@@ -706,8 +762,7 @@ def list_cleared(root: Path, *, workspace: str, limit: int = 20) -> list[dict[st
                 "decided_at": str(decision.get("timestamp") or ""),
             }
         )
-    items.sort(key=lambda item: item["decided_at"], reverse=True)
-    return items[: max(1, min(int(limit), 100))]
+    return items
 
 
 def reopen_note(root: Path, candidate_id_value: str, *, workspace: str, actor: str = "user") -> dict[str, Any]:
