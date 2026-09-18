@@ -800,3 +800,59 @@ def test_unreadable_and_undecodable_notes_report_distinct_statuses(
         priority=0.0,
     )
     assert review._reverify(tmp_path, missing, "2026-09-18")[1] == "unreadable"
+
+
+def test_an_invalid_disposition_does_not_rewrite_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected decide must not leave a side effect behind.
+
+    `record_decision` raises on a bad disposition, but the control plane
+    regenerated the queue projection first — so a call that errored out had
+    still rewritten `Workspace/Vault-Review.md`. An agent following a stale
+    instruction (the curation skill named `improve_link` for a release after
+    it was retired) hit exactly that.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError
+    from ciao.mcp_server import McpPrincipal
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".ciao"))
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    config = SimpleNamespace(
+        workspace=lambda name: object() if name == "personal" else None,
+        vault_root=tmp_path,
+        workspace_root=tmp_path,
+        agent_vault_root=lambda name: tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        state_path_parent=tmp_path / ".runtime",
+    )
+    plane = CiaoControlPlane(
+        config,
+        project_chat_manager=SimpleNamespace(
+            _workspace_vault_root=lambda ws: tmp_path,
+            # Attended turn: the unattended guard runs before the validation
+            # under test, so the stub has to get past it.
+            get_chat=lambda cid: SimpleNamespace(
+                user_turn_count=1, user_turn_unattended={}
+            ),
+        ),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="t", chat_id="c", project_id="p",
+        workspace="personal", provider="claude",
+    )
+    queue = tmp_path / "Workspace" / "Vault-Review.md"
+    assert not queue.exists()
+
+    with pytest.raises(ControlPlaneError) as caught:
+        plane.vault_review(
+            principal, action="decide", candidate_id="a" * 24, disposition="improve_link"
+        )
+
+    assert caught.value.code == "vault_review_invalid"
+    # The valid set is named, so an agent on a stale instruction can recover.
+    assert "keep" in str(caught.value)
+    assert not queue.exists()

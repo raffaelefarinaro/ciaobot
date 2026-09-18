@@ -786,6 +786,16 @@ class CiaoControlPlane:
             except ValueError as exc:
                 raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
             return _ok(result)
+        # Validated before the queue is regenerated below: `record_decision`
+        # raises on a bad disposition, but by then `write_queue=True` has
+        # already rewritten `Workspace/Vault-Review.md`, so a rejected call
+        # still did work. Naming the valid set also makes the error actionable
+        # for an agent following a stale instruction.
+        if action == "decide" and disposition not in review.DECISION_DISPOSITIONS:
+            raise ControlPlaneError(
+                "vault_review_invalid",
+                f"disposition must be one of {sorted(review.DECISION_DISPOSITIONS)}.",
+            )
         # `list` and `inspect` are declared read-only to the MCP host, so they
         # must not refresh the queue projection either.
         candidates = review.generate_candidates(

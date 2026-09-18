@@ -236,7 +236,7 @@ describe('VaultReviewPanel', () => {
     expect(createChat).toHaveBeenCalledTimes(1)
     const [projectId, title, seed] = createChat.mock.calls[0]
     expect(projectId).toBe('p-general')
-    expect(title).toBe('Retire Mo?')
+    expect(title).toBe('Link or retire Mo?')
     expect(seed).toContain('memory-vault/People/Mo.md')
     expect(seed).toContain('no other note links to it')
     expect(seed).toContain('I will pick Still true or Retire myself')
@@ -244,6 +244,61 @@ describe('VaultReviewPanel', () => {
     // No disposition was recorded: the row is still in the queue.
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('seeds an unlinked row with a hunt for the notes that should link to it', async () => {
+    // The repair for `unlinked` is a link, and a link lives in another note —
+    // so the seed sends the agent after those notes instead of only weighing
+    // the keep-or-retire question the row asks. `Link fixed` used to claim
+    // this repair and perform none of it.
+    apiGet.mockResolvedValue({ candidates: [candidate({ signals: ['unlinked'] })], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+
+    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await flushPromises()
+
+    const [, title, seed] = createChat.mock.calls[0]
+    expect(title).toBe('Link or retire Mo?')
+    expect(seed).toContain('search the vault for the notes that should link to it')
+    // The approval gate leads. Buried mid-paragraph it was one clause among
+    // five, and a model that misses it writes links the user never approved —
+    // which, because backlinks are counted live, also clears the row.
+    expect((seed as string).split('\n\n').at(-1)).toMatch(/^Write nothing until I say so\./)
+    expect(seed).toContain('wait for my go-ahead on each before writing it')
+    // The note under review is still not the agent's to change.
+    expect(seed).toContain('Do not edit, move, or delete the note itself')
+    wrapper.unmount()
+  })
+
+  it('keeps the seed read-only when nothing flagged the note as unlinked', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [candidate({ signals: ['weak_provenance'] })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+
+    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await flushPromises()
+
+    const [, title, seed] = createChat.mock.calls[0]
+    expect(title).toBe('Retire Mo?')
+    expect(seed).toContain('Do not edit, move, or delete anything')
+    expect(seed).not.toContain('should link to it')
     wrapper.unmount()
   })
 

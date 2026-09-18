@@ -171,9 +171,48 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
     `${candidate.workspace} vault.\n\n` +
     `Curation flagged it because ${reasons.join('; ') || 'it looked stale'}. ` +
     `It is ${facts.join(' · ')}.\n\n` +
-    'Read the note and tell me what would be lost if it went, and whether ' +
-    'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
-    'anything — I will pick Still true or Retire myself.'
+    discussTask(candidate)
+  )
+}
+
+/** What to ask the agent for, which the `unlinked` signal changes.
+ *
+ * An unlinked note is the one case where the queue's own question — keep or
+ * retire — is not the most useful one to open with. Nothing links to it, and
+ * the repair for that is a link, which by definition lives in some *other*
+ * note. So the seed sends the agent hunting for the notes that should point
+ * here, which is work that actually clears the signal: backlinks are counted
+ * live, so a note that gains one stops being flagged `unlinked` on the next
+ * run. The retired `Link fixed` button claimed exactly this repair and
+ * performed none of it — it cleared the row and left the note as orphaned as
+ * it found it.
+ *
+ * Nothing is written unattended either way. The read-only branch stays
+ * read-only, and the unlinked branch narrows the permission rather than
+ * dropping it: links into other notes, once approved, and no edit to the note
+ * under review.
+ */
+function discussTask(candidate: VaultReviewCandidate): string {
+  if (!candidate.signals.includes('unlinked')) {
+    return (
+      'Read the note and tell me what would be lost if it went, and whether ' +
+      'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
+      'anything — I will pick Still true or Retire myself.'
+    )
+  }
+  return (
+    // The approval gate leads, as the read-only branch's constraint does.
+    // Buried mid-paragraph it was one clause among five, and the cost of a
+    // model missing it is a write the user never approved — which, because
+    // backlinks are counted live, also clears the row on its own.
+    'Write nothing until I say so. Read the note, then search the vault for ' +
+    'the notes that should link to it — the projects, people, or decisions it ' +
+    'belongs to. Propose each one as the note the link would go in and the ' +
+    'sentence it would read, and wait for my go-ahead on each before writing ' +
+    'it: a link is what actually clears this flag, since a note that gains a ' +
+    'backlink stops being flagged for it. If nothing should link to it, say so ' +
+    'plainly — that is an argument for retiring it. Do not edit, move, or ' +
+    'delete the note itself; I will pick Still true or Retire myself.'
   )
 }
 
@@ -190,7 +229,12 @@ async function discussRow(candidate: VaultReviewCandidate) {
     await startFileDiscussion(projectStore, {
       path: candidate.path,
       workspace: candidate.workspace,
-      title: `Retire ${candidateLeaf(candidate.path)}?`,
+      // The chat's name follows the question the seed actually opens with:
+      // "Retire Mo?" over a chat hunting for links to Mo is the same small
+      // dishonesty the `Link fixed` button was removed for.
+      title: candidate.signals.includes('unlinked')
+        ? `Link or retire ${candidateLeaf(candidate.path)}?`
+        : `Retire ${candidateLeaf(candidate.path)}?`,
       seed: discussPrompt(candidate),
     })
   } finally {
@@ -255,9 +299,11 @@ function trashedDate(note: VaultTrashedNote): string {
         Stale notes the nightly curation flagged. <strong>Still true</strong> clears the
         row and stamps the note as verified today (a note with no frontmatter has
         nothing to stamp, and says so); <strong>Retire</strong> moves it to the
-        Trash tab, where one click brings it back for 30 days. Leaving a row alone
-        keeps it here. Nothing here deletes permanently except the trash's own
-        delete control, which asks first.
+        Trash tab, where one click brings it back for 30 days. <strong>Talk about it</strong>
+        opens a chat with the note pinned and decides nothing — on a note nothing links
+        to, it goes looking for the notes that should link to it, which is what actually
+        clears that flag. Leaving a row alone keeps it here. Nothing here deletes
+        permanently except the trash's own delete control, which asks first.
       </p>
 
       <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
