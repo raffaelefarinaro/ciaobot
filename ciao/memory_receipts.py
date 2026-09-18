@@ -338,6 +338,31 @@ def queue_lock(
         handle.close()
 
 
+def journal_writable(journal: Path) -> bool:
+    """Whether a receipt row could be appended to ``journal`` right now.
+
+    A pre-flight for callers that mutate a destination *before* the receipt is
+    written. The proposal accept path promotes the fact — a region write, a doc
+    fold, a people note, a learnings append — and only then rewrites the queue,
+    which is what raises :class:`QueueReceiptUnavailable`. An unwritable
+    journal there returned 503 with the destination already changed and the row
+    still queued, so the retry folded the doc twice or incremented a
+    recurrence count again.
+
+    Catches the reachable causes — a missing or read-only directory, a journal
+    that cannot be opened for append. It cannot predict a write that fails
+    mid-flight on a full disk; the receipt protocol still covers that, this
+    only stops the common case from mutating first.
+    """
+    try:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        with journal.open("a", encoding="utf-8"):
+            pass
+    except OSError:
+        return False
+    return True
+
+
 def _append(journal: Path, payload: dict[str, Any]) -> None:
     """Append one receipt row, serialized across processes and fsynced."""
     journal.parent.mkdir(parents=True, exist_ok=True)
@@ -852,11 +877,16 @@ def _write_queue_receipt(
         # confirmation. A bullet that is still queued means the intended
         # removal did not land, whatever else changed the file around it.
         #
-        # Matched through `_bullets_match` (parsed text plus kind), not a raw
-        # substring: `removed_text in line` reported a removed `Use Python` as
-        # still queued while `Use Python 3` remained, so a resolution that
-        # actually landed was journaled `rolled_back` and lost its undo.
-        present = _bullets_match(after, removed_text, kind)
+        # Counted, not merely matched. A raw `removed_text in line` reported a
+        # removed `Use Python` as still queued while `Use Python 3` remained;
+        # matching parsed bullets fixed that but still mis-settled a queue
+        # holding two identical bullets, where removing one leaves the other
+        # as apparent proof the removal failed. Either way the resolution was
+        # journaled `rolled_back` — terminal, so startup recovery skips it and
+        # History drops the undo. The count going down is the actual evidence.
+        present = _bullet_count(after, removed_text, kind) >= _bullet_count(
+            before, removed_text, kind
+        )
         receipt["bullet_present"] = present
         if present:
             receipt["status"] = ROLLED_BACK
@@ -1177,6 +1207,33 @@ def _reconcile_region(
         CONFLICT,
         "destination changed while the operation was interrupted",
     )
+
+
+def _bullet_count(text: str, needle: str, kind: str = "") -> int:
+    """How many bullets in ``text`` match ``needle`` (and ``kind``).
+
+    Presence alone cannot settle a removal: a queue may legitimately hold two
+    identical bullets of the same kind — `_stable_proposal_id` supports exactly
+    that with occurrence indexes — so a surviving twin made a successful
+    removal look like it never happened.
+    """
+    from ciao.memory_proposals import _one_line
+    from ciao.proposal_kinds import parse_bullet
+
+    target = _one_line(str(needle))
+    if not target:
+        return 0
+    wanted_kind = str(kind or "").strip().lower()
+    total = 0
+    for line in text.splitlines():
+        bullet = parse_bullet(line)
+        if bullet is None:
+            continue
+        if wanted_kind and bullet.kind.lower() != wanted_kind:
+            continue
+        if _one_line(bullet.text) == target:
+            total += 1
+    return total
 
 
 def _bullets_match(text: str, needle: str, kind: str = "") -> bool:
