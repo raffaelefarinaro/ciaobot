@@ -9,6 +9,18 @@ import { askConfirm } from '../lib/confirm'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 
+/** Which half of the retirement queue to render.
+ *
+ * Deciding about a note and emptying the trash are different jobs on different
+ * rows, and they used to share one scroll: a full queue put thirty candidates
+ * between a note you had just retired and the Restore button that brings it
+ * back. The parent owns the tab state; both sections stay in this component
+ * because they share the store, the busy set and the error toast.
+ */
+const props = withDefaults(defineProps<{ section?: 'candidates' | 'trash' }>(), {
+  section: 'candidates',
+})
+
 const store = useVaultReviewStore()
 const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
@@ -38,21 +50,6 @@ watch(workspace, (ws) => {
 
 function refresh() {
   if (workspace.value) void store.fetch(workspace.value, { force: true })
-}
-
-// "Later" needs a day count per row. Kept local: it is input state, not
-// server state, and it must survive a queue refresh while the user types.
-// Stored raw so clearing the field stays empty while typing instead of
-// snapping back to 0; only coerced when the Later action runs.
-const deferDays = ref<Record<string, string>>({})
-function daysFor(id: string): string {
-  return deferDays.value[id] ?? '7'
-}
-function clampDays(id: string): number {
-  const raw = (deferDays.value[id] ?? '7').trim()
-  if (!raw) return 7
-  const n = Math.floor(Number(raw))
-  return Number.isFinite(n) ? Math.max(1, Math.min(90, n)) : 7
 }
 
 // A candidate carries no content — only its path and why it was flagged —
@@ -119,6 +116,18 @@ function onExcerptToggle(candidate: VaultReviewCandidate, event: Event) {
   if ((event.target as HTMLDetailsElement).open) void ensureExcerpt(candidate)
 }
 
+/** The opening lines the queue already sent with the row.
+ *
+ * Every row used to start as a path and four bullet points with the note's own
+ * words hidden behind a disclosure, so telling two stale project logs apart
+ * meant opening both. The server now carries a short excerpt in the candidate's
+ * evidence; the disclosure below still loads the longer text on demand, and an
+ * older server that sends no excerpt simply falls back to it.
+ */
+function inlineExcerpt(candidate: VaultReviewCandidate): string {
+  return candidate.evidence.excerpt?.trim() || ''
+}
+
 async function openNote(path: string) {
   await fileViewer.open(path)
 }
@@ -152,7 +161,7 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
     `It is ${facts.join(' · ')}.\n\n` +
     'Read the note and tell me what would be lost if it went, and whether ' +
     'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
-    'anything — I will pick Still true, Retire, or Later myself.'
+    'anything — I will pick Still true, Retire, or Link fixed myself.'
   )
 }
 
@@ -179,10 +188,6 @@ async function discussRow(candidate: VaultReviewCandidate) {
 
 async function keepRow(candidate: VaultReviewCandidate) {
   await store.decide(workspace.value, candidate.candidate_id, 'keep')
-}
-
-async function deferRow(candidate: VaultReviewCandidate) {
-  await store.decide(workspace.value, candidate.candidate_id, 'defer', clampDays(candidate.candidate_id))
 }
 
 async function linkFixedRow(candidate: VaultReviewCandidate) {
@@ -222,8 +227,12 @@ function trashedDate(note: VaultTrashedNote): string {
   <div class="vault-review">
     <header class="vr-head">
       <p class="vr-summary">
-        <strong>{{ store.candidates.length }}</strong> to review in {{ workspace }}
-        · <strong>{{ store.trashed.length }}</strong> in trash
+        <template v-if="props.section === 'trash'">
+          <strong>{{ store.trashed.length }}</strong> retired {{ store.trashed.length === 1 ? 'note' : 'notes' }} in {{ workspace }}
+        </template>
+        <template v-else>
+          <strong>{{ store.candidates.length }}</strong> to review in {{ workspace }}
+        </template>
       </p>
       <button
         type="button"
@@ -233,115 +242,104 @@ function trashedDate(note: VaultTrashedNote): string {
       >{{ store.loading ? 'loading…' : 'refresh' }}</button>
     </header>
 
-    <p class="vr-hint">
-      Stale notes the nightly curation flagged. <strong>Still true</strong> re-verifies a
-      note; <strong>Retire</strong> moves it to the trash, where one click brings it
-      back for 30 days. <strong>Later</strong> snoozes a candidate; <strong>Link
-      fixed</strong> records that you re-linked it elsewhere. Nothing here deletes
-      permanently except the trash's own delete control, which asks first.
-    </p>
+    <template v-if="props.section !== 'trash'">
+      <p class="vr-hint">
+        Stale notes the nightly curation flagged. <strong>Still true</strong> stamps the
+        note as verified today and clears the row; <strong>Retire</strong> moves it to the
+        Trash tab, where one click brings it back for 30 days. <strong>Link fixed</strong>
+        clears it because you have since linked it from somewhere else, and changes nothing
+        in the note. Leaving a row alone keeps it here. Nothing here deletes permanently
+        except the trash's own delete control, which asks first.
+      </p>
 
-    <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
-    <p v-else-if="!store.candidates.length" class="vr-empty">
-      Nothing flagged here. Notes land here when curation finds them unlinked,
-      duplicated, superseded, or unverified — and leave when you or that run resolves them.
-    </p>
+      <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
+      <p v-else-if="!store.candidates.length" class="vr-empty">
+        Nothing flagged here. Notes land here when curation finds them unlinked,
+        duplicated, superseded, or unverified — and leave when you or that run resolves them.
+      </p>
 
-    <ul v-else class="vr-rows">
-      <li
-        v-for="candidate in store.candidates"
-        :key="candidate.candidate_id"
-        class="vr-row"
-        :class="{ 'vr-row--busy': store.isBusy(candidate.candidate_id) }"
-      >
-        <div class="vr-row-body">
-          <div class="vr-row-top">
-            <span class="vr-title">{{ candidateLeaf(candidate.path) }}</span>
-          </div>
-          <button
-            type="button"
-            class="vr-path"
-            :title="candidate.path"
-            @click="openNote(candidate.path)"
-          >{{ candidate.path }}</button>
-          <ul class="vr-reasons">
-            <li v-for="reason in signalReasons(candidate.signals)" :key="reason">{{ reason }}</li>
-          </ul>
-          <p class="vr-meta">
-            {{ candidate.evidence.type }} · {{ verifyLabelOf(candidate) }}
-            <span v-if="candidate.evidence.backlinks.length">
-              · {{ candidate.evidence.backlinks.length }} backlink{{ candidate.evidence.backlinks.length === 1 ? '' : 's' }}
-            </span>
-            <span v-if="candidate.evidence.bridge" class="vr-badge --warn">bridges clusters — think twice</span>
-          </p>
-          <p v-if="candidate.evidence.duplicate_group.length" class="vr-meta">
-            Possible {{ candidate.evidence.duplicate_group.length === 1 ? 'duplicate' : 'duplicates' }}:
-            {{ candidate.evidence.duplicate_group.filter(p => p !== candidate.path).slice(0, 3).join(', ') || 'see evidence' }}
-          </p>
-          <details class="vr-excerpt" @toggle="onExcerptToggle(candidate, $event)">
-            <summary>excerpt</summary>
-            <p v-if="excerpts[candidate.candidate_id]?.loading" class="vr-meta">Loading…</p>
-            <p v-else-if="excerpts[candidate.candidate_id]?.error" class="vr-error">
-              {{ excerpts[candidate.candidate_id].error }}
+      <ul v-else class="vr-rows">
+        <li
+          v-for="candidate in store.candidates"
+          :key="candidate.candidate_id"
+          class="vr-row"
+          :class="{ 'vr-row--busy': store.isBusy(candidate.candidate_id) }"
+        >
+          <div class="vr-row-body">
+            <div class="vr-row-top">
+              <span class="vr-title">{{ candidateLeaf(candidate.path) }}</span>
+            </div>
+            <button
+              type="button"
+              class="vr-path"
+              :title="candidate.path"
+              @click="openNote(candidate.path)"
+            >{{ candidate.path }}</button>
+            <ul class="vr-reasons">
+              <li v-for="reason in signalReasons(candidate.signals)" :key="reason">{{ reason }}</li>
+            </ul>
+            <p class="vr-meta">
+              {{ candidate.evidence.type }} · {{ verifyLabelOf(candidate) }}
+              <span v-if="candidate.evidence.backlinks.length">
+                · {{ candidate.evidence.backlinks.length }} backlink{{ candidate.evidence.backlinks.length === 1 ? '' : 's' }}
+              </span>
+              <span v-if="candidate.evidence.bridge" class="vr-badge --warn">bridges clusters — think twice</span>
             </p>
-            <pre v-else-if="excerpts[candidate.candidate_id]?.text" class="vr-excerpt-text">{{ excerpts[candidate.candidate_id].text }}</pre>
-          </details>
-        </div>
+            <p v-if="candidate.evidence.duplicate_group.length" class="vr-meta">
+              Possible {{ candidate.evidence.duplicate_group.length === 1 ? 'duplicate' : 'duplicates' }}:
+              {{ candidate.evidence.duplicate_group.filter(p => p !== candidate.path).slice(0, 3).join(', ') || 'see evidence' }}
+            </p>
+            <p v-if="inlineExcerpt(candidate)" class="vr-excerpt-inline">{{ inlineExcerpt(candidate) }}</p>
+            <details class="vr-excerpt" @toggle="onExcerptToggle(candidate, $event)">
+              <summary>{{ inlineExcerpt(candidate) ? 'read more' : 'excerpt' }}</summary>
+              <p v-if="excerpts[candidate.candidate_id]?.loading" class="vr-meta">Loading…</p>
+              <p v-else-if="excerpts[candidate.candidate_id]?.error" class="vr-error">
+                {{ excerpts[candidate.candidate_id].error }}
+              </p>
+              <pre v-else-if="excerpts[candidate.candidate_id]?.text" class="vr-excerpt-text">{{ excerpts[candidate.candidate_id].text }}</pre>
+            </details>
+          </div>
 
-        <div class="vr-actions">
-          <button
-            type="button"
-            class="btn-small btn-primary"
-            :disabled="store.isBusy(candidate.candidate_id)"
-            @click="keepRow(candidate)"
-          >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
-          <button
-            type="button"
-            class="btn-small btn-chip"
-            :disabled="store.isBusy(candidate.candidate_id)"
-            @click="trashRow(candidate)"
-          >Retire</button>
-          <span class="vr-defer">
+          <div class="vr-actions">
+            <button
+              type="button"
+              class="btn-small btn-primary"
+              :disabled="store.isBusy(candidate.candidate_id)"
+              title="Set this note's updated date to today and clear the row"
+              @click="keepRow(candidate)"
+            >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
             <button
               type="button"
               class="btn-small btn-chip"
               :disabled="store.isBusy(candidate.candidate_id)"
-              @click="deferRow(candidate)"
-            >Later</button>
-            <input
-              :value="daysFor(candidate.candidate_id)"
-              type="number"
-              min="1"
-              max="90"
-              aria-label="Snooze days"
-              class="vr-defer-input"
+              @click="trashRow(candidate)"
+            >Retire</button>
+            <button
+              type="button"
+              class="btn-small btn-chip"
               :disabled="store.isBusy(candidate.candidate_id)"
-              @input="deferDays[candidate.candidate_id] = ($event.target as HTMLInputElement).value"
-            />
-            <span class="vr-defer-unit">days</span>
-          </span>
-          <button
-            type="button"
-            class="btn-small btn-chip"
-            :disabled="store.isBusy(candidate.candidate_id)"
-            title="Record that you re-linked this note elsewhere"
-            @click="linkFixedRow(candidate)"
-          >Link fixed</button>
-          <button
-            type="button"
-            class="btn-small btn-chip"
-            :disabled="chatBusy"
-            title="Open a chat about this note before deciding"
-            @click="discussRow(candidate)"
-          >Talk about it</button>
-        </div>
-      </li>
-    </ul>
+              title="Record that you re-linked this note elsewhere; the note is not edited"
+              @click="linkFixedRow(candidate)"
+            >Link fixed</button>
+            <button
+              type="button"
+              class="btn-small btn-chip"
+              :disabled="chatBusy"
+              title="Open a chat about this note before deciding"
+              @click="discussRow(candidate)"
+            >Talk about it</button>
+          </div>
+        </li>
+      </ul>
+    </template>
 
-    <section v-if="store.trashed.length" class="vr-trash" aria-label="Trash">
-      <h3 class="vr-trash-title">Trash ({{ store.trashed.length }})</h3>
+    <section v-else class="vr-trash" aria-label="Trash">
       <p class="vr-hint">Retired notes stay restorable for 30 days. Restore is one click; permanent deletion asks first.</p>
-      <ul class="vr-rows">
+      <p v-if="!store.trashed.length" class="vr-empty">
+        Nothing retired yet. A note you retire from the To review tab waits here for
+        30 days before it can be deleted for good.
+      </p>
+      <ul v-else class="vr-rows">
         <li
           v-for="note in store.trashed"
           :key="note.candidate_id"
@@ -504,8 +502,24 @@ function trashedDate(note: VaultTrashedNote): string {
   color: var(--warning);
 }
 
+/* The note's own words, visible without a click. Clamped rather than truncated
+   server-side alone: the excerpt is a sentence or two, and three lines is as
+   much as a row can give it without the actions drifting out of reach. */
+.vr-excerpt-inline {
+  margin: var(--space-2) 0 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--fg2);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .vr-excerpt {
-  margin-top: var(--space-2);
+  margin-top: var(--space-1);
   font-size: 0.8rem;
   color: var(--fg2);
 }
@@ -542,40 +556,19 @@ function trashedDate(note: VaultTrashedNote): string {
   min-width: 8.5rem;
 }
 
-.vr-defer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.vr-defer-input {
-  width: 3.5rem;
-  min-height: var(--touch);
-}
-
-.vr-defer-unit {
-  font-size: 0.75rem;
-  color: var(--fg2);
-}
-
 /* Destructive, but not competing-pink: neutral chip in the error colour. */
 .vr-danger {
   color: var(--error);
   border-color: var(--error);
 }
 
+/* Its own tab now, so no separator rule and no heading: the tab above says
+   what this is, and the border only made sense when the trash was pinned
+   under the candidate list in the same scroll. */
 .vr-trash {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin-top: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-
-.vr-trash-title {
-  margin: 0;
-  font-size: 0.9rem;
 }
 
 /* Stacked column keeps text full-width on both desktop and mobile. */

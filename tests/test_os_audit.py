@@ -600,15 +600,17 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     (workspace / "AGENTS.md").unlink()
     (workspace / "AGENTS.md").write_text("- Never use rtk for shell commands.\n", encoding="utf-8")
     ideas = vault / "personal" / "Ideas"
-    resources = vault / "personal" / "Resources"
     ideas.mkdir(parents=True)
-    resources.mkdir(parents=True)
     (ideas / "same.md").write_text(
         "---\ntype: idea\n---\n# One\n\n[gone](./missing-target.md)\n",
         encoding="utf-8",
     )
-    (resources / "same.md").write_text(
-        "---\ntype: resource\n---\n# Two\n",
+    # The duplicate pair shares a directory: a repeated stem across folders is
+    # how a vault holds one report/log/slides per project, so the linter only
+    # calls two notes duplicates when they sit in the same place under two
+    # spellings of one name.
+    (ideas / "S-a-m-e.md").write_text(
+        "---\ntype: idea\n---\n# Two\n",
         encoding="utf-8",
     )
     proposals = vault / "personal" / "Workspace" / "Memory-Proposals.md"

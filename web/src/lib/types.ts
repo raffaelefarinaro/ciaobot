@@ -1241,6 +1241,11 @@ export interface VaultReviewEvidence {
   last_update: string
   type: string
   age_days: number | null
+  /** The note's opening prose, already stripped of frontmatter and its H1.
+   *
+   * Optional because a server older than this client does not send it; the
+   * panel falls back to its lazy per-row fetch when it is absent. */
+  excerpt?: string
 }
 
 /** One stale-note retirement candidate from `GET /api/vault/review`. */

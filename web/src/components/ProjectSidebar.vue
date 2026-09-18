@@ -369,23 +369,23 @@
          </button>
       </div>
 
-      <!-- The Graph/List/Review switcher lives here rather than in the pane
+      <!-- The Memory/Review switcher lives here rather than in the pane
            header: picking what the memory page shows is the same act as
            scoping it to a workspace, and this keeps every memory control in
-           one column. -->
+           one column.
+
+           Two buttons, not three. Graph and List are two drawings of the same
+           notes and belong on one level; sitting beside Review they read as
+           three peers, one of which is a different page with a different job.
+           Graph/List now lives in the map's own toolbar, where the rest of the
+           "how should this look" controls already are. -->
       <div class="workspace-toggle view-toggle">
         <button
           type="button"
-          :class="{ active: mm.view === 'graph' }"
-          :aria-pressed="mm.view === 'graph'"
-          @click="setMemoryView('graph')"
-        >Graph</button>
-        <button
-          type="button"
-          :class="{ active: mm.view === 'list' }"
-          :aria-pressed="mm.view === 'list'"
-          @click="setMemoryView('list')"
-        >List</button>
+          :class="{ active: mm.view !== 'review' }"
+          :aria-pressed="mm.view !== 'review'"
+          @click="setMemoryView(mm.mapView)"
+        >Memory</button>
         <button
           type="button"
           :class="{ active: mm.view === 'review' }"
@@ -1328,10 +1328,14 @@ async function discussFileInChat(path: string, prompt?: string): Promise<void> {
 const route = useRoute()
 const router = useRouter()
 
-/** The memory page's Graph/List/Review switcher. Review is the /proposals
- * route; graph and list are both /memory, so only those two need a push. */
+/** The memory page's Memory/Review switcher. Review is the /proposals
+ * route; graph and list are both /memory, so only those two need a push.
+ *
+ * A graph/list choice is also remembered in `mapView`, so the Memory button
+ * returns to the drawing that was on screen rather than resetting to graph. */
 function setMemoryView(next: 'graph' | 'list' | 'review') {
   mm.view = next
+  if (next !== 'review') mm.mapView = next
   const target = next === 'review' ? '/proposals' : '/memory'
   if (route.path !== target) void router.push(target)
 }
@@ -1339,6 +1343,9 @@ function setMemoryView(next: 'graph' | 'list' | 'review') {
 /** The "Needs review" list lands directly on the retirement queue. */
 function openRetirementReview() {
   mm.reviewTab = 'retirement'
+  // Always the queue, never the trash: this link means "show me what is
+  // waiting", and the sub-tab could be left on Trash from a previous visit.
+  mm.retirementTab = 'candidates'
   setMemoryView('review')
 }
 

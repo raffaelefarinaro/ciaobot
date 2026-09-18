@@ -7,7 +7,7 @@ import type {
   VaultTrashedNote,
 } from '../lib/types'
 
-export type VaultReviewDisposition = 'keep' | 'improve_link' | 'defer'
+export type VaultReviewDisposition = 'keep' | 'improve_link'
 
 function reviewUrl(workspace: string, includeTrashed: boolean): string {
   const query = `workspace=${encodeURIComponent(workspace)}${includeTrashed ? '&include=trashed' : ''}`
@@ -156,19 +156,13 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     }
   }
 
-  /** Record keep / improve_link / defer. Trash/restore/delete are separate actions. */
+  /** Record keep / improve_link. Trash/restore/delete are separate actions. */
   async function decide(
     workspace: string,
     id: string,
     disposition: VaultReviewDisposition,
-    deferDays = 7,
   ): Promise<boolean> {
-    return mutate(workspace, id, {
-      action: 'decide',
-      candidate_id: id,
-      disposition,
-      ...(disposition === 'defer' ? { defer_days: deferDays } : {}),
-    })
+    return mutate(workspace, id, { action: 'decide', candidate_id: id, disposition })
   }
 
   /** Retire a note into the reversible 30-day trash. */

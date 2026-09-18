@@ -141,10 +141,15 @@ describe('VaultReviewPanel', () => {
 
   it('renders the trash inventory with restore and a confirmed permanent delete', async () => {
     apiGet.mockResolvedValue({ candidates: [], trashed: [trashed()] })
-    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    // The trash is its own tab now; the parent picks the section, so the test
+    // mounts the one it is about rather than scrolling past the queue.
+    const wrapper = mount(VaultReviewPanel, {
+      props: { section: 'trash' },
+      global: { plugins: [pinia] },
+    })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Trash (1)')
+    expect(wrapper.text()).toContain('1 retired note in personal')
     expect(wrapper.text()).toContain('Old')
 
     await buttonByText(wrapper, 'Restore').trigger('click')
@@ -234,7 +239,7 @@ describe('VaultReviewPanel', () => {
     expect(title).toBe('Retire Mo?')
     expect(seed).toContain('memory-vault/People/Mo.md')
     expect(seed).toContain('no other note links to it')
-    expect(seed).toContain('I will pick Still true, Retire, or Later myself')
+    expect(seed).toContain('I will pick Still true, Retire, or Link fixed myself')
     expect(pinFile).toHaveBeenCalledWith('c-new', 'memory-vault/People/Mo.md')
     // No disposition was recorded: the row is still in the queue.
     expect(apiPost).not.toHaveBeenCalled()

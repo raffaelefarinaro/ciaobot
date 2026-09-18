@@ -4940,7 +4940,7 @@ async def vault_review(request: Request) -> JSONResponse:
         return JSONResponse({"error": "candidate not found or changed"}, status_code=409)
     try:
         if action == "decide":
-            result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user", defer_days=int(payload.get("defer_days", 7)))
+            result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user")
         elif action == "trash":
             result = review.trash_note(root, item)
         else:

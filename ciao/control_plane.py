@@ -759,7 +759,7 @@ class CiaoControlPlane:
 
     # ---- vault review --------------------------------------------------
 
-    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "", defer_days: int = 7) -> dict[str, Any]:
+    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "") -> dict[str, Any]:
         """Inspect candidates or record an explicit, scoped note disposition.
 
         Destructive operations are intentionally separate from ``decide`` and
@@ -803,7 +803,7 @@ class CiaoControlPlane:
             if action == "inspect":
                 return _ok(item.as_dict())
             if action == "decide":
-                result = review.record_decision(root, item, disposition, defer_days=defer_days)
+                result = review.record_decision(root, item, disposition)
                 review.generate_candidates(root, workspace=workspace, write_queue=True)
                 return _ok(result)
             if action == "trash":

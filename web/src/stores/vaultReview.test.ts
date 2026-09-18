@@ -118,18 +118,19 @@ describe('vaultReview store', () => {
     })
   })
 
-  it('sends defer_days only for a defer decision', async () => {
+  it('sends improve_link as a plain decision', async () => {
     get.mockResolvedValue({ candidates: [], trashed: [] })
     post.mockResolvedValue({ ok: true })
     const store = useVaultReviewStore()
 
-    await store.decide('personal', 'cid1', 'defer', 14)
+    await store.decide('personal', 'cid1', 'improve_link')
 
+    // No extra fields: `defer` and its day count are gone, so a decision is
+    // only ever the disposition.
     expect(post).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
       action: 'decide',
       candidate_id: 'cid1',
-      disposition: 'defer',
-      defer_days: 14,
+      disposition: 'improve_link',
     })
   })
 

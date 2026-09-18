@@ -965,7 +965,7 @@ class CiaoMcpService:
         @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
         async def vault_review(
             action: str = "list", path: str = "", candidate_id: str = "",
-            disposition: str = "", confirm: str = "", defer_days: int = 7,
+            disposition: str = "", confirm: str = "",
         ) -> dict[str, Any]:
             """List and decide scoped vault-note review candidates.
 
@@ -977,7 +977,7 @@ class CiaoMcpService:
                 "vault_review",
                 lambda cp, p: cp.vault_review(
                     p, action, path=path, candidate_id=candidate_id,
-                    disposition=disposition, confirm=confirm, defer_days=defer_days,
+                    disposition=disposition, confirm=confirm,
                 ),
                 mutating=action != "list" and action != "inspect",
             )

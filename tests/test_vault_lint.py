@@ -671,6 +671,40 @@ def test_ignores_links_in_code_and_escaped(temp_vault):
     ), bad
 
 
+def test_duplicate_detection_folds_spaces_and_accents(temp_vault):
+    """Two spellings of one name are one note.
+
+    A vault written by both a person and an agent collects `Ben Hempel.md` next
+    to `Ben-Hempel.md`; until spaces folded, the pair was invisible here and
+    both halves showed up in the retirement queue as merely unlinked instead.
+    """
+    people = temp_vault / "People"
+    (people / "Ben Hempel.md").write_text("Ben", encoding="utf-8")
+    (people / "Ben-Hempel.md").write_text("Ben again", encoding="utf-8")
+    (people / "Christian Kündig.md").write_text("Christian", encoding="utf-8")
+    (people / "Christian-Kundig.md").write_text("Christian again", encoding="utf-8")
+
+    groups = {frozenset(dup) for dup in vault_lint.run_validation(temp_vault)["duplicates"]}
+    assert frozenset({"People/Ben Hempel.md", "People/Ben-Hempel.md"}) in groups
+    assert frozenset({"People/Christian Kündig.md", "People/Christian-Kundig.md"}) in groups
+
+
+def test_same_stem_in_different_folders_is_structure_not_a_duplicate(temp_vault):
+    """One report.md per automation is the vault's shape, not a duplicated page.
+
+    The stem allowlist could only name the generic filenames someone had already
+    tripped over, so per-folder `report.md`/`slides.md`/`evaluation.md` families
+    filled a queue whose terminal action is deletion.
+    """
+    projects = temp_vault / "projects"
+    (projects / "a").mkdir(parents=True)
+    (projects / "b").mkdir(parents=True)
+    (projects / "a" / "report.md").write_text("A", encoding="utf-8")
+    (projects / "b" / "report.md").write_text("B", encoding="utf-8")
+    issues = vault_lint.run_validation(temp_vault)
+    assert all("report.md" not in "".join(dup) for dup in issues["duplicates"])
+
+
 def test_common_stems_not_flagged_as_duplicates(temp_vault):
     """One README/log per project is normal, not a duplicate page (#129)."""
     projects = temp_vault / "projects"

@@ -194,6 +194,16 @@ fn create_desktop_drop_grant(
     runtime_root: &std::path::Path,
     paths: &[std::path::PathBuf],
 ) -> Result<(String, Vec<String>), String> {
+    if paths.is_empty() {
+        // wry's macOS drag-drop hands over an empty path list when the
+        // pasteboard carries no NSFilenames entries (a text or URL drag
+        // release does this). Writing a grant for it makes the server reject
+        // the follow-up import with "invalid desktop drop grant", a 400 the
+        // user cannot act on; surfacing the no-files condition here instead
+        // shows the real problem in the composer.
+        return Err("No files were dropped: the drag did not contain file items."
+            .to_string());
+    }
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant_dir = runtime_root.join("desktop-drop-grants");
     std::fs::create_dir_all(&grant_dir).map_err(|error| error.to_string())?;
@@ -2071,6 +2081,26 @@ mod tests {
             script.starts_with("window.dispatchEvent(new CustomEvent(\"ciao:native-file-drop\"")
         );
         assert!(script.contains("\\\""));
+    }
+
+    // A drop with no file items (a text or URL drag release reaches the Drop
+    // event with an empty path list) must fail loudly at grant time instead of
+    // writing a grant the server will reject as invalid after the fact.
+    #[test]
+    fn an_empty_drop_writes_no_grant_and_reports_itself() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = create_desktop_drop_grant(root.path(), &[]).unwrap_err();
+
+        assert!(error.contains("No files were dropped"));
+        assert!(
+            !root
+                .path()
+                .join("desktop-drop-grants")
+                .join("staged")
+                .exists(),
+            "no staging dir may be created for an empty drop"
+        );
     }
 
     // A no-op engine upgrade must not abort the app half of the update, and a
