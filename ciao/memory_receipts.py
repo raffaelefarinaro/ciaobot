@@ -126,15 +126,41 @@ def content_revision(text: str) -> str:
     return _sha(text)
 
 
-def new_receipt_id(basis: str) -> str:
+def new_receipt_id(basis: str, journal: Path | None = None) -> str:
     """A stable id for one logical operation.
 
     Derived from the operation's content so two attempts at the same mutation
     (a retry after a timeout, the same archive re-processed) share an id and can
-    be folded rather than duplicated. A random suffix keeps concurrent
-    operations that happen to share a basis distinguishable.
+    be folded rather than duplicated.
+
+    Pass ``journal`` wherever the id names a *user action* rather than a
+    retryable step. Folding by id is what makes the journal order-independent,
+    but an undo restores the destination to its exact previous contents — so
+    the basis reconstructs identically and a genuinely new action silently
+    overwrites the old one's history. Dismissing a proposal, undoing it and
+    dismissing it again left a single `applied` receipt where two belong.
     """
-    return f"mrcpt_{_sha(basis)[:20]}"
+    base = f"mrcpt_{_sha(basis)[:20]}"
+    if journal is None:
+        return base
+    return _next_generation(journal, base)
+
+
+def _next_generation(journal: Path, base: str) -> str:
+    """``base``, or its next free generation when ``base`` was undone.
+
+    Only an ``undone`` receipt is stepped over. A ``prepared`` or ``applied``
+    one means the same operation is still live — a retry, or the same archive
+    re-processed — and must keep folding onto it, which is the whole point of
+    deriving the id from content in the first place.
+    """
+    statuses = {r.get("id"): r.get("status") for r in read_receipts(journal)}
+    candidate = base
+    generation = 1
+    while statuses.get(candidate) == UNDONE:
+        generation += 1
+        candidate = f"{base}.{generation}"
+    return candidate
 
 
 def _now() -> str:
@@ -548,10 +574,10 @@ def commit_region_change(
                 "the destination changed since this operation was planned"
             )
 
-        rid = new_receipt_id(
-            f"{guide}|{region}|{kind}|{fact_text}|{before_revision}"
-        )
         journal = journal_path(vault_root, guide)
+        rid = new_receipt_id(
+            f"{guide}|{region}|{kind}|{fact_text}|{before_revision}", journal
+        )
         base: dict[str, Any] = {
             "id": rid,
             "ts": _now(),
@@ -698,10 +724,11 @@ def queue_resolution(
             before = proposals_path.read_text(encoding="utf-8")
         except OSError:
             before = ""
-        rid = new_receipt_id(
-            f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
-        )
         journal = journal_path(vault_root, proposals_path.parent)
+        rid = new_receipt_id(
+            f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}",
+            journal,
+        )
         base: dict[str, Any] = {
             "id": rid,
             "ts": _now(),
@@ -788,8 +815,12 @@ def _write_queue_receipt(
             after = proposals_path.read_text(encoding="utf-8")
         except OSError:
             after = ""
+    # `receipt_id` wins when the caller already opened a receipt for this
+    # operation (the `queue_resolution` prepared row); only a standalone call
+    # needs a fresh generation.
     rid = receipt_id or new_receipt_id(
-        f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}"
+        f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}",
+        journal_path(vault_root, proposals_path.parent),
     )
     receipt = {
         "id": rid,
@@ -919,11 +950,12 @@ def queue_resolution_multi(
             before = ""
         texts = [str(r.get("text") or "") for r in removals]
         removal_kinds = [str(r.get("kind") or "") for r in removals]
+        journal = journal_path(vault_root, proposals_path.parent)
         rid = new_receipt_id(
             f"{proposals_path}|queue_resolve_batch|"
-            f"{'|'.join(texts)}|{content_revision(before)}"
+            f"{'|'.join(texts)}|{content_revision(before)}",
+            journal,
         )
-        journal = journal_path(vault_root, proposals_path.parent)
         base: dict[str, Any] = {
             "id": rid,
             "ts": _now(),

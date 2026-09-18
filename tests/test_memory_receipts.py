@@ -1757,3 +1757,88 @@ def test_queue_resolution_kind_distinguishes_identical_text(tmp_path):
     latest = receipts[-1]
     assert latest["bullet_present"] is False
     assert latest["status"] == mr.APPLIED
+
+
+# ── receipt id generations (PR #477 review) ──────────────────────────────────
+
+
+def _dismiss_alpha(tmp_path: Path, queue: Path) -> None:
+    with mr.queue_resolution(
+        queue,
+        removed_text="Use Python",
+        kind="memory",
+        promoted=False,
+        actor="operator",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        mp.remove_proposal_by_substring(queue, "(from: Alpha)")
+
+
+def _queue_with_one_row(tmp_path: Path) -> Path:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] Use Python  _(from: Alpha)_\n",
+        encoding="utf-8",
+    )
+    return queue
+
+
+def _resolves(journal: Path) -> list[dict]:
+    return [r for r in mr.read_receipts(journal) if r["kind"] == "queue_resolve"]
+
+
+def test_redoing_an_undone_resolution_keeps_both_in_history(tmp_path):
+    """Two distinct user actions must be two audit entries.
+
+    The id is derived from the operation's content, and an undo restores the
+    destination to its exact previous contents — so the second dismissal
+    reconstructed the same basis, the same id, and `read_receipts` folded it
+    over the first. History showed one dismissal where two had happened, and
+    the undo in between vanished with it.
+    """
+    queue = _queue_with_one_row(tmp_path)
+    journal = mr.journal_path(tmp_path, None)
+
+    _dismiss_alpha(tmp_path, queue)
+    first = _resolves(journal)[-1]
+    assert first["status"] == mr.APPLIED
+
+    mr.undo_receipt(first["id"], vault_root=tmp_path, journal=journal)
+    assert "Use Python" in queue.read_text(encoding="utf-8")
+
+    _dismiss_alpha(tmp_path, queue)
+
+    rows = _resolves(journal)
+    assert [r["status"] for r in rows] == [mr.UNDONE, mr.APPLIED]
+    assert rows[0]["id"] != rows[1]["id"]
+    # The new generation is derived from the old id, so the pair stays legible.
+    assert rows[1]["id"].startswith(rows[0]["id"])
+
+
+def test_a_retried_resolution_still_folds_onto_one_receipt(tmp_path):
+    """Only an *undone* generation is stepped over.
+
+    Deriving the id from content exists so a retry after a timeout, or the same
+    archive re-processed, folds instead of duplicating. Stepping on every
+    repeat would have thrown that away.
+    """
+    queue = _queue_with_one_row(tmp_path)
+    journal = mr.journal_path(tmp_path, None)
+    original = queue.read_text(encoding="utf-8")
+
+    for _ in range(2):
+        queue.write_text(original, encoding="utf-8")  # same before-image
+        _dismiss_alpha(tmp_path, queue)
+
+    rows = _resolves(journal)
+    assert len(rows) == 1
+    assert rows[0]["status"] == mr.APPLIED
+
+
+def test_new_receipt_id_is_unchanged_without_a_journal(tmp_path):
+    """The bare form stays content-addressed for callers that want folding."""
+    first = mr.new_receipt_id("a|b|c")
+    assert first == mr.new_receipt_id("a|b|c")
+    assert first != mr.new_receipt_id("a|b|d")
