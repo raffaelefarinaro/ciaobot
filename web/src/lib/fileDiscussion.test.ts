@@ -166,6 +166,26 @@ describe('startFileDiscussion', () => {
     )
   })
 
+  it('falls back to the workspace when the previous chat was archived mid-flight', async () => {
+    // Mirrors `chatExistsInList`: switching back onto an archived chat would
+    // leave the active chat pointing at it.
+    const store = makeStore({
+      chats: [{ chat_id: 'chat-before', archived: true }],
+      createChat: vi.fn(async () => { throw new Error('offline') }),
+    })
+
+    const chat = await startFileDiscussion(asStore(store), {
+      path: 'w/n.md',
+      seed: 'hello',
+      workspace: 'work',
+    })
+
+    expect(chat).toBeNull()
+    expect(store.switchChat).not.toHaveBeenCalled()
+    expect(store.switchWorkspace.mock.calls.map(c => c[0])).toEqual(['work', 'personal'])
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
   it('surfaces a failed creation as a toast and pins nothing', async () => {
     const store = makeStore({
       createChat: vi.fn(async () => { throw new Error('offline') }),

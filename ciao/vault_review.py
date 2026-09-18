@@ -346,7 +346,8 @@ def _generate_candidates(
         except (OSError, ValueError):
             continue
         present_paths.add(path)
-        present_digests.add(content_hash(raw))
+        digest = content_hash(raw)
+        present_digests.add(digest)
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
         # `entry.type` is the raw frontmatter string. The two type filters below
@@ -376,7 +377,9 @@ def _generate_candidates(
             continue
         if lookup_type in _LOOKUP_TYPES and signals == ["unlinked"]:
             continue
-        digest = content_hash(raw)
+        # `digest` was computed once, right after the read above, and reused
+        # for `present_digests` — hashing every queued candidate twice showed
+        # up on the queue-generation path.
         evidence = {
             "backlinks": sorted(incoming.get(path, [])),
             "outbound_links": sorted(outbound.get(path, [])),
@@ -450,6 +453,12 @@ def _record_vanished(
     * **Still in the vault under another name.** A rename leaves the old path
       empty; the note never left. Matching the recorded content hash against
       what the scan read tells a move from a deletion.
+
+    Known boundary, by design: the content match cannot tell identical twins
+    apart. If two notes share byte-identical content and one is deleted
+    externally, the survivor's hash suppresses the `vanished` row and the
+    deletion goes unrecorded. Disambiguating would need per-path revision
+    history, which the ledger deliberately does not keep.
     """
     terminal_paths = {
         str(row.get("path") or "")

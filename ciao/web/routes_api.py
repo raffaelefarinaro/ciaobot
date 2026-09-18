@@ -8037,6 +8037,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "action": action, "results": results})
 
 
+def _accept_journal_writable(config: Any, workspace: str, queue_path: str) -> bool:
+    """Pre-flight for the proposal accept path; runs off the event loop.
+
+    Even a stat-only probe must not run inline in the handler: on a slow or
+    contended filesystem it stalls every concurrent ASGI request and
+    WebSocket until it returns.
+    """
+    # Deferred import: a route handler in this module is also named
+    # `memory_receipts`, which shadows the module at function scope.
+    from ciao import memory_receipts as _receipts
+
+    queue = Path(queue_path)
+    try:
+        vault = Path(config.workspace_vault_root(workspace))
+    except (AttributeError, ValueError):
+        vault = queue.parent.parent
+    return _receipts.journal_writable(_receipts.journal_path(vault, queue.parent))
+
+
 async def proposal_action(request: Request) -> JSONResponse:
     """Accept or dismiss exactly one proposal by its stable id.
 
@@ -8108,17 +8127,10 @@ async def proposal_action(request: Request) -> JSONResponse:
         # journal returned 503 with the region already written, the doc already
         # folded or the learning already appended, and the row still queued.
         # The retry then did it a second time.
-        _accept_queue = Path(ctx["path"])
-        try:
-            _accept_vault = Path(config.workspace_vault_root(ctx["workspace"]))
-        except (AttributeError, ValueError):
-            _accept_vault = _accept_queue.parent.parent
-        # Aliased: a route handler in this module is also named
-        # `memory_receipts`, which shadows the module at function scope.
-        from ciao import memory_receipts as _receipts
-
-        if not _receipts.journal_writable(
-            _receipts.journal_path(_accept_vault, _accept_queue.parent)
+        # Off the event loop (see _accept_journal_writable): the probe runs
+        # before any promotion, and a slow filesystem must not stall the loop.
+        if not await asyncio.to_thread(
+            _accept_journal_writable, config, ctx["workspace"], ctx["path"]
         ):
             return JSONResponse(
                 {

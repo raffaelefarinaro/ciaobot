@@ -358,18 +358,28 @@ def journal_writable(journal: Path) -> bool:
     still queued, so the retry folded the doc twice or incremented a
     recurrence count again.
 
-    Catches the reachable causes — a missing or read-only directory, a journal
-    that cannot be opened for append. It cannot predict a write that fails
-    mid-flight on a full disk; the receipt protocol still covers that, this
-    only stops the common case from mutating first.
+    Probing only, never materialising: when the journal (or its parent
+    directory) does not exist yet, only the nearest existing ancestor's
+    writability is checked, so a pre-flight for a later-rejected accept leaves
+    no stray empty journal behind. Catches the reachable causes — a missing or
+    read-only directory, a journal that cannot be opened for append. It cannot
+    predict a write that fails mid-flight on a full disk; the receipt protocol
+    still covers that, this only stops the common case from mutating first.
     """
     try:
-        journal.parent.mkdir(parents=True, exist_ok=True)
-        with journal.open("a", encoding="utf-8"):
-            pass
+        if journal.exists():
+            return not journal.is_dir() and os.access(journal, os.W_OK)
+        probe = journal.parent
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:  # filesystem root — nothing to check against
+                return False
+            probe = parent
+        # A file where a directory should be (or a read-only ancestor) means
+        # the append path cannot create the journal.
+        return probe.is_dir() and os.access(probe, os.W_OK)
     except OSError:
         return False
-    return True
 
 
 def _append(journal: Path, payload: dict[str, Any]) -> None:
@@ -654,7 +664,7 @@ def commit_region_change(
             _append(
                 journal,
                 {
-                    "id": new_receipt_id(f"{guide}|{region}|{kind}|{fact_text}"),
+                    "id": new_receipt_id(f"{guide}|{region}|{kind}|{fact_text}", journal),
                     "ts": _now(),
                     "actor": actor,
                     "source": source,
@@ -1038,9 +1048,13 @@ def queue_resolution_multi(
                 after = proposals_path.read_text(encoding="utf-8")
             except OSError:
                 after = ""
-            all_gone = bool(texts) and not any(
-                _bullets_match(after, text, removal_kinds[i] if i < len(removal_kinds) else "")
-                for i, text in enumerate(texts)
+            all_gone = _removal_landed(
+                before,
+                after,
+                [
+                    (text, removal_kinds[i] if i < len(removal_kinds) else "")
+                    for i, text in enumerate(texts)
+                ],
             )
             if completed and all_gone:
                 # Only a completed, content-verified rewrite earns applied
@@ -1245,6 +1259,28 @@ def _bullet_count(text: str, needle: str, kind: str = "") -> int:
     return total
 
 
+def _removal_landed(
+    before: str, after: str, needles: list[tuple[str, str]]
+) -> bool:
+    """True when every needle's bullet count dropped by its multiplicity.
+
+    Counted, not merely matched: a queue may legitimately hold two identical
+    bullets, so a surviving twin must not make a successful one-of-two removal
+    look unlanded. Empty needles carry no information and are skipped.
+    """
+    needed: dict[tuple[str, str], int] = {}
+    for needle, kind in needles:
+        if needle:
+            needed[(needle, kind)] = needed.get((needle, kind), 0) + 1
+    if not needed:
+        return False
+    return all(
+        _bullet_count(before, needle, kind) - _bullet_count(after, needle, kind)
+        >= n
+        for (needle, kind), n in needed.items()
+    )
+
+
 def _bullets_match(text: str, needle: str, kind: str = "") -> bool:
     """True when a parsed bullet matches ``needle`` (exactly) and ``kind``.
 
@@ -1309,9 +1345,19 @@ def _reconcile_queue(
         text = path.read_text(encoding="utf-8")
     except OSError:
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
-    still_present = [
-        needle for needle, kind in needles if _bullets_match(text, needle, kind)
-    ]
+    still_present: list[str]
+    before_text = receipt.get("before_text")
+    if isinstance(before_text, str):
+        # The prepared row carries the pre-rewrite file: settle by count, so
+        # a surviving twin does not make a successful one-of-two removal look
+        # unlanded and roll back a landed batch (see _removal_landed).
+        landed = _removal_landed(before_text, text, needles)
+        still_present = [] if landed else [needle for needle, _ in needles]
+    else:
+        # No before image (older prepared row): presence-only fallback.
+        still_present = [
+            needle for needle, kind in needles if _bullets_match(text, needle, kind)
+        ]
     if not still_present:
         # The rewrite landed. Populate the after image/revision from disk so a
         # recovered receipt stays undoable: a prepared row carries only the

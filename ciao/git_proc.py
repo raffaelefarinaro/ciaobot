@@ -41,7 +41,12 @@ _REAP_TIMEOUT = 5.0
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> None:
-    """Kill ``proc``'s process group, wait for it, and close its pipes."""
+    """Kill ``proc``'s process group, wait for it, and close its pipes.
+
+    Exception-safe by design: this runs on timeout/cancel cleanup paths whose
+    callers promise a stable ``(-1, "", GIT_TIMEOUT_DETAIL)`` result, so a
+    failing kill or close must never escape and replace it.
+    """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -50,7 +55,7 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         # transport below still releases our own descriptors.
         try:
             proc.kill()
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError, OSError):
             pass
     try:
         await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT)
@@ -59,7 +64,13 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
     finally:
         transport = getattr(proc, "_transport", None)
         if transport is not None:
-            transport.close()
+            try:
+                transport.close()
+            except Exception:
+                logger.warning(
+                    "error closing git transport for pid %s", proc.pid,
+                    exc_info=True,
+                )
 
 
 async def run_git(
@@ -84,6 +95,13 @@ async def run_git(
         except asyncio.TimeoutError:
             await _reap(proc)
             return (-1, "", GIT_TIMEOUT_DETAIL)
+        except (asyncio.CancelledError, Exception):
+            # Cancellation (e.g. server shutdown) or a communicate() failure
+            # must reap the child too, or the same descriptor leak as the
+            # timeout path recurs (issue #470). Shield the reap so a second
+            # cancel arriving mid-cleanup does not interrupt it.
+            await asyncio.shield(_reap(proc))
+            raise
     else:
         out, err = await proc.communicate()
     return (

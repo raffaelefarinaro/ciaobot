@@ -91,7 +91,9 @@ export async function startFileDiscussion(
     // lost the conversation they were in. `switchChat` restores that chat —
     // and its workspace with it, through `ensureWorkspaceForChat`.
     if (target !== previous) {
-      if (previousChatId && store.chats.some(c => c.chat_id === previousChatId)) {
+      // Mirror `chatExistsInList`: an archived previous chat must not be
+      // switched back to — fall through to the workspace fallback instead.
+      if (previousChatId && store.chats.some(c => c.chat_id === previousChatId && !c.archived)) {
         await store.switchChat(previousChatId)
       } else {
         await store.switchWorkspace(previous)

@@ -1906,3 +1906,31 @@ def test_journal_writable_reports_an_unusable_journal(tmp_path):
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory", encoding="utf-8")
     assert mr.journal_writable(blocked / "Workspace" / "R.jsonl") is False
+
+
+def test_journal_writable_probes_without_creating(tmp_path):
+    """The pre-flight must not materialise the journal it probes.
+
+    An accept that is later rejected (400/409) used to leave a stray empty
+    journal behind, because the probe created the parents and the file
+    itself before validation ran.
+    """
+    journal = tmp_path / "Workspace" / "Memory-Receipts.jsonl"
+    assert mr.journal_writable(journal) is True
+    assert not journal.exists()
+    assert not (tmp_path / "Workspace").exists()
+
+
+def test_removal_landed_counts_instead_of_matching():
+    """A surviving twin must neither fake an unlanded removal nor hide one."""
+    before = "- [memory] Use Python\n- [memory] Use Python\n"
+    one_left = "- [memory] Use Python\n"
+    # One of two identical bullets removed: the count dropped, so it landed.
+    assert mr._removal_landed(before, one_left, [("Use Python", "memory")]) is True
+    # But two removals recorded against one actual drop did not fully land.
+    assert (
+        mr._removal_landed(before, one_left, [("Use Python", "memory")] * 2)
+        is False
+    )
+    assert mr._removal_landed(before, before, [("Use Python", "memory")]) is False
+    assert mr._removal_landed(before, one_left, []) is False
