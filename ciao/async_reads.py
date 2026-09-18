@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from typing import Any, TypeVar
@@ -280,8 +281,31 @@ class _VaultReadExecutor:
         with self._lock:
             return self._outstanding
 
-    def close(self) -> None:
+    def close(self, timeout: float = 2.0) -> None:
+        """Stop accepting reads and bound how long shutdown waits on them.
+
+        ``cancel_futures=True`` cancels *queued* reads only: one already
+        running keeps going, and CPython joins non-daemon pool threads at
+        interpreter exit — so a scan stuck on a slow or wedged filesystem can
+        hold a restart open well after this returns, despite `wait=False`.
+
+        This does not kill the worker (a pool thread cannot be), but it stops
+        the wait being unbounded *here* and names the cause in the log, so a
+        hung restart is diagnosable instead of looking like a deploy that
+        silently stalled. The reads themselves are side-effect-free.
+        """
         self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while self.outstanding() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        remaining = self.outstanding()
+        if remaining:
+            logger.warning(
+                "Vault read executor still running %d read(s) after %.1fs; "
+                "process exit will block until they return (stuck filesystem?). "
+                "In flight: %s",
+                remaining, timeout, ", ".join(self.inflight_keys()[:5]) or "unknown",
+            )
 
 
 def _get_executor() -> _VaultReadExecutor:

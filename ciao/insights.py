@@ -961,7 +961,14 @@ async def run_archive_pipeline(
 
         try:
             job.mark(name, RUNNING)
-            job.save()
+            if not job.save():
+                # Same rule the insights append applies below: a stage that
+                # cannot record that it started must not run. Otherwise the
+                # project fold, trajectory or proposal write lands while the
+                # durable manifest still says pending, and a crash has startup
+                # replay work that already happened. The handler below marks
+                # the stage failed, which is retryable.
+                raise RuntimeError("could not persist the archive job manifest")
 
             if name == "insights":
                 if _has_insights_section(archive_path):

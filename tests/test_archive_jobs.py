@@ -1548,3 +1548,38 @@ def test_a_never_run_manifest_is_still_planned_not_incomplete(
     assert reloaded.started is False
     reloaded._refresh_state()
     assert reloaded.state == aj.RUNNING
+
+
+def test_a_stage_does_not_run_when_its_start_cannot_be_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unwritable manifest must stop the stage before it does any work.
+
+    `job.mark(name, RUNNING)` was followed by an unchecked `job.save()`, so a
+    stage whose start could not be recorded ran anyway: the model was called,
+    and the project fold, trajectory or proposal write could land while the
+    durable manifest still said pending — leaving startup to replay work that
+    had already happened.
+
+    The discriminator is the model call, not the final status: the insights
+    append already refused without its evidence, so the stage ended FAILED
+    either way. What changes is that it now fails *before* doing the work.
+    """
+    archive = _archive(tmp_path)
+    called: list[str] = []
+
+    async def fake_call(body: str, model: str, **kwargs: object) -> str:
+        called.append("model")
+        return "## Decisions\n- Chose sqlite. [idx=1]\n"
+
+    monkeypatch.setattr(insights, "_call_text_model", fake_call)
+    job = _job(tmp_path, archive)
+    monkeypatch.setattr(job, "save", lambda: False)
+    inputs = _job_inputs(tmp_path, archive)
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+
+    assert job.status_of("insights") == aj.FAILED
+    assert called == [], "the stage must not run once its start could not be recorded"
+
+
