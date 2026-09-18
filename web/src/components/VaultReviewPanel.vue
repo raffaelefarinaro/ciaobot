@@ -173,7 +173,7 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
     `It is ${facts.join(' · ')}.\n\n` +
     'Read the note and tell me what would be lost if it went, and whether ' +
     'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
-    'anything — I will pick Still true, Retire, or Link fixed myself.'
+    'anything — I will pick Still true or Retire myself.'
   )
 }
 
@@ -200,10 +200,6 @@ async function discussRow(candidate: VaultReviewCandidate) {
 
 async function keepRow(candidate: VaultReviewCandidate) {
   await store.decide(workspace.value, candidate.candidate_id, 'keep')
-}
-
-async function linkFixedRow(candidate: VaultReviewCandidate) {
-  await store.decide(workspace.value, candidate.candidate_id, 'improve_link')
 }
 
 async function trashRow(candidate: VaultReviewCandidate) {
@@ -259,10 +255,9 @@ function trashedDate(note: VaultTrashedNote): string {
         Stale notes the nightly curation flagged. <strong>Still true</strong> clears the
         row and stamps the note as verified today (a note with no frontmatter has
         nothing to stamp, and says so); <strong>Retire</strong> moves it to the
-        Trash tab, where one click brings it back for 30 days. <strong>Link fixed</strong>
-        clears it because you have since linked it from somewhere else, and changes nothing
-        in the note. Leaving a row alone keeps it here. Nothing here deletes permanently
-        except the trash's own delete control, which asks first.
+        Trash tab, where one click brings it back for 30 days. Leaving a row alone
+        keeps it here. Nothing here deletes permanently except the trash's own
+        delete control, which asks first.
       </p>
 
       <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
@@ -327,13 +322,6 @@ function trashedDate(note: VaultTrashedNote): string {
               :disabled="store.isBusy(candidate.candidate_id)"
               @click="trashRow(candidate)"
             >Retire</button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="store.isBusy(candidate.candidate_id)"
-              title="Record that you re-linked this note elsewhere; the note is not edited"
-              @click="linkFixedRow(candidate)"
-            >Link fixed</button>
             <button
               type="button"
               class="btn-small btn-chip"

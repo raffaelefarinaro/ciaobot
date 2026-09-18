@@ -35,8 +35,12 @@ REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "de
 # row alone already does — an untouched candidate stays in the queue and asks
 # again every time you open it. What the snooze bought was a temporarily
 # shorter list, and it charged a number spinner on every row for it.
-DISPOSITIONS = frozenset({"keep", "improve_link", "trash", "restore", "delete"})
-DECISION_DISPOSITIONS = frozenset({"keep", "improve_link"})
+# No ``improve_link`` either. It cleared a row on the promise that you had
+# re-linked the note from somewhere else — a repair nobody makes by hand, so
+# the button was a third way to say "not now" wearing a claim about the vault.
+# Historical ledger rows still carry it and still suppress; see ``_suppressed``.
+DISPOSITIONS = frozenset({"keep", "trash", "restore", "delete"})
+DECISION_DISPOSITIONS = frozenset({"keep"})
 _SUPERSEDED_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 # Where a note is allowed to say it was superseded: its frontmatter and its
 # opening prose, before the first section heading.
@@ -164,11 +168,10 @@ def _suppressed(decision: dict[str, Any]) -> bool:
     if decision.get("content_hash") == "":
         return False
     disposition = decision.get("disposition")
-    # `improve_link` suppresses like `keep`. It used to fall through to False,
-    # so the row the user had just acted on stayed exactly where it was: the
-    # button wrote a ledger line and looked broken. The content-hash guard above
-    # still re-raises the note the moment it is edited, which is the same
-    # protection `keep` has.
+    # `improve_link` is no longer offered, but rows written while it was still
+    # suppress: a note the user already cleared must not reappear because the
+    # button behind it was retired. The content-hash guard above re-raises it
+    # the moment the note is edited, exactly as it does for `keep`.
     return disposition in {"keep", "improve_link", "trash", "delete"}
 
 

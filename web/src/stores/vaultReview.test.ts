@@ -111,26 +111,12 @@ describe('vaultReview store', () => {
     const ok = await store.decide('personal', 'cid1', 'keep')
 
     expect(ok).toBe(true)
+    // No extra fields: `defer` and its day count are gone, and `keep` is now
+    // the only decision, so a decision is only ever the disposition.
     expect(post).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
       action: 'decide',
       candidate_id: 'cid1',
       disposition: 'keep',
-    })
-  })
-
-  it('sends improve_link as a plain decision', async () => {
-    get.mockResolvedValue({ candidates: [], trashed: [] })
-    post.mockResolvedValue({ ok: true })
-    const store = useVaultReviewStore()
-
-    await store.decide('personal', 'cid1', 'improve_link')
-
-    // No extra fields: `defer` and its day count are gone, so a decision is
-    // only ever the disposition.
-    expect(post).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
-      action: 'decide',
-      candidate_id: 'cid1',
-      disposition: 'improve_link',
     })
   })
 

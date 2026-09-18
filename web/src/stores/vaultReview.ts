@@ -8,7 +8,7 @@ import type {
   VaultReviewDecisionResult,
 } from '../lib/types'
 
-export type VaultReviewDisposition = 'keep' | 'improve_link'
+export type VaultReviewDisposition = 'keep'
 
 function reviewUrl(workspace: string, includeTrashed: boolean): string {
   const query = `workspace=${encodeURIComponent(workspace)}${includeTrashed ? '&include=trashed' : ''}`
@@ -181,7 +181,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     return ''
   }
 
-  /** Record keep / improve_link. Trash/restore/delete are separate actions. */
+  /** Record a keep. Trash/restore/delete are separate actions. */
   async function decide(
     workspace: string,
     id: string,

@@ -239,7 +239,7 @@ describe('VaultReviewPanel', () => {
     expect(title).toBe('Retire Mo?')
     expect(seed).toContain('memory-vault/People/Mo.md')
     expect(seed).toContain('no other note links to it')
-    expect(seed).toContain('I will pick Still true, Retire, or Link fixed myself')
+    expect(seed).toContain('I will pick Still true or Retire myself')
     expect(pinFile).toHaveBeenCalledWith('c-new', 'memory-vault/People/Mo.md')
     // No disposition was recorded: the row is still in the queue.
     expect(apiPost).not.toHaveBeenCalled()

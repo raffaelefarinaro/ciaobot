@@ -307,12 +307,33 @@ def test_templates_are_never_retirement_candidates(tmp_path: Path) -> None:
     assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
 
 
-def test_link_fixed_clears_the_row_until_the_note_changes(tmp_path: Path) -> None:
-    """`improve_link` used to write a ledger row and leave the row in place."""
+def test_improve_link_is_no_longer_a_disposition(tmp_path: Path) -> None:
+    """Nobody re-links a note by hand, so the claim had no honest caller."""
     _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
     candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    with pytest.raises(ValueError):
+        record_decision(tmp_path, candidate, disposition="improve_link")
+    assert "improve_link" not in review.DISPOSITIONS
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False)
 
-    record_decision(tmp_path, candidate, disposition="improve_link")
+
+def test_historical_improve_link_rows_still_suppress(tmp_path: Path) -> None:
+    """A row cleared before the button was removed must not come back."""
+    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    review._append(
+        tmp_path,
+        {
+            "candidate_id": candidate.candidate_id,
+            "workspace": candidate.workspace,
+            "path": candidate.path,
+            "content_hash": candidate.content_hash,
+            "disposition": "improve_link",
+            "actor": "user",
+            "status": "reviewed",
+            "deferred_until": "",
+        },
+    )
     assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
 
     # Editing the note re-raises it, exactly as `keep` does.
@@ -481,16 +502,6 @@ def test_still_true_refuses_a_note_that_changed_under_it(tmp_path: Path) -> None
     _note(tmp_path, "Ideas/Loose.md", "Edited since the queue was built.")
     with pytest.raises(ValueError):
         record_decision(tmp_path, candidate, disposition="keep")
-
-
-def test_improve_link_does_not_claim_a_verification(tmp_path: Path) -> None:
-    """Re-linking a note elsewhere says nothing about whether its facts hold."""
-    _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
-    note = tmp_path / "Ideas" / "Loose.md"
-    before = note.read_text(encoding="utf-8")
-    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
-    record_decision(tmp_path, candidate, disposition="improve_link")
-    assert note.read_text(encoding="utf-8") == before
 
 
 # ── release review fixes ─────────────────────────────────────────────────────
