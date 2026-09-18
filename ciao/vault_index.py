@@ -170,6 +170,13 @@ TYPE_ALIASES = {
 }
 
 
+# How much of a note's filename a sibling temp file may carry. The prefix is
+# for debuggability, but the full name plus ".", 8 random chars and ".tmp" can
+# exceed NAME_MAX (255) on a long note name and raise ENAMETOOLONG, which none
+# of the three note writers that use it catch.
+TEMP_PREFIX_NAME_CHARS = 64
+
+
 def canonical_type(raw: str) -> str:
     """Return the canonical form of a frontmatter ``type``.
 
@@ -763,7 +770,10 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 encoding="utf-8",
                 delete=False,
                 dir=abs_path.parent,
-                prefix=f".{abs_path.name}.",
+                # Truncated for the same reason as `vault_review`: a note
+                # name near NAME_MAX plus ".", 8 random chars and ".tmp"
+                # raises ENAMETOOLONG, which no caller here catches.
+                prefix=f".{abs_path.name[:TEMP_PREFIX_NAME_CHARS]}.",
                 suffix=".tmp",
             ) as handle:
                 handle.write(new_text)

@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from ciao.vault_index import canonical_type, scan_vault
+from ciao.vault_index import TEMP_PREFIX_NAME_CHARS, canonical_type, scan_vault
 from ciao.vault_lint import is_template_stem, run_validation
 
 RETENTION_DAYS = 30
@@ -394,9 +394,16 @@ _FRONTMATTER_DELIM = "---"
 _UPDATED_KEY_RE = re.compile(r"^updated:\s*(.*)$")
 
 
+# A UTF-8 BOM is not whitespace, so `"\ufeff---".strip()` is not `"---"` and a
+# BOM-prefixed note read as having no frontmatter at all. `_FRONTMATTER_RE`
+# already tolerates one; these two paths must agree with it.
+def _strip_bom(text: str) -> str:
+    return text[1:] if text.startswith("\ufeff") else text
+
+
 def _already_current(text: str, today: str) -> bool:
     """Whether the note's frontmatter already carries today's ``updated:``."""
-    lines = text.split("\n")
+    lines = _strip_bom(text).split("\n")
     if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
         return False
     close = next(
@@ -424,7 +431,8 @@ def _stamp_updated(text: str, today: str) -> str | None:
     no frontmatter does not get one invented here — that is a lint finding of
     its own, and pressing *Still true* should not restructure a file.
     """
-    lines = text.split("\n")
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    lines = _strip_bom(text).split("\n")
     if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
         return None
     close = next(
@@ -447,10 +455,10 @@ def _stamp_updated(text: str, today: str) -> str | None:
         if match.group(1).strip().strip("\"'") == today:
             return None
         # Always a plain scalar date, so one line is the whole value.
-        return "\n".join(lines[:index] + [stamped] + lines[index + 1:])
+        return bom + "\n".join(lines[:index] + [stamped] + lines[index + 1:])
     # Appended rather than prepended: `type:`/`title:` conventionally lead the
     # block, and a new key at the bottom reads as the addition it is.
-    return "\n".join(lines[:close] + [stamped] + lines[close:])
+    return bom + "\n".join(lines[:close] + [stamped] + lines[close:])
 
 
 def _reverify(
@@ -483,7 +491,7 @@ def _reverify(
     try:
         raw = note.read_bytes()
     except OSError:
-        return candidate.content_hash, "not_stampable"
+        return candidate.content_hash, "unreadable"
     if content_hash(raw) != candidate.content_hash:
         raise ValueError("candidate changed or no longer exists; regenerate the review")
     try:
@@ -493,7 +501,7 @@ def _reverify(
         # rewrite every undecodable byte as U+FFFD — a destructive edit to a
         # note imported from a latin-1 source. Reading signals may be lossy;
         # a rewrite may not.
-        return candidate.content_hash, "not_stampable"
+        return candidate.content_hash, "not_utf8"
     if _already_current(text, today):
         # Verified today already — the opposite outcome from "could not be
         # stamped", and collapsing the two would make the UI warn about a note
@@ -501,7 +509,10 @@ def _reverify(
         return candidate.content_hash, "already_current"
     stamped = _stamp_updated(text, today)
     if stamped is None:
-        return candidate.content_hash, "not_stampable"
+        # Only reached when there is no frontmatter block to stamp — either
+        # absent or opened and never closed. The unreadable and undecodable
+        # cases returned above, so the caller can name this one precisely.
+        return candidate.content_hash, "no_frontmatter"
     payload = stamped.encode("utf-8")
     with tempfile.NamedTemporaryFile(
         "wb",
@@ -509,8 +520,9 @@ def _reverify(
         # Truncated: the prefix exists for debuggability, but a full note name
         # near NAME_MAX plus the dot, 8 random chars and ".tmp" would raise
         # ENAMETOOLONG where the old fixed "tmp" prefix never could — and
-        # `record_decision` does not catch OSError.
-        prefix=f".{note.name[:64]}.",
+        # `record_decision` does not catch OSError. `TEMP_PREFIX_NAME_CHARS`
+        # is shared with the other two note writers, which have the same bug.
+        prefix=f".{note.name[:TEMP_PREFIX_NAME_CHARS]}.",
         suffix=".tmp",
         delete=False,
     ) as handle:

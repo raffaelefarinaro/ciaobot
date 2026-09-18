@@ -166,6 +166,21 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     }
   }
 
+  /**
+   * Why the note was not stamped, phrased for a toast — or '' when it was
+   * stamped, was already current, or the disposition never stamps.
+   *
+   * One message for all three failures said "no frontmatter to stamp", which
+   * is wrong for a note that could not be read or decoded — and, before the
+   * BOM fix, wrong for a note whose frontmatter was perfectly good.
+   */
+  function stampFailureReason(status: string | undefined): string {
+    if (status === 'no_frontmatter') return 'this note has no frontmatter to stamp'
+    if (status === 'not_utf8') return 'this note is not valid UTF-8, so it was left untouched'
+    if (status === 'unreadable') return 'this note could not be read'
+    return ''
+  }
+
   /** Record keep / improve_link. Trash/restore/delete are separate actions. */
   async function decide(
     workspace: string,
@@ -173,11 +188,16 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     disposition: VaultReviewDisposition,
   ): Promise<boolean> {
     const ok = await mutate(workspace, id, { action: 'decide', candidate_id: id, disposition })
-    if (ok && disposition === 'keep' && lastResult.value?.stamp_status === 'not_stampable') {
-      notice.value =
-        'The row is cleared, but this note has no frontmatter to stamp, so its ' +
-        'verified date is unchanged — it will keep showing as needing review ' +
-        'until you add frontmatter to it.'
+    // Gated on the row's own id: `lastResult` is one shared slot, and each
+    // button is disabled only for its own row, so deciding a second row before
+    // the first POST returns could otherwise attach one row's outcome to the
+    // other's toast.
+    const result = lastResult.value
+    if (ok && disposition === 'keep' && result?.previous_candidate_id === id) {
+      const reason = stampFailureReason(result.stamp_status)
+      if (reason) {
+        notice.value = `The row is cleared, but ${reason}, so this note's verified date is unchanged.`
+      }
     }
     return ok
   }

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ciao.vault_index import TEMP_PREFIX_NAME_CHARS
+
 logger = logging.getLogger(__name__)
 
 
@@ -391,7 +393,9 @@ def _write_text_atomically(path: Path, text: str) -> None:
 
     mode = path.stat().st_mode if path.exists() else None
     fd, raw_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        # Truncated for the same reason as `vault_review`: a note name near
+        # NAME_MAX plus ".", 8 random chars and ".tmp" raises ENAMETOOLONG.
+        prefix=f".{path.name[:TEMP_PREFIX_NAME_CHARS]}.", suffix=".tmp", dir=str(path.parent)
     )
     temporary = Path(raw_name)
     try:

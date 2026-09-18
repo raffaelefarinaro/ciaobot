@@ -575,7 +575,7 @@ def test_reverify_refuses_to_rewrite_a_note_that_is_not_utf8(tmp_path: Path) -> 
 
     digest, status = review._reverify(tmp_path, candidate, "2026-09-18")
 
-    assert status == "not_stampable"
+    assert status == "not_utf8"
     assert digest == candidate.content_hash
     assert path.read_bytes() == raw  # not rewritten with U+FFFD
 
@@ -652,7 +652,10 @@ def test_keep_reports_a_note_that_was_already_verified_today(
     Collapsing it into the same `stamped: False` as "no frontmatter" would make
     the UI warn about a note that is perfectly stamped.
     """
-    today = datetime.now(UTC).date().isoformat()
+    # Pinned: computing `today` here and letting `record_decision` recompute it
+    # makes the test fail on a run that straddles UTC midnight.
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+    today = now.date().isoformat()
     path = tmp_path / "Ideas" / "fresh.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -661,7 +664,7 @@ def test_keep_reports_a_note_that_was_already_verified_today(
     )
     candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
 
-    result = record_decision(tmp_path, candidate, disposition="keep")
+    result = record_decision(tmp_path, candidate, disposition="keep", now=now)
 
     assert result["stamp_status"] == "already_current"
     assert result["stamped"] is False
@@ -676,7 +679,7 @@ def test_keep_distinguishes_nothing_to_stamp(tmp_path: Path) -> None:
 
     result = record_decision(tmp_path, candidate, disposition="keep")
 
-    assert result["stamp_status"] == "not_stampable"
+    assert result["stamp_status"] == "no_frontmatter"
     assert result["stamped"] is False
 
 
@@ -706,7 +709,11 @@ def test_keep_survives_a_very_long_note_filename(tmp_path: Path) -> None:
     `record_decision` does not catch OSError and the MCP layer only catches
     ValueError, so an ENAMETOOLONG here surfaced as an unhandled exception.
     """
-    stem = "x" * 180
+    # 246, not some round number: the old prefix built a temp basename of
+    # 1 + len(name) + 1 + 8 + 4 chars, so a 180-char stem came to 197 — well
+    # under NAME_MAX (255) and passing with or without the fix. 246 makes the
+    # old form 263 and the note filename itself still legal at 249.
+    stem = "x" * 246
     path = tmp_path / "Ideas" / f"{stem}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\ntype: note\n---\nAn unlinked note.\n", encoding="utf-8")
@@ -716,3 +723,69 @@ def test_keep_survives_a_very_long_note_filename(tmp_path: Path) -> None:
 
     assert result["stamp_status"] == "stamped"
     assert "updated:" in path.read_text(encoding="utf-8")
+
+
+def test_keep_stamps_a_bom_prefixed_note(tmp_path: Path) -> None:
+    """A BOM is not whitespace, so a BOM + "---" line is not seen as "---".
+
+    The note has perfectly good frontmatter; reading it as unstampable told the
+    user to add frontmatter it already had. `_FRONTMATTER_RE` already tolerates
+    a BOM, so these paths have to agree with it.
+
+    Driven through `_reverify`: `scan_vault` yields no entry at all for a
+    BOM-prefixed note, so the queue never reaches one today. The guard is
+    defensive; the bug it prevents is a false instruction to the user.
+    """
+    path = tmp_path / "Ideas" / "bom.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\ufeff---\ntype: note\nupdated: 2020-01-01\n---\nBody.\n", encoding="utf-8"
+    )
+    raw = path.read_bytes()
+    candidate = review.ReviewCandidate(
+        candidate_id="b" * 24,
+        workspace="personal",
+        path="memory-vault/Ideas/bom.md",
+        content_hash=content_hash(raw),
+        signals=["weak_provenance"],
+        evidence={},
+        priority=0.0,
+    )
+
+    _digest, status = review._reverify(tmp_path, candidate, "2026-09-18")
+
+    assert status == "stamped"
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("\ufeff")  # the BOM survives
+    assert "updated: 2026-09-18" in text
+
+
+def test_unreadable_and_undecodable_notes_report_distinct_statuses(
+    tmp_path: Path,
+) -> None:
+    """One "no frontmatter" message for all three failures was wrong for two."""
+    path = tmp_path / "Ideas" / "latin.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = "---\ntype: note\n---\nCaf\xe9\n".encode("latin-1")
+    path.write_bytes(raw)
+    candidate = review.ReviewCandidate(
+        candidate_id="x" * 24,
+        workspace="personal",
+        path="memory-vault/Ideas/latin.md",
+        content_hash=content_hash(raw),
+        signals=["weak_provenance"],
+        evidence={},
+        priority=0.0,
+    )
+    assert review._reverify(tmp_path, candidate, "2026-09-18")[1] == "not_utf8"
+
+    missing = review.ReviewCandidate(
+        candidate_id="y" * 24,
+        workspace="personal",
+        path="memory-vault/Ideas/gone.md",
+        content_hash=content_hash(b""),
+        signals=["weak_provenance"],
+        evidence={},
+        priority=0.0,
+    )
+    assert review._reverify(tmp_path, missing, "2026-09-18")[1] == "unreadable"

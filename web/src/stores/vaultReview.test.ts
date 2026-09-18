@@ -269,4 +269,83 @@ describe('vaultReview store', () => {
     expect(store.error).toBe('candidate changed or no longer exists')
     expect(store.isBusy('cid1')).toBe(false)
   })
+
+  // ── the "nothing to stamp" notice ──────────────────────────────────────
+
+  const ID = 'abc123abc123abc123abc123'
+
+  it('raises a notice when keep could not stamp the note', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    expect(store.notice).toContain('no frontmatter to stamp')
+  })
+
+  it('names the real reason for a note it could not decode', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'not_utf8' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // One shared "no frontmatter" message would have been simply untrue here.
+    expect(store.notice).toContain('not valid UTF-8')
+    expect(store.notice).not.toContain('no frontmatter')
+  })
+
+  it('stays silent when the note really was stamped', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: true, stamp_status: 'stamped' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    expect(store.notice).toBe('')
+  })
+
+  it('stays silent when the note was already verified today', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'already_current' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // "Already current" is a success; warning about it would be noise.
+    expect(store.notice).toBe('')
+  })
+
+  it('does not attach another row\'s outcome to this one', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: 'some-other-row', stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // `lastResult` is one shared slot and each button is disabled only for its
+    // own row, so a second decision landing first must not toast this one.
+    expect(store.notice).toBe('')
+  })
 })

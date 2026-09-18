@@ -1277,8 +1277,18 @@ export interface VaultReviewDecisionResult {
   previous_candidate_id?: string
   /** True only when an `updated:` date was actually written to the note. */
   stamped?: boolean
-  /** 'stamped' | 'already_current' | 'not_stampable' | 'not_applicable' */
-  stamp_status?: string
+  /**
+   * Why a keep did or did not stamp the note. A union rather than `string`:
+   * the sole consumer compares string literals, so a typo or a backend rename
+   * would compile clean and silently disable the notice this exists to raise.
+   */
+  stamp_status?:
+    | 'stamped'
+    | 'already_current'
+    | 'no_frontmatter'
+    | 'not_utf8'
+    | 'unreadable'
+    | 'not_applicable'
 }
 
 export interface VaultReviewResponse {
