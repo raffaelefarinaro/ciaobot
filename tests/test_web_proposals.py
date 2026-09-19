@@ -1671,3 +1671,103 @@ def test_an_accept_revalidates_the_row_another_resolver_took(
 
     assert resp.status_code == 409, resp.json()
     assert _learnings_count(config) == 1, "the fact was promoted a second time"
+
+
+# ---- Retry reconciliation from the review path ----------------------------
+
+
+_COMPETING_QUEUE = """# Memory Proposals
+
+## 2026-09-19 curation pass (this pass)
+
+- [memory] Office is in Berlin.  _(from: Decisions)_
+"""
+
+
+def _competing_vault(tmp_path: Path) -> CiaoConfig:
+    """A queued fact that supersedes an entry already in the region.
+
+    The archive-time reconcile deferred it, so it is sitting in the queue with
+    its competitor still live. Accepting it plainly appends both.
+    """
+    config = _config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(config, "personal", _COMPETING_QUEUE)
+    from ciao import memory_tool as mt
+
+    guide = config.agent_root("personal") / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    guide.write_text("# Guide\n\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    mt.write_region(guide, "memory", ["Office is in Zurich. [2026-01-01]"])
+    return config
+
+
+def _memory_entries(config: CiaoConfig) -> list[str]:
+    from ciao import memory_tool as mt
+
+    entries, _diags = mt.read_region(config.agent_root("personal") / "CLAUDE.md", "memory")
+    return entries
+
+
+def test_accept_without_reconcile_stays_model_free(tmp_path: Path, monkeypatch) -> None:
+    """The default accept is still one synchronous write, no model call.
+
+    A reconcile on every click costs the batch endpoint one timeout per row,
+    which is why the retry is opt-in rather than the new default.
+    """
+
+    async def never(*args: object, **kwargs: object) -> str:  # pragma: no cover
+        raise AssertionError("the plain accept must not call a model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", never)
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+
+def test_reconcile_on_accept_replaces_the_competing_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`?reconcile=1` resolves a deferred fact instead of appending beside it."""
+
+    async def merges(prompt: str, **kwargs: object) -> str:
+        assert "Office is in Zurich." in prompt
+        return '[{"action": "update", "index": 1, "text": "Office is in Berlin."}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", merges)
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1")
+
+    assert resp.status_code == 200, resp.json()
+    entries = _memory_entries(config)
+    assert len(entries) == 1, "the obsolete entry and its replacement are both live"
+    assert entries[0].startswith("Office is in Berlin.")
+
+
+def test_a_retry_that_cannot_decide_keeps_the_row_queued(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed retry is not a licence to append; the bullet survives."""
+
+    async def timing_out(prompt: str, **kwargs: object) -> str:
+        raise TimeoutError("reconcile timed out")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", timing_out)
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1")
+
+    assert resp.status_code == 409, resp.json()
+    # The reason and the competing entry are on the response, not only in a log.
+    assert "Office is in Zurich." in resp.json()["error"]
+    assert _memory_entries(config) == ["Office is in Zurich. [2026-01-01]"]
+    assert [r["kind"] for r in client.get("/api/proposals").json()["rows"]] == ["memory"]
