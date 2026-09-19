@@ -15,7 +15,7 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -905,3 +905,395 @@ def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict
         return str(outcome.get("destination", ""))
     # fold_doc, write_people_note, append_learnings all set "destination".
     return str(outcome.get("destination", ""))
+
+
+# ── Accept preview ────────────────────────────────────────────────────────
+#
+# A queued bullet says what was noticed, not what accepting it writes. The
+# promotion path reconciles against whatever the destination holds now — it
+# stamps a learned-at date, it recognises a duplicate and writes nothing, it
+# bumps a learning's recurrence count instead of appending a second copy — so
+# the bullet's own text is never the whole story.
+#
+# `preview_row` computes exactly what the accept would produce, from the same
+# functions the accept itself calls, and pins the revision it was computed
+# against. The accept then re-checks that revision (`destination_revision`) and
+# refuses with a conflict rather than writing over a destination that moved
+# while the preview was on screen.
+#
+# Nothing in here writes. A kind whose result cannot be known without writing
+# (a `[project]` fold is decided by a model at accept time) says so through
+# `exact: False` rather than showing a guess as if it were the outcome.
+
+# How much of a destination's before/after body to ship to the review card.
+# The regions are cap-bounded and a learnings file is a few hundred lines; the
+# limit only trips on a hand-grown file, where a truncated preview plus the
+# flag is still better than a multi-megabyte response.
+PREVIEW_MAX_CHARS = 20_000
+
+
+def _clip(text: str) -> tuple[str, bool]:
+    if len(text) <= PREVIEW_MAX_CHARS:
+        return text, False
+    return text[:PREVIEW_MAX_CHARS], True
+
+
+def _base_preview(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "workspace": str(row.get("workspace") or ""),
+        "kind": str(row.get("kind") or ""),
+        "text": str(row.get("text") or ""),
+        "source": str(row.get("source") or ""),
+        "operation": "",
+        "destination": "",
+        "destination_path": "",
+        "revision": "",
+        "before": "",
+        "after": "",
+        "exact": False,
+        "truncated": False,
+        "can_accept": False,
+        "reason": "",
+        # What joins the destination's units, so the card diffs the same thing
+        # the destination is made of. A bounded region's entries are separated
+        # by "\n§\n"; diffed as lines, appending one entry showed a second
+        # added row reading "§" and tore multi-line entries apart. An ordinary
+        # file is lines.
+        "separator": "\n",
+    }
+
+
+def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one memory/profile bullet would leave in the region.
+
+    Mirrors the click path exactly: `accept_region_fact` passes no reconcile
+    decision, so the write is the plain stamped append — or nothing at all when
+    the stamp-stripped fact is already an entry.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_proposals import _promotable_text
+    from ciao.memory_receipts import content_revision
+    from ciao.memory_tool import (
+        ensure_regions,
+        read_region,
+        resolve_region as _resolve,
+        serialize_entries,
+    )
+
+    out = _base_preview(row)
+    region = _resolve(row.get("region") or row["kind"])
+    from ciao.memory_tool import SECTION_SEP
+
+    out["separator"] = f"\n{SECTION_SEP}\n"
+    out["destination"] = f"ciao:{region}"
+    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    out["destination_path"] = str(guide)
+    out["leak_warning"] = bool(row.get("leak_warning"))
+    try:
+        ensure_regions(guide)
+        entries, diags = read_region(guide, region)
+    except (OSError, ValueError) as exc:
+        out["reason"] = f"could not read {guide}: {exc}"
+        return out
+    if diags:
+        out["reason"] = "; ".join(d.message for d in diags)
+        return out
+
+    before = serialize_entries(entries)
+    out["revision"] = content_revision(before)
+    before_clip, before_cut = _clip(before)
+    out["before"] = before_clip
+
+    promotable = _promotable_text(text)
+    if promotable is None:
+        # The event-shape guard refuses this at accept time too, so offering an
+        # accept here would be a button that cannot do what it says.
+        out["operation"] = "none"
+        out["after"] = before_clip
+        out["truncated"] = before_cut
+        out["exact"] = True
+        out["reason"] = (
+            "this reads as an event, not a standing rule, so it would rot in "
+            "always-loaded memory. Edit it into what is true from now on, or "
+            "talk about it."
+        )
+        return out
+
+    out["written"] = promotable
+    if promotable in {strip_learned_stamp(entry) for entry in entries}:
+        out["operation"] = "none"
+        out["after"] = before_clip
+        out["truncated"] = before_cut
+        out["exact"] = True
+        out["can_accept"] = True
+        out["reason"] = f"ciao:{region} already holds this; accepting only clears the row"
+        return out
+
+    # The learned-at stamp is applied at write time from the system date, which
+    # is the date this preview is being read on.
+    stamped = f"{promotable} [{date.today().isoformat()}]"
+    after = serialize_entries([*entries, stamped])
+    after_clip, after_cut = _clip(after)
+    out["operation"] = "add"
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["exact"] = True
+    out["can_accept"] = True
+    out["added"] = [stamped]
+    return out
+
+
+def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one `[learnings]` bullet would leave in Learnings.md."""
+    from ciao.memory_proposals import (
+        learnings_path,
+        read_learnings,
+        render_learning_append,
+    )
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    out["destination"] = "Workspace/Learnings.md"
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    out["destination_path"] = str(learnings_path(vault))
+    try:
+        before = read_learnings(vault)
+    except OSError as exc:
+        out["reason"] = f"could not read Workspace/Learnings.md: {exc}"
+        return out
+    after, operation = render_learning_append(
+        before, text, source=str(row.get("source") or "")
+    )
+    before_clip, before_cut = _clip(before)
+    after_clip, after_cut = _clip(after)
+    out["revision"] = content_revision(before)
+    out["before"] = before_clip
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["operation"] = operation
+    out["exact"] = True
+    out["can_accept"] = True
+    if operation == "update":
+        out["reason"] = "this learning is already filed; accepting bumps its recurrence count"
+    elif operation == "none":
+        out["reason"] = "already recorded; accepting only clears the row"
+    return out
+
+
+def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one `[people]` bullet would create.
+
+    Create-only, like the accept: an existing note is a merge nobody can make
+    mechanically, so the preview says so instead of offering an accept that
+    would refuse.
+    """
+    from ciao.memory_proposals import people_note_path
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    name = str(row.get("target") or "").strip()
+    if not name:
+        out["reason"] = "the bullet names no person"
+        return out
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    note = people_note_path(vault, name)
+    if note is None:
+        out["reason"] = "the bullet names no usable person"
+        return out
+    out["destination"] = f"People/{note.name}"
+    out["destination_path"] = str(note)
+    if note.exists():
+        out["operation"] = "none"
+        try:
+            existing = note.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+        before_clip, cut = _clip(existing)
+        out["before"] = before_clip
+        out["after"] = before_clip
+        out["truncated"] = cut
+        out["revision"] = content_revision(existing)
+        out["exact"] = True
+        out["reason"] = (
+            f"{out['destination']} already exists; merge the fact by hand, then dismiss"
+        )
+        return out
+    after = (
+        "---\n"
+        "tags: [person]\n"
+        f"updated: {date.today().isoformat()}\n"
+        f"---\n# {note.stem}\n\n{text}\n"
+    )
+    after_clip, cut = _clip(after)
+    out["operation"] = "add"
+    out["revision"] = content_revision("")
+    out["after"] = after_clip
+    out["truncated"] = cut
+    out["exact"] = True
+    out["can_accept"] = True
+    return out
+
+
+def _fold_preview(config, row: dict[str, Any]) -> dict[str, Any]:
+    """A `[project]` fold names its doc but cannot show the replacement.
+
+    The rewrite is a model call made at accept time, so any "after" shown here
+    would be invented. `exact: False` is what the card renders as "the exact
+    wording is decided when you accept".
+    """
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    doc_raw = str(row.get("target") or "").strip()
+    if not doc_raw:
+        out["reason"] = "the bullet names no project doc"
+        return out
+    doc = Path(doc_raw)
+    if not doc.is_absolute():
+        doc = Path(config.workspace_root) / doc
+    out["destination"] = doc_raw
+    out["destination_path"] = str(doc)
+    if not doc.is_file():
+        out["reason"] = f"project doc not found: {doc_raw}"
+        return out
+    try:
+        before = doc.read_text(encoding="utf-8")
+    except OSError as exc:
+        out["reason"] = f"could not read {doc_raw}: {exc}"
+        return out
+    before_clip, cut = _clip(before)
+    out["before"] = before_clip
+    out["truncated"] = cut
+    out["revision"] = content_revision(before)
+    out["operation"] = "update"
+    out["exact"] = False
+    out["can_accept"] = True
+    out["reason"] = "a model folds this into the doc when you accept, so the exact wording is decided then"
+    return out
+
+
+def _rehome_preview(config, row: dict[str, Any]) -> dict[str, Any]:
+    """A re-home accept moves a note; there is no memory body to replace."""
+    out = _base_preview(row)
+    signal = row.get("rehome") or {}
+    out["destination"] = str(signal.get("destination") or "")
+    out["operation"] = "move"
+    out["exact"] = False
+    out["can_accept"] = bool(signal.get("justified")) and bool(out["destination"])
+    out["source_note"] = str(signal.get("note") or "")
+    if not out["can_accept"]:
+        out["reason"] = "pick the workspace this note belongs to"
+    else:
+        out["reason"] = "moves the note and rewrites every link to it"
+    return out
+
+
+def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
+    """Exactly what accepting one queued row would write, without writing it.
+
+    ``text`` overrides the bullet's own wording, which is what the review
+    card's "edit suggestion" sends: the operator sees the replacement their
+    edit produces, against the destination as it is right now, before the
+    accept goes anywhere near it.
+    """
+    row = ctx["row"]
+    fact = (text or str(row.get("text") or "")).strip()
+    if ctx.get("file"):
+        out = _base_preview(row)
+        out["text"] = fact
+        out["destination"] = str(row.get("path") or "")
+        out["operation"] = "none"
+        out["reason"] = "a skill proposal is a file; there is nothing to write into memory"
+        return out
+    try:
+        accept = proposal_kinds.accept_for(str(row.get("kind") or ""))
+    except proposal_kinds.UnknownKindError as exc:
+        out = _base_preview(row)
+        out["text"] = fact
+        out["reason"] = str(exc)
+        return out
+    if accept.action == "edit_region":
+        out = _region_preview(config, row, fact)
+    elif accept.action == "append_learnings":
+        out = _learnings_preview(config, row, fact)
+    elif accept.action == "write_people_note":
+        out = _people_preview(config, row, fact)
+    elif accept.action == "fold_doc":
+        out = _fold_preview(config, row)
+    elif accept.action == "move_file":
+        out = _rehome_preview(config, row)
+    else:
+        out = _base_preview(row)
+        out["operation"] = "none"
+        out["reason"] = "this row has no destination yet; decide what it is first"
+    out["text"] = fact
+    out["action"] = accept.action
+    return out
+
+
+def destination_revision(config, row: dict[str, Any]) -> str:
+    """The destination's revision right now, for the accept's conflict check.
+
+    The same digest :func:`preview_row` pins, recomputed at accept time. An
+    empty string means this kind has no single body to compare (a re-home move,
+    an unroutable row); the accept then runs its own guards instead.
+    """
+    try:
+        accept = proposal_kinds.accept_for(str(row.get("kind") or ""))
+    except proposal_kinds.UnknownKindError:
+        return ""
+    from ciao.memory_receipts import content_revision
+
+    try:
+        if accept.action == "edit_region":
+            from ciao.memory_tool import (
+                ensure_regions,
+                read_region,
+                resolve_region as _resolve,
+                serialize_entries,
+            )
+
+            region = _resolve(row.get("region") or row["kind"])
+            guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+            ensure_regions(guide)
+            entries, diags = read_region(guide, region)
+            if diags:
+                return ""
+            return content_revision(serialize_entries(entries))
+        if accept.action == "append_learnings":
+            from ciao.memory_proposals import read_learnings
+
+            vault = Path(config.workspace_vault_root(row["workspace"]))
+            return content_revision(read_learnings(vault))
+        if accept.action == "write_people_note":
+            from ciao.memory_proposals import people_note_path
+
+            vault = Path(config.workspace_vault_root(row["workspace"]))
+            note = people_note_path(vault, str(row.get("target") or ""))
+            if note is None:
+                return ""
+            if not note.exists():
+                return content_revision("")
+            return content_revision(note.read_text(encoding="utf-8"))
+        if accept.action == "fold_doc":
+            doc = Path(str(row.get("target") or ""))
+            if not str(doc):
+                return ""
+            if not doc.is_absolute():
+                doc = Path(config.workspace_root) / doc
+            if not doc.is_file():
+                return ""
+            return content_revision(doc.read_text(encoding="utf-8"))
+    except (AttributeError, OSError, ValueError) as exc:
+        logger.info("proposal preview: could not read the destination (%s)", exc)
+        return ""
+    return ""

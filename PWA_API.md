@@ -648,11 +648,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 **Proposal queue**
 
 Routes: `GET /api/proposals`, `GET /api/proposals/history`,
+`GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
-Memory mutations also expose `GET /api/memory/receipts` and
-`POST /api/memory/receipts/{id}/undo` (see below).
+Memory mutations also expose `GET /api/memory/receipts`,
+`GET /api/memory/receipts/{id}` and `POST /api/memory/receipts/{id}/undo`
+(see below).
 
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
@@ -675,11 +677,34 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # into the primary workspace's injected region).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
+# What accepting one row would write, WITHOUT writing it. Returns
+# {ok, preview} where preview is {id, kind, text, action, operation
+# (add|update|move|none), destination, destination_path, before, after,
+# revision, exact, can_accept, reason, truncated}. `before`/`after` are the
+# exact destination body the accept would replace, computed from the same
+# functions the accept calls - so a stamped learned-at date, a duplicate that
+# writes nothing, and a learning whose recurrence count is bumped instead of
+# appended all show as what they are. `exact: false` marks a kind whose result
+# cannot be known without writing (a `[project]` fold is decided by a model at
+# accept time). `?text=` previews an edited wording against the same current
+# destination. `revision` is the destination digest this preview was computed
+# against; hand it back on the accept below.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
+
 # Accept one row. Dispatches through the kind's own accept descriptor: memory/
 # profile/user are region edits (returns {action: edit_region, region,
 # leak_warning}), rehome is a file move (returns {action: move_file,
 # destination, justified}). The row is dismissed from the queue; promotion is
 # a separate explicit step, matching the MCP resolve path.
+#
+# Optional JSON body: {"expected_revision": "<preview revision>", "text":
+# "<edited wording>"}. A destination that changed since that revision is
+# refused with 409 {error, conflict: true, preview} carrying a REFRESHED
+# preview, and nothing is written - an accept can never land on top of an edit
+# nobody saw. `text` promotes an edited wording; the decision history still
+# records the bullet's original text, because that is what the dedupe readers
+# compare a re-extracted fact against. Both fields are optional, so a client
+# that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
 
 # Dismiss one row from the queue. No region/file is touched.
@@ -687,6 +712,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 
 # Accept or dismiss a set atomically. Body: {"action":"accept|dismiss","ids":[...]}.
 # Every id must resolve or the whole batch is rejected (404) with no file change.
+# Optional "revisions": {"<id>": "<preview revision>"} applies the same
+# conflict guard per row: a row whose destination moved fails on its own with
+# {conflict: true} and stays queued, and the rest of the batch still runs.
+# The reply carries `results` (one entry per row, unchanged) and `summary`:
+# one entry per destination with {destination, action, total, ok, failed,
+# conflicts, duplicates, failed_ids[], errors[]}, so a fifty-row accept reads
+# as what changed and where without losing any per-row failure.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
   -H 'content-type: application/json' \
   -d '{"action":"accept","ids":["<id1>","<id2>"]}'
@@ -707,6 +739,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # actually served and `at_max` says the request asked for more than the cap, so
 # a wider limit would return the same page - a client paging with "show more"
 # must stop on `at_max` rather than on `truncated`.
+#
+# Each served row also carries `source_path` (the archive transcript it came
+# from, when one still exists on disk) and, where the receipt protocol
+# performed the decision, `change`: {receipt_id, kind, status, destination,
+# undoable, changed, ts}. A row with NO `change` key is one the protocol never
+# recorded - every decision made before receipts landed, and every one made
+# outside them - and must be rendered as "No change snapshot available" rather
+# than given an undo it cannot honour.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 
 # Managed memory mutations (receipts), newest first: every region write, queue
@@ -719,6 +759,16 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/hist
 # history-only (`undoable: false`) facts that must not each restore the file.
 # Optional query params: workspace, limit (default 200).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
+
+# One receipt with its before/after images and a line diff, which the list
+# above deliberately strips. Returns {id, workspace, kind, status, ts, actor,
+# source, destination, fact_text, undoable, has_snapshot, changed, error} and,
+# when `has_snapshot`, {before, after, diff[{op, text}], truncated,
+# diff_truncated}. `has_snapshot: false` carries a `reason` and is what the
+# History row renders as "No change snapshot available"; a row that is not
+# undoable carries a `reason` saying which case applies (part of a batch
+# transaction, not applied, itself an undo, or unsupported).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID"
 
 # Undo one receipt. Refuses with 409 when the destination changed since the
 # operation (undo would otherwise delete an unrelated later fact), 400 when the

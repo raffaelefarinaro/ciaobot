@@ -8,7 +8,7 @@ import ProposalReviewPanel from '../ProposalReviewPanel.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
-import type { ProposalRow } from '../../lib/types'
+import type { ProposalPreview, ProposalRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -26,6 +26,31 @@ function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
     workspace: 'personal',
     path: 'personal/Workspace/Memory-Proposals.md',
     line: 3,
+    ...overrides,
+  }
+}
+
+/** A server preview: what accepting a row would write, and the revision it was
+ * computed against. */
+function preview(overrides: Partial<ProposalPreview> = {}): ProposalPreview {
+  return {
+    id: 'row-1',
+    workspace: 'personal',
+    kind: 'memory',
+    text: 'Remember the thing',
+    source: '',
+    action: 'edit_region',
+    operation: 'add',
+    destination: 'ciao:memory',
+    destination_path: '/w/CLAUDE.md',
+    revision: 'rev-1',
+    before: '- An older fact.',
+    after: '- An older fact.\n- Remember the thing [2026-09-19]',
+    exact: true,
+    truncated: false,
+    can_accept: true,
+    reason: '',
+    separator: '\n',
     ...overrides,
   }
 }
@@ -191,9 +216,20 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('shows a leak warning before an accept is confirmed', async () => {
-    apiGet.mockResolvedValue({
-      rows: [row({ id: 'leak', kind: 'memory', workspace: 'work', leak_warning: true, region: 'memory' })],
+  it('carries the leak warning into the decision card, which confirms the accept', async () => {
+    // The warning used to open a confirmation of its own. It now rides on the
+    // card, which is where the destination and the replacement already are —
+    // two stacked confirmations for one decision is one too many.
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/leak/preview')) {
+        return Promise.resolve({
+          ok: true,
+          preview: preview({ id: 'leak', destination: 'ciao:memory', leak_warning: true }),
+        })
+      }
+      return Promise.resolve({
+        rows: [row({ id: 'leak', kind: 'memory', workspace: 'work', leak_warning: true, region: 'memory' })],
+      })
     })
     useProjectStore().activeWorkspace = 'work'
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
@@ -202,16 +238,18 @@ describe('ProposalReviewPanel', () => {
     const rowEl = wrapper.find('.pr-row')
     expect(rowEl.text()).toContain('visible in every workspace')
 
-    // Clicking accept opens the confirm step, not the API call.
+    // Clicking the primary opens the card, not the API call.
     await rowEl.find('.btn-primary').trigger('click')
-    await nextTick()
-    expect(apiPost).not.toHaveBeenCalled()
-    expect(rowEl.text()).toContain('Sure?')
-
-    // Confirming sends the accept.
-    await rowEl.find('.pr-actions--confirm .btn-primary').trigger('click')
     await flushPromises()
-    expect(apiPost).toHaveBeenCalledWith('/api/proposals/leak/accept')
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.find('.pr-card').text()).toContain('visible in every workspace')
+
+    // Confirming sends the accept, pinned to the revision the card showed.
+    await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/leak/accept', {
+      expected_revision: 'rev-1',
+    })
     wrapper.unmount()
   })
 
@@ -593,10 +631,10 @@ describe('talk about it', () => {
     apiPost.mockReset()
   })
 
-  it('offers a third action beside accept and dismiss, and leaves the row queued', async () => {
-    // "Accept" writes the fact and "dismiss" drops it. Neither is right when the
-    // operator does not yet know which — so a third action hands the row to a
-    // chat in that row's workspace and changes nothing here.
+  it('offers a third action beside review and dismiss, and leaves the row queued', async () => {
+    // "Review" opens the decision card and "dismiss" drops the row. Neither is
+    // right when the operator does not yet know which — so a third action hands
+    // the row to a chat in that row's workspace and changes nothing here.
     apiGet.mockResolvedValue({ rows: [row({ workspace: 'work' })] })
     const projects = useProjectStore()
     projects.activeWorkspace = 'work'
@@ -604,7 +642,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['accept', 'dismiss', 'talk about it'])
+    expect(labels).toEqual(['review', 'dismiss', 'talk about it'])
 
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
@@ -865,6 +903,9 @@ describe('Queue / History tabs', () => {
           truncated: false,
         })
       }
+      if (url.startsWith('/api/proposals/a/preview')) {
+        return Promise.resolve({ ok: true, preview: preview({ id: 'a' }) })
+      }
       return Promise.resolve({ rows: [row({ id: 'a' })] })
     })
   }
@@ -931,8 +972,10 @@ describe('Queue / History tabs', () => {
     apiPost.mockResolvedValue({} as never)
     await wrapper.find('.pr-row .btn-primary').trigger('click')
     await flushPromises()
+    await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+    await flushPromises()
 
-    expect(apiPost).toHaveBeenCalledWith(expect.stringContaining('/accept'))
+    expect(apiPost).toHaveBeenCalledWith(expect.stringContaining('/accept'), expect.anything())
     expect(historyCalls()).toBeGreaterThan(before)
     wrapper.unmount()
   })
@@ -941,3 +984,195 @@ describe('Queue / History tabs', () => {
 
 // The History badge itself is now rendered by the Review surface's single tab
 // bar, so its counting rules are pinned in `MemoryMapView.test.ts`.
+describe('decision card', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+    useProjectStore().activeWorkspace = 'personal'
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  /** Queue + preview, with the preview overridable per test. */
+  function mockQueue(previewOverrides: Partial<ProposalPreview> = {}) {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      if (url.startsWith('/api/proposals/row-1/preview')) {
+        return Promise.resolve({ ok: true, preview: preview(previewOverrides) })
+      }
+      return Promise.resolve({ rows: [row()] })
+    })
+  }
+
+  async function openCard() {
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('shows the destination, operation, source and exact replacement before accepting', async () => {
+    // The bullet's own text is NOT the change: the promotion reconciles against
+    // whatever the destination holds now and stamps a learned-at date. The card
+    // is what closes that gap, so it has to carry all four.
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      if (url.startsWith('/api/proposals/row-1/preview')) {
+        return Promise.resolve({ ok: true, preview: preview() })
+      }
+      return Promise.resolve({ rows: [row({ source: 'chat-42' })] })
+    })
+    const wrapper = await openCard()
+
+    const card = wrapper.find('.pr-card')
+    expect(card.exists()).toBe(true)
+    expect(card.find('.pr-card-op').text()).toBe('Add')
+    expect(card.find('.pr-card-dest').text()).toBe('ciao:memory')
+    expect(card.text()).toContain('chat-42')
+    // The replacement the SERVER computed, stamp and all - not the row's text.
+    const added = card.findAll('.pr-card-diff-line--added').map(l => l.text())
+    expect(added.join(' ')).toContain('Remember the thing [2026-09-19]')
+    // Nothing has been written yet.
+    expect(apiPost).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('offers one primary action with edit, discuss and dismiss beside it', async () => {
+    mockQueue()
+    const wrapper = await openCard()
+
+    const actions = wrapper.findAll('.pr-actions--card button').map(b => b.text())
+    expect(actions[0]).toBe('save to ciao:memory')
+    expect(actions.slice(1)).toEqual(['edit suggestion', 'talk about it', 'dismiss', 'cancel'])
+    expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('sends the previewed revision with the accept', async () => {
+    mockQueue()
+    apiPost.mockResolvedValue({} as never)
+    const wrapper = await openCard()
+
+    await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
+      expected_revision: 'rev-1',
+    })
+    wrapper.unmount()
+  })
+
+  it('re-renders the card from the conflict response instead of writing', async () => {
+    // The destination moved while the card was on screen. The server refuses
+    // and hands back a refreshed preview; showing THAT is the whole point, so
+    // the operator decides against the destination as it is now.
+    mockQueue()
+    const wrapper = await openCard()
+    const conflict = Object.assign(new Error('the destination changed'), {
+      payload: {
+        conflict: true,
+        preview: preview({
+          revision: 'rev-2',
+          before: '- An older fact.\n- Someone else wrote this.',
+          after: '- An older fact.\n- Someone else wrote this.\n- Remember the thing [2026-09-19]',
+        }),
+      },
+    })
+    apiPost.mockRejectedValue(conflict)
+
+    await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+    await flushPromises()
+
+    const card = wrapper.find('.pr-card')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('The destination changed since this preview')
+    // The diff is recomputed against the body that is there NOW: the fact
+    // someone else wrote is context, not a change this accept would make.
+    expect(card.text()).not.toContain('Someone else wrote this')
+    expect(useProposalsStore().previews['row-1'].revision).toBe('rev-2')
+    wrapper.unmount()
+  })
+
+  it('previews an edited wording against the same destination', async () => {
+    mockQueue()
+    const wrapper = await openCard()
+
+    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'edit suggestion')!.trigger('click')
+    await nextTick()
+    await wrapper.find('.pr-card-edit-input').setValue('Remember the other thing')
+    await wrapper.find('.pr-card-edit .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith(
+      '/api/proposals/row-1/preview?text=Remember%20the%20other%20thing',
+    )
+    wrapper.unmount()
+  })
+
+  it('offers no accept for a preview the server says cannot be written', async () => {
+    mockQueue({ can_accept: false, operation: 'none', after: '- An older fact.', reason: 'this reads as an event' })
+    const wrapper = await openCard()
+
+    expect(wrapper.find('.pr-actions--card .btn-primary').exists()).toBe(false)
+    expect(wrapper.find('.pr-card').text()).toContain('this reads as an event')
+    wrapper.unmount()
+  })
+
+  it('says so rather than guessing when the replacement cannot be known', async () => {
+    mockQueue({ exact: false, before: 'doc', after: '', operation: 'update', destination: 'Projects/Ciao.md' })
+    const wrapper = await openCard()
+
+    expect(wrapper.find('.pr-card').text()).toContain('decided when you accept')
+    wrapper.unmount()
+  })
+
+  it('summarises a bulk accept per destination and keeps the failures', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      return Promise.resolve({ rows: [row({ id: 'a' }), row({ id: 'b' })] })
+    })
+    apiPost.mockResolvedValue({
+      ok: true,
+      action: 'accept',
+      results: [
+        { id: 'a', action: 'edit_region', dismissed: true, promoted: true },
+        { id: 'b', action: 'edit_region', dismissed: false, promoted: false, conflict: true, error: 'changed' },
+      ],
+      summary: [
+        {
+          destination: 'ciao:memory', action: 'accept', total: 2, ok: 1, failed: 1,
+          conflicts: 1, duplicates: 0, failed_ids: ['b'], errors: ['changed'],
+        },
+      ],
+    } as never)
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.find('.pr-group-select input').setValue(true)
+    await nextTick()
+    await wrapper.find('.pr-batch .btn-primary').trigger('click')
+    await flushPromises()
+
+    const summary = wrapper.find('.pr-summary-block')
+    expect(summary.exists()).toBe(true)
+    expect(summary.text()).toContain('ciao:memory')
+    expect(summary.text()).toContain('1 of 2 applied')
+    expect(summary.text()).toContain('1 changed underneath')
+    expect(summary.text()).toContain('1 still queued')
+    wrapper.unmount()
+  })
+})

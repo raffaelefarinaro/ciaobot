@@ -484,6 +484,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals/history",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
+        "/api/proposals/{id}/preview",
         "/api/proposals/{id}/{action}",
     }
     assert registered == expected, f"app.py route table drifted: {registered}"
