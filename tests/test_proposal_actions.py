@@ -171,6 +171,39 @@ def test_failed_region_write_without_an_error_gets_the_default() -> None:
     assert payload["region"] == "memory"
 
 
+def test_a_conflict_rides_along_and_is_told_apart_from_a_refusal() -> None:
+    """A batch row refused on a stale body is still promotable.
+
+    The single-row route answers a conflict with its own 409, but a batch has
+    no per-row refusal to carry one — so the flag travels on the result the
+    builder makes, and the client reopens the preview instead of reporting a
+    permanent failure.
+    """
+    payload = proposal_actions.build_accept_result(
+        "abc",
+        proposal_kinds.accept_for("memory"),
+        {"kind": "memory"},
+        {"ok": False, "region": "memory", "error": "stale", "conflict": True},
+        include_usage=False,
+    ).as_dict()
+
+    assert payload["conflict"] is True
+    assert payload["dismissed"] is False
+    assert payload["error"] == "stale"
+
+
+def test_an_ordinary_refusal_carries_no_conflict_key() -> None:
+    payload = proposal_actions.build_accept_result(
+        "abc",
+        proposal_kinds.accept_for("memory"),
+        {"kind": "memory"},
+        {"ok": False, "region": "memory", "error": "over cap"},
+        include_usage=False,
+    ).as_dict()
+
+    assert "conflict" not in payload
+
+
 def test_destination_accepts_report_where_the_fact_landed() -> None:
     for kind, action, destination in (
         ("project", "fold_doc", "Projects/Alpha.md"),
@@ -295,6 +328,51 @@ def test_accept_records_a_promotion_with_its_destination(tmp_path: Path) -> None
 
     events = _read_events(tmp_path)
     assert [(e["action"], e["via"]) for e in events] == [("promoted", "agent")]
+
+
+def test_an_edited_accept_records_its_receipt(tmp_path: Path) -> None:
+    """The history keeps the ORIGINAL bullet, so the receipt is the way back.
+
+    Append-time dedupe compares a re-extracted fact against the recorded text,
+    which is why an accept promoted with edited wording still records the
+    bullet it came from — and why the change receipt has to ride along, or
+    nothing can find what actually landed.
+    """
+    from ciao.memory_proposals import read_decisions
+
+    queue = _queue(tmp_path)
+    proposal_actions.record_decision(
+        queue,
+        action="accept",
+        text="Ada prefers plain text.",
+        kind="memory",
+        via="pwa",
+        workspace="personal",
+        destination="ciao:memory",
+        outcome="written",
+        proposal_id="abc",
+        receipt_id="rcpt-1",
+    )
+
+    decisions = read_decisions(queue)
+    assert decisions[0]["text"] == "Ada prefers plain text."
+    assert decisions[0]["receipt_id"] == "rcpt-1"
+
+
+def test_a_dismissal_records_no_receipt(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+
+    queue = _queue(tmp_path)
+    proposal_actions.record_decision(
+        queue,
+        action="dismiss",
+        text="Ada prefers plain text.",
+        kind="memory",
+        via="pwa",
+        workspace="personal",
+    )
+
+    assert read_decisions(queue)[0]["receipt_id"] == ""
 
 
 def test_non_extraction_kinds_stay_out_of_the_tally(tmp_path: Path) -> None:

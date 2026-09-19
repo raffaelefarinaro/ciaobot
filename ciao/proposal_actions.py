@@ -76,6 +76,7 @@ class ProposalActionResult:
     justified: bool | None = None
     already_moved: bool | None = None
     error: str | None = None
+    conflict: bool = False
 
     def as_dict(self) -> dict[str, object]:
         """The JSON object the PWA receives for this row."""
@@ -104,6 +105,8 @@ class ProposalActionResult:
             payload["already_moved"] = self.already_moved
         if self.error is not None:
             payload["error"] = self.error
+        if self.conflict:
+            payload["conflict"] = True
         return payload
 
 
@@ -127,9 +130,17 @@ def build_accept_result(
     single-row response reports the region's usage after the write, the batch
     response never has. Passing it explicitly keeps that asymmetry visible
     instead of hiding it in two divergent builders.
+
+    A ``conflict`` in the outcome rides along on every shape: it is told apart
+    from an ordinary refusal because the row is still promotable, just not
+    against the body the operator read, so the client reopens its preview
+    rather than reporting a permanent failure. The single-row route never
+    reaches here with one — it refuses with 409 before building a result — but
+    the batch route has no per-row refusal to carry it.
     """
     failed = "ok" in outcome and not outcome["ok"]
     dismissed = not failed
+    conflict = bool(outcome.get("conflict"))
     if isinstance(accept, proposal_kinds.RegionAccept):
         usage = outcome.get("usage", {}) if include_usage else None
         return ProposalActionResult(
@@ -147,6 +158,7 @@ def build_accept_result(
                 if failed
                 else None
             ),
+            conflict=conflict,
         )
     if accept.action in _DESTINATION_ACTIONS:
         return ProposalActionResult(
@@ -160,6 +172,7 @@ def build_accept_result(
                 if failed
                 else None
             ),
+            conflict=conflict,
         )
     # Re-home and route_manually: nothing was written into a region or a doc.
     # A re-home's move is performed by its own handler and reported through the
@@ -172,6 +185,7 @@ def build_accept_result(
         promoted=False,
         destination=str(rehome.get("destination", "")),
         justified=bool(rehome.get("justified", False)),
+        conflict=conflict,
     )
 
 
@@ -187,6 +201,7 @@ def record_decision(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
 ) -> None:
     """Record one resolved proposal in both ledgers the queue depends on.
 
@@ -200,6 +215,12 @@ def record_decision(
     each caller already had. The tally is written only for the extraction
     kinds — ``skill`` rows come from skill evolution and ``rehome`` rows from
     vault hygiene, and neither measures the memory pipeline.
+
+    ``receipt_id`` is the memory-change receipt an accept's write handed back.
+    The history keeps the ORIGINAL bullet as ``text`` because append-time
+    dedupe compares a re-extracted fact against it, so an accept promoted with
+    edited wording is unmatchable by text and the receipt reference is the only
+    way back to what actually landed. A dismiss writes nothing and so has none.
 
     Imports are deferred so a test that patches ``ciao.memory_proposals`` or
     ``ciao.proposal_outcomes`` still sees its patch honoured here.
@@ -218,6 +239,7 @@ def record_decision(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        receipt_id=receipt_id,
     )
     if not proposal_outcomes.is_extraction_kind(kind):
         return

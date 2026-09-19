@@ -15,14 +15,17 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
+
+if TYPE_CHECKING:  # ``memory_proposals`` is imported lazily everywhere else here.
+    from ciao.memory_proposals import ReconcileDecision
 
 logger = logging.getLogger(__name__)
 
@@ -701,7 +704,84 @@ def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None,
     return resolved, None
 
 
-def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
+async def _plan_accept_reconcile(
+    config, row: dict[str, Any], region: str, guide: Path
+) -> tuple[ReconcileDecision | None, ReconcileDecision | None]:
+    """Reconcile one queued fact against the region as it stands right now.
+
+    The retry half of the archive-time deferral. A fact queued because the
+    reconcile timed out, replied unusably, or named an entry that had moved
+    under it is otherwise stuck: accepting it took the plain append path, which
+    is the very thing the deferral exists to prevent — the obsolete entry and
+    its replacement both asserted in always-loaded memory.
+
+    Opt-in per request (``reconcile`` on the accept payload) because it is a
+    model call on a click: the default accept stays synchronous and instant,
+    and a row that needs judgment asks for it explicitly.
+
+    Returns ``(decision, deferral)``. ``decision`` is None when no call was
+    needed — an empty region or an exact duplicate is decided deterministically
+    — and ``deferral`` is the defer row when the retry came back unable to
+    decide again, in which case the row stays queued rather than being appended
+    on a failed retry. The defer row, not a sentence about it: its ``reason``
+    and ``competing`` entries are what the review UI puts in front of the
+    person deciding whether to retry again, and a formatted string cannot be
+    taken apart into them.
+    """
+    from ciao.insights import _resolve_insights_call
+    from ciao.memory_proposals import reconcile_region_fact
+
+    model = str(getattr(config, "insights_model", "") or "").strip()
+    if not model:
+        return None, None
+    effective_model, provider, _note = _resolve_insights_call(config, model)
+    try:
+        decision = await reconcile_region_fact(
+            guide,
+            row.get("region") or row["kind"],
+            row["text"],
+            model=effective_model,
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed retry must not write
+        return None, {
+            "action": "defer",
+            "reason": f"the reconcile call against ciao:{region} failed: {exc}",
+        }
+    if decision is not None and decision.get("action") == "defer":
+        return None, decision
+    return decision, None
+
+
+def _deferred_response(region: str, deferral: ReconcileDecision) -> dict[str, Any]:
+    """The refusal body for a fact no reconcile could place.
+
+    One shape for both ways a reconcile-backed accept defers — the retry that
+    could not decide, and the update whose entry moved under it — because the
+    review UI shows one thing for both: what stopped the write, the entries it
+    was weighed against, and a retry button. ``reason`` and ``competing`` are
+    carried as fields *and* folded into ``error``, since the plain message is
+    all a curl caller or an older client ever sees.
+    """
+    reason = str(deferral.get("reason") or "the reconcile could not decide")
+    competing = [str(entry) for entry in (deferral.get("competing") or [])]
+    detail = f" It competes with: {'; '.join(competing)}." if competing else ""
+    return {
+        "ok": False,
+        "region": region,
+        "deferred": True,
+        "reason": reason,
+        "competing": competing,
+        "error": (
+            f"reconciling against ciao:{region} could not decide ({reason}), so "
+            f"nothing was written and this stays queued.{detail}"
+        ),
+    }
+
+
+async def _promote_region_row(
+    config, row: dict[str, Any], *, reconcile: bool = False
+) -> dict[str, Any]:
     """Write an accepted memory/profile fact into its workspace's region.
 
     Accept used to remove the bullet and return a descriptor saying what SHOULD
@@ -726,6 +806,13 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
     The guide is resolved through ``agent_root``, so before the re-rooting this
     writes the shared guide (and the row's ``leak_warning`` is why the UI asks
     for confirmation first) and afterwards that workspace's own.
+
+    ``reconcile`` runs one fresh reconcile call against the region's current
+    entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
+    a fact the archive-time reconcile deferred can be resolved on a retry
+    instead of being appended beside whatever it supersedes. It is off by
+    default: the plain accept is one synchronous write, and a model call on
+    every click would cost the batch endpoint one timeout per row.
     """
     from ciao.memory_proposals import accept_region_fact
     from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
@@ -746,15 +833,40 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         # Only the undo log needs it; a promotion must not fail for want of one.
         vault_root = None
 
+    decision: ReconcileDecision | None = None
+    if reconcile:
+        decision, deferral = await _plan_accept_reconcile(config, row, region, guide)
+        if deferral is not None:
+            # The retry is the way out of a deferral, so a retry that cannot
+            # decide either leaves the row exactly where it was — queued, with
+            # the reason and the entries it competes with on the response.
+            return _deferred_response(region, deferral)
+
+    # Filled only on a ``deferred`` outcome, with the defer row `_promote_to_region`
+    # built for an update it could not safely apply. Without it the response could
+    # say a write was refused but not against what, which is the whole of what
+    # someone deciding whether to retry needs.
+    deferrals: list[ReconcileDecision] = []
+
+    # Filled by the write with the receipt that performed it. The caller
+    # records this decision under the bullet's ORIGINAL text (append-time
+    # dedupe compares a re-extracted fact against that), so when the operator
+    # edited the wording the ledger row can never be matched back to its
+    # receipt by text. Carrying the id out here is what gives such a decision a
+    # change snapshot and an undo in History.
+    receipt: dict[str, Any] = {}
     try:
         outcome, promotable = accept_region_fact(
             guide_path=guide,
             target=row.get("region") or row["kind"],
             text=row["text"],
             vault_root=vault_root,
+            decision=decision,
             actor="operator",
             source="pwa",
             workspace=str(row.get("workspace") or ""),
+            deferral_out=deferrals,
+            receipt_out=receipt,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
@@ -777,7 +889,13 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         # `written` is reported because the guard can promote only the trailing
         # durable-rule clause of a bullet, so what landed is not always the
         # sentence the operator read on the row.
-        return {"ok": True, "region": region, "written": promotable, "usage": _usage()}
+        return {
+            "ok": True,
+            "region": region,
+            "written": promotable,
+            "usage": _usage(),
+            "receipt_id": str(receipt.get("id", "")),
+        }
     if outcome == "duplicate":
         # Already remembered. The fact is in the region either way, so the row
         # is resolved and may leave the queue.
@@ -806,6 +924,22 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
                 "was written. Retry to apply it against the current entries."
             ),
         }
+    if outcome == "deferred":
+        # The reconcile decision named an entry that could not be safely
+        # replaced. Appending instead is the defect this path exists to avoid,
+        # so the row survives and says what to do about it.
+        return _deferred_response(
+            region,
+            deferrals[0]
+            if deferrals
+            else {
+                "action": "defer",
+                "reason": (
+                    f"this fact may supersede an entry already in ciao:{region}, "
+                    "and the reconcile could not say which"
+                ),
+            },
+        )
     return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
 
 
@@ -905,3 +1039,395 @@ def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict
         return str(outcome.get("destination", ""))
     # fold_doc, write_people_note, append_learnings all set "destination".
     return str(outcome.get("destination", ""))
+
+
+# ── Accept preview ────────────────────────────────────────────────────────
+#
+# A queued bullet says what was noticed, not what accepting it writes. The
+# promotion path reconciles against whatever the destination holds now — it
+# stamps a learned-at date, it recognises a duplicate and writes nothing, it
+# bumps a learning's recurrence count instead of appending a second copy — so
+# the bullet's own text is never the whole story.
+#
+# `preview_row` computes exactly what the accept would produce, from the same
+# functions the accept itself calls, and pins the revision it was computed
+# against. The accept then re-checks that revision (`destination_revision`) and
+# refuses with a conflict rather than writing over a destination that moved
+# while the preview was on screen.
+#
+# Nothing in here writes. A kind whose result cannot be known without writing
+# (a `[project]` fold is decided by a model at accept time) says so through
+# `exact: False` rather than showing a guess as if it were the outcome.
+
+# How much of a destination's before/after body to ship to the review card.
+# The regions are cap-bounded and a learnings file is a few hundred lines; the
+# limit only trips on a hand-grown file, where a truncated preview plus the
+# flag is still better than a multi-megabyte response.
+PREVIEW_MAX_CHARS = 20_000
+
+
+def _clip(text: str) -> tuple[str, bool]:
+    if len(text) <= PREVIEW_MAX_CHARS:
+        return text, False
+    return text[:PREVIEW_MAX_CHARS], True
+
+
+def _base_preview(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "workspace": str(row.get("workspace") or ""),
+        "kind": str(row.get("kind") or ""),
+        "text": str(row.get("text") or ""),
+        "source": str(row.get("source") or ""),
+        "operation": "",
+        "destination": "",
+        "destination_path": "",
+        "revision": "",
+        "before": "",
+        "after": "",
+        "exact": False,
+        "truncated": False,
+        "can_accept": False,
+        "reason": "",
+        # What joins the destination's units, so the card diffs the same thing
+        # the destination is made of. A bounded region's entries are separated
+        # by "\n§\n"; diffed as lines, appending one entry showed a second
+        # added row reading "§" and tore multi-line entries apart. An ordinary
+        # file is lines.
+        "separator": "\n",
+    }
+
+
+def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one memory/profile bullet would leave in the region.
+
+    Mirrors the click path exactly: `accept_region_fact` passes no reconcile
+    decision, so the write is the plain stamped append — or nothing at all when
+    the stamp-stripped fact is already an entry.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_proposals import _promotable_text
+    from ciao.memory_receipts import content_revision
+    from ciao.memory_tool import (
+        ensure_regions,
+        read_region,
+        resolve_region as _resolve,
+        serialize_entries,
+    )
+
+    out = _base_preview(row)
+    region = _resolve(row.get("region") or row["kind"])
+    from ciao.memory_tool import SECTION_SEP
+
+    out["separator"] = f"\n{SECTION_SEP}\n"
+    out["destination"] = f"ciao:{region}"
+    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    out["destination_path"] = str(guide)
+    out["leak_warning"] = bool(row.get("leak_warning"))
+    try:
+        ensure_regions(guide)
+        entries, diags = read_region(guide, region)
+    except (OSError, ValueError) as exc:
+        out["reason"] = f"could not read {guide}: {exc}"
+        return out
+    if diags:
+        out["reason"] = "; ".join(d.message for d in diags)
+        return out
+
+    before = serialize_entries(entries)
+    out["revision"] = content_revision(before)
+    before_clip, before_cut = _clip(before)
+    out["before"] = before_clip
+
+    promotable = _promotable_text(text)
+    if promotable is None:
+        # The event-shape guard refuses this at accept time too, so offering an
+        # accept here would be a button that cannot do what it says.
+        out["operation"] = "none"
+        out["after"] = before_clip
+        out["truncated"] = before_cut
+        out["exact"] = True
+        out["reason"] = (
+            "this reads as an event, not a standing rule, so it would rot in "
+            "always-loaded memory. Edit it into what is true from now on, or "
+            "talk about it."
+        )
+        return out
+
+    out["written"] = promotable
+    if promotable in {strip_learned_stamp(entry) for entry in entries}:
+        out["operation"] = "none"
+        out["after"] = before_clip
+        out["truncated"] = before_cut
+        out["exact"] = True
+        out["can_accept"] = True
+        out["reason"] = f"ciao:{region} already holds this; accepting only clears the row"
+        return out
+
+    # The learned-at stamp is applied at write time from the system date, which
+    # is the date this preview is being read on.
+    stamped = f"{promotable} [{date.today().isoformat()}]"
+    after = serialize_entries([*entries, stamped])
+    after_clip, after_cut = _clip(after)
+    out["operation"] = "add"
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["exact"] = True
+    out["can_accept"] = True
+    out["added"] = [stamped]
+    return out
+
+
+def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one `[learnings]` bullet would leave in Learnings.md."""
+    from ciao.memory_proposals import (
+        learnings_path,
+        read_learnings,
+        render_learning_append,
+    )
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    out["destination"] = "Workspace/Learnings.md"
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    out["destination_path"] = str(learnings_path(vault))
+    try:
+        before = read_learnings(vault)
+    except OSError as exc:
+        out["reason"] = f"could not read Workspace/Learnings.md: {exc}"
+        return out
+    after, operation = render_learning_append(
+        before, text, source=str(row.get("source") or "")
+    )
+    before_clip, before_cut = _clip(before)
+    after_clip, after_cut = _clip(after)
+    out["revision"] = content_revision(before)
+    out["before"] = before_clip
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["operation"] = operation
+    out["exact"] = True
+    out["can_accept"] = True
+    if operation == "update":
+        out["reason"] = "this learning is already filed; accepting bumps its recurrence count"
+    elif operation == "none":
+        out["reason"] = "already recorded; accepting only clears the row"
+    return out
+
+
+def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one `[people]` bullet would create.
+
+    Create-only, like the accept: an existing note is a merge nobody can make
+    mechanically, so the preview says so instead of offering an accept that
+    would refuse.
+    """
+    from ciao.memory_proposals import people_note_path
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    name = str(row.get("target") or "").strip()
+    if not name:
+        out["reason"] = "the bullet names no person"
+        return out
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    note = people_note_path(vault, name)
+    if note is None:
+        out["reason"] = "the bullet names no usable person"
+        return out
+    out["destination"] = f"People/{note.name}"
+    out["destination_path"] = str(note)
+    if note.exists():
+        out["operation"] = "none"
+        try:
+            existing = note.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+        before_clip, cut = _clip(existing)
+        out["before"] = before_clip
+        out["after"] = before_clip
+        out["truncated"] = cut
+        out["revision"] = content_revision(existing)
+        out["exact"] = True
+        out["reason"] = (
+            f"{out['destination']} already exists; merge the fact by hand, then dismiss"
+        )
+        return out
+    after = (
+        "---\n"
+        "tags: [person]\n"
+        f"updated: {date.today().isoformat()}\n"
+        f"---\n# {note.stem}\n\n{text}\n"
+    )
+    after_clip, cut = _clip(after)
+    out["operation"] = "add"
+    out["revision"] = content_revision("")
+    out["after"] = after_clip
+    out["truncated"] = cut
+    out["exact"] = True
+    out["can_accept"] = True
+    return out
+
+
+def _fold_preview(config, row: dict[str, Any]) -> dict[str, Any]:
+    """A `[project]` fold names its doc but cannot show the replacement.
+
+    The rewrite is a model call made at accept time, so any "after" shown here
+    would be invented. `exact: False` is what the card renders as "the exact
+    wording is decided when you accept".
+    """
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    doc_raw = str(row.get("target") or "").strip()
+    if not doc_raw:
+        out["reason"] = "the bullet names no project doc"
+        return out
+    doc = Path(doc_raw)
+    if not doc.is_absolute():
+        doc = Path(config.workspace_root) / doc
+    out["destination"] = doc_raw
+    out["destination_path"] = str(doc)
+    if not doc.is_file():
+        out["reason"] = f"project doc not found: {doc_raw}"
+        return out
+    try:
+        before = doc.read_text(encoding="utf-8")
+    except OSError as exc:
+        out["reason"] = f"could not read {doc_raw}: {exc}"
+        return out
+    before_clip, cut = _clip(before)
+    out["before"] = before_clip
+    out["truncated"] = cut
+    out["revision"] = content_revision(before)
+    out["operation"] = "update"
+    out["exact"] = False
+    out["can_accept"] = True
+    out["reason"] = "a model folds this into the doc when you accept, so the exact wording is decided then"
+    return out
+
+
+def _rehome_preview(config, row: dict[str, Any]) -> dict[str, Any]:
+    """A re-home accept moves a note; there is no memory body to replace."""
+    out = _base_preview(row)
+    signal = row.get("rehome") or {}
+    out["destination"] = str(signal.get("destination") or "")
+    out["operation"] = "move"
+    out["exact"] = False
+    out["can_accept"] = bool(signal.get("justified")) and bool(out["destination"])
+    out["source_note"] = str(signal.get("note") or "")
+    if not out["can_accept"]:
+        out["reason"] = "pick the workspace this note belongs to"
+    else:
+        out["reason"] = "moves the note and rewrites every link to it"
+    return out
+
+
+def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
+    """Exactly what accepting one queued row would write, without writing it.
+
+    ``text`` overrides the bullet's own wording, which is what the review
+    card's "edit suggestion" sends: the operator sees the replacement their
+    edit produces, against the destination as it is right now, before the
+    accept goes anywhere near it.
+    """
+    row = ctx["row"]
+    fact = (text or str(row.get("text") or "")).strip()
+    if ctx.get("file"):
+        out = _base_preview(row)
+        out["text"] = fact
+        out["destination"] = str(row.get("path") or "")
+        out["operation"] = "none"
+        out["reason"] = "a skill proposal is a file; there is nothing to write into memory"
+        return out
+    try:
+        accept = proposal_kinds.accept_for(str(row.get("kind") or ""))
+    except proposal_kinds.UnknownKindError as exc:
+        out = _base_preview(row)
+        out["text"] = fact
+        out["reason"] = str(exc)
+        return out
+    if accept.action == "edit_region":
+        out = _region_preview(config, row, fact)
+    elif accept.action == "append_learnings":
+        out = _learnings_preview(config, row, fact)
+    elif accept.action == "write_people_note":
+        out = _people_preview(config, row, fact)
+    elif accept.action == "fold_doc":
+        out = _fold_preview(config, row)
+    elif accept.action == "move_file":
+        out = _rehome_preview(config, row)
+    else:
+        out = _base_preview(row)
+        out["operation"] = "none"
+        out["reason"] = "this row has no destination yet; decide what it is first"
+    out["text"] = fact
+    out["action"] = accept.action
+    return out
+
+
+def destination_revision(config, row: dict[str, Any]) -> str:
+    """The destination's revision right now, for the accept's conflict check.
+
+    The same digest :func:`preview_row` pins, recomputed at accept time. An
+    empty string means this kind has no single body to compare (a re-home move,
+    an unroutable row); the accept then runs its own guards instead.
+    """
+    try:
+        accept = proposal_kinds.accept_for(str(row.get("kind") or ""))
+    except proposal_kinds.UnknownKindError:
+        return ""
+    from ciao.memory_receipts import content_revision
+
+    try:
+        if accept.action == "edit_region":
+            from ciao.memory_tool import (
+                ensure_regions,
+                read_region,
+                resolve_region as _resolve,
+                serialize_entries,
+            )
+
+            region = _resolve(row.get("region") or row["kind"])
+            guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+            ensure_regions(guide)
+            entries, diags = read_region(guide, region)
+            if diags:
+                return ""
+            return content_revision(serialize_entries(entries))
+        if accept.action == "append_learnings":
+            from ciao.memory_proposals import read_learnings
+
+            vault = Path(config.workspace_vault_root(row["workspace"]))
+            return content_revision(read_learnings(vault))
+        if accept.action == "write_people_note":
+            from ciao.memory_proposals import people_note_path
+
+            vault = Path(config.workspace_vault_root(row["workspace"]))
+            note = people_note_path(vault, str(row.get("target") or ""))
+            if note is None:
+                return ""
+            if not note.exists():
+                return content_revision("")
+            return content_revision(note.read_text(encoding="utf-8"))
+        if accept.action == "fold_doc":
+            doc = Path(str(row.get("target") or ""))
+            if not str(doc):
+                return ""
+            if not doc.is_absolute():
+                doc = Path(config.workspace_root) / doc
+            if not doc.is_file():
+                return ""
+            return content_revision(doc.read_text(encoding="utf-8"))
+    except (AttributeError, OSError, ValueError) as exc:
+        logger.info("proposal preview: could not read the destination (%s)", exc)
+        return ""
+    return ""

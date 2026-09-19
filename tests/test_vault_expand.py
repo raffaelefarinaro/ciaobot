@@ -419,6 +419,120 @@ def test_control_plane_expand_requires_a_path(tmp_path: Path) -> None:
     assert excinfo.value.code == "invalid_request"
 
 
+# ── Negation, and the abstention branch ────────────────────────────────────
+#
+# The qualification fixture above covers one half of what the 32-token budget
+# cuts: a clause that replaces the value the snippet kept. A NEGATION is the
+# other half, and it is worse — the snippet-only answer is not stale, it is the
+# opposite of what the note records. The abstention case is the third leg the
+# drill-down has to get right: a note the query matches by topic while the fact
+# it asks for is simply absent, where widening must return a signal rather than
+# an unrelated block dressed up as evidence.
+
+ONBOARDING = """# Contractor onboarding
+
+## Visas
+
+Contractors from the EU need a work visa for the Zurich office.
+That stopped being true after the 2026-03 bilateral update: no permit is
+required for them any more.
+
+## Emergency
+
+Safe combination is 8891.
+"""
+
+NEGATION_QUERY = "work visa Zurich office contractors"
+
+
+def _onboarding(tmp_path: Path) -> tuple[Path, Path, str]:
+    base = tmp_path / "install"
+    vault = base / "personal" / "memory-vault"
+    (vault / "projects").mkdir(parents=True, exist_ok=True)
+    (vault / "projects" / "Onboarding.md").write_text(ONBOARDING, encoding="utf-8")
+    return base, vault, os.path.join(
+        "personal", "memory-vault", "projects", "Onboarding.md"
+    )
+
+
+def test_snippet_drops_the_negation_that_reverses_the_answer(
+    tmp_path: Path,
+) -> None:
+    """The baseline for the negation shape, as for the qualification one."""
+    base, vault, _ = _onboarding(tmp_path)
+    conn = _indexed(base, vault)
+    rows = fts_search.search_vault(
+        conn, NEGATION_QUERY, path_prefix=fts_search.vault_key_prefix(vault, base)
+    )
+    assert rows, "the fixture note must match the query"
+    snippet = rows[0]["snippet"]
+    assert "need a work visa" in snippet
+    assert "no permit" not in snippet
+
+
+def test_expansion_recovers_the_negation(tmp_path: Path) -> None:
+    base, vault, key = _onboarding(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(conn, base, vault, key, query=NEGATION_QUERY)
+    assert result is not None
+    body = _text(result)
+    assert "no permit" in body
+    assert "bilateral update" in body
+    # The denial arrives; the sibling block's safe combination does not.
+    assert "8891" not in body
+    assert [s["heading"] for s in result["sections"]] == ["Visas"]
+
+
+def test_expansion_signals_that_it_has_no_evidence_for_the_question(
+    tmp_path: Path,
+) -> None:
+    """An absent fact must come back as a signal, not as a confident paragraph.
+
+    `no_line_match` is the drill-down's abstention branch: the note holds no
+    line matching the query, so the single block returned is context rather than
+    evidence, and the recall rule says to abstain instead of answering from it.
+    """
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(
+        conn, base, vault, _key(), query="penalty percentage for late payment"
+    )
+    assert result is not None
+    assert result["reason"] == "no_line_match"
+    body = _text(result)
+    assert "penalty" not in body.casefold()
+    # The fallback is still one bounded block of the same note, not the note.
+    assert len(result["sections"]) == 1
+    assert "ac-live-7e2c9a441b" not in body
+    assert "4417" not in body
+
+
+def test_a_function_word_does_not_anchor_a_window(tmp_path: Path) -> None:
+    """A stopword is not evidence, and must not choose which block is widened.
+
+    `_expand_terms` feeds a substring test over the note's lines, so before the
+    stopword filter the word "for" in a natural-language query matched "Door
+    code for the studio is 4417" and returned the Access block to a caller
+    asking about billing. The widening has to be driven by the words that
+    carry the question, or it is neither purpose-driven nor bounded by it.
+    """
+    assert fts_search._expand_terms("penalty percentage for late payment") == [
+        "penalty",
+        "percentage",
+        "late",
+        "payment",
+    ]
+    assert fts_search._expand_terms("what is the door code") == ["door", "code"]
+    # A query of nothing but function words leaves no anchor at all.
+    assert fts_search._expand_terms("what about that") == []
+
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(conn, base, vault, _key(), query="the late payment terms")
+    assert result is not None
+    assert "4417" not in _text(result)
+
+
 # ── Catalog and prompt wiring ──────────────────────────────────────────────
 
 

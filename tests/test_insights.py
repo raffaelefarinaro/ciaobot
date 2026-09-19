@@ -1761,3 +1761,254 @@ def test_backfill_refuses_to_silently_scope_without_a_map(
         )
     )
     assert result["eligible"] == 1
+
+
+# ── Structured extraction (opt-in) ───────────────────────────────────────
+
+
+def _structured_config(enabled: bool = True):
+    config = _config()
+    config.insights_structured = enabled
+    return config
+
+
+def test_structured_extraction_is_off_by_default() -> None:
+    """The archive's auto-save default is unchanged until an operator opts in."""
+    assert insights.structured_extraction_enabled(_config()) is False
+
+
+def test_structured_extraction_env_overrides_the_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CIAO_INSIGHTS_STRUCTURED", "1")
+    assert insights.structured_extraction_enabled(_config()) is True
+    monkeypatch.setenv("CIAO_INSIGHTS_STRUCTURED", "off")
+    assert insights.structured_extraction_enabled(_structured_config()) is False
+
+
+def test_structured_prompt_keeps_the_grounding_rules_verbatim() -> None:
+    """Structured mode swaps the output shape, never the evidence bar.
+
+    The two prompts are built from one rule block on purpose: a structured
+    extraction that quietly relaxed "cite every claim" would feed the evidence
+    gate candidates it cannot check.
+    """
+    assert insights._STRUCTURED_SYSTEM_PROMPT.startswith(insights._INSIGHTS_RULES)
+    assert insights._INSIGHTS_SYSTEM_PROMPT.startswith(insights._INSIGHTS_RULES)
+    assert "[idx=N]" in insights._STRUCTURED_SYSTEM_PROMPT
+    assert "never cite `[idx=0]`" in insights._STRUCTURED_SYSTEM_PROMPT
+    assert "## Errors" not in insights._STRUCTURED_SYSTEM_PROMPT
+
+
+def test_structured_extraction_appends_validated_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A well-formed structured answer renders the same archive section."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    captured: dict[str, str] = {}
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        captured["system_prompt"] = system_prompt
+        return json.dumps([
+            {
+                "text": "The operator runs pytest through the workspace venv",
+                "section": "User corrections",
+                "destination": "memory",
+                "source_message_ids": [4],
+                "evidence_excerpt": "use the venv",
+                "attended": True,
+            },
+            {
+                "text": "person: Mo - reviews the release branch",
+                "section": "New entities",
+                "destination": "people",
+                "payload": "Mo",
+                "source_message_ids": [7],
+                "attended": True,
+            },
+        ])
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    asyncio.run(insights.extract_and_append(
+        archive_path=archive,
+        filtered_jsonl='{"idx": 4}',
+        config=_structured_config(),
+        model="sonnet",
+    ))
+
+    text = archive.read_text(encoding="utf-8")
+    assert "## Session insights" in text
+    assert "## User corrections" in text
+    assert "- The operator runs pytest through the workspace venv [idx=4] [memory]" in text
+    assert "- person: Mo - reviews the release branch [idx=7] [people: Mo]" in text
+    assert captured["system_prompt"] == insights._STRUCTURED_SYSTEM_PROMPT
+
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["extra"]["extraction"] == "structured"
+    assert "structured_parse_errors" not in run["extra"]
+
+
+def test_structured_extraction_queues_a_malformed_row_for_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable row becomes a reviewable `[review]` candidate, not a drop.
+
+    It has to survive all the way to the router: reaching the archive and
+    stopping there would still be the silent loss the review destination
+    exists to prevent.
+    """
+    from ciao import memory_proposals as mp
+
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        return json.dumps([
+            {
+                "text": "The operator runs pytest through the workspace venv",
+                "section": "User corrections",
+                "destination": "memory",
+                "source_message_ids": [4],
+                "attended": True,
+            },
+            {"text": "a fact with no destination at all"},
+        ])
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    asyncio.run(insights.extract_and_append(
+        archive_path=archive,
+        filtered_jsonl='{"idx": 4}',
+        config=_structured_config(),
+        model="sonnet",
+    ))
+
+    text = archive.read_text(encoding="utf-8")
+    assert "## Unreadable extraction output" in text
+    assert "a fact with no destination at all" in text
+    assert "row carries no destination" in text
+    assert "[review]" in text
+
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "ok"
+    assert run["extra"]["structured_parse_errors"] == ["row 2: row carries no destination"]
+
+    body = text.split("## Session insights", 1)[1]
+    review = [p for p in mp.propose_from_insights(body) if p.target == "review"]
+    assert len(review) == 1
+    assert "row carries no destination" in review[0].text
+
+
+def test_structured_extraction_falls_back_for_an_unsupported_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider off the allowlist gets the Markdown contract, not a failure."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    captured: dict[str, str] = {}
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        captured["system_prompt"] = system_prompt
+        return "## Decisions\n- Chose A over B because C [idx=2] [review]\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    asyncio.run(insights.extract_and_append(
+        archive_path=archive,
+        filtered_jsonl='{"idx": 2}',
+        config=_structured_config(),
+        model="some-local-model",
+        provider="opencode",
+    ))
+
+    text = archive.read_text(encoding="utf-8")
+    assert "## Session insights" in text
+    assert "Chose A over B" in text
+    assert captured["system_prompt"] == insights._INSIGHTS_SYSTEM_PROMPT
+
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "ok"
+    assert run["extra"]["extraction"] == "markdown"
+    assert "not on the structured-output allowlist" in run["extra"]["structured_fallback"]
+
+
+def test_structured_extraction_falls_back_for_the_on_device_model() -> None:
+    """Apple's on-device model has no structured contract to hold."""
+    assert insights.structured_unsupported_reason("apple", "claude") == (
+        "the on-device model has no structured-output contract"
+    )
+    assert insights.structured_unsupported_reason(
+        "sonnet", "claude", text_mode=True
+    ) == "text-mode extraction has no transcript indices to cite"
+    assert insights.structured_unsupported_reason("sonnet", "claude") == ""
+
+
+def test_structured_provider_allowlist_is_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CIAO_INSIGHTS_STRUCTURED_PROVIDERS", "claude, opencode")
+    assert insights.structured_unsupported_reason("sonnet", "opencode") == ""
+
+
+def test_structured_extraction_fails_explicitly_on_an_invalid_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wholly unreadable answer fails the stage; it never saves an empty section.
+
+    "The provider returned prose instead of rows" and "this session had no
+    durable signal" must not settle the same way — the second is a clean skip,
+    the first has to stay retryable.
+    """
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        return "Sure! Here is a summary of the session: nothing much happened."
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    monkeypatch.setattr(insights.asyncio, "sleep", no_sleep)
+
+    asyncio.run(insights.extract_and_append(
+        archive_path=archive,
+        filtered_jsonl='{"idx": 1}',
+        config=_structured_config(),
+        model="sonnet",
+    ))
+
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "error"
+    assert "no readable candidates" in run["error"]
+
+
+def test_structured_extraction_treats_an_empty_array_as_no_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`[]` is the contract's way of saying nothing durable happened."""
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        return "```json\n[]\n```"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    asyncio.run(insights.extract_and_append(
+        archive_path=archive,
+        filtered_jsonl='{"idx": 1}',
+        config=_structured_config(),
+        model="sonnet",
+    ))
+
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "skipped"
+    assert run["error"] is None
+    assert run["extra"]["skip_reason"] == "no durable signal in this session"

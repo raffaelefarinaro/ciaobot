@@ -143,6 +143,9 @@ def test_contract_checks_pass_over_the_shipped_catalog() -> None:
         "recall-expansion-recovers-qualification",
         "recall-expansion-stays-in-section",
         "recall-expansion-rejects-foreign-note",
+        "recall-snippet-omits-negation",
+        "recall-expansion-recovers-negation",
+        "recall-expansion-signals-no-evidence",
     } <= ids
 
 
@@ -164,6 +167,42 @@ def test_contract_checks_measure_the_drill_down_benefit() -> None:
     # worse than no drill-down at all.
     assert by_id["recall-expansion-stays-in-section"].zero_tolerance
     assert by_id["recall-expansion-rejects-foreign-note"].zero_tolerance
+
+
+def test_contract_checks_cover_negation_and_the_abstention_branch() -> None:
+    """The acceptance criteria name qualifiers, negation *and* abstention.
+
+    A qualification replaces the value the snippet kept; a negation denies it,
+    so a snippet-only answer is the opposite of the note rather than merely out
+    of date. The third check is the other branch: when the note holds no line
+    matching the query, the drill-down has to say so, or it hands recall an
+    unrelated block that reads exactly like evidence.
+    """
+    report = be.run_contract_checks()
+    by_id = {c.id: c for c in report.checks}
+    assert by_id["recall-snippet-omits-negation"].passed
+    assert by_id["recall-expansion-recovers-negation"].passed
+    assert by_id["recall-expansion-signals-no-evidence"].passed
+    assert by_id["recall-expansion-signals-no-evidence"].category == "abstention"
+
+
+def test_contract_check_detects_a_drill_down_that_never_abstains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reporting `matched` for a note that matched nothing must fail."""
+    from ciao import fts_search
+
+    real = fts_search.expand_note
+
+    def always_matched(conn, key_base, vault_root, stored_key, query, **kwargs):  # noqa: ANN001
+        result = real(conn, key_base, vault_root, stored_key, query, **kwargs)
+        if result is not None:
+            result["reason"] = "matched"
+        return result
+
+    monkeypatch.setattr(fts_search, "expand_note", always_matched)
+    report = be.run_contract_checks()
+    assert "recall-expansion-signals-no-evidence" in {c.id for c in report.failures}
 
 
 def test_contract_check_detects_an_unbounded_drill_down(
@@ -1534,7 +1573,12 @@ def test_model_eval_repeats_produce_variability() -> None:
     )
     assert report.repeats == 2
     recall = report.dimensions["supported_fact_recall"]
-    assert recall.n == 20  # 10 recall-asserting scenarios x 2 repeats
+    # Derived, not hard-coded: the dimension is sampled once per repeat for
+    # every scenario that asserts a fact, so adding one to the catalog should
+    # not look like a variance regression.
+    asserting = sum(1 for s in catalog.scenarios if s.expect.answer_facts)
+    assert asserting  # the catalog must still assert facts somewhere
+    assert recall.n == asserting * 2
     assert recall.stdev > 0.0
 
 
