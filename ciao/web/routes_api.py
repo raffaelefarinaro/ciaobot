@@ -7533,6 +7533,10 @@ def _receipt_for_row(
 ) -> dict[str, Any] | None:
     """The receipt that recorded one decision, or None.
 
+    Text-matching fallback, used only for ledger rows written before the
+    decision carried its receipt's id. A row that names one is resolved by id
+    and never reaches here.
+
     The two sides are written by different functions and do not share an id:
     the sidecar records the bullet's text, the receipt records the *promotable*
     text, which for an event-shaped bullet is only its trailing durable-rule
@@ -7581,8 +7585,30 @@ def abs_ts_gap(left: str, right: str) -> float:
         return float("inf")
 
 
+def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
+    """The `change` pointer one decision row carries, from its receipt."""
+    from ciao.memory_receipts import is_undoable
+
+    return {
+        "receipt_id": str(receipt.get("id", "")),
+        "kind": str(receipt.get("kind", "")),
+        "status": str(receipt.get("status", "")),
+        "destination": str(receipt.get("destination", ""))
+        or str(receipt.get("region", "")),
+        "undoable": is_undoable(receipt),
+        "changed": bool(receipt.get("changed", True)),
+        "ts": str(receipt.get("ts", "")),
+    }
+
+
 def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     """Point each decision at the receipt that performed it, where one exists.
+
+    A decision written since the ledger started carrying ``receipt_id`` names
+    its receipt outright, and that is the only reliable join: the ledger records
+    the ORIGINAL bullet — append-time dedupe compares a re-extracted fact
+    against it — while the receipt records what was actually written, so an
+    accept of an operator-edited wording shares no text with its own receipt.
 
     Rows with no receipt keep no ``change`` key at all, which is what the
     History surface renders as "No change snapshot available" — every decision
@@ -7592,7 +7618,6 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     """
     from ciao.memory_receipts import (
         MemoryReceiptError,
-        is_undoable,
         journal_path,
         read_receipts,
     )
@@ -7602,7 +7627,33 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     except (MemoryReceiptError, OSError, ValueError):
         return
     receipts.sort(key=lambda r: str(r.get("ts", "")), reverse=True)
+    by_id = {str(r.get("id", "")): r for r in receipts if r.get("id")}
+    claimed: set[str] = set()
+    # Explicit references first, over the WHOLE journal rather than the window
+    # the heuristic scans: a named receipt is right however old it is, and
+    # claiming it here also keeps the text-matching pass below from handing the
+    # same receipt to some other decision that merely reads alike.
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        rid = str(row.pop("receipt_id", "") or "")
+        found = by_id.get(rid) if rid else None
+        if found is not None:
+            claimed.add(rid)
+            row["change"] = _change_payload(found)
+        elif rid:
+            # The ledger names a receipt this journal does not hold (a vault
+            # restored without its journal, a trimmed archive). Recording it
+            # was still a decision; it just has no snapshot to show, which is
+            # the honest "No change snapshot available" state. Do NOT fall back
+            # to text matching here: the id was written precisely because the
+            # text cannot identify the write.
+            continue
+        else:
+            pending.append(row)
+    rows = pending
     receipts = receipts[:_HISTORY_RECEIPT_WINDOW]
+    # Fallback for rows the ledger wrote before it carried a receipt id.
+    #
     # A promotion writes the destination AND removes the bullet, so two
     # receipts describe it. Each action is matched against exactly one pool,
     # with no cross-fallback:
@@ -7611,14 +7662,12 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     #   destination write. Falling back to that accept's queue receipt would
     #   describe the bullet's removal instead, and its undo would re-queue a
     #   fact the destination still holds — a duplicate wearing an Undo button.
-    #   An accept whose destination receipt cannot be identified (the operator
-    #   edited the wording, so the receipt records text the ledger never saw)
+    #   A legacy accept whose destination receipt cannot be identified by text
     #   stays snapshot-less, which is the honest answer.
     # * A DISMISS touches nothing but the queue, so its queue receipt IS the
     #   change, and undoing it restores the bullet.
     region_rows = [r for r in receipts if str(r.get("kind", "")).startswith("region_")]
     queue_rows = [r for r in receipts if str(r.get("kind", "")) == "queue_resolve"]
-    claimed: set[str] = set()
     # Newest decision first, so the newest receipt is claimed by the decision it
     # actually belongs to rather than by an older one that merely matched.
     for row in sorted(rows, key=lambda r: str(r.get("ts", "")), reverse=True):
@@ -7627,16 +7676,7 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
         if found is None:
             continue
         claimed.add(str(found.get("id", "")))
-        row["change"] = {
-            "receipt_id": str(found.get("id", "")),
-            "kind": str(found.get("kind", "")),
-            "status": str(found.get("status", "")),
-            "destination": str(found.get("destination", ""))
-            or str(found.get("region", "")),
-            "undoable": is_undoable(found),
-            "changed": bool(found.get("changed", True)),
-            "ts": str(found.get("ts", "")),
-        }
+        row["change"] = _change_payload(found)
 
 
 # The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
@@ -8442,6 +8482,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
                         outcome="duplicate" if row_outcome.get("duplicate") else "written",
                         proposal_id=pid,
+                        # The ledger keeps the ORIGINAL bullet as ``text``
+                        # (append-time dedupe compares against it), so an
+                        # edited accept is unmatchable by text. The write hands
+                        # its receipt back here instead.
+                        receipt_id=str(row_outcome.get("receipt_id") or ""),
                     )
                 if not proposal_outcomes.is_extraction_kind(row["kind"]):
                     # Not recorded: this ledger measures the MEMORY extraction
@@ -8929,6 +8974,10 @@ async def proposal_action(request: Request) -> JSONResponse:
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
                 outcome="duplicate" if promoted.get("duplicate") else "written",
                 proposal_id=pid,
+                # See the batch path: the recorded text is the original bullet,
+                # so the receipt reference is the only way back to what an
+                # edited accept actually wrote.
+                receipt_id=str(promoted.get("receipt_id") or ""),
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":

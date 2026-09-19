@@ -9,7 +9,9 @@ destination holds *now*. These tests pin the three things that gap requires:
   is a conflict with a refreshed preview instead of an unseen overwrite;
 * a History join that offers Undo only where a receipt can honour it, and says
   "no snapshot" — rather than nothing — for every decision recorded before the
-  receipt protocol existed.
+  receipt protocol existed. A decision names its receipt outright, which is the
+  only join that survives the operator editing the wording before accepting;
+  rows written before that id existed still fall back to matching on text.
 """
 
 from __future__ import annotations
@@ -379,26 +381,138 @@ def test_history_points_an_accepted_row_at_its_receipt(tmp_path: Path) -> None:
     assert any(d["op"] == "added" and row["text"] in d["text"] for d in detail["diff"])
 
 
-def test_history_gives_an_edited_accept_no_change_rather_than_the_wrong_one(
+EDITED = "Raffa always runs scripts/check-first.sh before a release."
+
+
+def test_history_points_an_edited_accept_at_the_change_it_made(
     tmp_path: Path,
 ) -> None:
-    """An accept must never borrow its queue receipt as the memory change.
+    """An edited accept is undoable, and its change is the REGION write.
 
-    The ledger records the ORIGINAL bullet (the dedupe readers compare against
-    it) while the receipt records the edited wording, so the two cannot be
-    matched. Falling back to the queue receipt would describe the bullet's
-    removal instead, and undoing THAT re-queues a fact the region still holds.
+    The ledger records the ORIGINAL bullet while the receipt records the edited
+    wording, so no text match can join the two. The decision row therefore
+    carries the receipt's id outright. Borrowing the accept's queue receipt
+    instead would describe the bullet's removal, and undoing THAT would re-queue
+    a fact the region still holds.
     """
     config = _vault(tmp_path)
     client = _client(config)
     row = _row(client, "memory", "check-first")
-    client.post(
-        f"/api/proposals/{row['id']}/accept",
-        json={"text": "Raffa always runs scripts/check-first.sh before a release."},
-    )
+    client.post(f"/api/proposals/{row['id']}/accept", json={"text": EDITED})
 
     rows = client.get("/api/proposals/history").json()["rows"]
     accepted = next(r for r in rows if r["text"] == row["text"])
+
+    change = accepted["change"]
+    assert change["kind"] == "region_apply"
+    assert change["destination"] == "ciao:memory"
+    assert change["undoable"] is True
+
+    detail = client.get(f"/api/memory/receipts/{change['receipt_id']}").json()
+    assert detail["has_snapshot"] is True
+    # Before/after describe what was WRITTEN, which is the edited wording.
+    assert EDITED not in detail["before"]
+    assert EDITED in detail["after"]
+    assert row["text"] not in detail["after"]
+    assert any(d["op"] == "added" and EDITED in d["text"] for d in detail["diff"])
+
+
+def test_an_edited_accept_still_records_the_original_text_in_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """The dedupe contract: the sidecar keeps the bullet the curator will re-extract.
+
+    Recording the edited wording there would let the nightly curator re-queue
+    the very bullet the operator just accepted, because ``append_proposals``
+    dedupes against this sidecar and never against the destination. The receipt
+    reference is additive; it must not have moved the recorded text.
+    """
+    from ciao.memory_proposals import read_decisions, was_promoted
+
+    config = _vault(tmp_path)
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept", json={"text": EDITED})
+
+    sidecar = (
+        config.workspace_vault_root("personal")
+        / "Workspace"
+        / "Memory-Proposals.dismissed.jsonl"
+    )
+    entries = [
+        json.loads(line)
+        for line in sidecar.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    promoted = [e for e in entries if "promoted_at" in e]
+    assert len(promoted) == 1
+    assert promoted[0]["text"] == row["text"]
+    assert promoted[0]["text"] != EDITED
+    assert promoted[0]["receipt_id"]
+
+    decisions = read_decisions(
+        config.workspace_vault_root("personal")
+        / "Workspace"
+        / "Memory-Proposals.md"
+    )
+    assert [d["text"] for d in decisions] == [row["text"]]
+    # The dedupe reader the nightly curator uses still recognises the bullet,
+    # and does NOT recognise the edited wording (which it never recorded).
+    vault = Path(config.workspace_vault_root("personal"))
+    assert was_promoted(vault, row["text"])
+    assert not was_promoted(vault, EDITED)
+
+
+def test_history_does_not_serve_the_raw_receipt_id_outside_change(
+    tmp_path: Path,
+) -> None:
+    """The reference reaches the client once, inside ``change``."""
+    config = _vault(tmp_path)
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept", json={"text": EDITED})
+
+    accepted = next(
+        r
+        for r in client.get("/api/proposals/history").json()["rows"]
+        if r["text"] == row["text"]
+    )
+    assert "receipt_id" not in accepted
+    assert accepted["change"]["receipt_id"]
+
+
+def test_history_shows_no_change_for_a_named_receipt_the_journal_lost(
+    tmp_path: Path,
+) -> None:
+    """A recorded id that no longer resolves must not fall back to text matching.
+
+    The id was written precisely because the text cannot identify the write; a
+    silent fallback would hand such a row the bullet's own queue receipt and
+    offer an undo that re-queues a fact the region still holds.
+    """
+    config = _vault(tmp_path)
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept")
+
+    sidecar = (
+        config.workspace_vault_root("personal")
+        / "Workspace"
+        / "Memory-Proposals.dismissed.jsonl"
+    )
+    lines = []
+    for line in sidecar.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if "promoted_at" in entry:
+            entry["receipt_id"] = "mrcpt_gone"
+        lines.append(json.dumps(entry))
+    sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    accepted = next(
+        r
+        for r in client.get("/api/proposals/history").json()["rows"]
+        if r["text"] == row["text"]
+    )
     assert "change" not in accepted
 
 
@@ -438,6 +552,78 @@ def test_history_leaves_a_legacy_decision_without_a_change(tmp_path: Path) -> No
     rows = _client(config).get("/api/proposals/history").json()["rows"]
     legacy = next(r for r in rows if "before receipts" in r["text"])
     assert "change" not in legacy
+
+
+def test_history_falls_back_to_text_for_a_row_with_no_receipt_id(
+    tmp_path: Path,
+) -> None:
+    """Ledger rows written before the id existed must stay undoable.
+
+    Their text IS the written text (nothing was edited), so the old
+    accept-matches-destination-receipts join still identifies the change.
+    """
+    config = _vault(tmp_path)
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept")
+
+    sidecar = (
+        config.workspace_vault_root("personal")
+        / "Workspace"
+        / "Memory-Proposals.dismissed.jsonl"
+    )
+    # Rewrite the sidecar in the pre-change shape: no receipt reference at all.
+    lines = []
+    for line in sidecar.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        entry.pop("receipt_id", None)
+        lines.append(json.dumps(entry))
+    sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    accepted = next(
+        r
+        for r in client.get("/api/proposals/history").json()["rows"]
+        if r["text"] == row["text"]
+    )
+    change = accepted["change"]
+    assert change["kind"] == "region_apply"
+    assert change["undoable"] is True
+    assert client.post(
+        f"/api/memory/receipts/{change['receipt_id']}/undo"
+    ).status_code == 200
+    assert row["text"] not in _guide(config).read_text(encoding="utf-8")
+
+
+def test_undo_of_an_edited_accept_restores_the_region_then_refuses_a_later_edit(
+    tmp_path: Path,
+) -> None:
+    """The edited accept's undo is real, and still guarded by the revision check.
+
+    ``undo_receipt`` re-checks the destination's revision under the guide lock;
+    threading the receipt id onto the decision row must not let History talk it
+    into overwriting a write that landed afterwards.
+    """
+    from ciao.memory_tool import update_region
+
+    config = _vault(tmp_path)
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept", json={"text": EDITED})
+    change = next(
+        r["change"]
+        for r in client.get("/api/proposals/history").json()["rows"]
+        if r["text"] == row["text"]
+    )
+    assert EDITED in _guide(config).read_text(encoding="utf-8")
+
+    update_region(_guide(config), "memory", action="add", entry="A later unrelated fact.")
+
+    conflict = client.post(f"/api/memory/receipts/{change['receipt_id']}/undo")
+    assert conflict.status_code == 409
+    assert conflict.json()["conflict"] is True
+    guide = _guide(config).read_text(encoding="utf-8")
+    assert "A later unrelated fact." in guide
+    assert EDITED in guide
 
 
 def test_undo_restores_the_region_and_then_refuses_a_later_edit(

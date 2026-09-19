@@ -1118,6 +1118,11 @@ describe('decision card', () => {
     expect(apiGet).toHaveBeenCalledWith(
       '/api/proposals/row-1/preview?text=Remember%20the%20other%20thing',
     )
+    // An edited accept used to be warned about here: the ledger records the
+    // ORIGINAL bullet, so History could not match the decision to the write.
+    // The decision now carries the receipt's id, so the change and its undo
+    // are there like any other and the caveat would be false.
+    expect(wrapper.find('.pr-card').text()).not.toContain('cannot be undone')
     wrapper.unmount()
   })
 

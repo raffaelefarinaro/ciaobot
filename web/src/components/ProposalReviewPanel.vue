@@ -1085,15 +1085,12 @@ watch(
               <p v-else class="pr-card-note">Nothing in {{ store.previews[row.id].destination }} changes.</p>
 
               <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
-              <!-- Said plainly rather than discovered later in History: the
-                   decision ledger records the ORIGINAL bullet (that is what the
-                   nightly curator compares a re-extracted fact against), so an
-                   edited accept cannot be matched to the change it made and
-                   History will show it without a snapshot or an undo. -->
-              <p v-if="store.previews[row.id].text !== row.text" class="pr-card-reason">
-                Edited wording: History will record this decision without a change
-                snapshot, so it cannot be undone from there.
-              </p>
+              <!-- No edited-wording caveat here any more. The ledger still
+                   records the ORIGINAL bullet (that is what the nightly curator
+                   compares a re-extracted fact against), but the decision row
+                   now also carries the id of the receipt that performed the
+                   write, so an edited accept reaches History with its real
+                   before/after and a working Undo like any other. -->
 
               <div class="pr-actions pr-actions--card">
                 <button

@@ -743,10 +743,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # Each served row also carries `source_path` (the archive transcript it came
 # from, when one still exists on disk) and, where the receipt protocol
 # performed the decision, `change`: {receipt_id, kind, status, destination,
-# undoable, changed, ts}. A row with NO `change` key is one the protocol never
-# recorded - every decision made before receipts landed, and every one made
-# outside them - and must be rendered as "No change snapshot available" rather
-# than given an undo it cannot honour.
+# undoable, changed, ts}. The decision ledger records the id of the receipt
+# that performed the write, so the join is exact even when the operator edited
+# the wording before accepting (the ledger keeps the ORIGINAL bullet as its
+# text, because append-time dedupe compares a re-extracted fact against it).
+# Rows written before the id was recorded are joined by matching the decision's
+# text against the receipt's - accepts against destination receipts, dismissals
+# against queue receipts, with no cross-fallback. A row with NO `change` key is
+# one the protocol never recorded - every decision made before receipts landed,
+# and every one made outside them - and must be rendered as "No change snapshot
+# available" rather than given an undo it cannot honour.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 
 # Managed memory mutations (receipts), newest first: every region write, queue

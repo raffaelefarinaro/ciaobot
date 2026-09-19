@@ -379,6 +379,7 @@ def _promote_to_region(
     actor: str = "agent",
     source: str = "archive",
     workspace: str = "",
+    receipt_out: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     """Write one region-bound proposal.
 
@@ -413,6 +414,16 @@ def _promote_to_region(
     the consolidations undo log first — ``{"action": "defer", "reason": ...}``
     routes the fact to the queue, and ``{"action": "add"}`` or ``None`` is the
     plain append path.
+
+    ``receipt_out`` is an optional caller-owned dict this fills with the
+    receipt ``commit_region_change`` recorded, when a write actually happened.
+    It is an out-parameter rather than a third return value on purpose: the
+    return tuple is unpacked by the archive-time apply loop and by a dozen
+    tests, and the only caller that needs the receipt is the PWA accept. The
+    decision ledger records the ORIGINAL bullet — that is what append-time
+    dedupe compares a re-extracted fact against — so an edited accept's ledger
+    row cannot be matched back to its receipt by text. This is how the row gets
+    the reference instead of guessing at it.
     """
     from ciao.memory_receipts import (
         RevisionConflict,
@@ -557,7 +568,7 @@ def _promote_to_region(
                     f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
                 )
                 _log_consolidation(vault_root, region, old)
-                commit_region_change(
+                receipt = commit_region_change(
                     guide_path,
                     region,
                     entries=updated,
@@ -572,6 +583,8 @@ def _promote_to_region(
                     removed_texts=[old],
                     kind="region_update",
                 )
+                if receipt_out is not None:
+                    receipt_out.update(receipt)
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
                     index,
@@ -596,7 +609,7 @@ def _promote_to_region(
         # region — read by the aging audit so unverified old facts surface
         # for re-verification instead of asserting themselves forever.
         stamped = f"{promotable} [{date.today().isoformat()}]"
-        commit_region_change(
+        receipt = commit_region_change(
             guide_path,
             region,
             entries=entries + [stamped],
@@ -610,6 +623,8 @@ def _promote_to_region(
             destination=f"ciao:{region}",
             kind="region_apply",
         )
+        if receipt_out is not None:
+            receipt_out.update(receipt)
         return "written", promotable
     except RevisionConflict as exc:
         logger.info("memory apply: destination changed, fact stays queued (%s)", exc)
@@ -635,6 +650,7 @@ def accept_region_fact(
     actor: str = "operator",
     source: str = "pwa",
     workspace: str = "",
+    receipt_out: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     """Write one approved region fact through the guarded path.
 
@@ -651,7 +667,10 @@ def accept_region_fact(
     A caller that has already reconciled elsewhere may pass ``decision``; the
     click path passes none.
 
-    Returns ``_promote_to_region``'s ``(outcome, promotable)``.
+    Returns ``_promote_to_region``'s ``(outcome, promotable)``. Pass
+    ``receipt_out`` to also learn which receipt performed the write: the
+    caller records the decision under the bullet's ORIGINAL text, so an
+    accept of an edited wording has no way to find its own receipt again.
     """
     proposal = MemoryProposal(target=target, text=text, source_section="review")
     return _promote_to_region(
@@ -662,6 +681,7 @@ def accept_region_fact(
         actor=actor,
         source=source,
         workspace=workspace,
+        receipt_out=receipt_out,
     )
 
 
@@ -1614,6 +1634,7 @@ def record_dismissal(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
@@ -1646,6 +1667,7 @@ def record_dismissal(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        receipt_id=receipt_id,
         once=once,
     )
 
@@ -1660,6 +1682,7 @@ def record_promotion(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1682,6 +1705,7 @@ def record_promotion(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        receipt_id=receipt_id,
         once=once,
         history_only=history_only,
     )
@@ -1698,6 +1722,7 @@ def _record_decision(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1731,6 +1756,16 @@ def _record_decision(
         entry["outcome"] = outcome
     if proposal_id:
         entry["proposal_id"] = proposal_id
+    if receipt_id:
+        # The memory receipt (see :mod:`ciao.memory_receipts`) that performed
+        # this decision's write. ``text`` above stays the ORIGINAL bullet,
+        # because that is what append-time dedupe compares a re-extracted fact
+        # against; when the operator edited the wording before accepting, the
+        # receipt records the edited text and no text match can find it again.
+        # Recording the id is what lets History show that decision's change and
+        # offer an undo. Rows written before this existed carry no id and are
+        # joined heuristically instead.
+        entry["receipt_id"] = receipt_id
     if history_only:
         # Ledger-only row: it records that a pass ran and decided nothing new,
         # so the dedupe readers must not treat it as a decision. Without this
@@ -1878,7 +1913,9 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, log, seq}``. This is the read side of the
+    destination, outcome, proposal_id, receipt_id, log, seq}``. ``receipt_id``
+    is empty for every row written before it was recorded, and for every
+    decision made outside the receipt protocol. This is the read side of the
     decision history the review page's History tab renders; :func:`record_dismissal`
     and :func:`record_promotion` are the write side.
 
@@ -1917,6 +1954,7 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "destination": str(entry.get("destination", "")),
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
+                    "receipt_id": str(entry.get("receipt_id", "")),
                     "log": suffix,
                     "seq": seq,
                 }

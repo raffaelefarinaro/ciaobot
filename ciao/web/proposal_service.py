@@ -746,6 +746,13 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         # Only the undo log needs it; a promotion must not fail for want of one.
         vault_root = None
 
+    # Filled by the write with the receipt that performed it. The caller
+    # records this decision under the bullet's ORIGINAL text (append-time
+    # dedupe compares a re-extracted fact against that), so when the operator
+    # edited the wording the ledger row can never be matched back to its
+    # receipt by text. Carrying the id out here is what gives such a decision a
+    # change snapshot and an undo in History.
+    receipt: dict[str, Any] = {}
     try:
         outcome, promotable = accept_region_fact(
             guide_path=guide,
@@ -755,6 +762,7 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
             actor="operator",
             source="pwa",
             workspace=str(row.get("workspace") or ""),
+            receipt_out=receipt,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
@@ -777,7 +785,13 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         # `written` is reported because the guard can promote only the trailing
         # durable-rule clause of a bullet, so what landed is not always the
         # sentence the operator read on the row.
-        return {"ok": True, "region": region, "written": promotable, "usage": _usage()}
+        return {
+            "ok": True,
+            "region": region,
+            "written": promotable,
+            "usage": _usage(),
+            "receipt_id": str(receipt.get("id", "")),
+        }
     if outcome == "duplicate":
         # Already remembered. The fact is in the region either way, so the row
         # is resolved and may leave the queue.
