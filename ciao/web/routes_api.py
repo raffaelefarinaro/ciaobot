@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
@@ -7729,27 +7730,23 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
             )
         removed += result["removed"]
         if result["changed"]:
-            from ciao.memory_proposals import record_dismissal
-
             for swept_kind, swept_text, swept_source in zip(
                 result["kinds"], result["texts"], result["sources"]
             ):
                 # Expiry is a decision too: without the text in the dedupe
                 # history, a curator pass that re-reads the same transcript
-                # re-files the fact the operator just let expire.
-                record_dismissal(
+                # re-files the fact the operator just let expire. Same handler
+                # as an explicit dismiss, so both land in both ledgers.
+                proposal_actions.record_decision(
                     queue,
+                    action="dismiss",
                     text=swept_text,
                     kind=swept_kind,
                     via="pwa",
+                    workspace=workspace,
                     source=swept_source,
                     outcome="swept",
                 )
-            for kind in result["kinds"]:
-                if proposal_outcomes.is_extraction_kind(kind):
-                    proposal_outcomes.record(
-                        kind=kind, action="dismissed", workspace=workspace, via="pwa",
-                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
@@ -7843,25 +7840,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
             row = ctx["row"]
             target, target_error = proposal_service._rehome_target(row, requested_workspace)
             if target_error:
-                results_moves.append({
-                    "id": row["id"], "action": "move_file", "dismissed": False,
-                    "error": target_error,
-                })
+                results_moves.append(proposal_actions.ProposalActionResult(
+                    id=row["id"], action="move_file", dismissed=False,
+                    error=target_error,
+                ).as_dict())
                 continue
             outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
             if not outcome.get("ok"):
-                results_moves.append({
-                    "id": row["id"], "action": "move_file", "dismissed": False,
-                    "error": outcome["error"],
-                })
+                results_moves.append(proposal_actions.ProposalActionResult(
+                    id=row["id"], action="move_file", dismissed=False,
+                    error=outcome["error"],
+                ).as_dict())
                 continue
             moved_ids.add(row["id"])
             moved_destinations[row["id"]] = str(outcome.get("destination", ""))
-            results_moves.append({
-                "id": row["id"], "action": "move_file", "dismissed": True,
-                "destination": outcome.get("destination", ""),
-                "already_moved": outcome.get("already_moved", False),
-            })
+            results_moves.append(proposal_actions.ProposalActionResult(
+                id=row["id"], action="move_file", dismissed=True,
+                destination=str(outcome.get("destination", "")),
+                already_moved=bool(outcome.get("already_moved", False)),
+            ).as_dict())
         # Only the rows whose move landed may have their bullet dropped; a failed move
         # keeps its row so the note is not left somewhere nobody asked for with
         # nothing recording it.
@@ -7875,12 +7872,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # skill row has no line in any queue.
         results = list(results_moves)
         for contested_id in contested:
-            results.append({
-                "id": contested_id,
-                "action": action,
-                "dismissed": False,
-                "error": "this proposal is already being resolved",
-            })
+            results.append(proposal_actions.ProposalActionResult(
+                id=contested_id,
+                action=action,
+                dismissed=False,
+                error="this proposal is already being resolved",
+            ).as_dict())
         file_rows = [ctx for ctx in resolved if ctx.get("file")]
         resolved = [ctx for ctx in resolved if not ctx.get("file")]
         for ctx in file_rows:
@@ -7888,32 +7885,38 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # Same result shape a bullet dismiss returns, so the client needs no
             # second contract for a row it renders identically.
             if action != "dismiss":
-                results.append({
-                    "id": row["id"],
-                    "action": action,
-                    "dismissed": False,
-                    "error": "a skill proposal is a file; there is nothing to promote",
-                })
+                results.append(proposal_actions.ProposalActionResult(
+                    id=row["id"],
+                    action=action,
+                    dismissed=False,
+                    error="a skill proposal is a file; there is nothing to promote",
+                ).as_dict())
                 continue
             outcome = proposal_service._dismiss_skill_proposal(ctx)
-            entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
-            if not outcome.get("ok"):
-                entry["error"] = outcome["error"]
-            elif ctx["workspace"]:
-                from ciao.memory_proposals import record_dismissal
-
+            skill_result = proposal_actions.ProposalActionResult(
+                id=row["id"],
+                action="dismiss",
+                dismissed=bool(outcome.get("ok")),
+                error=None if outcome.get("ok") else outcome["error"],
+            )
+            if outcome.get("ok") and ctx["workspace"]:
                 # The file is already unlinked; a sidecar write failure must not
                 # fail a dismiss that happened.
                 try:
-                    record_dismissal(
+                    proposal_actions.record_decision(
                         proposal_service._proposals_file(config, ctx["workspace"]),
-                        text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                        action="dismiss",
+                        text=row["text"],
+                        kind="skill",
+                        via="pwa",
+                        workspace=ctx["workspace"],
+                        proposal_id=row["id"],
                     )
                 except OSError:
                     logger.info(
                         "proposals: could not record skill dismissal for %s", row["id"]
                     )
-            results.append(entry)
+            results.append(skill_result.as_dict())
 
         # Group by file so each affected file is rewritten exactly once.
         by_file: dict[str, dict[str, Any]] = {}
@@ -8031,86 +8034,58 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 if pid not in removed_here or pid in recorded:
                     continue
                 recorded.add(pid)
-                if action == "dismiss":
-                    # Same contract as the single-row route: the decision's text
-                    # must outlive the row, or the nightly curator re-files it.
-                    from ciao.memory_proposals import record_dismissal
-
-                    record_dismissal(
-                        queue,
-                        text=str(row.get("text") or ""),
-                        kind=str(row.get("kind") or ""),
-                        via="pwa",
-                        source=str(row.get("source") or ""),
-                        proposal_id=pid,
-                    )
-                elif action == "accept":
-                    from ciao.memory_proposals import record_promotion
-
+                # Same contract as the single-row route, through the same
+                # handler: the decision's text must outlive the row or the
+                # nightly curator re-files it, and only the extraction kinds
+                # reach the outcomes tally (skill rows come from skill
+                # evolution, rehome rows from vault hygiene).
+                destination = ""
+                row_outcome: dict[str, Any] = {}
+                if action == "accept":
                     accept_here = proposal_kinds.accept_for(row["kind"])
                     if accept_here.action == "move_file":
                         row_outcome = {"destination": moved_destinations.get(pid, "")}
                     else:
                         row_outcome = promoted.get(pid, {})
-                    record_promotion(
-                        queue,
-                        text=str(row.get("text") or ""),
-                        kind=str(row.get("kind") or ""),
-                        via="pwa",
-                        source=str(row.get("source") or ""),
-                        destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
-                        outcome="duplicate" if row_outcome.get("duplicate") else "written",
-                        proposal_id=pid,
+                    destination = proposal_service._decision_destination(
+                        accept_here.action, row, row_outcome
                     )
-                if not proposal_outcomes.is_extraction_kind(row["kind"]):
-                    # Not recorded: this ledger measures the MEMORY extraction
-                    # pipeline. Skill proposals come from skill evolution and
-                    # rehome rows from vault hygiene.
-                    continue
-                proposal_outcomes.record(
-                    kind=row["kind"],
-                    action="promoted" if action == "accept" else "dismissed",
-                    workspace=entry["workspace"],
+                proposal_actions.record_decision(
+                    queue,
+                    action=action,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
                     via="pwa",
+                    workspace=entry["workspace"],
+                    source=str(row.get("source") or ""),
+                    destination=destination,
+                    outcome=(
+                        ("duplicate" if row_outcome.get("duplicate") else "written")
+                        if action == "accept"
+                        else ""
+                    ),
+                    proposal_id=pid,
                 )
             for row in entry["rows"]:
                 if action == "accept":
                     accept = proposal_kinds.accept_for(row["kind"])
-                    outcome = promoted.get(row["id"], {})
                     # An absent outcome means nothing was written here (a rehome
                     # move performed above the grouping), which is a success.
-                    failed = "ok" in outcome and not outcome["ok"]
-                    result = {
-                        "id": row["id"],
-                        "action": accept.action,
-                        "dismissed": not failed,
-                    }
-                    if accept.action == "edit_region":
-                        result["region"] = outcome.get("region", accept.region)
-                        result["promoted"] = bool(outcome.get("ok"))
-                        result["leak_warning"] = row.get("leak_warning", False)
-                        # What actually landed, which is not always the row's text:
-                        # the event-shape guard can promote only a bullet's trailing
-                        # "Durable rule:" clause. `duplicate` says the fact was
-                        # already there and nothing was written.
-                        if outcome.get("written"):
-                            result["written"] = outcome["written"]
-                        if outcome.get("duplicate"):
-                            result["duplicate"] = True
-                        if failed:
-                            result["error"] = outcome.get("error", "could not write the region")
-                    elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
-                        result["promoted"] = bool(outcome.get("ok"))
-                        result["destination"] = outcome.get("destination", "")
-                        if failed:
-                            result["error"] = outcome.get("error", "could not write the destination")
-                    else:
-                        result["promoted"] = False
-                        result["destination"] = row.get("rehome", {}).get("destination", "")
-                        result["justified"] = row.get("rehome", {}).get("justified", False)
-                    results.append(result)
+                    # `written` says what actually landed, which is not always
+                    # the row's text: the event-shape guard can promote only a
+                    # bullet's trailing "Durable rule:" clause, and `duplicate`
+                    # says the fact was already there.
+                    results.append(proposal_actions.build_accept_result(
+                        row["id"],
+                        accept,
+                        row,
+                        promoted.get(row["id"], {}),
+                        include_usage=False,
+                    ).as_dict())
                 else:
-                    results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
+                    results.append(proposal_actions.ProposalActionResult(
+                        id=row["id"], action="dismiss", dismissed=True
+                    ).as_dict())
         return JSONResponse({"ok": True, "action": action, "results": results})
 
 
@@ -8201,16 +8176,23 @@ async def proposal_action(request: Request) -> JSONResponse:
         # gone by now — a recording failure must not turn a completed dismiss
         # into a 500, or the client's retry 404s on work that succeeded.
         if row["workspace"]:
-            from ciao.memory_proposals import record_dismissal
-
             try:
-                record_dismissal(
+                proposal_actions.record_decision(
                     proposal_service._proposals_file(config, row["workspace"]),
-                    text=row["text"], kind="skill", via="pwa", proposal_id=pid,
+                    action="dismiss",
+                    text=row["text"],
+                    kind="skill",
+                    via="pwa",
+                    workspace=row["workspace"],
+                    proposal_id=pid,
                 )
             except OSError:
                 logger.info("proposals: could not record skill dismissal for %s", pid)
-        return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
+        return JSONResponse(
+            proposal_actions.ProposalActionResult(
+                id=pid, action="dismiss", dismissed=True
+            ).as_dict()
+        )
 
     promoted: dict[str, Any] = {}
     queue = Path(ctx["path"])
@@ -8371,71 +8353,59 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
-        result = {"id": pid, "action": accept.action, "dismissed": True}
-        if accept.action == "edit_region":
-            result["region"] = promoted.get("region", accept.region)
-            result["promoted"] = True
-            result["usage"] = promoted.get("usage", {})
-            result["leak_warning"] = row.get("leak_warning", False)
-            # See the batch builder: the text written can differ from the row's,
-            # and a duplicate resolves the row without writing anything.
-            if promoted.get("written"):
-                result["written"] = promoted["written"]
-            if promoted.get("duplicate"):
-                result["duplicate"] = True
-        elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
-            result["promoted"] = True
-            result["destination"] = promoted.get("destination", "")
-        else:
-            # Rehome: the note itself is not moved here. Moving a file and
-            # rewriting every reference to it is `vault_rehome`'s job and it is
-            # reversible through its own receipt; doing half of it from a queue
-            # row would leave the links pointing at a path that moved.
-            result["promoted"] = False
-            result["destination"] = row.get("rehome", {}).get("destination", "")
-            result["justified"] = row.get("rehome", {}).get("justified", False)
-        if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
-            proposal_outcomes.record(
-                kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
-            )
+        # The payload shape is the batch route's, built once: an accept that
+        # reports a region, a destination or a rehome candidate must read the
+        # same either way. `usage` is the one field only this route reports.
+        # Rehome rows land in the last branch: the note itself is not moved
+        # there. Moving a file and rewriting every reference to it is
+        # `vault_rehome`'s job and it is reversible through its own receipt;
+        # doing half of it from a queue row would leave the links pointing at
+        # a path that moved.
+        result = proposal_actions.build_accept_result(
+            pid, accept, row, promoted, include_usage=True
+        )
         if removed_ours:
             # Preserve the accepted row's text in the same decision history a
             # dismissal uses: append-time dedupe consults the live queue and
             # that sidecar — never the promoted destination — so the nightly
             # curator would otherwise re-read the transcript and queue the
-            # already-accepted fact again.
-            from ciao.memory_proposals import record_promotion
-
-            record_promotion(
+            # already-accepted fact again. The outcomes tally is the same
+            # call's second half.
+            proposal_actions.record_decision(
                 queue,
+                action="accept",
                 text=str(row.get("text") or ""),
                 kind=str(row.get("kind") or ""),
                 via="pwa",
+                workspace=ctx["workspace"],
                 source=str(row.get("source") or ""),
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
                 outcome="duplicate" if promoted.get("duplicate") else "written",
                 proposal_id=pid,
             )
-        return JSONResponse({"ok": True, "result": result})
-    if removed_ours and action == "dismiss":
+        return JSONResponse({"ok": True, "result": result.as_dict()})
+    if removed_ours:
         # Preserve the decided row's text: append-time dedupe consults this
         # history, so without it the nightly curator re-files the fact the
         # operator just rejected while its transcript is still recent.
-        from ciao.memory_proposals import record_dismissal
-
-        record_dismissal(
+        proposal_actions.record_decision(
             queue,
+            action="dismiss",
             text=str(row.get("text") or ""),
             kind=str(row.get("kind") or ""),
             via="pwa",
+            workspace=ctx["workspace"],
             source=str(row.get("source") or ""),
             proposal_id=pid,
         )
-    if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
-        proposal_outcomes.record(
-            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
-        )
-    return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
+    return JSONResponse(
+        {
+            "ok": True,
+            "result": proposal_actions.ProposalActionResult(
+                id=pid, action="dismiss", dismissed=True
+            ).as_dict(),
+        }
+    )
 
 
 # ── Operator-action housekeeping strip ───────────────────────────────────
