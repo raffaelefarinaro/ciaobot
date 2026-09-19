@@ -9,6 +9,8 @@
 - feat(curation): compute the nightly worklist, then budget and serialize it (`39f15fbc`, #461)
 - feat(recall): add a scoped evidence drill-down for truncated snippets (`8d93ef22`, #460)
 - feat(memory): flatten Review to one navigation level and lead with the decision (`3246108b`, #447)
+- feat(security): deny the agent its own workspace credentials and runtime state (`d8b61bbb`)
+- feat(providers): reclaim a chat's provider once it has been idle (`2460894b`)
 - feat(review): make the retirement queue precise enough to act on (`68be35aa`)
 - feat(review): retire the improve_link disposition (`63eac1be`)
 - feat(review): send an unlinked row hunting for its missing links (`c86ed809`)
@@ -62,6 +64,9 @@
 - fix(receipts): settle the row a failed region write opened, drop dead code (`8f8f7010`)
 - fix(tests): stop the auto-sync config tests writing the developer's ~/.ciao (`dbb852cb`)
 - fix(tests): stop 51 tests minting a token in the developer's ~/.ciao (`5447a649`)
+- fix(curation): make the nightly lease actually serialize its run (`69075538`)
+- fix(proposals): guard promotion ordering on both accept paths (`23e2b6c6`)
+- fix(review): keep a failed provider teardown observable, refuse undecodable notes (`f3b4c40d`)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
