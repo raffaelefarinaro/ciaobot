@@ -1111,6 +1111,12 @@ class CiaoMcpService:
             is not a current search result of this workspace is refused. It is
             not a substitute for a file read, and it is the only permitted way
             to widen the evidence for a pure recall question.
+
+            ``reason`` says whether the reply is evidence. ``matched`` means the
+            sections are the blocks around the lines your query matched;
+            ``no_line_match`` means the note holds no such line, and the single
+            block returned is context rather than evidence — abstain instead of
+            answering from it. ``truncated`` marks a reply the bounds cut short.
             """
             return await self._invoke(
                 "vault_expand",
