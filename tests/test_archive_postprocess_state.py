@@ -17,7 +17,8 @@ from ciao.config import CiaoConfig
 from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager, _restored_postprocess
+from ciao.web.chat_service import _restored_postprocess
+from ciao.web.project_chats import ProjectChatManager
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:

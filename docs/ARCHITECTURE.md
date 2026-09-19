@@ -134,13 +134,15 @@ ciao/                          Python backend (Starlette).
     connection_tracker.py      Tracks live WebSocket connections for the node connected-clients list.
     chat_broker.py             Chat WebSocket broker, file-touch tagging, snapshot scheduling.
     project_chats.py           ProjectChatManager: chat lifecycle, streaming, transcripts, archives.
+    chat_service.py            Chat-workflow domain logic behind ProjectChatManager: provider-error retry classification, fork/handover transcript trimming, re-entry summary parsing and capping, chat-title derivation, project-doc frontmatter description writes, project-file upload policy, and scheduled-run grading (`ScheduleRunOutcome`). project_chats.py and routes_api.py import it as a module; the manager keeps the state file, the live streams, and the background tasks.
     file_snapshots.py          SnapshotStore: append-only file snapshots behind the file viewer.
     artifact_bridge.py         Comment bridge injected into /api/workspace-html responses: the in-frame script that turns selections and Alt+Clicks into postMessage anchors for the panel's comment composer.
     push.py                    PushManager: bounded notification log, Web Push publishing, and cross-device read-clear controls.
   # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
   # handlers without a domain home; new domains get their own routes_*.py rather than growing
-  # routes_api.py. Domain logic a handler needs belongs in a service module beside it
-  # (proposal_service.py), not inline in the handler. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
+  # routes_api.py. Domain logic a handler or a manager needs belongs in a service module beside it
+  # (proposal_service.py, chat_service.py), not inline in the handler or the manager.
+  # mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
 
 web/                           Vue 3 PWA frontend.

@@ -18,7 +18,7 @@ providers and adding error classification).
 
 # Markers that flag a result string as a hostless connection/DNS failure
 # worth annotating. Kept in sync with the retryable-error classifier in
-# ``ciao/web/project_chats.py::_is_retryable_connection_error``.
+# ``ciao/web/chat_service.py::_is_retryable_connection_error``.
 _HOSTLESS_CONNECT_MARKERS = (
     "unable to connect",
     "enotfound",

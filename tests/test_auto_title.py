@@ -699,7 +699,7 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
 
 
 def test_clean_llm_title_strips_noise() -> None:
-    from ciao.web.project_chats import _clean_llm_title
+    from ciao.web.chat_service import _clean_llm_title
 
     assert _clean_llm_title("  Zendesk Ticket Thread  ") == "Zendesk Ticket Thread"
     assert _clean_llm_title('"Quoted Title"\n') == "Quoted Title"
@@ -717,7 +717,7 @@ def test_clean_llm_title_strips_noise() -> None:
 
 def test_fallback_title_strips_leading_url() -> None:
     """The reported failure: 'Check Zendesk ticket https://scandit.zendesk…'."""
-    from ciao.web.project_chats import _fallback_title
+    from ciao.web.chat_service import _fallback_title
 
     assert (
         _fallback_title(

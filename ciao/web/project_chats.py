@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import mimetypes
@@ -63,7 +62,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, provider_registry, subagent_tracking
+from ciao import job_runs, subagent_tracking
 from ciao.subagent_tracking import SubagentInfo
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
@@ -71,7 +70,6 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.error_log import clear_error_log, tail_error_log
-from ciao.schedules import supports_auto_archive
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -88,7 +86,7 @@ from ciao.models import (
     ThinkingEvent,
     ToolUseEvent,
 )
-from ciao.model_tiers import canonical_tier, is_tier
+from ciao.model_tiers import is_tier
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
     OpencodeProvider,
@@ -110,6 +108,7 @@ from ciao.web.chat_broker import (
     remove_pending_list,
     reorder_pending_list,
 )
+from ciao.web import chat_service
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 
@@ -132,26 +131,6 @@ _CAPABILITY_IMAGE_MSG = (
     "Pick a model that supports images and re-send."
 )
 
-# Project-files surface (list + upload). Mirrors the union of the read-only
-# workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
-# docs). Kept in sync intentionally: anything we let users upload, we also
-# need to be able to serve back via one of the workspace endpoints.
-_PROJECT_TEXT_EXTS = frozenset({
-    ".md", ".markdown", ".txt",
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".vue",
-    ".css", ".html", ".json",
-    ".yaml", ".yml", ".toml",
-    ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv",
-})
-_PROJECT_IMAGE_EXTS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
-})
-_PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
-})
-_PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
-_PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
@@ -221,11 +200,6 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # /messages renderer collapses it into a system line rather than showing a user
 # bubble nobody typed).
 _SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
-_HANDOVER_ROLES = {"user", "assistant", "system"}
-_FORK_MAX_MESSAGES = 80
-_FORK_MAX_CHARS = 60_000
-_PROVIDER_HANDOVER_MAX_MESSAGES = 12
-_PROVIDER_HANDOVER_MAX_CHARS = 12_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
@@ -256,274 +230,9 @@ def _state_file_lock(path: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _classify_file(path: Path) -> str:
-    """Map a file path to one of: ``markdown | image | text | binary``.
-
-    Anything outside the three allowlists falls back to ``binary`` so the UI
-    can show it greyed-out with a download fallback. The file may not be
-    representable by any of our viewers, but we still list it.
-    """
-    ext = path.suffix.lower()
-    if ext in {".md", ".markdown"}:
-        return "markdown"
-    if ext in _PROJECT_IMAGE_EXTS:
-        return "image"
-    if ext in _PROJECT_TEXT_EXTS:
-        return "text"
-    return "binary"
-
 # Legacy IDs from the removed auto-imported Claude Code CLI view.
 _CC_CLI_PROJECT_ID = "proj-cc-cli"
 _CC_CHAT_PREFIX = "chat-cc-"
-
-# A vault_folder must be a single directory name under projects/active/ or
-# projects/completed/. Reject path separators, parent-directory traversal,
-# leading dots, and non-printable characters. Names are free-form (lowercase
-# kebab-case is preferred but not enforced); see README "Project naming
-# convention".
-_VAULT_FOLDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _restored_postprocess(raw: object) -> dict:
-    """Sanitize a persisted post-archive record on load.
-
-    The pipeline is an in-process ``asyncio`` task, so a record still marked
-    "running" is a record whose task died with the previous process. Downgrading
-    it to "done" keeps the chat reporting the steps that did land instead of
-    showing an activity indicator nothing is left alive to clear."""
-    if not isinstance(raw, dict) or not raw:
-        return {}
-    state = dict(raw)
-    if state.get("state") == "running":
-        state["state"] = "done"
-        state["step"] = ""
-        state["interrupted"] = True
-    return state
-
-
-def _project_reference_key(value: str) -> str:
-    """Normalize a display name or vault-folder slug for context matching."""
-
-    return re.sub(r"[\W_]+", "-", str(value).casefold()).strip("-")
-
-
-def _stable_vault_project_id(workspace: str, vault_folder: str) -> str:
-    """Return the convergent id for a newly discovered vault-backed project."""
-
-    identity = f"{workspace.casefold()}\0{vault_folder.casefold()}".encode("utf-8")
-    return f"proj-{hashlib.sha256(identity).hexdigest()[:12]}"
-
-
-def _iso_after(seconds: int) -> str:
-    return (datetime.now(UTC) + timedelta(seconds=seconds)).replace(
-        microsecond=0
-    ).isoformat().replace("+00:00", "Z")
-
-
-def _parse_iso(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _provider_label(provider: str) -> str:
-    if not provider:
-        return "Provider"
-    return provider_registry.label(provider, short=True)
-
-
-def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
-    """Sanitize visible chat rows without applying history limits."""
-    rows: list[dict] = []
-    for raw in messages or []:
-        if not isinstance(raw, dict):
-            continue
-        role = str(raw.get("role", "")).strip().lower()
-        if role not in _HANDOVER_ROLES:
-            continue
-        content = str(raw.get("content", "")).strip()
-        if not content:
-            continue
-        entry: dict = {
-            "role": role,
-            "content": content,
-        }
-        timestamp = str(raw.get("timestamp", "") or raw.get("sent_at", "")).strip()
-        if timestamp:
-            entry["timestamp"] = timestamp
-        tool_name = str(raw.get("tool_name", "")).strip()
-        if tool_name:
-            entry["tool_name"] = tool_name
-        if bool(raw.get("is_error")):
-            entry["is_error"] = True
-        images = raw.get("images")
-        if isinstance(images, list):
-            refs = [str(ref) for ref in images if str(ref)]
-            if refs:
-                entry["images"] = refs
-        file_path = str(raw.get("file_path", "")).strip()
-        if file_path:
-            entry["file_path"] = file_path
-        action = str(raw.get("action", "")).strip()
-        if action:
-            entry["action"] = action
-        tool = str(raw.get("tool", "")).strip()
-        if tool:
-            entry["tool"] = tool
-        rows.append(entry)
-    return rows
-
-
-def _normalize_handover_messages(
-    messages: list[dict] | None,
-    *,
-    max_messages: int = _FORK_MAX_MESSAGES,
-    max_chars: int = _FORK_MAX_CHARS,
-) -> list[dict]:
-    """Sanitize and bound visible rows for a fork or provider handover."""
-    rows = _clean_handover_messages(messages)
-    total_chars = sum(len(str(row.get("content", ""))) for row in rows)
-    while (
-        len(rows) > max_messages
-        or total_chars > max_chars
-    ) and rows:
-        removed = rows.pop(0)
-        total_chars -= len(str(removed.get("content", "")))
-    return rows
-
-
-def _handover_marker(
-    *,
-    old_provider: str,
-    old_model: str,
-    new_provider: str,
-    new_model: str,
-) -> dict:
-    return {
-        "role": "system",
-        "content": (
-            "Handed over from "
-            f"{_provider_label(old_provider)} / {old_model} to "
-            f"{_provider_label(new_provider)} / {new_model}."
-        ),
-        "timestamp": _now_iso(),
-    }
-
-
-def _is_retryable_quota_error(text: str) -> bool:
-    low = (text or "").lower()
-    # Claude Code uses "You've hit your session limit" in its user-facing
-    # exhaustion banner, while the API-shaped error says "reached your
-    # session usage limit". Both should arm the deferred hourly retry.
-    if (
-        "reached your session usage limit" in low
-        or "hit your session limit" in low
-    ):
-        return True
-    # Temporary model saturation is a capacity error rather than a 429/quota
-    # error. Treat it as hourly retryable so the user does not have to keep the
-    # chat open and press Retry manually.
-    if "at capacity" in low:
-        return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
-        return True
-    # A provider that just states the limit, with no 429 and none of the vendor
-    # phrasings above — opencode/OpenAI surfaces "The usage limit has been
-    # reached". Pairing a limit noun with an exhaustion verb is unambiguous in a
-    # way the bare nouns are not, which is why those still need the 429 marker
-    # below: "quota" or "session" alone appears in plenty of prose that is not
-    # an exhaustion error.
-    if any(noun in low for noun in ("usage limit", "rate limit", "quota", "token limit")) and any(
-        verb in low for verb in ("reached", "exceeded", "exhausted")
-    ):
-        return True
-    if "429" not in low and "too many requests" not in low:
-        return False
-    return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
-
-
-
-def _is_retryable_connection_error(text: str) -> bool:
-    low = (text or "").lower()
-    connection_indicators = (
-        "enotfound",
-        "econnrefused",
-        "econnreset",
-        "etimedout",
-        "unable to connect",
-        "failed to fetch",
-        "network request failed",
-        "temporary failure in name resolution",
-        "dns resolution failed",
-        "socket timeout",
-        "gateway timeout",
-        "bad gateway",
-        "service unavailable",
-        "502 bad gateway",
-        "503 service unavailable",
-        "504 gateway timeout",
-        "connect timeout",
-        "connection timeout",
-        "connection timed out",
-        # Upstream API dropped the streaming connection mid-response. The CLI
-        # surfaces this as a banner; the Claude provider re-flags it as an
-        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
-        # ``ciao/providers/claude.py``.
-        "connection closed mid-response",
-        "response above may be incomplete",
-    )
-    return any(indicator in low for indicator in connection_indicators)
-
-
-def _is_retryable_provider_startup_error(text: str) -> bool:
-    """Recognize a transient provider-launch failure before turn progress."""
-    low = (text or "").lower()
-    if "opencode serve exited" in low and (
-        "database is locked" in low or "database is busy" in low
-    ):
-        return True
-    # A server that stays alive but never answers /global/health is the same
-    # transient startup wedge (shared SQLite contention with other opencode
-    # processes); _ensure_server already retries it internally, so a chat
-    # turn that still lands here should get the same bounded auto-retry as
-    # the database-locked exit instead of failing outright.
-    return "opencode serve did not become healthy" in low
-
-
-def _is_retryable_auth_error(text: str) -> bool:
-    """Recognize a transient OAuth session expiry that can recover on retry.
-
-    The Claude CLI surfaces ``Failed to authenticate: OAuth session expired
-    and could not be refreshed`` when its in-memory credentials lapsed
-    mid-turn. The credentials are refreshed on the next process spawn, so
-    retrying the turn (fast 30s interval, bounded like connection errors)
-    recovers without user intervention. Keep this narrow: only the
-    ``oauth session expired`` / ``could not be refreshed`` shape is
-    retried, not every ``Failed to authenticate`` (e.g. revoked keys).
-
-    ``Not logged in · Please run /login`` is the same class: the CLI reports
-    it when the credentials it holds lapsed mid-turn, and the next spawn
-    re-reads them from disk. It is retried on the same bounded ladder, so a
-    genuinely signed-out install stops after ``_MAX_CONNECTION_DROP_RETRIES``
-    instead of looping.
-    """
-    low = (text or "").lower()
-    if "oauth session expired" in low:
-        return True
-    if "failed to authenticate" in low and "could not be refreshed" in low:
-        return True
-    if "session expired" in low and "could not be refreshed" in low:
-        return True
-    if "not logged in" in low and "/login" in low:
-        return True
-    return False
 
 
 def _has_running_loop() -> bool:
@@ -534,399 +243,13 @@ def _has_running_loop() -> bool:
         return False
 
 
-def _uuid8() -> str:
-    return uuid.uuid4().hex[:8]
-
-
-_REENTRY_SUMMARY_MAX_CHARS = 600
-_REENTRY_SUMMARY_MAX_BULLETS = 4
-
-
-def _reentry_summary_lines(text: str) -> list[str]:
-    """Return summary content without markdown/list wrapper syntax."""
-    lines: list[str] = []
-    for raw_line in (text or "").splitlines():
-        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw_line).strip()
-        if not line or re.fullmatch(r"```(?:[a-zA-Z0-9_-]+)?\s*", line):
-            continue
-        lines.append(line)
-    return lines
-
-
-def _parse_reentry_summary_json(text: str) -> Any | None:
-    """Parse a JSON response, including a fenced or bullet-wrapped object."""
-    cleaned = "\n".join(_reentry_summary_lines(text))
-    candidates = [candidate for candidate in (text.strip(), cleaned) if candidate]
-    decoder = json.JSONDecoder()
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-        # Apple occasionally adds a short preamble before the structured
-        # response. Decode from the first object/array rather than exposing
-        # that preamble or the JSON punctuation in the UI.
-        for marker in ("{", "["):
-            start = candidate.find(marker)
-            if start == -1:
-                continue
-            try:
-                value, _ = decoder.raw_decode(candidate[start:])
-            except json.JSONDecodeError:
-                continue
-            return value
-    return None
-
-
-# Keys that carry transcript plumbing rather than anything a returning reader
-# wants. Apple's on-device model mirrors the shape of the records it is handed,
-# so a "summary" can come back as a synthetic envelope of its own
-# ({"type": "event", "event_id": "..."}). Those fields are noise even when the
-# JSON parses cleanly.
-_SUMMARY_METADATA_KEY_RE = re.compile(
-    r"^(?:id|idx|index|type|kind|role|event|schema|version|timestamp|time|date"
-    r"|session|\w+_id)$",
-    re.IGNORECASE,
-)
-
-# A line that is bare JSON punctuation, a quoted `"key": value` pair, or a key
-# opening a nested object is transcript residue, not a summary. It reaches the
-# plain-line fallback when the model answers with JSON that does not parse -
-# output truncated mid-object, or several records concatenated.
-_JSON_RESIDUE_RE = re.compile(
-    r"""^(?:
-        [\[\]{}(),;]+
-        | "[^"]*"\s*:.*
-        | [\w .-]+\s*:\s*[\[{]\s*,?
-    )$""",
-    re.VERBOSE,
-)
-
-
-def _summary_field_label(key: object) -> str:
-    if _SUMMARY_METADATA_KEY_RE.fullmatch(str(key).strip()):
-        return ""
-    label = re.sub(r"[_-]+", " ", str(key)).strip()
-    return label[:1].upper() + label[1:] if label else ""
-
-
-def _summary_value_text(value: Any) -> str:
-    """Render a JSON value as compact human-readable text."""
-    if isinstance(value, str):
-        return " ".join(value.split())
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        parts = [_summary_value_text(item) for item in value]
-        return "; ".join(part for part in parts if part)
-    if isinstance(value, dict):
-        field_parts: list[str] = []
-        for key, item in value.items():
-            item_text = _summary_value_text(item)
-            label = _summary_field_label(key)
-            if item_text and label:
-                field_parts.append(f"{label}: {item_text}")
-        return "; ".join(field_parts)
-    return str(value)
-
-
-def _reentry_summary_phrases(parsed: Any) -> list[str]:
-    if isinstance(parsed, dict):
-        phrases: list[str] = []
-        for key, value in parsed.items():
-            label = _summary_field_label(key)
-            value_text = _summary_value_text(value)
-            if label and value_text:
-                phrases.append(f"{label}: {value_text}")
-        return phrases
-    if isinstance(parsed, list):
-        return [value for item in parsed if (value := _summary_value_text(item))]
-    value = _summary_value_text(parsed)
-    return [value] if value else []
-
-
-def _reentry_transcript_text(filtered_jsonl: str) -> str:
-    """Flatten line-oriented transcript JSON into speaker-prefixed prose.
-
-    Apple's on-device model mirrors the shape of what it is given: handed
-    JSON records it answers with a JSON envelope of its own instead of a
-    summary. Prose in, prose out. Dropping the tool_use records at the same
-    time spends the small Apple input budget on what the chat was about
-    rather than on tool plumbing the summary would never mention.
-    """
-    lines: list[str] = []
-    for raw_line in (filtered_jsonl or "").splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        content = record.get("content")
-        texts: list[str] = []
-        if isinstance(content, str):
-            texts = [" ".join(content.split())]
-        else:
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict) or block.get("type") != "text":
-                    continue
-                text = " ".join(str(block.get("text") or "").split())
-                if text:
-                    texts.append(text)
-        body = " ".join(text for text in texts if text)
-        if not body:
-            continue
-        speaker = "User" if record.get("type") == "user" else "Assistant"
-        lines.append(f"{speaker}: {body}")
-    return "\n".join(lines)
-
-
-def _cap_reentry_summary(text: str) -> str:
-    """Normalize an orientation summary to a small, predictable UI note."""
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return ""
-
-    parsed = _parse_reentry_summary_json(raw)
-    if parsed is not None:
-        phrases = _reentry_summary_phrases(parsed)
-    else:
-        phrases = [
-            line
-            for line in _reentry_summary_lines(raw)
-            if not line.startswith("#") and not _JSON_RESIDUE_RE.match(line)
-        ]
-    # Nothing survived: the model answered with structure instead of a summary.
-    # Show no note rather than JSON punctuation dressed up as bullet points.
-    if not phrases:
-        return ""
-    if len(phrases) == 1:
-        phrases = [
-            phrase.strip()
-            for phrase in re.split(r"(?<=[.!?])\s+", phrases[0])
-            if phrase.strip()
-        ]
-
-    bullets = [f"• {phrase}" for phrase in phrases[:_REENTRY_SUMMARY_MAX_BULLETS]]
-    result = "\n".join(bullets)
-    if len(result) <= _REENTRY_SUMMARY_MAX_CHARS:
-        return result
-    return result[: _REENTRY_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
-
-_PLACEHOLDER_TITLE_RE = re.compile(r"^New session\b", re.IGNORECASE)
-
-
-def _normalize_tier(model: str) -> str:
-    """Canonicalize a tier alias; a concrete model id passes through unchanged."""
-    return canonical_tier(model) if is_tier(model) else model
-
-
-_INJECTED_CONTEXT_MARKER = "[CIAO_CONTEXT_BEGIN]"
-
-
-def _real_title(title: str) -> str | None:
-    """Return *title* if it is a real provider title, else None.
-
-    Providers seed a session with a placeholder default (opencode uses
-    ``New session - <timestamp>``) and only later write the generated title.
-    Treating the placeholder as a real title would let the auto-title poll
-    stop early and leave the sidebar stuck on it, so it is filtered out here.
-
-    Also rejected: a provider whose own summarizer degrades and echoes the
-    literal first session message back as the "title". That message carries
-    our injected context capsule (see `_build_prompt_prefix`), which is meant
-    to stay invisible to the user - accepting it verbatim both leaked
-    internal state into the sidebar and skipped the 6-word
-    `_fallback_title` truncation, which only runs when no native title is
-    accepted.
-    """
-    title = (title or "").strip()
-    if not title or _PLACEHOLDER_TITLE_RE.match(title) or _INJECTED_CONTEXT_MARKER in title:
-        return None
-    return title
-
-
-_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-
-
-def _fallback_title(user_text: str) -> str | None:
-    """Deterministic fallback title derived from the user's first message.
-
-    Used when the model call fails, so the
-    sidebar never stays stuck on "New Chat" indefinitely.
-    """
-    snippet = (user_text or "").strip()
-    if not snippet:
-        return None
-    # First line only, strip surrounding quotes.
-    snippet = snippet.splitlines()[0].strip().strip('"').strip("'").strip()
-    if not snippet:
-        return None
-    # A leading URL truncates mid-host ("Check Zendesk ticket https://scand…"),
-    # which reads as broken text in the sidebar. Keep only the words before
-    # the first URL when there are any; a bare-URL prompt keeps the URL.
-    url_match = _URL_RE.search(snippet)
-    if url_match and url_match.start() > 0:
-        before = snippet[: url_match.start()].strip()
-        if before:
-            snippet = before
-    # Cap at ~6 words or 60 chars.
-    words = snippet.split()
-    if len(words) > 6:
-        snippet = " ".join(words[:6])
-    snippet = snippet.rstrip(".!?:,")
-    if len(snippet) > 60:
-        snippet = snippet[:57].rstrip() + "..."
-    return snippet or None
-
-
 # One-shot titler budget. Hosted models answer in a couple of seconds; a slow
 # local backend simply times out and the deterministic fallback applies, the
 # same trade the schedule attention classifier makes with a longer window.
 _TITLE_LLM_TIMEOUT_S = 45.0
 
-_TITLE_MAX_CHARS = 60
-
-
-def _clean_llm_title(text: str | None) -> str | None:
-    """Normalize a model-produced title, or None when it is not usable.
-
-    Models answer with trailing newlines, wrapping quotes, or — when their
-    own summarizer degrades — the literal first session message, which
-    carries our injected ``[CIAO_CONTEXT_BEGIN]`` capsule. Accepting any of
-    those would put them straight into the sidebar.
-    """
-    title = (text or "").strip()
-    if not title:
-        return None
-    # First non-empty line only; the prompt asks for one line anyway.
-    for line in title.splitlines():
-        line = line.strip()
-        if line:
-            title = line
-            break
-    title = title.strip().strip('"').strip("'").strip("`").strip()
-    title = title.rstrip(".!?:,")
-    if not title or _PLACEHOLDER_TITLE_RE.match(title):
-        return None
-    if _INJECTED_CONTEXT_MARKER in title:
-        return None
-    if len(title) > _TITLE_MAX_CHARS:
-        title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
-    return title or None
-
-
-_FRONTMATTER_DELIM = "---"
-_DESCRIPTION_KEY_RE = re.compile(r"^description\s*:")
-
-
-def _yaml_quote(value: str) -> str:
-    """Encode *value* as a YAML double-quoted scalar.
-
-    JSON string syntax is a subset of YAML's double-quoted style, so
-    ``json.dumps`` already escapes the characters that break an unquoted
-    scalar - colons, quotes, leading ``#``, newlines - without hand-rolling an
-    encoder. ``ensure_ascii=False`` keeps accented descriptions readable in the
-    file rather than exploding them into ``\\uXXXX``.
-    """
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _set_frontmatter_description(text: str, description: str) -> str | None:
-    """Return *text* with its YAML frontmatter ``description:`` set.
-
-    Surgical by design: every other line of the document, frontmatter included,
-    survives byte-for-byte. Round-tripping the block through ``yaml.safe_dump``
-    would reorder keys and strip the comments out of docs people hand-write.
-
-    Creates the frontmatter block when the document has none - that block is
-    what auto-discovery reads, so a doc without one cannot carry a description
-    at all. Returns ``None`` when the frontmatter is open but never closed:
-    that document is malformed, and guessing where the block ends risks
-    rewriting prose.
-    """
-    quoted = f"description: {_yaml_quote(description)}"
-    lines = text.split("\n")
-
-    # The delimiter only opens frontmatter on line 1. Anywhere else it is a
-    # horizontal rule in the body.
-    if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
-        block = f"{_FRONTMATTER_DELIM}\n{quoted}\n{_FRONTMATTER_DELIM}\n"
-        return f"{block}\n{text}" if text.strip() else block
-
-    close = next(
-        (i for i in range(1, len(lines)) if lines[i].strip() == _FRONTMATTER_DELIM),
-        None,
-    )
-    if close is None:
-        return None
-
-    start = next(
-        (i for i in range(1, close) if _DESCRIPTION_KEY_RE.match(lines[i])),
-        None,
-    )
-    if start is None:
-        # Append rather than prepend: `name:`/`status:` conventionally lead the
-        # block, and a new key at the bottom reads as the addition it is.
-        return "\n".join(lines[:close] + [quoted] + lines[close:])
-
-    # Consume the value's continuation lines. Block scalars (`description: |`)
-    # and wrapped flow scalars both continue on more-indented lines, and a
-    # blank line inside a block scalar is still part of the value.
-    end = start + 1
-    while end < close:
-        line = lines[end]
-        if line.strip() and not line[:1].isspace():
-            break
-        end += 1
-    # A trailing run of blank lines separates keys; it belongs to whatever
-    # comes next, not to the value we are replacing.
-    while end > start + 1 and not lines[end - 1].strip():
-        end -= 1
-    return "\n".join(lines[:start] + [quoted] + lines[end:])
-
-
-
 
 # ── Data models ──────────────────────────────────────────────────────────
-
-
-def _normalize_chat_helper(value: Any) -> dict[str, Any]:
-    """Fail closed on lifecycle metadata supplied by older or invalid clients."""
-    if not isinstance(value, dict) or value.get("kind") != "proposal":
-        return {}
-    intent = str(value.get("intent") or "")
-    policy = str(value.get("archive_policy") or "")
-    if (intent, policy) not in {
-        ("resolve", "when_resolved"),
-        ("review", "manual"),
-    }:
-        return {}
-    raw_ids = value.get("proposal_ids")
-    if not isinstance(raw_ids, list):
-        return {}
-    proposal_ids = list(
-        dict.fromkeys(
-            item
-            for item in raw_ids[:100]
-            if isinstance(item, str) and 0 < len(item) <= 128
-        )
-    )
-    if not proposal_ids:
-        return {}
-    return {
-        "kind": "proposal",
-        "intent": intent,
-        "proposal_ids": proposal_ids,
-        "archive_policy": policy,
-    }
 
 
 @dataclass(slots=True)
@@ -1180,55 +503,6 @@ class ArchiveOutcome:
 
 
 @dataclass(slots=True)
-class ScheduleRunOutcome:
-    completed: bool = False
-    is_error: bool = False
-    permission_requested: bool = False
-    question_requested: bool = False
-    stream_error: bool = False
-    retry_pending: bool = False
-    final_text: str = ""
-    archived_to: str = ""
-    # True when the run dispatched background subagents that had not finished
-    # by the time we stopped waiting. Such a run is not "done" yet, so it must
-    # stay visible rather than auto-archive on a half-complete result.
-    subagents_pending: bool = False
-
-
-def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
-    return (
-        outcome.completed
-        and not outcome.is_error
-        and not outcome.permission_requested
-        and not outcome.question_requested
-        and not outcome.stream_error
-        and not outcome.retry_pending
-        and not outcome.subagents_pending
-    )
-
-
-def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | None]:
-    """Classify a scheduled turn for job-run history.
-
-    A pending retry means the provider deferred the work, such as after a
-    quota rejection. It remains unclean and visible, but is not an app error.
-    Unsettled background subagents (or a run that ended on an interim message
-    with no synthesis turn) mean the work is not done yet either — not a
-    failure to report as such, but not a healthy run either: recording "ok"
-    would clear a previous error while the follow-up never completed.
-    """
-    if outcome.retry_pending:
-        return "skipped", None
-    if outcome.stream_error or outcome.is_error:
-        return "error", (outcome.final_text or "stream error")[:1000]
-    if outcome.permission_requested or outcome.question_requested:
-        return "skipped", None
-    if outcome.subagents_pending:
-        return "skipped", None
-    return "ok", None
-
-
-@dataclass(slots=True)
 class _StreamOutcome:
     """Terminal result of a single ``provider.execute_streaming`` pass.
 
@@ -1246,22 +520,6 @@ class _StreamOutcome:
     quota: dict[str, str] = field(default_factory=dict)
     cost_usd: float = 0.0
     tool_events: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _should_auto_archive_schedule_run(
-    entry: object, outcome: ScheduleRunOutcome, *, needs_user: bool = False
-) -> bool:
-    archive_policy = getattr(entry, "archive_policy", "manual")
-    if archive_policy != "auto":
-        return False
-    # Never auto-archive the chat an interval entry is bound to: archiving it
-    # makes the next run fork a replacement and archive that too, forever. One
-    # predicate, shared with the store-side normalisation that keeps `auto`
-    # from being persisted for such an entry in the first place — two copies of
-    # this rule would drift, and the dispatcher's copy is the one that decides.
-    if not supports_auto_archive(entry):
-        return False
-    return _schedule_run_clean(outcome) and not needs_user
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -1535,7 +793,7 @@ class ProjectChatManager:
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
-                handover_messages=_normalize_handover_messages(
+                handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
@@ -1551,12 +809,12 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
-                helper=_normalize_chat_helper(cd.get("helper")),
+                helper=chat_service._normalize_chat_helper(cd.get("helper")),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
                 # forever on a spinner nothing will ever clear.
-                postprocess=_restored_postprocess(cd.get("postprocess")),
+                postprocess=chat_service._restored_postprocess(cd.get("postprocess")),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1759,7 +1017,7 @@ class ProjectChatManager:
             return
         audit_path = self._path.with_name(f"{self._path.stem}.audit.jsonl")
         event = {
-            "timestamp": _now_iso(),
+            "timestamp": chat_service._now_iso(),
             "pid": os.getpid(),
             "revision": revision,
             "reason": reason,
@@ -1959,12 +1217,12 @@ class ProjectChatManager:
                 None,
             )
             if general is None:
-                pid = _stable_vault_project_id(ws, "general")
+                pid = chat_service._stable_vault_project_id(ws, "general")
                 general = ProjectInfo(
                     project_id=pid,
                     name="General",
                     workspace=ws,
-                    created_at=_now_iso(),
+                    created_at=chat_service._now_iso(),
                     order=0,
                     vault_folder="general",
                 )
@@ -2307,7 +1565,7 @@ class ProjectChatManager:
         that may be absolute for vaults outside the workspace root.
         """
         folder_name = project.vault_folder
-        if not folder_name or not _VAULT_FOLDER_RE.fullmatch(folder_name):
+        if not folder_name or not chat_service._VAULT_FOLDER_RE.fullmatch(folder_name):
             return None
         try:
             active_root = self._vault_active_root(project.workspace).resolve()
@@ -2338,7 +1596,7 @@ class ProjectChatManager:
             return False
         try:
             current = doc.read_text(encoding="utf-8")
-            updated = _set_frontmatter_description(current, project.context)
+            updated = chat_service._set_frontmatter_description(current, project.context)
             if updated is None or updated == current:
                 return False
             doc.write_text(updated, encoding="utf-8")
@@ -2436,19 +1694,19 @@ class ProjectChatManager:
 
         project_map: dict[tuple[str, str], str] = {}
         for project in self._projects.values():
-            name_key = _project_reference_key(project.name)
+            name_key = chat_service._project_reference_key(project.name)
             if name_key:
                 project_map.setdefault((name_key, project.workspace), project.project_id)
         # A canonical vault slug wins over a colliding display-name alias.
         for project in self._projects.values():
-            folder_key = _project_reference_key(project.vault_folder)
+            folder_key = chat_service._project_reference_key(project.vault_folder)
             if folder_key:
                 project_map[(folder_key, project.workspace)] = project.project_id
         return project_map
 
     def _resolve_project_reference(self, workspace: str, value: str) -> str:
         project_id = self._project_reference_map().get(
-            (_project_reference_key(value), workspace), ""
+            (chat_service._project_reference_key(value), workspace), ""
         )
         if project_id:
             return project_id
@@ -2634,8 +1892,8 @@ class ProjectChatManager:
             title = str(transcript.get("context_label") or "").strip()
             if not title or title == "New Chat":
                 # Input is always non-empty, so the fallback returns a str.
-                title = cast(str, _fallback_title(visible_prompt or "Recovered Chat"))
-            created_at = str(transcript.get("started_at") or "") or _now_iso()
+                title = cast(str, chat_service._fallback_title(visible_prompt or "Recovered Chat"))
+            created_at = str(transcript.get("started_at") or "") or chat_service._now_iso()
             updated_at = str(transcript.get("updated_at") or created_at)
             mode: BridgeMode = cast(
                 BridgeMode, str(valid_turns[-1].get("mode") or self._config.claude_mode)
@@ -2904,13 +2162,13 @@ class ProjectChatManager:
                     })
                     continue
 
-                pid = _stable_vault_project_id(ws, stem)
+                pid = chat_service._stable_vault_project_id(ws, stem)
                 project = ProjectInfo(
                     project_id=pid,
                     name=name,
                     workspace=ws,
                     context=context,
-                    created_at=_now_iso(),
+                    created_at=chat_service._now_iso(),
                     order=len(self._projects),
                     vault_folder=stem,
                     vault_doc_path=self._display_path(readme) if readme is not None else "",
@@ -2952,13 +2210,13 @@ class ProjectChatManager:
         workspace: str,
         context: str = "",
     ) -> ProjectInfo:
-        pid = f"proj-{_uuid8()}"
+        pid = f"proj-{chat_service._uuid8()}"
         project = ProjectInfo(
             project_id=pid,
             name=name,
             workspace=workspace,
             context=context,
-            created_at=_now_iso(),
+            created_at=chat_service._now_iso(),
             order=len(self._projects),
         )
         self._projects[pid] = project
@@ -2989,7 +2247,7 @@ class ProjectChatManager:
             # Reject anything that could escape projects/active/<folder>/.
             # Empty string clears the binding; a non-empty value must be a
             # single safe folder name (no separators, no traversal, no NUL).
-            if vault_folder and not _VAULT_FOLDER_RE.fullmatch(vault_folder):
+            if vault_folder and not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
                 raise ValueError(
                     f"Invalid vault_folder {vault_folder!r}: "
                     "must match [A-Za-z0-9._-]+ with no path separators."
@@ -3075,7 +2333,7 @@ class ProjectChatManager:
         if vault_folder and self._is_known_workspace(project.workspace):
             # Defence in depth: even though update_project validates
             # vault_folder, double-check before any filesystem operation.
-            if not _VAULT_FOLDER_RE.fullmatch(vault_folder):
+            if not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
                 raise ValueError(
                     f"Invalid vault_folder {vault_folder!r} stored on project."
                 )
@@ -3157,7 +2415,7 @@ class ProjectChatManager:
         """
         if not self._is_known_workspace(workspace):
             raise ValueError("Invalid workspace.")
-        if not _VAULT_FOLDER_RE.fullmatch(stem):
+        if not chat_service._VAULT_FOLDER_RE.fullmatch(stem):
             raise ValueError(f"Invalid project folder {stem!r}.")
 
         completed_root = self._vault_completed_root(workspace).resolve()
@@ -3314,7 +2572,7 @@ class ProjectChatManager:
         # response), which closed the panel and caused the "new chat flashes
         # and then opens" bug. Empty chats now live until the user deletes
         # them explicitly.
-        cid = f"chat-{_uuid8()}"
+        cid = f"chat-{chat_service._uuid8()}"
         # Per-provider default thinking level for new chats; a missing entry
         # leaves it to the provider default ("" = auto).
         default_thinking = (self._config.provider_default_thinking or {}).get(
@@ -3328,8 +2586,8 @@ class ProjectChatManager:
             provider=chat_provider,
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
-            created_at=_now_iso(),
-            helper=_normalize_chat_helper(helper),
+            created_at=chat_service._now_iso(),
+            helper=chat_service._normalize_chat_helper(helper),
         )
         self._chats[cid] = chat
         self._save()
@@ -3599,10 +2857,10 @@ class ProjectChatManager:
         new_chat.thinking_level = chat.thinking_level
         
         # Seed handover messages
-        new_chat.handover_messages = _normalize_handover_messages(
+        new_chat.handover_messages = chat_service._normalize_handover_messages(
             parsed_messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         new_chat.handover_context_pending = True
         
@@ -3625,7 +2883,7 @@ class ProjectChatManager:
         if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
             raise ValueError("Fork turn must be a non-negative integer")
 
-        clean_rows = _clean_handover_messages(messages)
+        clean_rows = chat_service._clean_handover_messages(messages)
         if not clean_rows:
             raise ValueError("Fork history must be non-empty")
         if clean_rows[-1].get("role") != "assistant" or clean_rows[-1].get("is_error"):
@@ -3642,8 +2900,8 @@ class ProjectChatManager:
             len(str(row.get("content", ""))) for row in selected_rows
         )
         if (
-            len(selected_rows) > _FORK_MAX_MESSAGES
-            or selected_chars > _FORK_MAX_CHARS
+            len(selected_rows) > chat_service._FORK_MAX_MESSAGES
+            or selected_chars > chat_service._FORK_MAX_CHARS
         ):
             raise ValueError("The selected turn is too large to fork")
 
@@ -3651,8 +2909,8 @@ class ProjectChatManager:
         total_chars = sum(len(str(row.get("content", ""))) for row in rows)
         truncated = False
         while (
-            len(rows) > _FORK_MAX_MESSAGES
-            or total_chars > _FORK_MAX_CHARS
+            len(rows) > chat_service._FORK_MAX_MESSAGES
+            or total_chars > chat_service._FORK_MAX_CHARS
         ):
             removed = rows.pop(0)
             total_chars -= len(str(removed.get("content", "")))
@@ -3682,14 +2940,14 @@ class ProjectChatManager:
         )
 
         fork = ChatInfo(
-            chat_id=f"chat-{_uuid8()}",
+            chat_id=f"chat-{chat_service._uuid8()}",
             project_id=source.project_id,
             title=f"{base_title} · Fork {next_index}",
             model=source.model,
             mode=source.mode,
             provider=source.provider,
             thinking_level=source.thinking_level,
-            created_at=_now_iso(),
+            created_at=chat_service._now_iso(),
             handover_messages=rows,
             handover_context_pending=True,
             forked_from_chat_id=source.chat_id,
@@ -3768,13 +3026,13 @@ class ProjectChatManager:
 
         old_provider = chat.provider
         old_model = chat.model
-        rows = _normalize_handover_messages(
+        rows = chat_service._normalize_handover_messages(
             messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         rows.append(
-            _handover_marker(
+            chat_service._handover_marker(
                 old_provider=old_provider,
                 old_model=old_model,
                 new_provider=provider,
@@ -3794,7 +3052,7 @@ class ProjectChatManager:
         # the old lineage doesn't apply. Visible history instead carries over
         # via `handover_messages` above.
         chat.previous_session_ids = []
-        chat.last_activity_at = _now_iso()
+        chat.last_activity_at = chat_service._now_iso()
 
         ctx = ChatContext.for_web(chat_id)
         self._state.reset_active_session(ctx)
@@ -3971,7 +3229,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
             return False
-        helper = _normalize_chat_helper(chat.helper)
+        helper = chat_service._normalize_chat_helper(chat.helper)
         if helper.get("archive_policy") != "when_resolved":
             return False
         if (
@@ -4220,7 +3478,7 @@ class ProjectChatManager:
                 # Leave `step` pointing at the last thing that ran: between two
                 # steps there is no current one, and blanking it would make the
                 # UI flicker back to a generic label for a few milliseconds.
-            state["updated_at"] = _now_iso()
+            state["updated_at"] = chat_service._now_iso()
             chat.postprocess = state
             self._publish_postprocess(chat)
         except Exception:  # noqa: BLE001
@@ -4249,8 +3507,8 @@ class ProjectChatManager:
             "step": expected[0] if expected else "",
             "expected": list(expected),
             "steps": {},
-            "started_at": _now_iso(),
-            "updated_at": _now_iso(),
+            "started_at": chat_service._now_iso(),
+            "updated_at": chat_service._now_iso(),
         }
         self._publish_postprocess(chat)
 
@@ -4272,7 +3530,7 @@ class ProjectChatManager:
         else:
             state["state"] = "done"
         state["step"] = ""
-        state["updated_at"] = _now_iso()
+        state["updated_at"] = chat_service._now_iso()
         chat.postprocess = state
         # Persisted so an archived chat can still report what was learned from
         # it after a restart — the run log rotates, this does not.
@@ -4774,7 +4032,7 @@ class ProjectChatManager:
         # partly-complete job is visible even before `_end_postprocess` runs.
         if view.get("state") in ("incomplete", "blocked") and state.get("state") != "running":
             state["state"] = view["state"]
-        state["updated_at"] = _now_iso()
+        state["updated_at"] = chat_service._now_iso()
         chat.postprocess = state
         self._publish_postprocess(chat)
 
@@ -5269,10 +4527,10 @@ class ProjectChatManager:
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
-        rows = _normalize_handover_messages(
+        rows = chat_service._normalize_handover_messages(
             chat.handover_messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         lines = [
             "[Provider handover messages]",
@@ -5289,7 +4547,7 @@ class ProjectChatManager:
             ])
         for msg in rows:
             role = str(msg.get("role", "")).strip().lower()
-            if role not in _HANDOVER_ROLES:
+            if role not in chat_service._HANDOVER_ROLES:
                 continue
             content = str(msg.get("content", "")).strip()
             if not content:
@@ -5612,7 +4870,7 @@ class ProjectChatManager:
         resolved = (model or "").strip()
         if provider != "claude" and is_tier(resolved):
             return self._config.default_model_for_provider(provider)
-        return _normalize_tier(resolved)
+        return chat_service._normalize_tier(resolved)
 
     def _resolve_and_validate_chat_model(
         self, model: str, provider: str, project_id: str
@@ -5853,7 +5111,7 @@ class ProjectChatManager:
         """
         path = Path(self._config.state_path).parent / "agent_tool_calls.jsonl"
         record = {
-            "timestamp": _now_iso(),
+            "timestamp": chat_service._now_iso(),
             "chat_id": chat.chat_id,
             "project_id": chat.project_id,
             "provider": chat.provider,
@@ -6275,7 +5533,7 @@ class ProjectChatManager:
         journal.begin({
             "provider": chat.provider,
             "prompt": (request.display_prompt or request.prompt)[:2000],
-            "started_at": _now_iso(),
+            "started_at": chat_service._now_iso(),
         })
 
         async def _journalled_stream():
@@ -6694,7 +5952,7 @@ class ProjectChatManager:
         chat.retry_last_error = reason
         if interval_seconds is not None:
             chat.retry_interval_seconds = interval_seconds
-        chat.retry_next_at = next_at or _iso_after(chat.retry_interval_seconds)
+        chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
         self._ensure_retry_task(chat_id)
@@ -6717,7 +5975,7 @@ class ProjectChatManager:
             return None
         images = self._resolve_retry_images(chat)
         chat.retry_attempts += 1
-        chat.retry_next_at = _iso_after(chat.retry_interval_seconds)
+        chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
         return self.start_stream(
@@ -6790,7 +6048,7 @@ class ProjectChatManager:
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
-                due = _parse_iso(chat.retry_next_at)
+                due = chat_service._parse_iso(chat.retry_next_at)
                 delay = 0.0
                 if due is not None:
                     delay = max(0.0, (due - datetime.now(UTC)).total_seconds())
@@ -6800,7 +6058,7 @@ class ProjectChatManager:
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
                 if self._broker.get(chat_id) is not None:
-                    chat.retry_next_at = _iso_after(chat.retry_interval_seconds)
+                    chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
                     self._save()
                     self._publish_retry(chat)
                     continue
@@ -6956,7 +6214,7 @@ class ProjectChatManager:
             chat_meta.user_turn_count = turn_index + 1
             if image_refs:
                 chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
-            sent_at_iso = _now_iso()
+            sent_at_iso = chat_service._now_iso()
             chat_meta.last_activity_at = sent_at_iso
             chat_meta.last_read_at = sent_at_iso  # user sending = implicitly read
             chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
@@ -7087,7 +6345,7 @@ class ProjectChatManager:
                                 and isinstance(event, ResultEvent)
                                 and current_turn_index is not None
                             ):
-                                completed_at = _now_iso()
+                                completed_at = chat_service._now_iso()
                                 started_perf = self._turn_perf_started.pop(
                                     (chat_id, current_turn_index), None
                                 )
@@ -7244,7 +6502,7 @@ class ProjectChatManager:
                                     # a session that already streamed with
                                     # "continue" rather than replaying, so
                                     # progress mid-turn never gets double-run.
-                                    if _is_retryable_quota_error(result_text):
+                                    if chat_service._is_retryable_quota_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -7254,7 +6512,7 @@ class ProjectChatManager:
                                             had_progress=had_provider_progress,
                                             reason=result_text or "quota limit",
                                         )
-                                    elif _is_retryable_connection_error(result_text):
+                                    elif chat_service._is_retryable_connection_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -7264,7 +6522,7 @@ class ProjectChatManager:
                                             had_progress=had_provider_progress,
                                             reason=result_text or "connection error",
                                         )
-                                    elif _is_retryable_auth_error(result_text):
+                                    elif chat_service._is_retryable_auth_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -7306,7 +6564,7 @@ class ProjectChatManager:
                         )
                         turn_assistant_text = turn_streamed_text
                         chat_now = self._chats.get(chat_id)
-                        completed_at = _now_iso()
+                        completed_at = chat_service._now_iso()
                         duration_ms = None
                         sent_at_rec = ""
                         if current_turn_index is not None:
@@ -7426,7 +6684,7 @@ class ProjectChatManager:
                                         "Failed to persist stream error for chat %s",
                                         chat_id,
                                     )
-                            if _is_retryable_provider_startup_error(error_msg):
+                            if chat_service._is_retryable_provider_startup_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -7436,7 +6694,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_quota_error(error_msg):
+                            elif chat_service._is_retryable_quota_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -7446,7 +6704,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_connection_error(error_msg):
+                            elif chat_service._is_retryable_connection_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -7456,7 +6714,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_auth_error(error_msg):
+                            elif chat_service._is_retryable_auth_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -7554,7 +6812,7 @@ class ProjectChatManager:
                             chat_meta2.user_turn_images[str(turn_index2)] = list(
                                 merged_image_refs
                             )
-                        sent_at_iso2 = _now_iso()
+                        sent_at_iso2 = chat_service._now_iso()
                         chat_meta2.last_activity_at = sent_at_iso2
                         chat_meta2.last_read_at = sent_at_iso2  # user sending = implicitly read
                         chat_meta2.user_turn_timings[str(turn_index2)] = {
@@ -7593,7 +6851,7 @@ class ProjectChatManager:
                 # Also re-run when the early poll fell back to the deterministic
                 # truncation — the late poll can then upgrade that fallback to
                 # the provider's native title once it finally lands.
-                _late_fallback = _fallback_title(prompt) if prompt else None
+                _late_fallback = chat_service._fallback_title(prompt) if prompt else None
                 if prompt and chat_meta and (
                     chat_meta.title == "New Chat"
                     or (_late_fallback is not None and chat_meta.title == _late_fallback)
@@ -7615,7 +6873,7 @@ class ProjectChatManager:
                 # looking like it still needs approval.
                 if chat_meta is not None:
                     permission_pending = bool(chat_meta.pending_permission)
-                    chat_meta.last_response = last_assistant_text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                    chat_meta.last_response = last_assistant_text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
                     chat_meta.last_response_status = (
                         "error" if had_error
                         else "question" if chat_meta.pending_question
@@ -7690,7 +6948,7 @@ class ProjectChatManager:
                     if chat_now is not None:
                         if chat_now.retry_status == "pending" and is_retry:
                             self._clear_chat_retry(chat_now)
-                        chat_now.last_activity_at = _now_iso()
+                        chat_now.last_activity_at = chat_service._now_iso()
                         chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
@@ -7786,7 +7044,7 @@ class ProjectChatManager:
         if chat is None:
             return None
         was_unread = (chat.last_activity_at or "") > (chat.last_read_at or "")
-        chat.last_read_at = _now_iso()
+        chat.last_read_at = chat_service._now_iso()
         self._save()
         self._cancel_pending_push(chat_id)
         self._events.publish({
@@ -7826,7 +7084,7 @@ class ProjectChatManager:
         chat_ids that were touched. Emits one `chat_read` event per chat so
         WS handlers can update incrementally.
         """
-        now = _now_iso()
+        now = chat_service._now_iso()
         touched: list[str] = []
         for chat in self._chats.values():
             if chat.archived:
@@ -8257,7 +7515,7 @@ class ProjectChatManager:
                     if ready_to_nudge:
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
-                            chat_now.last_activity_at = _now_iso()
+                            chat_now.last_activity_at = chat_service._now_iso()
                             self._save()
                         # Poke the parent to synthesize a final report. The
                         # CLI won't auto-continue the turn on its own, so
@@ -8385,7 +7643,7 @@ class ProjectChatManager:
                 count, had_subagents = opencode_collab_tree_counts(tree)
                 if count != last_count:
                     if count == 0 and last_count > 0:
-                        chat.last_activity_at = _now_iso()
+                        chat.last_activity_at = chat_service._now_iso()
                         self._save()
                         # No separate "Background agents finished" push — the
                         # chat's own result notification covers it; the extra
@@ -8560,7 +7818,7 @@ class ProjectChatManager:
                     continue
                 if chat.provider != "claude":
                     continue
-                last_active = _parse_iso(chat.last_activity_at)
+                last_active = chat_service._parse_iso(chat.last_activity_at)
                 if (
                     last_active is not None
                     and datetime.now(UTC) - last_active
@@ -8953,9 +8211,9 @@ class ProjectChatManager:
                         snippet = self._result_snippet(text)
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
-                            chat_now.last_activity_at = _now_iso()
+                            chat_now.last_activity_at = chat_service._now_iso()
                             chat_now.last_snippet = snippet
-                            chat_now.last_response = text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                            chat_now.last_response = text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
                             chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
@@ -9331,12 +8589,12 @@ class ProjectChatManager:
            ≥ 2.1.246 skips its own title generation for prompts that open
            with our injected ``[CIAO_CONTEXT_BEGIN]`` capsule — i.e. every
            Ciaobot chat — so without this tier new chats sat on tier 3.
-        3. The deterministic ``_fallback_title`` (first 6 words of the
+        3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
            prompt) so the sidebar never stays stuck on "New Chat". The
            late-turn poll can still upgrade it with a native title when one
            finally lands.
         """
-        fallback = _fallback_title(user_text)
+        fallback = chat_service._fallback_title(user_text)
 
         def _is_titling_target(title: str) -> bool:
             # "New Chat" is always a target; the deterministic fallback is also
@@ -9440,7 +8698,7 @@ class ProjectChatManager:
         except Exception:  # noqa: BLE001 — any titler failure degrades to tier 3
             logger.info("LLM title fallback failed for %s", chat.chat_id, exc_info=True)
             return None
-        return _clean_llm_title(text)
+        return chat_service._clean_llm_title(text)
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
@@ -9466,7 +8724,7 @@ class ProjectChatManager:
                 thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
                 info = thread.get("info") if isinstance(thread, dict) else None
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
-                return _real_title(title)
+                return chat_service._real_title(title)
             if provider != "claude":
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
@@ -9475,7 +8733,7 @@ class ProjectChatManager:
                 return None
             custom_title = (session_info.custom_title or "").strip()
             summary = (session_info.summary or "").strip()
-            return _real_title(custom_title) or _real_title(summary)
+            return chat_service._real_title(custom_title) or chat_service._real_title(summary)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None
@@ -9594,7 +8852,7 @@ class ProjectChatManager:
             await asyncio.sleep(1)
         return None
 
-    async def _schedule_run_needs_user(self, entry: object, outcome: ScheduleRunOutcome) -> bool:
+    async def _schedule_run_needs_user(self, entry: object, outcome: chat_service.ScheduleRunOutcome) -> bool:
         """Return True when an auto-archive schedule result deserves attention.
 
         Conservative default: if the classifier cannot produce strict JSON,
@@ -9926,7 +9184,7 @@ class ProjectChatManager:
             return {}
 
         result: dict[str, str] = {"chat_id": target_id}
-        outcome = ScheduleRunOutcome()
+        outcome = chat_service.ScheduleRunOutcome()
 
         # Job-run recording: this method swallows its own errors (the broad
         # except below sets outcome.stream_error and continues) and has a
@@ -9998,7 +9256,7 @@ class ProjectChatManager:
             # the backlog it never processed.
             if (
                 (had_error_placeholder or had_issue_placeholder)
-                and _schedule_run_clean(outcome)
+                and chat_service._schedule_run_clean(outcome)
             ):
                 await asyncio.to_thread(
                     clear_error_log, self._config.workspace_root
@@ -10024,7 +9282,7 @@ class ProjectChatManager:
         # before the archive decision so the classifier judges the completed
         # result — not an interim "dispatched, will report later" message. If
         # they don't settle in time, mark the run pending so it stays visible.
-        if _schedule_run_clean(outcome):
+        if chat_service._schedule_run_clean(outcome):
             # Drop any stale synthesis result before waiting so we only pick up
             # the turn that runs when *these* subagents finish. The drain that
             # captures it was started by start_stream's completion handler.
@@ -10069,10 +9327,10 @@ class ProjectChatManager:
             self._last_drain_result.pop(target_id, None)
 
         needs_user = False
-        if getattr(entry, "archive_policy", "manual") == "auto" and _schedule_run_clean(outcome):
+        if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):
             needs_user = await self._schedule_run_needs_user(entry, outcome)
 
-        if _should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
+        if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
             chat_meta = self._chats.get(target_id)
             project_meta = (
                 self._projects.get(chat_meta.project_id) if chat_meta else None
@@ -10100,7 +9358,7 @@ class ProjectChatManager:
                     target_id,
                 )
 
-        _sched_status, _sched_error = _schedule_dispatch_status(outcome)
+        _sched_status, _sched_error = chat_service._schedule_dispatch_status(outcome)
         # Interval entries surface their own last_status in the UI, so hand the
         # classification back. "skipped" (a permission prompt or a deferred
         # retry) is not an error, but it is not a completed run either -- report
@@ -10323,7 +9581,7 @@ class ProjectChatManager:
         if chat.archived:
             return ""
         if chat.reentry_summary:
-            normalized = _cap_reentry_summary(chat.reentry_summary)
+            normalized = chat_service._cap_reentry_summary(chat.reentry_summary)
             if normalized:
                 if normalized != chat.reentry_summary:
                     chat.reentry_summary = normalized
@@ -10354,7 +9612,7 @@ class ProjectChatManager:
         if not filtered.strip():
             return ""
 
-        transcript = _reentry_transcript_text(filtered)
+        transcript = chat_service._reentry_transcript_text(filtered)
         if not transcript.strip():
             return ""
 
@@ -10394,7 +9652,7 @@ class ProjectChatManager:
             instructions=instructions,
             timeout=30.0,
         )
-        summary = _cap_reentry_summary(generated)
+        summary = chat_service._cap_reentry_summary(generated)
         current = self._chats.get(chat_id)
         if (
             not summary
@@ -10412,7 +9670,7 @@ class ProjectChatManager:
         ext = Path(filename).suffix.lower() or ".webm"
         if ext not in _ALLOWED_VOICE_EXTENSIONS:
             raise ValueError(f"Unsupported voice format: {ext}")
-        target = self._config.media_root / f"web_voice_{_uuid8()}{ext}"
+        target = self._config.media_root / f"web_voice_{chat_service._uuid8()}{ext}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if len(data) > self._config.max_voice_size_bytes:
@@ -10534,7 +9792,7 @@ class ProjectChatManager:
             out.append({
                 "path": rel.as_posix(),
                 "vault_path": self._display_path(resolved),
-                "kind": _classify_file(resolved),
+                "kind": chat_service._classify_file(resolved),
                 "size": stat.st_size,
                 "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)
                     .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -10568,9 +9826,9 @@ class ProjectChatManager:
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:
             raise ValueError("invalid filename")
         ext = Path(base).suffix.lower()
-        if ext not in _PROJECT_UPLOAD_EXTS:
+        if ext not in chat_service._PROJECT_UPLOAD_EXTS:
             raise ValueError(f"unsupported file type: {ext or '(none)'}")
-        if len(data) > _PROJECT_UPLOAD_MAX_BYTES:
+        if len(data) > chat_service._PROJECT_UPLOAD_MAX_BYTES:
             raise ValueError("file too large")
         # Collision: foo.png -> foo-2.png -> foo-3.png ...
         target = vault_dir / base
@@ -10605,7 +9863,7 @@ class ProjectChatManager:
             "path": rel.as_posix(),
             "vault_path": self._display_path(resolved),
             "absolute_path": str(resolved),
-            "kind": _classify_file(resolved),
+            "kind": chat_service._classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)
                 .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -10618,7 +9876,7 @@ class ProjectChatManager:
         ext = Path(filename).suffix.lower() or ".jpg"
         if ext not in _ALLOWED_IMAGE_EXTENSIONS:
             raise ValueError(f"Unsupported image format: {ext}")
-        ref = f"web_{_uuid8()}{ext}"
+        ref = f"web_{chat_service._uuid8()}{ext}"
         target = self._config.media_root / ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)

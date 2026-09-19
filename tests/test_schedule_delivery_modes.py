@@ -5,11 +5,11 @@ import pytest
 
 from ciao.config import CiaoConfig
 from ciao.schedules import ScheduleEntry
-from ciao.web.project_chats import (
-    ProjectChatManager,
+from ciao.web.chat_service import (
     ScheduleRunOutcome,
     _should_auto_archive_schedule_run,
 )
+from ciao.web.project_chats import ProjectChatManager
 
 
 def _entry(*, archive: str = "auto") -> ScheduleEntry:
@@ -56,7 +56,7 @@ def test_retry_pending_stays_visible() -> None:
 
 
 def test_quota_retry_is_recorded_as_skipped_not_error() -> None:
-    from ciao.web.project_chats import _schedule_dispatch_status
+    from ciao.web.chat_service import _schedule_dispatch_status
 
     status, error = _schedule_dispatch_status(
         ScheduleRunOutcome(
@@ -75,7 +75,7 @@ def test_unsettled_subagents_are_recorded_as_skipped_not_ok() -> None:
     """A parent turn that finished while its background subagents did not
     settle is an unfinished run: recording "ok" would clear a previous error
     stamp and brand the schedule healthy while its synthesis never ran."""
-    from ciao.web.project_chats import _schedule_dispatch_status
+    from ciao.web.chat_service import _schedule_dispatch_status
 
     status, error = _schedule_dispatch_status(
         ScheduleRunOutcome(
@@ -121,7 +121,7 @@ def test_auto_policy_stays_visible_when_classifier_says_user_needed() -> None:
 def test_failed_run_is_not_clean_so_error_log_survives() -> None:
     # A 429/stream failure mid-triage must not count as clean: the
     # error-log clear in _dispatch gates on _schedule_run_clean.
-    from ciao.web.project_chats import _schedule_run_clean
+    from ciao.web.chat_service import _schedule_run_clean
 
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, is_error=False)) is True
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, stream_error=True)) is False
@@ -135,7 +135,7 @@ def test_pending_background_subagents_keep_run_unclean() -> None:
     # A parent turn that finished cleanly but left background subagents
     # running is not "done": it must not count as clean (so it stays visible
     # and is not auto-archived on a half-complete result).
-    from ciao.web.project_chats import _schedule_run_clean
+    from ciao.web.chat_service import _schedule_run_clean
 
     assert (
         _schedule_run_clean(
@@ -187,7 +187,7 @@ def test_auto_policy_does_not_archive_interim_subagent_text() -> None:
     )
     # It is reported as skipped-with-reason, not ok: the dispatch row must
     # tell the story instead of reading "ok".
-    from ciao.web.project_chats import _schedule_run_clean
+    from ciao.web.chat_service import _schedule_run_clean
 
     assert _schedule_run_clean(outcome) is False
 
