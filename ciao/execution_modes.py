@@ -64,13 +64,14 @@ def harness_skill_overrides() -> dict[str, str]:
 # the right default; for Ciaobot's own control plane it isn't. Each tool below
 # is the programmatic twin of a button in the PWA, is bearer-token scoped to
 # this instance, and lands in a UI where its effect is visible and reversible.
-# Prompting "Approve use of mcp__ciaobot__loop_create?" one line after the user
-# asked for a loop is friction with no safety value, so these names are handed
-# to ``ClaudeAgentOptions.allowed_tools`` and never reach the PermissionGate.
+# Prompting "Approve use of mcp__ciaobot__schedule?" one line after the user
+# asked for an automation is friction with no safety value, so these names are
+# handed to ``ClaudeAgentOptions.allowed_tools`` and never reach the
+# PermissionGate.
 #
 # The cut is the ``_DESTRUCTIVE`` annotation in ``ciao/mcp_server.py``: deletes
 # and lifecycle actions (``chat_delete``, ``project_delete``, ``chat_stop``,
-# ``schedule_action``, ``loop_action``, ``project_complete``), plus
+# ``schedule_action``, ``project_complete``), plus
 # ``background_run_start`` / ``background_run_cancel``, which execute and kill
 # real commands, are deliberately absent and still raise a card.
 # ``tests/test_mcp_server.py``
@@ -83,6 +84,10 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "memory_status",
     "memory_update",
     "vault_search",
+    # The scoped evidence drill-down. Read-only and strictly narrower than the
+    # file read it replaces: it can only widen context inside a note this
+    # workspace's own search already matched.
+    "vault_expand",
     "gws_status",
     "projects_list",
     "project_get",
@@ -106,10 +111,6 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "background_run_status",
     "schedules_list",
     "schedule",
-    # Deprecated aliases onto interval schedules; still auto-approved while
-    # they exist so a model reaching for the old name is not a friction wall.
-    "loops_list",
-    "loop",
     "file_surface",
 )
 
@@ -130,3 +131,125 @@ def auto_approved_mcp_tool_names(server: str = MCP_SERVER_NAME) -> list[str]:
 # exact thing the operator chose Manual mode to prevent. Shared here so the
 # Claude and opencode providers cannot drift apart on the carve-out.
 CONTROL_PLANE_PREAPPROVED_MODES: frozenset[str] = frozenset({"auto", "bypass"})
+
+
+# ── Credential and runtime-state path denies ─────────────────────────────
+# The one carve-out no permission mode may buy its way out of, shared here so
+# the Claude and opencode providers cannot drift apart on it (same reason as
+# CONTROL_PLANE_PREAPPROVED_MODES above).
+#
+# Why these paths. ``<workspace_root>/.env`` holds ``PWA_AUTH_TOKEN``; a model
+# that reads it can POST it to ``/api/auth/login`` (ciao/web/routes_auth.py)
+# and get an owner session cookie, which carries the full PWA REST API —
+# strictly wider than the chat-scoped MCP bearer token the same process was
+# handed, and it reaches every route the MCP catalog deliberately withholds
+# (workspace delete, deploy, browser-session admin). ``.runtime/`` holds the
+# chat/project/schedule stores the control plane guards behind
+# ``runtime_file_forbidden`` (ciao/control_plane.py), so a direct write walks
+# around the control plane rather than through it. ``secrets/`` is OAuth
+# material.
+#
+# Anchored with ``**`` rather than at the workspace root. opencode resolves a
+# tool's path to an absolute one before matching a rule, so a relative
+# ``.runtime/**`` would never match; and for a deny, also catching a nested
+# ``.env`` deeper in the tree is the conservative direction. The cost is that
+# an agent asked to inspect some *other* project's ``.env`` is refused too.
+#
+# ``.env.*`` is deliberately NOT here. This repo ships ``.env.example`` and the
+# release pipeline copies it (``ciao/public_release.py``), and the two existing
+# ``.env.*`` guards in this codebase both carve the template names out
+# (``git_sync._protected_path``, ``local_session.py``) — a template is not a
+# secret is an established convention here. A glob deny cannot express "all of
+# ``.env.*`` except these four", and since this list is prepended outside the
+# workspace extras there would be no operator opt-out either. The credential
+# that motivates this list lives in exactly one file, ``<workspace_root>/.env``
+# (``mcp_server._workspace_env_path``), so that is what is denied.
+#
+# What this does NOT cover, stated plainly. First, the shell: Claude's
+# ``Bash(cmd:*)`` rules are prefix matches on the command line and opencode's
+# ``bash`` pattern likewise matches the command, not a path — no glob can
+# path-scope a shell. Closing that needs a sandbox, not a denylist. Second,
+# ``**/.runtime/**`` is a *name*, while the real runtime root is operator-
+# configurable through ``CIAO_RUNTIME_ROOT``. Callers that can resolve it pass
+# it in (see the ``runtime_root`` argument below); the static pattern alone
+# only covers the default layout.
+CREDENTIAL_DENY_PATTERNS: tuple[str, ...] = (
+    "**/.env",
+    "**/.runtime/**",
+    "**/secrets/**",
+)
+
+
+def _runtime_root_patterns(runtime_root: object) -> tuple[str, ...]:
+    """Absolute deny patterns for a resolved, non-default runtime root.
+
+    ``CIAO_RUNTIME_ROOT`` can put ``state.json`` and the chat/project/schedule
+    stores anywhere, including outside the workspace tree, where no
+    ``**/.runtime/**`` pattern reaches them. A caller that has resolved the
+    real root hands it over and gets a pattern that matches it exactly, so the
+    guarantee stops depending on the directory being *named* ``.runtime``.
+    """
+    if not runtime_root:
+        return ()
+    root = str(runtime_root).rstrip("/")
+    if not root:
+        return ()
+    return (root, f"{root}/**")
+
+# Claude's native file tools, as ``disallowed_tools`` names them. ``Glob`` and
+# ``Grep`` are included so the paths do not leak through a listing either.
+CLAUDE_CREDENTIAL_DENY_TOOLS: tuple[str, ...] = (
+    "Read",
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookRead",
+    "Glob",
+    "Grep",
+)
+
+# The same tools under opencode's lowercase permission names.
+OPENCODE_CREDENTIAL_DENY_PERMISSIONS: tuple[str, ...] = (
+    "read",
+    "edit",
+    "write",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+)
+
+
+def credential_path_deny_rules(runtime_root: object = None) -> tuple[str, ...]:
+    """``Tool(pattern)`` deny rules for Claude's ``disallowed_tools``.
+
+    Unconditional: unlike the harness denylist these are NOT part of the
+    per-workspace ``disallowed_tools`` default, so neither an operator's custom
+    "Extra disallowed tools" list nor the literal ``none`` opt-out clears them.
+    A denylist escape hatch that also unlocks ``PWA_AUTH_TOKEN`` is not an
+    escape hatch anyone asked for.
+
+    ``runtime_root`` is the resolved runtime directory when the caller knows
+    it; see :func:`_runtime_root_patterns`.
+    """
+    patterns = (*CREDENTIAL_DENY_PATTERNS, *_runtime_root_patterns(runtime_root))
+    return tuple(
+        f"{tool}({pattern})"
+        for tool in CLAUDE_CREDENTIAL_DENY_TOOLS
+        for pattern in patterns
+    )
+
+
+def opencode_credential_deny_rules(runtime_root: object = None) -> list[dict[str, str]]:
+    """The same denies as opencode session permission rules.
+
+    Appended last by ``ciao.providers.opencode.mode_settings``: opencode
+    resolves rules last-match-wins, so placed first the wildcard ``allow`` in
+    ``auto``/``bypass`` would override them.
+    """
+    patterns = (*CREDENTIAL_DENY_PATTERNS, *_runtime_root_patterns(runtime_root))
+    return [
+        {"permission": permission, "pattern": pattern, "action": "deny"}
+        for permission in OPENCODE_CREDENTIAL_DENY_PERMISSIONS
+        for pattern in patterns
+    ]

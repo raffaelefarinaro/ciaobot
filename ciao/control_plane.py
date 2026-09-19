@@ -20,8 +20,11 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ciao import vault_index
+from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
+    EXPAND_MAX_WINDOWS,
+    expand_note,
     get_db_path,
     index_vault,
     init_db,
@@ -505,6 +508,8 @@ class CiaoControlPlane:
         match: str = "",
     ) -> dict[str, Any]:
         """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        from ciao.memory_tool import MemoryLockError
+
         workspace = self._workspace(principal)
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
@@ -516,6 +521,10 @@ class CiaoControlPlane:
         )
         guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
         try:
+            vault_root = Path(self.config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            vault_root = None
+        try:
             result = update_region(
                 guide,
                 canonical,
@@ -523,7 +532,16 @@ class CiaoControlPlane:
                 entry=entry,
                 match=match,
                 char_limit=limit,
+                actor="agent",
+                source="mcp",
+                workspace=workspace,
+                vault_root=vault_root,
             )
+        except MemoryLockError as exc:
+            # Retryable, and explicitly not a success: the region is unchanged.
+            raise ControlPlaneError(
+                "memory_update_locked", f"memory is busy; retry: {exc}", retryable=True
+            ) from exc
         except ValueError as exc:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)
@@ -625,7 +643,22 @@ class CiaoControlPlane:
             return Path(base)
         return Path(self.config.vault_root).parent
 
-    def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
+    def _search_runtime_dir(self) -> Path | None:
+        """The install runtime directory that owns this install's search index.
+
+        Every control-plane entry point resolves its database through this, so
+        the MCP tools cannot disagree with the CLI or startup indexing about
+        which database belongs to this install. Falls back to the install root's
+        ``.runtime`` when a minimal config stub has no ``state_path`` — the same
+        directory the server uses.
+        """
+        state_path = getattr(self.config, "state_path", None)
+        if state_path:
+            return Path(state_path).parent
+        base = self._search_key_base()
+        return base / ".runtime"
+
+    async def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.
 
         Keys are stored relative to the install root so two agent roots holding
@@ -634,30 +667,121 @@ class CiaoControlPlane:
         the isolation used to be a side effect of the index prune deleting every
         other root's rows on each pass, which also meant switching workspace
         re-indexed the whole vault.
+
+        Scope is resolved on the calling thread so a bad principal fails fast;
+        the incremental index pass and the search itself run in a bounded worker,
+        which opens and closes its own SQLite connection there so a connection
+        never crosses threads. Identical in-flight searches coalesce.
         """
         root = self._vault_root(principal)
         base = self._search_key_base()
-        db_path = get_db_path()
-        conn = sqlite3.connect(db_path)
-        try:
-            init_db(conn)
-            index_vault(conn, root, path_base=base)
-            rows = search_vault(
-                conn,
-                query,
-                limit=max(1, min(50, int(limit))),
-                path_prefix=vault_key_prefix(root, base),
-            )
-        finally:
-            conn.close()
-        # Retrieval telemetry for the decay-by-disuse audit: which notes recall
-        # actually uses. Best-effort; never blocks the search result.
-        record_search_hits(
-            Path(self.config.state_path).parent, query, [row["path"] for row in rows]
-        )
+        runtime_dir = self._search_runtime_dir() or (base / ".runtime")
+        bounded_limit = max(1, min(50, int(limit)))
+
+        def _search() -> list[dict[str, str]]:
+            # Install-owned database (SYS-03), resolved inside the worker so the
+            # connection and its path never cross threads.
+            db_path = get_db_path(self._search_runtime_dir())
+            conn = sqlite3.connect(db_path)
+            try:
+                # Serialize the write phase per database file. Distinct query
+                # keys run concurrently, but SQLite takes one file-level write
+                # lock, so two index passes against this database would race it
+                # and fail with "database is locked" once a scan outlasts the
+                # connection timeout. The search that follows is read-only and
+                # does not need the lock.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_vault(conn, root, path_base=base)
+                rows = search_vault(
+                    conn,
+                    query,
+                    limit=bounded_limit,
+                    path_prefix=vault_key_prefix(root, base),
+                )
+            finally:
+                conn.close()
+            # Retrieval telemetry for the decay-by-disuse audit: which notes
+            # recall actually uses. Best-effort, and appended here so the whole
+            # read (SQLite plus this write) stays in one worker.
+            record_search_hits(runtime_dir, query, [row["path"] for row in rows])
+            return rows
+
+        key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
+        rows = await run_read(key, _search)
         return _ok(rows)
 
-    def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
+    async def vault_expand(
+        self,
+        principal: McpPrincipal,
+        path: str,
+        query: str = "",
+        windows: int = EXPAND_MAX_WINDOWS,
+    ) -> dict[str, Any]:
+        """Bounded extra context from ONE note ``vault_search`` already matched.
+
+        The scoped drill-down for the case the snippet rule cannot serve: a
+        32-token snippet that cut away the qualification, the negation, or the
+        paragraph naming the current value, leaving recall to answer from a
+        fragment that reverses the meaning of the note.
+
+        It refines that rule rather than replacing it, and the scope is the
+        same one ``vault_search`` answers under. ``path`` must be a key the FTS
+        index currently holds beneath this workspace's prefix, so it can only
+        ever name a note this principal's own search could have returned;
+        anything else — another workspace's note, a transcript, an opted-out
+        note, a traversal, an absolute path — is ``note_not_matched``, not a
+        smaller answer. What comes back is the markdown section around each
+        matched line, capped in windows, lines and characters, never the note.
+
+        There is no expiring result handle to go stale: the index pass and the
+        file read both happen here, so an edited note is answered at its
+        current revision and a removed one is refused.
+        """
+        root = self._vault_root(principal)
+        base = self._search_key_base()
+        bounded_windows = max(1, min(EXPAND_MAX_WINDOWS, int(windows)))
+        target = str(path or "").strip()
+        if not target:
+            raise ControlPlaneError(
+                "invalid_request",
+                "Pass the 'path' of a vault_search result to expand.",
+            )
+
+        def _expand() -> dict[str, Any] | None:
+            db_path = get_db_path(self._search_runtime_dir())
+            conn = sqlite3.connect(db_path)
+            try:
+                # Same write lock and incremental pass as vault_search: the
+                # expansion is validated against a current index, so a note
+                # edited or removed since the search is refreshed or refused
+                # rather than answered from a stale row.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_vault(conn, root, path_base=base)
+                return expand_note(
+                    conn,
+                    base,
+                    root,
+                    target,
+                    query,
+                    path_prefix=vault_key_prefix(root, base),
+                    max_windows=bounded_windows,
+                )
+            finally:
+                conn.close()
+
+        key = f"vault_expand:{root}:{base}:{target}:{query}:{bounded_windows}"
+        result = await run_read(key, _expand)
+        if result is None:
+            raise ControlPlaneError(
+                "note_not_matched",
+                "That path is not a current vault_search result in this "
+                "workspace. Run vault_search and expand a path it returned.",
+            )
+        return _ok(result)
+
+    async def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.
 
         The index root is ``agent_vault_root(workspace)``, which is correct in
@@ -673,27 +797,41 @@ class CiaoControlPlane:
 
         The FTS index stays workspace-scoped: it backs ``vault_search``, whose
         isolation boundary is ``_vault_root(principal)``.
+
+        The scan and both SQLite index passes run together in a bounded worker;
+        the worker opens and closes its own connection so it never crosses
+        threads. Scope is resolved on the calling thread first.
         """
         search_root = self._vault_root(principal)
         index_root = self._entity_index_root(principal)
-        entries = vault_index.scan_vault(
-            index_root, workspace=self._index_stamp(principal)
-        )
-        vault_index.write_index_file(entries, index_root / "INDEX.md")
-        db_path = get_db_path()
-        conn = sqlite3.connect(db_path)
-        try:
-            init_db(conn)
-            indexed, removed = index_vault(
-                conn, search_root, path_base=self._search_key_base()
-            )
-        finally:
-            conn.close()
-        return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
+        stamp = self._index_stamp(principal)
+        base = self._search_key_base()
+        runtime_dir = self._search_runtime_dir()
+
+        def _refresh() -> tuple[int, int, int]:
+            entries = vault_index.scan_vault(index_root, workspace=stamp)
+            vault_index.write_index_file(entries, index_root / "INDEX.md")
+            # Install-owned database (SYS-03), resolved inside the worker.
+            db_path = get_db_path(runtime_dir)
+            conn = sqlite3.connect(db_path)
+            try:
+                # Same database-file write lock as vault_search: an index
+                # refresh and a search can land on the same SQLite file, so the
+                # write phase is serialized per database.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    indexed, removed = index_vault(conn, search_root, path_base=base)
+            finally:
+                conn.close()
+            return len(entries), indexed, removed
+
+        key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}"
+        notes, indexed, removed = await run_read(key, _refresh)
+        return _ok({"notes": notes, "fts_indexed": indexed, "fts_removed": removed})
 
     # ---- vault review --------------------------------------------------
 
-    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "", defer_days: int = 7) -> dict[str, Any]:
+    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "") -> dict[str, Any]:
         """Inspect candidates or record an explicit, scoped note disposition.
 
         Destructive operations are intentionally separate from ``decide`` and
@@ -720,6 +858,16 @@ class CiaoControlPlane:
             except ValueError as exc:
                 raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
             return _ok(result)
+        # Validated before the queue is regenerated below: `record_decision`
+        # raises on a bad disposition, but by then `write_queue=True` has
+        # already rewritten `Workspace/Vault-Review.md`, so a rejected call
+        # still did work. Naming the valid set also makes the error actionable
+        # for an agent following a stale instruction.
+        if action == "decide" and disposition not in review.DECISION_DISPOSITIONS:
+            raise ControlPlaneError(
+                "vault_review_invalid",
+                f"disposition must be one of {sorted(review.DECISION_DISPOSITIONS)}.",
+            )
         # `list` and `inspect` are declared read-only to the MCP host, so they
         # must not refresh the queue projection either.
         candidates = review.generate_candidates(
@@ -737,7 +885,7 @@ class CiaoControlPlane:
             if action == "inspect":
                 return _ok(item.as_dict())
             if action == "decide":
-                result = review.record_decision(root, item, disposition, defer_days=defer_days)
+                result = review.record_decision(root, item, disposition)
                 review.generate_candidates(root, workspace=workspace, write_queue=True)
                 return _ok(result)
             if action == "trash":
@@ -1179,7 +1327,7 @@ class CiaoControlPlane:
             )
         )
 
-    # ---- schedules/loops ----------------------------------------------
+    # ---- schedules ----------------------------------------------------
 
     def _schedule_payload(self, entry: ScheduleEntry) -> dict[str, Any]:
         data = asdict(entry)
@@ -1540,187 +1688,6 @@ class CiaoControlPlane:
         deleted = self.schedules.delete(schedule_id)
         publish_automations_changed(self.pcm)
         return _ok({"deleted": deleted, "schedule_id": schedule_id})
-
-    # ---- loops (compatibility) -----------------------------------------
-    # Loops became the `interval` cadence of a schedule. These methods keep the
-    # retired tool surface working for one release by translating to and from
-    # interval schedules; the `schedule` tool with frequency="interval" is the
-    # real API. Remove them, and the `loop*` MCP tools, in the release after
-    # next.
-
-    def _loop_payload(self, entry: ScheduleEntry) -> dict[str, Any]:
-        """An interval schedule rendered in the retired Loop shape."""
-        return {
-            "loop_id": entry.schedule_id,
-            "schedule_id": entry.schedule_id,
-            "prompt": entry.prompt,
-            "web_chat_id": entry.web_chat_id or "",
-            "web_project_id": entry.web_project_id or "",
-            "workspace": entry.workspace,
-            "created_at": entry.created_at,
-            "interval_minutes": entry.interval_minutes,
-            "title": entry.title,
-            # One flag replaced two: a stopped entry neither ticks now nor
-            # resumes on the next boot, so both legacy fields report it.
-            "autostart": entry.enabled,
-            "running": entry.enabled,
-            "last_run_at": entry.last_dispatched_at,
-            "last_status": entry.last_status,
-            "scope": entry.scope,
-        }
-
-    def _interval_entries(self) -> list[ScheduleEntry]:
-        return [entry for entry in self.schedules.list_entries() if is_interval(entry)]
-
-    def loops_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        rows = []
-        for entry in self._interval_entries():
-            if not entry.web_chat_id:
-                continue
-            try:
-                self._chat(principal, entry.web_chat_id)
-            except ControlPlaneError:
-                continue
-            rows.append(self._loop_payload(entry))
-        return _ok(rows)
-
-    def loop_create(
-        self,
-        principal: McpPrincipal,
-        chat_id: str = "",
-        prompt: str = "",
-        interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
-        title: str = "",
-        autostart: bool = False,
-        start: bool = True,
-    ) -> dict[str, Any]:
-        chat, project = self._chat_scope(principal, chat_id)
-        text = prompt.strip()
-        if not text:
-            raise ControlPlaneError("empty_prompt", "Prompt is required.")
-        try:
-            minutes = normalize_interval_minutes(interval_minutes)
-        except ValueError as exc:
-            raise ControlPlaneError("invalid_interval", str(exc)) from exc
-        entry = self.schedules.create(
-            daily_time_utc="",
-            prompt=text,
-            # Empty model/mode is what makes each run inherit the target chat's
-            # own settings, which is how loops always behaved.
-            model="",
-            mode="",
-            chat_id=0,
-            frequency=INTERVAL_FREQUENCY,
-            interval_minutes=minutes,
-            web_chat_id=chat.chat_id,
-            title=title,
-            workspace=project.workspace,
-        )
-        # `start` and `autostart` collapsed into `enabled`: the split existed so
-        # a loop could tick until the next restart and then be silently dead,
-        # which is the "model says running, loop isn't" failure it was meant to
-        # prevent. Either flag now means "run it".
-        stamp_fallback_project(entry, self.pcm)
-        if not (start or autostart):
-            entry.enabled = False
-        self.schedules.replace(entry)
-        publish_automations_changed(self.pcm)
-        return _ok(self._loop_payload(entry))
-
-    def _loop(self, principal: McpPrincipal, loop_id: str) -> ScheduleEntry:
-        entry = next(
-            (item for item in self._interval_entries() if item.schedule_id == loop_id),
-            None,
-        )
-        if entry is None:
-            raise ControlPlaneError("loop_not_found", f"Loop '{loop_id}' was not found.")
-        # Same workspace boundary `_schedule` enforces. Loops always carried a
-        # `web_chat_id`, so the chat check below was the only scope check they
-        # ever needed; interval schedules can be project-bound and carry none,
-        # which left this deprecated surface as an unguarded second door onto
-        # another workspace's automations — and both `loop` and `loop_action`
-        # are auto-approved, so no card would have been raised either.
-        if entry.workspace and entry.workspace != principal.workspace:
-            raise ControlPlaneError(
-                "workspace_forbidden", "Loop belongs to another workspace."
-            )
-        # Packaged routines are read-only through `schedule`/`schedule_action`
-        # (`system_schedule_read_only` / `schedule_not_removable`). Every
-        # `_loop` caller mutates, runs, or deletes, so refuse them outright
-        # here rather than let the deprecated shape reach a row the supported
-        # surface protects. No packaged routine is interval-cadenced today;
-        # this keeps that from silently becoming a hole if one ever is.
-        if entry.scope == "system" or not entry.removable:
-            raise ControlPlaneError(
-                "system_schedule_read_only",
-                "This is a system routine; manage it with `schedule`, not `loop`.",
-            )
-        if entry.web_chat_id:
-            self._chat(principal, entry.web_chat_id)
-        return entry
-
-    def loop_update(self, principal: McpPrincipal, loop_id: str, **changes: Any) -> dict[str, Any]:
-        entry = self._loop(principal, loop_id)
-        supplied = {key: value for key, value in changes.items() if value is not None}
-        unknown = sorted(
-            set(supplied)
-            - {"chat_id", "web_chat_id", "prompt", "title", "interval_minutes", "autostart"}
-        )
-        if unknown:
-            raise ControlPlaneError("invalid_fields", f"Unknown loop fields: {', '.join(unknown)}")
-        target_chat = supplied.pop("chat_id", None) or supplied.pop("web_chat_id", None)
-        if target_chat is not None:
-            chat, project = self._chat_scope(principal, str(target_chat))
-            entry.web_chat_id = chat.chat_id
-            entry.web_project_id = None
-            entry.web_project_name = ""
-            entry.workspace = project.workspace
-            # Retargeting moves where this entry re-homes.
-            stamp_fallback_project(entry, self.pcm)
-        if "prompt" in supplied:
-            entry.prompt = str(supplied["prompt"])
-        if "title" in supplied:
-            entry.title = str(supplied["title"])
-        if "interval_minutes" in supplied:
-            try:
-                entry.interval_minutes = normalize_interval_minutes(
-                    supplied["interval_minutes"]
-                )
-            except ValueError as exc:
-                raise ControlPlaneError("invalid_interval", str(exc)) from exc
-        if "autostart" in supplied:
-            entry.enabled = bool(supplied["autostart"])
-        self.schedules.replace(entry)
-        publish_automations_changed(self.pcm)
-        return _ok(self._loop_payload(entry))
-
-    def loop_start(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        entry = self._loop(principal, loop_id)
-        entry.enabled = True
-        self.schedules.replace(entry)
-        publish_automations_changed(self.pcm)
-        return _ok(self._loop_payload(entry))
-
-    def loop_stop(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        entry = self._loop(principal, loop_id)
-        entry.enabled = False
-        self.schedules.replace(entry)
-        publish_automations_changed(self.pcm)
-        return _ok({"loop_id": loop_id, "running": False})
-
-    async def loop_run(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        self._loop(principal, loop_id)
-        result = self._raise_if_run_refused(await self.schedules.dispatch_now(loop_id))
-        publish_automations_changed(self.pcm)
-        return _ok({**result, "loop_id": loop_id})
-
-    def loop_delete(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
-        self._loop(principal, loop_id)
-        deleted = self.schedules.delete(loop_id)
-        publish_automations_changed(self.pcm)
-        return _ok({"deleted": deleted, "loop_id": loop_id})
-
 
     # ---- workspace files/assets ---------------------------------------
 

@@ -13,12 +13,14 @@ from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
+from ciao.web.chat_service import (
+    _cap_reentry_summary,
+    _reentry_transcript_text,
+)
 from ciao.web.project_chats import (
     McpUnavailableError,
     ProjectChatManager,
     _StreamOutcome,
-    _cap_reentry_summary,
-    _reentry_transcript_text,
 )
 
 from tests.conftest import attach_stub_mcp

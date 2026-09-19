@@ -274,7 +274,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     // count reported a stalled chat as still busy, and hid the one signal
     // here that the user can act on.
     const status = workLane.find('.home-lane-status-text').text()
-    expect(status).toContain('1 insights extraction failed')
+    expect(status).toContain('1 chat with unfinished steps')
     expect(status).not.toContain('tidying up')
     wrapper.unmount()
   })
@@ -301,7 +301,38 @@ describe('HomeRecentChats lanes and tiers', () => {
     // attention. no agents working. 1 chat tidying up." — three clauses, none
     // of which mention that something stopped and needs a retry.
     expect(workLane.find('.home-lane-status-text').text())
-      .toBe('nothing needs your attention. no agents working. 1 insights extraction failed.')
+      .toBe('nothing needs your attention. no agents working. 1 chat with unfinished steps.')
+    wrapper.unmount()
+  })
+
+  it('names the unfinished manifest stages on a partially-complete row', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'c-partial-work', project_id: 'work-project', title: 'Partial work chat',
+        created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
+        archived: true, local: true, archive_path: 'archive/partial.md',
+        postprocess: {
+          state: 'incomplete',
+          steps: { insights: { status: 'ok' } },
+          job: {
+            job_id: 'j', state: 'incomplete',
+            unfinished: ['project_doc_update', 'memory_proposals'],
+          },
+        },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    const row = workLane.find('.home-tier--failed .home-chat-item')
+    expect(row.find('.home-chat-tidy-note').text())
+      .toBe('project doc, memory proposals not finished')
+    expect(row.find('.home-chat-retry').exists()).toBe(true)
     wrapper.unmount()
   })
 

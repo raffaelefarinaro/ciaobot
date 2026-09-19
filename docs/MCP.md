@@ -25,9 +25,30 @@ flowchart LR
     CP --> MANAGERS["PWA domain managers and stores"]
 ```
 
-- The server issues a random bearer token scoped to chat, project, workspace,
-  provider, and role. Tokens are reused only for that scope, expire, and are
-  revoked on session reset, handover, archive, or deletion.
+- The server issues a random bearer token carrying a principal of chat,
+  project, workspace, provider, and role. Tokens are reused only for that
+  scope, expire after 12 h, and are revoked on session reset, handover,
+  archive, or deletion.
+- **What that scope enforces, precisely.** The authorization checks are
+  *workspace* confinement plus *chat attribution* — not chat isolation. Every
+  ownership test terminates in `CiaoControlPlane._workspace`, which compares
+  against `principal.workspace`, and `_chat_scope` authorizes any chat through
+  the workspace of the project that owns it. So a chat's token can read,
+  message, retitle, fork, archive and delete **other chats in the same
+  workspace**; it cannot touch another workspace. The chat half of the
+  principal is what drives the plan-mode gate, the child-mode ceiling,
+  background-run ownership, revocation granularity, and per-chat telemetry —
+  and it lets a tool recognise its own chat so it does not tear down its own
+  caller. Do not read "scoped to chat" as a sandbox between chats.
+- The scope is also not a containment boundary against the model itself. The
+  same process holds native Read/Bash/Edit over its workspace root, so the
+  control plane is the *convenient* path to Ciaobot state, not the only one.
+  `.env` (which holds `PWA_AUTH_TOKEN`, a strictly wider credential),
+  `.runtime/` (by name, and by the resolved `CIAO_RUNTIME_ROOT` path when a
+  caller can reach it), and `secrets/` are denied to the native file tools on
+  both providers — see `credential_path_deny_rules` in
+  `ciao/execution_modes.py`, which also states what that deny does not cover
+  (the shell) and why `.env.example` and the other templates are excluded.
 - Ciaobot injects credentials only while it launches the provider process.
   They are not placed in the normal model shell environment. Claude receives
   the token in the SDK MCP header configuration; opencode receives equivalent
@@ -48,6 +69,11 @@ flowchart LR
 - Tool telemetry is appended to `.runtime/mcp_tool_calls.jsonl`; provider tool
   selection is appended to `.runtime/agent_tool_calls.jsonl`. Neither file
   records tool arguments.
+- `mcp_tool_calls.jsonl` is size-capped like the job-run log: past ~2 MB it is
+  trimmed to the newest 2000 records. Detailed records therefore cover only
+  that retained window, but the per-tool counters of everything dropped are
+  rolled into `.runtime/mcp_tool_calls_totals.json` first, so the Settings
+  usage table keeps reporting lifetime call, error, and duration totals.
 
 ## Managed Claude Code configuration
 
@@ -92,6 +118,16 @@ For opencode, Ciaobot launches a per-chat server with the scoped MCP endpoint
 and token. Project-scoped servers remain in the workspace `.mcp.json`; generated
 provider assets are marker-owned and are pruned only when their markers match.
 
+This is the real cost of per-chat scope: opencode's MCP configuration is
+server-wide, so one token per chat means one `opencode serve` per chat. Those
+processes are reclaimed by an idle sweep —
+`ProjectChatManager.reap_idle_providers`, every
+`CIAO_PROVIDER_REAP_INTERVAL` seconds (default 120), for any chat quiet for
+`CIAO_PROVIDER_IDLE_TIMEOUT` seconds (default 900) with no stream, drain,
+retry loop, pending background wake, or parked question. Reclaiming only
+releases the provider: the chat's `session_id` is persisted, so the next turn
+reconnects and resumes.
+
 Static configuration in an unrelated terminal is intentionally unsupported:
 the token is a live chat capability, not an operator credential. Use Ciaobot's
 managed Claude Code or opencode process so scope, revocation, deferred
@@ -99,16 +135,18 @@ self-actions, and telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 34 explicit tools. The MCP `tools/list` response is the
+The catalog contains 32 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/opencode session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
-- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage, `memory_update` for a typed bounded edit, and the proposal tools for review/dismissal.
+- **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage and `memory_update` for a typed bounded edit (the region cap is advisory — the write goes through and reports `over_cap`). Review, accept, and dismiss the proposals queue through the PWA; the one deliberate CLI exception is `ciao memory-proposal-add` / `ciao memory-proposals` / `ciao memory-proposal-dismiss`, which the nightly curation agent drives because one shell command beats a synchronous MCP round-trip per row.
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
-  replicate.
+  replicate — and `vault_expand` with it: recall is forbidden a full-note
+  read, so the bounded drill-down is the only way to widen a truncated
+  snippet, and a file tool cannot enforce that bound.
 - **Workspace file** read/write and **file history/snapshots** → the model's
   native Read/Write/Glob tools and the workspace git repo.
 - **Workspace config** (update/delete) → the PWA Settings UI
@@ -140,29 +178,41 @@ skill surface (admin or redundant with native tools).
 | Domain | Tools |
 |---|---|
 | Context | `context_get` (includes `system` status) |
-| Bounded memory | `memory_status`, `memory_update` (review proposals via the CLI: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
-| Vault | `vault_search`, `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
+| Bounded memory | `memory_status`, `memory_update` (cap is advisory; proposals are reviewed in the PWA, or via the curation agent's CLI exception: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
+| Vault | `vault_search`, `vault_expand` (bounded extra context from a note `vault_search` already matched), `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
 | Google Workspace | `gws_status` (read-only connection/token health) |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
 | Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
-| Loops (deprecated) | `loops_list`, `loop` (create/update), `loop_action` (start/stop/run/delete) |
 | Workspace files | `file_surface` |
+
+`vault_search` does an incremental FTS index pass plus the query. That work runs
+in a bounded off-loop worker (`ciao/async_reads.py`), so a large-vault scan does
+not stall the event loop that serves other MCP calls and `/ws/chat` keepalives.
+`vault_expand` runs the same pass before it answers, which is what makes the
+search result path a safe reference: there is no expiring handle, so an edited
+note is answered at its current revision and a removed one is refused. Its
+`path` must be a key the index currently holds under this workspace's prefix,
+so it can only widen a note this principal's own search could have returned,
+and what comes back is the markdown block around each matched line — capped in
+windows, lines and characters — never the note.
+Identical concurrent searches coalesce into one scan, and each worker owns its
+SQLite connection for its whole lifetime.
 
 **Sub-day recurrence** is `schedule` with `frequency="interval"` and
 `interval_minutes`. Combined with `chat_id` it keeps one conversation going and
 inherits that chat's model and mode; combined with `project_id` it opens a
 fresh chat per run.
 
-The `loops_list` / `loop` / `loop_action` tools are **deprecated** and translate
-onto interval schedules for one release. Loops were a separate primitive with
-two runtime flags — `start` (tick now) and `autostart` (come back after a
-restart) — which were routinely conflated: a loop created with
-`autostart=true` reported as running while the PWA banner correctly said
-`stopped`. The merged primitive has one `enabled` flag, and both legacy fields
-report it.
+The retired `loops_list` / `loop` / `loop_action` tools were removed. Loops were
+a separate primitive with two runtime flags — `start` (tick now) and
+`autostart` (come back after a restart) — which were routinely conflated: a loop
+created with `autostart=true` reported as running while the PWA banner correctly
+said `stopped`. The merged primitive has one `enabled` flag, and a legacy
+`.runtime/loops.json` is imported once on startup as interval schedules (see
+`ciao/schedules.py::migrate_loops`).
 
 **Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
 SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
@@ -171,7 +221,7 @@ app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_action`, `chat_delete`, `chat_stop`,
 `background_run_start`, `background_run_cancel`, `schedule_action`,
-`loop_action`, `vault_review`) are deliberately excluded and
+`vault_review`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

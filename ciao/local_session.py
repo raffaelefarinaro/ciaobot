@@ -17,11 +17,12 @@ resolution runs as a normal PWA chat dispatched from the route layer.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
 from pathlib import Path
+
+from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git
 
 logger = logging.getLogger(__name__)
 
@@ -101,26 +102,35 @@ Report what you resolved and any decisions you made.
 
 
 async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=str(workspace),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    if timeout is not None:
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            return (-1, "", "git command timed out")
-    else:
-        out, err = await proc.communicate()
-    return (
-        proc.returncode or 0,
-        out.decode(errors="replace").strip(),
-        err.decode(errors="replace").strip(),
-    )
+    rc, out, err = await run_git(workspace, *args, timeout=timeout)
+    return (rc, out.strip(), err.strip())
+
+
+# Failure details that will not self-heal at the normal backup cadence.
+# Credentials cannot be re-entered (there is no TTY to prompt under launchd),
+# and an unreachable remote answers no faster for being asked every 30s.
+_AUTH_MARKERS = (
+    "could not read username",
+    "authentication failed",
+    "invalid username or token",
+    "permission denied (publickey",
+)
+
+
+def backoff_reason(detail: str) -> str | None:
+    """Why a failed backup push should drop to the slow cadence, or None.
+
+    Returns ``"auth"`` for a credential failure and ``"unreachable"`` for a
+    timeout. Before issue #470 only the auth markers were recognised, so a
+    timeout — the shape an unreachable remote takes — never engaged the
+    backoff and got retried every 30 seconds indefinitely.
+    """
+    lowered = (detail or "").lower()
+    if any(marker in lowered for marker in _AUTH_MARKERS):
+        return "auth"
+    if GIT_TIMEOUT_DETAIL in lowered:
+        return "unreachable"
+    return None
 
 
 def _git_sync(workspace: Path, *args: str) -> tuple[int, str]:

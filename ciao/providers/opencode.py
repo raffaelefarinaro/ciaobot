@@ -65,6 +65,7 @@ from ciao.execution_modes import (
     AUTO_APPROVED_MCP_TOOLS,
     CONTROL_PLANE_PREAPPROVED_MODES,
     MCP_SERVER_NAME,
+    opencode_credential_deny_rules,
 )
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
@@ -198,7 +199,6 @@ _DESTRUCTIVE_MCP_TOOLS = (
     "project_action",
     "chat_stop",
     "schedule_action",
-    "loop_action",
     "background_run_start",
     "background_run_cancel",
 )
@@ -575,13 +575,20 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
 
 
 def mode_settings(
-    mode: BridgeMode, *, tools_enabled: bool = True
+    mode: BridgeMode,
+    *,
+    tools_enabled: bool = True,
+    runtime_root: object = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
     One-shot routines set ``tools_enabled=False``. A deny-all session rule is
     the opencode API's tool-disable mechanism: unlike plan mode it does not
     allow read/glob/grep/list to reach the provider at all.
+
+    ``runtime_root`` is the resolved runtime directory, when the caller can
+    reach it, so the credential denies cover a relocated
+    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
@@ -593,6 +600,10 @@ def mode_settings(
     # escalation) lives beside the shared constant in ciao/execution_modes.py.
     if key in CONTROL_PLANE_PREAPPROVED_MODES:
         rules.extend(control_plane_permission_rules())
+    # Last, and for every mode including `bypass`: resolution is
+    # last-match-wins, and this is the one carve-out no mode may buy its way
+    # out of. See `opencode_credential_deny_rules`.
+    rules.extend(opencode_credential_deny_rules(runtime_root))
     return _MODE_AGENTS[key], rules
 
 
@@ -901,6 +912,23 @@ class OpencodeProvider(BaseSDKProvider):
         payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
 
+    def _runtime_root(self) -> str:
+        """The resolved runtime directory, or "" when it cannot be reached.
+
+        Feeds the credential denies in ``mode_settings`` so a relocated
+        ``CIAO_RUNTIME_ROOT`` is covered by path, not just by the default
+        ``.runtime`` name. ``self.config`` is optional on this base class and
+        unset in many tests, so a missing one degrades to the name-based
+        patterns rather than raising.
+        """
+        state_path = getattr(self.config, "state_path", None)
+        if not state_path:
+            return ""
+        try:
+            return str(Path(state_path).parent.resolve())
+        except (OSError, ValueError):
+            return ""
+
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.
 
@@ -1100,9 +1128,11 @@ class OpencodeProvider(BaseSDKProvider):
         interpolation is a config-*file* feature and is not applied to configs
         registered through the API (verified — the placeholder was sent
         through verbatim, which the control plane would reject as a bad
-        token). The call is loopback and password-authenticated, and the
-        server already holds the token in its environment, so this adds no
-        exposure — and unlike ``opencode.json`` it never reaches disk.
+        token). The call is loopback and password-authenticated, and the token
+        stays in the server's memory: ``_start_server_once`` deliberately pops
+        ``CIAO_MCP_SESSION_TOKEN`` from the child environment, because opencode
+        hands that environment to model-launched shell commands. Unlike
+        ``opencode.json`` it never reaches disk either.
         """
         client = self._client
         if client is None or not request.mcp_url or not request.mcp_token:
@@ -1208,7 +1238,9 @@ class OpencodeProvider(BaseSDKProvider):
         client = self._client
         assert client is not None
         agent, permission = mode_settings(
-            request.mode, tools_enabled=self._tools_enabled
+            request.mode,
+            tools_enabled=self._tools_enabled,
+            runtime_root=self._runtime_root(),
         )
         provider_id, model_id = split_model(request.model)
         if model_id and not provider_id:

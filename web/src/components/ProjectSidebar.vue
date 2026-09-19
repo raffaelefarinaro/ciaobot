@@ -77,8 +77,8 @@
             to="/memory"
             class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
-            title="memory"
-            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} to review` : 'memory'"
+            :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
+            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested memories across all workspaces` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. It also now covers review, since
@@ -369,35 +369,80 @@
          </button>
       </div>
 
-      <!-- The Graph/List/Review switcher lives here rather than in the pane
+      <!-- The Memory/Review switcher lives here rather than in the pane
            header: picking what the memory page shows is the same act as
            scoping it to a workspace, and this keeps every memory control in
-           one column. -->
+           one column.
+
+           Two buttons, not three. Graph and List are two drawings of the same
+           notes and belong on one level; sitting beside Review they read as
+           three peers, one of which is a different page with a different job.
+           Graph/List now lives in the map's own toolbar, where the rest of the
+           "how should this look" controls already are. -->
       <div class="workspace-toggle view-toggle">
         <button
           type="button"
-          :class="{ active: mm.view === 'graph' }"
-          :aria-pressed="mm.view === 'graph'"
-          @click="setMemoryView('graph')"
-        >Graph</button>
-        <button
-          type="button"
-          :class="{ active: mm.view === 'list' }"
-          :aria-pressed="mm.view === 'list'"
-          @click="setMemoryView('list')"
-        >List</button>
+          :class="{ active: mm.view !== 'review' }"
+          :aria-pressed="mm.view !== 'review'"
+          @click="setMemoryView(mm.mapView)"
+        >Memory</button>
         <button
           type="button"
           :class="{ active: mm.view === 'review' }"
           :aria-pressed="mm.view === 'review'"
+          :title="decisionsWaiting ? `${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : undefined"
+          :aria-label="decisionsWaiting ? `Review — ${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : 'Review'"
           @click="setMemoryView('review')"
         >
           <!-- Scoped, not the global tally: the workspace toggle directly
-               above scopes the queue, so a global count here claimed items the
+               above scopes the queues, so a global count here claimed items the
                Review list would not show — 12 next to a selected workspace
-               whose list is empty. -->
-          Review<span v-if="reviewScoped" class="view-count">{{ reviewScoped }}</span>
+               whose list is empty.
+
+               Both queues, not just the proposals one: this button is the
+               answer to "is there anything to decide", and a badge that
+               counted one of the two tabs behind it said no while the other
+               held five notes. -->
+          Review<span v-if="decisionsWaiting" class="view-count">{{ decisionsWaiting }}</span>
         </button>
+      </div>
+
+      <!-- Retirements is a different queue from Proposals, and this column used
+           to report the proposals one whatever tab was open: a panel showing
+           five notes to review sat beside "0 of 0 shown". The stats follow the
+           tab, and the proposals-only search and kind chips stay with it. -->
+      <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
+        <h3>Notes to revisit</h3>
+        <!-- Three states, not one: a zero is a claim about the vault and may
+             only be printed once a load for this workspace has succeeded. -->
+        <template v-if="retirementPending">
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading candidates…</span>
+          </div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          </div>
+        </template>
+        <p v-else-if="retirementFailed" class="empty-hint" role="status">
+          // could not load the retirement queue
+        </p>
+        <div v-else class="mm-stat-grid mm-stat-grid--3">
+          <div class="mm-stat">
+            <div class="n">{{ retirementScoped }}</div>
+            <div class="l">to revisit</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ retirementTrashed }}</div>
+            <div class="l">retired</div>
+          </div>
+          <div class="mm-stat">
+            <div class="n">{{ retirementSignals }}</div>
+            <div class="l">reasons</div>
+          </div>
+        </div>
       </div>
 
       <!-- Review: the same shape as the memory map's sidebar — stats, a search,
@@ -405,9 +450,9 @@
            segmented control in the panel header while this column sat empty,
            which put the queue's controls somewhere different from every other
            memory view's. -->
-      <div v-if="mode === 'proposals'" class="mm-sidebar-scroll">
+      <div v-else-if="mode === 'proposals'" class="mm-sidebar-scroll">
         <template v-if="proposals.loading">
-          <h3>Queue</h3>
+          <h3>Suggested memories</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading proposals…</span>
@@ -428,7 +473,7 @@
           </div>
         </template>
         <template v-else>
-          <h3>Queue</h3>
+          <h3>Suggested memories</h3>
           <div class="mm-stat-grid mm-stat-grid--3">
             <div class="mm-stat">
               <div class="n">{{ reviewVisible }}</div>
@@ -1152,6 +1197,7 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
+import { useVaultReviewStore } from '../stores/vaultReview'
 import { isLightTheme } from '../lib/theme'
 import ChatSignals from './ChatSignals.vue'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
@@ -1162,7 +1208,7 @@ import { workspaceLabel } from '../lib/workspaceLabel'
 import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
-import { formatFileComments } from '../lib/commentContext'
+import { startFileDiscussion } from '../lib/fileDiscussion'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1173,11 +1219,40 @@ const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
+const vaultReview = useVaultReviewStore()
 
 // Review-queue figures for the sidebar. Scoped counts come from the store so
 // they use the same workspace rule as the list — a chip that disagreed with the
 // rows under it would be worse than no chip.
+// Retirement counts mirror `retirementCount`/`trashCount` in MemoryMapView:
+// the store holds one workspace at a time, so a load for another workspace
+// must read as zero here rather than as the previous workspace's queue.
+const retirementLoaded = computed(() => vaultReview.loadedWorkspace === store.activeWorkspace)
+// `retirementLoaded` alone collapsed three states into one number: the queue
+// not fetched yet, a fetch that failed (the store swallows the error and
+// leaves `loadedWorkspace` where it was), and a queue that really is empty.
+// The first two rendered a hard 0/0/0 beside a panel saying "Loading
+// candidates…" — the stats-vs-rows contradiction this column exists to avoid.
+// The Proposals column above solves it with a skeleton; so does this one.
+const retirementPending = computed(() => !retirementLoaded.value && !vaultReview.error)
+const retirementFailed = computed(() => !retirementLoaded.value && Boolean(vaultReview.error))
+const retirementScoped = computed(() => (retirementLoaded.value ? vaultReview.candidates.length : 0))
+const retirementTrashed = computed(() => (retirementLoaded.value ? vaultReview.trashed.length : 0))
+// Distinct reasons across the queue, not a sum: one note flagged unlinked and
+// weak_provenance is two signals on one row, and the number is there to say
+// what kind of work the queue holds.
+const retirementSignals = computed(() => {
+  if (!retirementLoaded.value) return 0
+  const seen = new Set<string>()
+  for (const c of vaultReview.candidates) for (const s of c.signals) seen.add(s)
+  return seen.size
+})
+
 const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+// What the Review button promises: everything in this workspace still waiting
+// on a decision, across both of its queues. Retired notes and the decision
+// ledger are records, not work, so neither counts here.
+const decisionsWaiting = computed(() => reviewScoped.value + retirementScoped.value)
 const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
 const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
 const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
@@ -1321,28 +1396,21 @@ async function discussGuide(): Promise<void> {
   await discussFileInChat(path, `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?`)
 }
 async function discussFileInChat(path: string, prompt?: string): Promise<void> {
-  const ws = store.activeWorkspace
-  const general = store.projects.find(p => p.workspace === ws && p.is_auto && p.name === 'General')
-  if (!general) { store.pushErrorToast('Cannot start chat', 'No General project found in this workspace.'); return }
-  const title = `Discuss ${path.split('/').pop() || path}`
-  const base = prompt || `Let's discuss the file \`${path}\`.`
-  const pendingComments = store.fileComments[path] ?? []
-  const seed = pendingComments.length ? `${base}\n\n${formatFileComments(pendingComments)}` : base
-  try {
-    const chat = await store.createChat(general.project_id, title, seed)
-    // Pin the file so the new chat opens split-view with it visible.
-    store.pinFile(chat.chat_id, path)
-  } catch (e) { store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e)) }
+  await startFileDiscussion(store, { path, seed: prompt || `Let's discuss the file \`${path}\`.` })
 }
 // Expose for template's generic file discuss (also used by FileViewerModal/PinnedFilePanel via a shared helper fallback)
 // and for the guide card's "Discuss" button.
 const route = useRoute()
 const router = useRouter()
 
-/** The memory page's Graph/List/Review switcher. Review is the /proposals
- * route; graph and list are both /memory, so only those two need a push. */
+/** The memory page's Memory/Review switcher. Review is the /proposals
+ * route; graph and list are both /memory, so only those two need a push.
+ *
+ * A graph/list choice is also remembered in `mapView`, so the Memory button
+ * returns to the drawing that was on screen rather than resetting to graph. */
 function setMemoryView(next: 'graph' | 'list' | 'review') {
   mm.view = next
+  if (next !== 'review') mm.mapView = next
   const target = next === 'review' ? '/proposals' : '/memory'
   if (route.path !== target) void router.push(target)
 }
@@ -1350,6 +1418,9 @@ function setMemoryView(next: 'graph' | 'list' | 'review') {
 /** The "Needs review" list lands directly on the retirement queue. */
 function openRetirementReview() {
   mm.reviewTab = 'retirement'
+  // Always the queue, never the trash: this link means "show me what is
+  // waiting", and the sub-tab could be left on Trash from a previous visit.
+  mm.retirementTab = 'candidates'
   setMemoryView('review')
 }
 

@@ -1342,17 +1342,35 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
     vault_root = _resolve_vault_root(args.vault_root)
-    # Keys are relative to the install root, so one database can hold several
-    # agent roots each with a vault of the same name.
-    key_base = Path(
-        os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
-    ).expanduser().resolve()
     # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
     # be derived from the vault root on a migrated install.
     from ciao.config import logs_root_for
 
-    logs_root = logs_root_for(key_base, vault_root, key_base / ".runtime")
-    db_path = fts_search.get_db_path()
+    # The install root defines BOTH the stored-key base and the database: an
+    # explicit --runtime-root / CIAO_RUNTIME_ROOT names `<install>/.runtime`, so
+    # its parent is the authoritative install root. Deriving the key base from
+    # `--vault-root` instead (e.g. `/install/personal` from
+    # `/install/personal/memory-vault`) opened the install's live database while
+    # writing keys, and `_ensure_path_base` then cleared every workspace's rows
+    # because the base did not match the server's `/install`.
+    runtime_arg = getattr(args, "runtime_root", None)
+    env_runtime = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+    if runtime_arg or env_runtime:
+        runtime_root = _resolve_runtime_root(runtime_arg)
+        key_base = runtime_root.parent
+    else:
+        # Keys are relative to the install root, so one database can hold several
+        # agent roots each with a vault of the same name.
+        key_base = Path(
+            os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
+        ).expanduser().resolve()
+        runtime_root = (key_base / ".runtime").resolve()
+    logs_root = logs_root_for(key_base, vault_root, runtime_root)
+    # Install-owned, exactly like the MCP tools and startup indexing: with the
+    # legacy global `~/.ciao/vault-fts.db`, a `ciao vault-search` run from a dev
+    # checkout cleared the production install's index (and vice versa) because
+    # the key base differs between installs.
+    db_path = fts_search.get_db_path(runtime_root)
 
     if args.rebuild and db_path.exists():
         try:
@@ -2335,7 +2353,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
                 workspace, names, vault_name=leaf
             )
             result["search"] = workspace_reroot.rebuild_search_index(
-                workspace, names, vault_name=leaf
+                workspace, names, runtime_root=runtime, vault_name=leaf
             )
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "migrated" else 1
@@ -2840,21 +2858,88 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # would silently delete whichever was tried first. Either way the outcome is
     # recorded against a proposal nobody named. One row or nothing.
     flattened = " ".join(needle.split())
-    raw_matches = find_proposal_matches(path, needle)
-    flat_matches = (
-        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
-    )
-    union = set(raw_matches) | set(flat_matches)
-    if len(union) > 1:
-        print(
-            f"{len(union)} memory proposals match {needle!r}; "
-            "pass a longer, unique substring.",
-            file=sys.stderr,
+    # Resolve the unique match and remove it under the queue lock, so the
+    # proposal the receipt names is the one this call actually removes: a
+    # concurrent archive or CLI writer landing between the match scan and the
+    # indexed reread could otherwise point the saved line at a different
+    # proposal. The receipt names the *resolved full parsed text* while the
+    # removal re-uses the needle form that matched (see `removal_needle`
+    # below), so both name the same row without the remover having to match on
+    # a text that is a prefix of another queued bullet's.
+    from ciao.memory_receipts import queue_lock, queue_resolution
+    from ciao.proposal_kinds import parse_bullet
+
+    with queue_lock(path):
+        raw_matches = find_proposal_matches(path, needle)
+        flat_matches = (
+            find_proposal_matches(path, flattened) if flattened != needle else raw_matches
         )
-        return 1
-    if not raw_matches and flat_matches:
-        needle = flattened
-    removed = remove_proposal_by_substring(path, needle)
+        union = set(raw_matches) | set(flat_matches)
+        if len(union) > 1:
+            print(
+                f"{len(union)} memory proposals match {needle!r}; "
+                "pass a longer, unique substring.",
+                file=sys.stderr,
+            )
+            return 1
+        if not union:
+            print(
+                f"No unique memory proposal matched {needle!r} "
+                "(the text may be ambiguous or absent).",
+                file=sys.stderr,
+            )
+            return 1
+        # The row is fixed while this lock is held, so its parsed identity is
+        # the one the removal below acts on.
+        try:
+            target_line = path.read_text(encoding="utf-8").splitlines()[
+                next(iter(union))
+            ]
+        except (OSError, IndexError, StopIteration):
+            target_line = ""
+        parsed = parse_bullet(target_line) if target_line else None
+        if parsed is None:
+            print(
+                f"No unique memory proposal matched {needle!r} "
+                "(the text may be ambiguous or absent).",
+                file=sys.stderr,
+            )
+            return 1
+        resolved_text = parsed.text
+        resolved_kind = parsed.kind
+        # The removal keeps using the caller's needle (in whichever form
+        # matched), not the resolved text: `remove_proposal_by_substring`
+        # matches substrings over whole lines, so handing it the row's full
+        # text refuses to remove a row whose text is a prefix of another
+        # queued bullet's — exactly the row the union above just resolved
+        # uniquely. The receipt still names the resolved text.
+        removal_needle = needle
+        if not raw_matches and flat_matches:
+            removal_needle = flattened
+        # Bracket the removal with a receipt so a crash between the queue
+        # rewrite and the decision record is recoverable, and so the History
+        # surface can reverse a dismissal the curator made.
+        from ciao.memory_receipts import QueueReceiptUnavailable
+
+        try:
+            with queue_resolution(
+                path,
+                removed_text=resolved_text,
+                kind=resolved_kind,
+                promoted=bool(args.promoted),
+                actor="agent",
+                source="cli",
+                workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+                vault_root=vault,
+            ):
+                removed = remove_proposal_by_substring(path, removal_needle)
+        except QueueReceiptUnavailable as exc:
+            print(
+                f"the memory receipt journal is unavailable; "
+                f"the proposal was not removed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
     if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
@@ -2899,8 +2984,12 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             via="agent",
         )
     if args.json:
+        # `text` is the resolved bullet, not the caller's needle: a row can be
+        # dismissed by a disambiguating fragment (`(from: Alpha)`), and handing
+        # an automation that fragment back as the dismissed fact is wrong. It
+        # matches `removed_text` on the receipt.
         json.dump(
-            {"removed": True, "text": needle, "workspace": str(workspace)},
+            {"removed": True, "text": removed_text, "workspace": str(workspace)},
             sys.stdout,
         )
         sys.stdout.write("\n")
@@ -2955,6 +3044,308 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     if args.json:
         module_args.append("--json")
     return label_hygiene.main(module_args)
+
+
+def _eval_command(args: argparse.Namespace) -> int:
+    """Versioned behavioral evaluations for prompts, providers, and guides.
+
+    Three verbs: ``contracts`` runs the deterministic, model-free guard checks
+    (CI half); ``run`` performs the bounded model-backed probe; ``compare``
+    diffs a baseline and a candidate report. Nothing here reads a live vault —
+    the packaged synthetic scenario catalog is the only input.
+    """
+    from ciao import behavioral_eval
+
+    action = getattr(args, "eval_action", "")
+    if action == "contracts":
+        contract_report = behavioral_eval.run_contract_checks()
+        if args.json:
+            print(json.dumps(contract_report.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_contract_text(contract_report))
+        return 0 if contract_report.ok() else 1
+    if action == "compare":
+        baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+        candidate = json.loads(Path(args.candidate).read_text(encoding="utf-8"))
+        comparison = behavioral_eval.compare_reports(baseline, candidate)
+        if args.json:
+            print(json.dumps(comparison, indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_comparison_text(comparison))
+        return 0
+    if action == "run":
+        import asyncio
+
+        catalog = behavioral_eval.load_scenarios()
+        budget = behavioral_eval.EvalBudget.from_env()
+        if args.max_calls is not None:
+            budget.max_calls = max(1, args.max_calls)
+        if args.max_cost_usd is not None:
+            budget.max_cost_usd = max(0.0, args.max_cost_usd)
+        if args.cost_per_call is not None:
+            budget.cost_per_call_usd = max(0.0, args.cost_per_call)
+        include = tuple(
+            item.strip() for item in (args.include or "").split(",") if item.strip()
+        )
+        eval_report = asyncio.run(
+            behavioral_eval.run_model_eval(
+                catalog,
+                provider=args.provider,
+                model=args.model,
+                label=args.label,
+                budget=budget,
+                repeats=args.repeats,
+                concurrency=args.concurrency,
+                include=include,
+                timeout_s=args.timeout,
+            )
+        )
+        out = Path(args.out) if args.out else behavioral_eval.default_report_path(args.label)
+        behavioral_eval.write_report(eval_report, out)
+        if args.json:
+            print(json.dumps(eval_report.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(behavioral_eval.render_report_text(eval_report))
+            print(f"Wrote {out}")
+        # Nonzero on any zero-tolerance failure OR when no probe succeeded:
+        # an evaluation that measured nothing (all calls failed/timed out/)
+        # was unparseable) must not look like a successful run to automation.
+        failed = bool(eval_report.zero_tolerance_failures)
+        measured_nothing = eval_report.sample_size == 0
+        if measured_nothing and not failed:
+            print(
+                "error: no probe succeeded; nothing was measured",
+                file=sys.stderr,
+            )
+        return 1 if (failed or measured_nothing) else 0
+    print("error: unknown eval action", file=sys.stderr)
+    return 2
+
+
+# A busy lease is not an error the caller should retry immediately, and it is
+# not success either. 75 is EX_TEMPFAIL, which is what a scheduled run that
+# found the vault already being curated actually means.
+CURATION_BUSY_EXIT = 75
+
+
+def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
+    """Workspace/vault/guide resolution and budget flags, shared by the four."""
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    parser.add_argument(
+        "--guide",
+        type=Path,
+        default=None,
+        help="Workspace CLAUDE.md holding the bounded regions. Defaults to <workspace>/CLAUDE.md.",
+    )
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=None,
+        help="Most worklist items one run may take. Defaults to the built-in budget.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Longest one run may hold the lease. Doubles as the lease TTL.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+
+
+def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any]:
+    from ciao.curation_run import RunBudget
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    guide = Path(args.guide).expanduser().resolve() if args.guide else workspace / "CLAUDE.md"
+    defaults = RunBudget()
+    budget = RunBudget(
+        max_items=args.max_items if args.max_items is not None else defaults.max_items,
+        max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
+    )
+    return workspace, vault, guide, budget
+
+
+def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+    from ciao.curation_run import build_worklist, load_state, plan_run
+
+    workspace, vault, guide, budget = _curation_context(args)
+    state = load_state(vault)
+    worklist = build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        workspace_dir=workspace,
+        done_keys=frozenset(state.done_keys),
+    )
+    plan = plan_run(worklist, budget)
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "vault_root": str(vault),
+        **worklist.as_dict(),
+        **plan.as_dict(),
+        "last_run": state.last_run,
+    }
+    return payload, worklist
+
+
+def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return
+    if payload.get("empty"):
+        print("Nothing to curate: every mechanical check is clear.")
+        return
+    print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
+    for item in payload.get("planned", []):
+        print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
+        for key in item["keys"]:
+            print(f"    {key}")
+    for item in payload.get("deferred", []):
+        print(f"- deferred [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
+
+
+def _curation_plan_command(args: argparse.Namespace) -> int:
+    """Print the deterministic worklist without starting a run.
+
+    Read-only on purpose: the plan is also how a human (or a test) checks what
+    the nightly run would do without taking the lease away from it.
+    """
+    payload, _ = _curation_plan(args)
+    _print_curation(payload, as_json=args.json)
+    return 0
+
+
+def _curation_begin_command(args: argparse.Namespace) -> int:
+    """Take the lease and print this run's plan.
+
+    An empty worklist releases the lease again before returning: a quiet night
+    must not leave archive-time auto-apply standing down until the TTL expires.
+    """
+    from ciao.curation_run import CurationBusy, begin_run, end_run
+
+    _workspace, vault, _guide, budget = _curation_context(args)
+    try:
+        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+    except CurationBusy as exc:
+        print(f"curation is already running: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+
+    payload, _worklist = _curation_plan(args)
+    payload["lease"] = lease.as_dict()
+    if payload.get("empty"):
+        end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        payload["lease"] = {}
+    _print_curation(payload, as_json=args.json)
+    return 0
+
+
+def _curation_holder(args: argparse.Namespace) -> str:
+    """The lease holder a follow-up command must carry, or "" with an error.
+
+    `record_done` and `end_run` skip their ownership check when the holder is
+    empty, so a follow-up command that omitted it was not leased at all: an
+    over-budget run kept writing the vault after its lease expired, and could
+    go on to clear the lease a *newer* run had since taken. Required rather
+    than defaulted, because only `curation-begin` knows the value — guessing
+    `host:pid` here would match nothing and reject every honest run.
+    """
+    holder = (getattr(args, "holder", "") or "").strip()
+    if not holder:
+        print(
+            "pass --holder with the value `curation-begin` reported as lease.holder",
+            file=sys.stderr,
+        )
+    return holder
+
+
+def _curation_progress_command(args: argparse.Namespace) -> int:
+    """Record finished worklist keys and renew the lease."""
+    from ciao.curation_run import CurationBusy, record_done, renew_run
+
+    _workspace, vault, _guide, budget = _curation_context(args)
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
+    keys = [key.strip() for key in (args.key or []) if key.strip()]
+    if not keys:
+        print("pass at least one --key from `curation-begin`", file=sys.stderr)
+        return 2
+    try:
+        added = record_done(vault, keys, holder=holder)
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    renew_run(vault, holder=holder, ttl_s=budget.max_seconds)
+    payload = {"recorded": len(keys), "newly_done": added}
+    if args.json:
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"recorded {len(keys)} item(s), {added} newly done")
+    return 0
+
+
+def _curation_end_command(args: argparse.Namespace) -> int:
+    """Release the lease, record the counts, and stamp the weekly marker.
+
+    The marker is stamped by code rather than by the agent because the rule —
+    both weekly checks reliably done — is mechanical, and an agent that stamped
+    it after a failed audit made the weekly pass skip a week with nothing to
+    show for it. `end_run` does the stamping, so it happens only for the run
+    that still owns the lease.
+    """
+    from ciao.curation_run import CurationBusy, end_run
+
+    _workspace, vault, _guide, _budget = _curation_context(args)
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
+    payload, worklist = _curation_plan(args)
+    live_keys = frozenset(key for item in worklist.items for key in item.keys)
+    deferred = int(payload.get("deferred_count", 0))
+    try:
+        # `end_run` stamps the marker itself, inside the lease check. Stamping
+        # it out here let a run whose lease had expired — one this call then
+        # rejected with 75 — still suppress the weekly passes for seven days.
+        # The worklist above already excludes the two hygiene keys, since they
+        # are recorded done, so the prune inside `end_run` still forgets them
+        # and next week's pass is planned again.
+        summary = end_run(
+            vault,
+            holder=holder,
+            status=args.status,
+            planned=args.planned,
+            completed=args.completed,
+            deferred=deferred,
+            reasons=args.reason or [],
+            live_keys=live_keys,
+            advance_marker=args.status == "ok",
+        )
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    advanced = bool(summary.get("full_pass_advanced"))
+    if args.json:
+        json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(
+            f"run {summary['status']}: planned {summary['planned']}, "
+            f"completed {summary['completed']}, deferred {summary['deferred']}; "
+            f"weekly marker {'advanced' if advanced else 'left due'}"
+        )
+    return 0
 
 
 def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
@@ -3565,6 +3956,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
     )
+    search_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Install runtime root that owns the search database. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime; the index is install-owned "
+            "so two installs cannot clear each other's derived state."
+        ),
+    )
     search_parser.set_defaults(func=_vault_search_command)
 
     index_parser = subparsers.add_parser(
@@ -4168,6 +4569,103 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 
+    curation_plan_parser = subparsers.add_parser(
+        "curation-plan",
+        help="Show what tonight's Workspace care would do, without starting it.",
+        description=(
+            "Computes the nightly curation worklist from files alone — pending "
+            "proposals, region usage, aging entries, learnings, the weekly "
+            "marker, log sizes, skill proposals — and prints it with the run "
+            "budget applied. Read-only: takes no lease and changes nothing. "
+            "Exit 0 always; read `empty` to tell a quiet night from a busy one."
+        ),
+    )
+    _add_curation_arguments(curation_plan_parser)
+    curation_plan_parser.set_defaults(func=_curation_plan_command)
+
+    curation_begin_parser = subparsers.add_parser(
+        "curation-begin",
+        help="Take the curation lease and print this run's planned worklist.",
+        description=(
+            "Serializes the nightly run: one curation run per vault at a time, "
+            "and archive-time memory auto-apply stands down while the lease is "
+            "held. Prints the same plan as `curation-plan`. Exit 0 when the "
+            "lease was taken, 75 when another run holds it (do not curate), "
+            "and 0 with `\"empty\": true` when there is nothing to do — the "
+            "lease is released again in that case. Pass the reported "
+            "`lease.holder` to every `curation-progress` and `curation-end` "
+            "of this run; they require it and refuse to act for another owner."
+        ),
+    )
+    _add_curation_arguments(curation_begin_parser)
+    curation_begin_parser.add_argument(
+        "--holder",
+        default="",
+        help="Label recorded as the lease owner. Defaults to host:pid.",
+    )
+    curation_begin_parser.set_defaults(func=_curation_begin_command)
+
+    curation_progress_parser = subparsers.add_parser(
+        "curation-progress",
+        help="Record finished curation items so the next run does not redo them.",
+        description=(
+            "Marks worklist keys done and renews the lease. Keys come from "
+            "`curation-begin`'s output. A budget-limited run records what it "
+            "finished, so the next run resumes at the remainder instead of "
+            "starting again at the top of pass 1."
+        ),
+    )
+    _add_curation_arguments(curation_progress_parser)
+    curation_progress_parser.add_argument(
+        "--key",
+        action="append",
+        default=[],
+        help="A worklist key from `curation-begin`. Repeatable.",
+    )
+    curation_progress_parser.add_argument(
+        "--holder",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
+    )
+    curation_progress_parser.set_defaults(func=_curation_progress_command)
+
+    curation_end_parser = subparsers.add_parser(
+        "curation-end",
+        help="Release the curation lease and record the run's counts.",
+        description=(
+            "Releases the lease, records planned/completed/deferred counts and "
+            "reasons so a no-op run is distinguishable from skipped or failed "
+            "work, and — only when both weekly checks are recorded done and "
+            "the status is ok — stamps `last_full_pass`. An unreliable weekly "
+            "pass stays due."
+        ),
+    )
+    _add_curation_arguments(curation_end_parser)
+    curation_end_parser.add_argument(
+        "--status",
+        choices=["ok", "failed"],
+        default="ok",
+        help="Whether the run completed its planned work reliably.",
+    )
+    curation_end_parser.add_argument(
+        "--planned", type=int, default=0, help="Items this run planned to do."
+    )
+    curation_end_parser.add_argument(
+        "--completed", type=int, default=0, help="Items this run actually finished."
+    )
+    curation_end_parser.add_argument(
+        "--reason",
+        action="append",
+        default=[],
+        help="Why work was deferred or failed. Repeatable.",
+    )
+    curation_end_parser.add_argument(
+        "--holder",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
+    )
+    curation_end_parser.set_defaults(func=_curation_end_command)
+
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",
         help="Remove a resolved skill proposal from the review queue.",
@@ -4273,6 +4771,87 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the structured report as JSON instead of text.",
     )
     label_hygiene_parser.set_defaults(func=_label_hygiene_command)
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help=(
+            "Versioned behavioral evaluations for prompts, providers, and "
+            "guides. 'contracts' is deterministic CI; 'run' is boundedly "
+            "model-backed."
+        ),
+    )
+    eval_sub = eval_parser.add_subparsers(dest="eval_action", required=True)
+    eval_contracts = eval_sub.add_parser(
+        "contracts",
+        help="Run the deterministic, model-free guard checks over the scenario catalog.",
+    )
+    eval_contracts.add_argument(
+        "--json", action="store_true", help="Emit the structured report as JSON."
+    )
+    eval_contracts.set_defaults(func=_eval_command)
+
+    eval_run = eval_sub.add_parser(
+        "run",
+        help="Run the bounded model-backed probe (explicit; enforces a call/cost ceiling).",
+    )
+    eval_run.add_argument("--provider", default="claude", choices=["claude", "opencode"])
+    eval_run.add_argument(
+        "--model",
+        required=True,
+        help="Provider model id to evaluate. Required; the runner never defaults it.",
+    )
+    eval_run.add_argument(
+        "--label",
+        default="candidate",
+        help="Report label (baseline or candidate). Recorded with provenance.",
+    )
+    eval_run.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Runs per scenario; >1 exposes model noise. Report shows mean and stdev.",
+    )
+    eval_run.add_argument(
+        "--concurrency", type=int, default=1, help="Concurrent scenario probes."
+    )
+    eval_run.add_argument(
+        "--include",
+        default="",
+        help="Comma-separated scenario ids to run (default: the whole catalog).",
+    )
+    eval_run.add_argument(
+        "--max-calls", type=int, default=None,
+        help="Hard call ceiling for this run (default: CIAO_EVAL_MAX_CALLS or 40).",
+    )
+    eval_run.add_argument(
+        "--max-cost-usd", type=float, default=None,
+        help="Hard estimated-cost ceiling in USD (default: CIAO_EVAL_MAX_COST_USD or 2.00).",
+    )
+    eval_run.add_argument(
+        "--cost-per-call", type=float, default=None,
+        help="Declared per-call upper-bound cost used to enforce --max-cost-usd.",
+    )
+    eval_run.add_argument(
+        "--timeout", type=float, default=120.0, help="Per-call timeout in seconds."
+    )
+    eval_run.add_argument(
+        "--out", type=Path, default=None, help="Report path (default: .runtime/evals/...)."
+    )
+    eval_run.add_argument(
+        "--json", action="store_true", help="Emit the structured report as JSON."
+    )
+    eval_run.set_defaults(func=_eval_command)
+
+    eval_compare = eval_sub.add_parser(
+        "compare",
+        help="Diff a baseline and a candidate report on provenance and quality.",
+    )
+    eval_compare.add_argument("--baseline", type=Path, required=True)
+    eval_compare.add_argument("--candidate", type=Path, required=True)
+    eval_compare.add_argument(
+        "--json", action="store_true", help="Emit the structured comparison as JSON."
+    )
+    eval_compare.set_defaults(func=_eval_command)
 
     skills_parser = subparsers.add_parser(
         "skills",

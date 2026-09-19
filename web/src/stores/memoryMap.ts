@@ -159,12 +159,26 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    */
   const view = ref<'graph' | 'list' | 'review'>('graph')
   /**
+   * Which rendering the map surface uses. Graph and list are two drawings of
+   * one thing — the same notes, the same workspace, the same filters — so the
+   * sidebar offers `Memory | Review` and this choice lives in the map's own
+   * toolbar beside the other view controls. Kept separate from `view` so
+   * leaving Review returns to the drawing that was on screen before it.
+   */
+  const mapView = ref<'graph' | 'list'>('graph')
+  /**
    * Which pane the Review surface shows: the agent-proposal queue or the
    * stale-note retirement queue. Defaults to proposals; entry points that
    * are about retiring a note (the sidebar's "Needs review" list, a stale
    * note's detail panel) select retirement directly.
    */
   const reviewTab = ref<'proposals' | 'retirement'>('proposals')
+  /**
+   * Which half of the retirement queue is on screen. The trash used to be a
+   * section pinned under the candidate list in the same scroll, so a full
+   * queue put thirty rows between you and the note you had just retired.
+   */
+  const retirementTab = ref<'candidates' | 'trash'>('candidates')
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
@@ -313,8 +327,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     return new Set(chain)
   })
   const pathHint = computed(() => {
-    if (!pathStart.value) return 'Shift-click a note to start, then shift-click another to trace the shortest path between them.'
-    if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Shift-click another note.`
+    if (!pathStart.value) return 'Pick a note\'s “start” action — or shift-click a dot on the graph — to set the path start.'
+    if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Now pick another note’s “end” action.`
     if (pathIds.value.size === 0) return 'No path found between those two notes.'
     return `${pathIds.value.size} notes on the path.`
   })
@@ -587,6 +601,39 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     pathEnd.value = null
   }
   /**
+   * Set a path endpoint from an explicit control — the list rows' actions and
+   * the detail panel's buttons, which are the keyboard/touch equivalent of
+   * shift-clicking a dot.
+   *
+   * `'start'`/`'end'` name the slot outright so a mouse-less user is never
+   * relying on "the first one you pick becomes the start". `'toggle'` is the
+   * single-button form: the first pick is the start, the second the end, and a
+   * third *new* note starts over. Re-picking a note that already holds a slot
+   * releases that slot, which is what makes the gesture a toggle — and, more
+   * importantly, is why it can never seat one note in both slots.
+   */
+  function choosePathEndpoint(id: string, which: 'start' | 'end' | 'toggle') {
+    if (which === 'start') {
+      pathStart.value = id
+      if (pathEnd.value === id) pathEnd.value = null
+      return
+    }
+    if (which === 'end') {
+      pathEnd.value = id
+      if (pathStart.value === id) pathStart.value = null
+      return
+    }
+    // Dedupe first, like the named slots above. Without it, shift-clicking the
+    // dot already sitting in `pathStart` dropped the same id into the empty
+    // `pathEnd`: `pathIds` then BFS-terminates on the start node and the hint
+    // reports a degenerate "1 notes on the path".
+    if (pathStart.value === id) { pathStart.value = null; return }
+    if (pathEnd.value === id) { pathEnd.value = null; return }
+    if (!pathStart.value) pathStart.value = id
+    else if (!pathEnd.value) pathEnd.value = id
+    else { pathStart.value = id; pathEnd.value = null }
+  }
+  /**
    * Permanently delete a note. The backend strips dangling references from
    * every note that linked to it before removing the file, so we only need
    * to mirror that locally: drop the node, drop its edges, and repair the
@@ -618,9 +665,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
 
   function handleNodeClick(id: string, shiftKey: boolean) {
     if (shiftKey) {
-      if (!pathStart.value) pathStart.value = id
-      else if (!pathEnd.value) pathEnd.value = id
-      else { pathStart.value = id; pathEnd.value = null }
+      choosePathEndpoint(id, 'toggle')
       return
     }
     // Clicking a node directly on the canvas should feel the same as
@@ -633,7 +678,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
     pendingFocus,
-    hideOrphans, orphanFilter, colorMode, view, reviewTab,
+    hideOrphans, orphanFilter, colorMode, view, mapView, reviewTab, retirementTab,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
     clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,
@@ -641,7 +686,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
-    resetPath, handleNodeClick, deleteNote,
+    resetPath, choosePathEndpoint, handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

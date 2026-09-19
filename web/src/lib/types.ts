@@ -198,15 +198,36 @@ export interface ChatInfo {
   postprocess?: ChatPostprocess | null
 }
 
+/** One stage of the persisted archive-job manifest (ciao/archive_jobs.py). */
+export interface ArchiveJobStep {
+  status: 'ok' | 'error' | 'skipped' | 'blocked' | 'pending' | 'running'
+  reason?: string
+  attempts?: number
+}
+
+/** The postprocess-friendly view of an archive job manifest. */
+export interface ArchiveJobView {
+  job_id: string
+  state: 'running' | 'incomplete' | 'blocked' | 'done' | 'tombstoned'
+  tombstoned?: boolean
+  blocked_reason?: string
+  /** Stages still pending/failed/blocked, in execution order. */
+  unfinished?: string[]
+  steps?: Record<string, ArchiveJobStep>
+  updated_at?: string
+}
+
 /** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
 export interface ChatPostprocessStep {
   status: 'ok' | 'error' | 'skipped'
   extra?: Record<string, unknown>
+  /** Manifest projection: pending/running/blocked/ok/skipped/error. */
+  manifest_status?: ArchiveJobStep['status']
 }
 
 export interface ChatPostprocess {
   /** 'running' while the pipeline task is alive; 'done' once it settles. */
-  state: 'running' | 'done'
+  state: 'running' | 'done' | 'incomplete' | 'blocked'
   /** Job id of the step that is running, or the last one that ran. */
   step?: string
   /** Steps that can run for this chat, in execution order. */
@@ -217,6 +238,10 @@ export interface ChatPostprocess {
   updated_at?: string
   /** Set when a server restart killed the pipeline mid-flight. */
   interrupted?: boolean
+  /** Persisted manifest view, once the job settles or loads. */
+  job?: ArchiveJobView | null
+  /** Human-readable reason a job is blocked. */
+  blocked_reason?: string
 }
 
 export interface ChatRetryInfo {
@@ -1216,6 +1241,11 @@ export interface VaultReviewEvidence {
   last_update: string
   type: string
   age_days: number | null
+  /** The note's opening prose, already stripped of frontmatter and its H1.
+   *
+   * Optional because a server older than this client does not send it; the
+   * panel falls back to its lazy per-row fetch when it is absent. */
+  excerpt?: string
 }
 
 /** One stale-note retirement candidate from `GET /api/vault/review`. */
@@ -1241,7 +1271,38 @@ export interface VaultTrashedNote {
   trashed_at: string
 }
 
+export interface VaultReviewDecisionResult {
+  candidate_id: string
+  /** The id the caller asked about; `candidate_id` is recomputed post-stamp. */
+  previous_candidate_id?: string
+  /** True only when an `updated:` date was actually written to the note. */
+  stamped?: boolean
+  /**
+   * Why a keep did or did not stamp the note. A union rather than `string`:
+   * the sole consumer compares string literals, so a typo or a backend rename
+   * would compile clean and silently disable the notice this exists to raise.
+   */
+  stamp_status?:
+    | 'stamped'
+    | 'already_current'
+    | 'no_frontmatter'
+    | 'not_utf8'
+    | 'unreadable'
+    | 'not_applicable'
+}
+
+/** One note cleared with `keep` and still in the vault, from `include=cleared`. */
+export interface VaultClearedNote {
+  candidate_id: string
+  workspace: string
+  path: string
+  content_hash: string
+  decided_at: string
+}
+
 export interface VaultReviewResponse {
   candidates: VaultReviewCandidate[]
   trashed?: VaultTrashedNote[]
+  cleared?: VaultClearedNote[]
+  result?: VaultReviewDecisionResult
 }

@@ -134,6 +134,7 @@ async def _run_claude_oneshot(
     system_prompt: str,
     model: str,
     env: dict[str, str] | None,
+    max_turns: int = 2,
 ) -> str:
     # Titles / insights / critique never need agent tooling. Leaving
     # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
@@ -159,8 +160,10 @@ async def _run_claude_oneshot(
         # where the model starts to call a tool, gets nothing back, and the
         # SDK aborts the turn. With 2 turns the model recovers and returns
         # the actual text on the next iteration. Title / critique callers
-        # never loop, so this is one extra API call at most.
-        max_turns=2,
+        # never loop, so this is one extra API call at most. A caller that
+        # counts billable attempts (the behavioral eval's budget) passes
+        # ``max_turns=1`` so one reserved slot is one provider call.
+        max_turns=max(1, int(max_turns)),
         env=env or {},
     )
     parts: list[str] = []
@@ -259,12 +262,18 @@ async def run_oneshot(
     cwd: Path | None = None,
     max_retries: int = 1,
     retry_backoff_s: float = 0.5,
+    max_turns: int = 2,
 ) -> str:
     """Run a single-turn model call and return the assistant's text.
 
     Empty string is a valid return (the model had nothing to say); the
     caller decides how to handle it. ``timeout_s`` wraps each attempt via
     :func:`asyncio.wait_for`.
+
+    ``max_turns`` bounds the Claude path's turns. It stays 2 by default so a
+    stray ``stop_reason=tool_use`` is absorbed; a caller that must count
+    billable provider attempts (the behavioral eval's budget) passes 1 so one
+    reserved slot is exactly one provider call.
 
     On a transient failure (an empty-body / ``is_error`` result) the call is
     retried up to ``max_retries``
@@ -327,6 +336,7 @@ async def run_oneshot(
                 system_prompt=system_prompt,
                 model=model,
                 env=merged_env,
+                max_turns=max_turns,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

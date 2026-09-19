@@ -1161,3 +1161,89 @@ def test_add_can_refile_dismissed_fact_when_explicitly_allowed(
         ]
     ) == 0
     assert "Queued" in capsys.readouterr().out
+
+
+def test_cli_dismiss_removes_a_row_whose_text_prefixes_another(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row resolved uniquely by its source suffix must actually be removed.
+
+    The command resolved the row by needle, then handed the *resolved full
+    text* to `remove_proposal_by_substring`. That matcher is a casefolded
+    substring test requiring exactly one hit, so `Use Python` also matched the
+    surviving `Use Python 3 here.` and the removal refused — reporting "No
+    unique memory proposal matched" for the row it had just resolved uniquely.
+    """
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Use Python  _(from: Alpha)_\n"
+        "- [memory] Use Python 3 here.  _(from: Beta)_\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "(from: Alpha)",
+    ])
+
+    assert rc == 0
+    remaining = queue.read_text(encoding="utf-8")
+    assert "(from: Alpha)" not in remaining
+    assert "Use Python 3 here." in remaining
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / ".runtime" / po.PROPOSAL_OUTCOMES_NAME)
+        .read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    assert events[0]["action"] == "dismissed"
+
+    # The receipt names the resolved row, not the needle that found it, so
+    # History shows the fact rather than the disambiguating fragment.
+    from ciao import memory_receipts as mr
+
+    resolves = [
+        r for r in mr.read_receipts(mr.journal_path(vault, queue.parent))
+        if r["kind"] == "queue_resolve"
+    ]
+    assert resolves
+    assert resolves[-1]["removed_text"] == "Use Python"
+    assert resolves[-1]["status"] == mr.APPLIED
+
+
+def test_cli_dismiss_still_refuses_an_ambiguous_needle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The uniqueness guard must survive the needle change."""
+    from ciao import cli
+
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "- [memory] Use Python  _(from: Alpha)_\n"
+        "- [memory] Use Python 3 here.  _(from: Beta)_\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "Use Python",
+    ])
+
+    assert rc != 0
+    assert queue.read_text(encoding="utf-8").count("- [memory]") == 2

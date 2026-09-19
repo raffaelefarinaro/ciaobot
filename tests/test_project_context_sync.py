@@ -20,10 +20,8 @@ import yaml
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import (
-    ProjectChatManager,
-    _set_frontmatter_description,
-)
+from ciao.web.chat_service import _set_frontmatter_description
+from ciao.web.project_chats import ProjectChatManager
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────

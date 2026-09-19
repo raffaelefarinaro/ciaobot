@@ -52,7 +52,9 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
 # write the unattended nightly curator never performs"), contradicting both
 # the schedules section and ciao/stock/schedules.json's own prompt. Readers
 # reach for the bounded-memory section first, so pin the corrected contract
-# and the guardrails that make the unattended write safe.
+# and the guardrails that make the unattended write safe. AI-01 later made the
+# promotion rule explicit: archive time auto-applies confident state-shaped
+# facts, while the unattended curator never promotes a NEW region fact.
 def test_architecture_doc_states_the_consolidation_contract() -> None:
     repo = Path(__file__).resolve().parents[1]
     doc = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
@@ -65,7 +67,7 @@ def test_architecture_doc_states_the_consolidation_contract() -> None:
         "~85% of the cap",  # the threshold that gates consolidation
         "Workspace/Memory-Consolidations.md",  # the undo log
         "the queue itself cannot apply a drop",  # the [review] escape hatch
-        "Promoting NEW facts into a region stays user-reviewed",
+        "the unattended nightly curator never promotes a new region fact",
     ):
         assert fragment in doc, (
             "docs/ARCHITECTURE.md no longer documents the memory-consolidation "

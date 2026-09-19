@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import TabBar, { type TabSpec } from './TabBar.vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -167,55 +166,84 @@ const selected = computed({
  */
 const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
 
-// -- Queue / History tabs ---------------------------------------------------
+// -- Queue load states ------------------------------------------------------
+//
+// The queue used to render one empty state — "Nothing queued here." — whenever
+// `filtered` was empty, so the first (slow) GET, a failed first GET, and a
+// filter that matched nothing all looked like a successfully reviewed queue.
+// These four are distinct and must stay distinct: a load that has not answered
+// yet, a load that failed before any snapshot, a filter hiding a non-empty
+// scope, and a queue that really is empty.
+
+/** No snapshot has loaded and none has failed yet: the first fetch is about to
+ * start or is in flight. Keyed off `loaded`/`loadError` rather than `loading`,
+ * so the render between mount and `onMounted` cannot flash a zero-state. */
+const queueLoading = computed(() => !store.loaded && !store.loadError)
+
+/** The list could not be read and there is no snapshot to fall back on, so no
+ * empty-queue claim may be made. */
+const queueFailed = computed(() => Boolean(store.loadError) && !store.loaded)
+
+/** The first load is over, one way or the other, so rows may be rendered.
+ * The rows block and the empty-state block share this and differ only by the
+ * stale-refresh clause — spelling the shared half out twice let a later edit
+ * invert one branch and not the other. */
+const queueSettled = computed(() => !queueLoading.value && !queueFailed.value)
+
+/** Rows in the current workspace scope before the kind/search filters. Lets
+ * "nothing matches the filter" be told apart from "nothing queued", the way
+ * the History list already does. */
+const scopedCount = computed(() => store.scopedRows(projectStore.activeWorkspace).length)
+
+/** A kind/search filter is hiding a non-empty scope. When `filtered` is empty
+ * but `scopedCount` is not, a filter must be active: both are computed from
+ * the same rows, and with no filter the two are equal. */
+const filtersHideEverything = computed(
+  () => !filtered.value.length && scopedCount.value > 0,
+)
+
+/** The last successful snapshot held nothing in scope, with no failed refresh
+ * on top. "All reviewed." may only describe a load that actually succeeded;
+ * while a refresh is failing the stale banner speaks instead. */
+const queueEmpty = computed(() => store.loaded && !store.loadError && scopedCount.value === 0)
+
+function retryQueue() {
+  void store.fetch({ force: true })
+}
+
+// -- Queue / History sections -----------------------------------------------
 //
 // The two sub-views share this panel (and its workspace/kind/search filter
 // state in the store) rather than living on separate routes: switching is a
 // glance, not a navigation, and the sidebar's scope picker must not reset.
-const REVIEW_TABS = [
-  { key: 'queue' as const, label: 'Queue' },
-  { key: 'history' as const, label: 'History' },
-]
-// Must match TabBar's `id-prefix="pr"` scheme: the tabs live in that component
-// and point at these panels via aria-controls.
-function tabId(key: string): string {
-  return `pr-tab-${key}`
-}
+//
+// The tab bar that used to pick between them is gone from here. Review had
+// three stacked tab rows — Proposals/Retirements, then this one, then To
+// review/Trash — so the parent now renders one bar for all four sections and
+// drives this panel through `section`. The store still holds the choice, so
+// anything that sets `store.view` directly keeps working.
+const props = withDefaults(defineProps<{ section?: 'queue' | 'history' }>(), {
+  section: 'queue',
+})
 
-function panelId(key: string): string {
-  return `pr-panel-${key}`
-}
-
-const reviewTabs = computed<TabSpec<'queue' | 'history'>[]>(() =>
-  REVIEW_TABS.map(tab => ({
-    ...tab,
-    // Only History carries a count, and it stays hidden while the ledger loads
-    // — a badge rendered before the fetch read "History 0" on a full ledger.
-    count: tab.key === 'history' ? historyCount.value : undefined,
-  })),
+watch(
+  () => props.section,
+  (section) => {
+    store.view = section
+    if (section === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
+  },
+  { immediate: true },
 )
 
-function switchTab(key: 'queue' | 'history') {
-  store.view = key
-  if (key === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
-}
-
-// Null until the ledger has loaded, and the badge is hidden while it is: a
-// count rendered before the fetch read "History 0" on a ledger with hundreds
-// of rows - the opposite of what a badge is for. `onMounted` prefetches, so
-// the wait is the first request, not the first tab switch.
-//
-// Unfiltered it reports the server's scoped total rather than the rows we
-// happen to hold: the page is capped, so a workspace with more decisions than
-// the limit showed the limit itself (200) as though that were the whole
-// ledger. Under a filter the visible count is the honest number.
-const historyCount = computed(() => {
-  if (!store.historyLoaded) return null
-  if (store.historyFiltersActive) {
-    return store.visibleHistory(projectStore.activeWorkspace).length
-  }
-  return store.historyTotal
-})
+/** Which section to render. Reads the store, which the watcher above keeps in
+ * step with the prop, so a standalone mount (and anything that still flips
+ * `store.view` directly) behaves.
+ *
+ * Deliberately NOT named `section`: a prop and a computed of the same name
+ * both land on the instance, so `section` in the template resolved to
+ * whichever won rather than to the one meant here. `vue/no-dupe-keys` is an
+ * error for exactly that reason. */
+const activeSection = computed(() => store.view)
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -272,13 +300,20 @@ function rowTitle(row: ProposalRow): string {
   return row.text
 }
 
-/** The line under the title: where an accept would write.
+/** Where an accept would write, as a path. Now the tooltip and the details
+ * line rather than the row's own subtitle.
  *
  * Every kind's answer lives in its descriptor, including the re-home row's
  * `from → to · why` form and the skill row's path.
  */
 function rowSubtitle(row: ProposalRow): string {
   return descriptorFor(row).destination(row)
+}
+
+/** The line under the title: what keeping this row would do, named without a
+ * path. Same registry, so a new kind still answers both in one place. */
+function rowConsequence(row: ProposalRow): string {
+  return descriptorFor(row).consequence(row)
 }
 
 /** The verbose original, kept behind a disclosure rather than on the surface. */
@@ -660,18 +695,9 @@ watch(
 
 <template>
   <div class="proposal-review">
-    <header class="pr-head">
-      <!-- A tablist, not a nav landmark: this switches sub-views in place. -->
-      <TabBar
-        :model-value="store.view"
-        :tabs="reviewTabs"
-        label="Proposal review"
-        id-prefix="pr"
-        class="pr-tabs"
-        @update:model-value="switchTab"
-      />
-      <p v-if="store.view === 'queue'" class="pr-summary">
-        <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
+    <header v-if="activeSection === 'queue' && queueSettled" class="pr-head">
+      <p class="pr-summary">
+        <strong>{{ filtered.length }}</strong> to decide in {{ projectStore.activeWorkspace }}
         <button
           v-if="store.kindFilter !== 'all' || store.search"
           type="button"
@@ -681,25 +707,37 @@ watch(
       </p>
     </header>
 
-    <ProposalHistoryList
-      v-if="store.view === 'history'"
-      :id="panelId('history')"
-      role="tabpanel"
-      :aria-labelledby="tabId('history')"
-    />
+    <ProposalHistoryList v-if="activeSection === 'history'" />
 
-    <div v-else :id="panelId('queue')" role="tabpanel" :aria-labelledby="tabId('queue')">
-    <p class="pr-hint">
-      This is a fallback queue, not a list of every new fact: confident facts are
-      applied when a chat is archived. Daily Memory curation retries addressable
-      queued items and re-checks aging notes, so rows can disappear when either
-      you or that run resolves them. Accepting a memory row writes it into that
-      workspace’s bounded guide region; project rows fold into the named doc,
-      people rows create a stub note, and learnings append to
-      Workspace/Learnings.md. Re-home rows are not moved here. Skill rows are
-      files — dismiss removes them, and implement builds the skill in a chat.
-      Review rows have no destination yet and still need your decision.
+    <div v-else>
+    <!-- One sentence naming the decision, and the mechanism behind it folded
+         away. The paragraph this replaces ran nine lines — internal routing,
+         bounded regions, stub notes, file removal — and at a 390px viewport it
+         took about 230px of screen before the first thing to decide. Where a
+         row would actually go is now on the row itself. -->
+    <p class="pr-lede">
+      Things Ciaobot thought worth remembering but was not sure enough to save on
+      its own. Keep the ones you want; dismiss the rest.
     </p>
+    <details class="pr-how">
+      <summary class="pr-how-summary">How memory works</summary>
+      <div class="pr-how-body">
+        <p>
+          When you archive a chat, Ciaobot saves what it is confident about by
+          itself. Anything it is unsure about waits here instead, so nothing it
+          guessed at lands in your notes without you seeing it.
+        </p>
+        <p>
+          Each row says what keeping it would do. A nightly pass looks again at
+          this list and at your older notes, so a row can also clear itself once
+          that pass can settle it.
+        </p>
+        <p>
+          Notes that are already saved but may have gone out of date are under
+          <strong>Notes to revisit</strong>, not here.
+        </p>
+      </div>
+    </details>
 
 
     <!-- Counted and gated on the VISIBLE selection, so the bar can never
@@ -741,8 +779,40 @@ watch(
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 
-    <p v-if="!filtered.length" class="pr-empty">Nothing queued here.</p>
+    <!-- The queue's four load states, kept apart so none of them can borrow the
+         others' words. The old single "Nothing queued here." rendered under a
+         slow or failed first GET and read as a confirmed-empty queue. -->
+    <p v-if="queueLoading" class="pr-empty" role="status" aria-live="polite">Loading proposals…</p>
 
+    <div v-else-if="queueFailed" class="pr-error-block" role="alert">
+      <p class="pr-error">{{ store.loadError }}</p>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+    </div>
+
+    <!-- A refresh failed while rows are already on screen: keep showing them,
+         but say they are the last snapshot rather than the current one. -->
+    <div v-else-if="store.loadError" class="pr-stale" role="status">
+      <span>Could not refresh — showing the last loaded queue.</span>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+    </div>
+
+    <!-- Empty-state claims render only on a successful load with no failed
+         refresh shadowing it. `filtersHideEverything` needs a filter to be the
+         reason; `queueEmpty` is the only branch allowed to say "All reviewed." -->
+    <template v-if="queueSettled && !store.loadError">
+      <p v-if="filtersHideEverything" class="pr-empty">
+        No proposals match the current filters.
+        <button
+          v-if="store.kindFilter !== 'all' || store.search"
+          type="button"
+          class="pr-clear-filter"
+          @click="store.resetFilters()"
+        >Clear filters</button>
+      </p>
+      <p v-else-if="queueEmpty" class="pr-empty">All reviewed.</p>
+    </template>
+
+    <template v-if="queueSettled">
     <section class="pr-group">
       <header v-if="filtered.length" class="pr-group-head">
         <label class="pr-group-select">
@@ -766,22 +836,32 @@ watch(
           class="pr-row"
           :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }"
         >
-          <input
-            class="pr-row-check"
-            type="checkbox"
-            :checked="selected.has(row.id)"
-            @change="toggleRow(row.id)"
-          />
+          <!-- Wrapped so the tap target reaches 44px; the input itself keeps its
+               native size, and the aria-label names the fact this row controls. -->
+          <label class="pr-row-check-hit">
+            <input
+              class="pr-row-check"
+              type="checkbox"
+              :checked="selected.has(row.id)"
+              :aria-label="`Select ${kindLabel(row.kind)}: ${rowTitle(row)}`"
+              @change="toggleRow(row.id)"
+            />
+          </label>
 
           <div class="pr-row-body">
             <div class="pr-row-top">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <span class="pr-row-title">{{ rowTitle(row) }}</span>
             </div>
-            <!-- For a skill row the subtitle IS the file, so it opens it. A
-                 separate "view" button spent a slot saying what the path already
-                 said. Only the leaf: every row in a group shares the folder. -->
-            <p class="pr-row-sub">
+            <!-- What accepting this row would do, in words rather than a path:
+                 `ciao:memory` and `Workspace/Learnings.md` are the same shape of
+                 string and say nothing about the difference between them. The
+                 path is still one disclosure away, and still the title text.
+
+                 For a skill row the file IS the row, so its leaf stays a button
+                 that opens it — a separate "view" button spent a slot saying
+                 what the path already said. -->
+            <p class="pr-row-sub" :title="rowSubtitle(row)">
               <button
                 v-if="isSkill(row) && row.path"
                 type="button"
@@ -789,13 +869,14 @@ watch(
                 :title="row.path"
                 @click="view(row)"
               >{{ pathLeaf(row.path) }}</button>
-              <template v-else>{{ rowSubtitle(row) }}</template>
+              <template v-else>{{ rowConsequence(row) }}</template>
               <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
-            <details v-if="rowDetail(row)" class="pr-row-detail">
+            <details class="pr-row-detail">
               <summary>details</summary>
-              <p class="pr-row-prose">{{ rowDetail(row) }}</p>
-              <p class="pr-row-source">{{ row.path }}</p>
+              <p v-if="rowDetail(row)" class="pr-row-prose">{{ rowDetail(row) }}</p>
+              <p class="pr-row-source">Goes to {{ rowSubtitle(row) }}</p>
+              <p v-if="row.path" class="pr-row-source">{{ row.path }}</p>
             </details>
           </div>
 
@@ -879,6 +960,7 @@ watch(
       </label>
       <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
     </footer>
+    </template>
     </div>
   </div>
 </template>
@@ -919,13 +1001,46 @@ watch(
   font-size: 0.8rem;
 }
 
-.pr-hint {
+/* The one sentence that says what this list is. Full-contrast and at body
+   size, because it is the first thing read — the nine-line muted paragraph it
+   replaces was both harder to read and longer than the screen it opened on. */
+.pr-lede {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* The mechanism, folded away. Closed it costs one line; the summary is a real
+   disclosure control, so it is keyboard-reachable and states its own state. */
+.pr-how {
   margin: 0;
   color: var(--fg2);
-  font-size: 0.8rem;
-  line-height: 1.5;
-  max-width: none;
+  font-size: var(--text-xs);
 }
+
+.pr-how-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.pr-how-summary:hover { color: var(--fg); }
+.pr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.pr-how-body {
+  max-width: 62ch;
+  line-height: 1.5;
+}
+
+.pr-how-body p {
+  margin: 0 0 var(--space-2);
+}
+
+.pr-how-body p:last-child { margin-bottom: 0; }
 
 .pr-error {
   color: var(--error);
@@ -938,11 +1053,29 @@ watch(
   padding: var(--space-4) 0;
 }
 
-/* Queue / History tablist, matching ProjectView's project-tabs underline
-   style so switching sub-views reads the same way across the app. */
-/* Layout only — the tab styling lives in TabBar. */
-.pr-tabs {
-  margin-bottom: var(--space-2);
+/* A failed first load: the error stands alone with a retry, and no empty-queue
+   claim sits under it. */
+.pr-error-block {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-3) 0;
+}
+
+.pr-error-block .pr-error {
+  margin: 0;
+}
+
+/* A refresh that failed while rows are on screen. Muted, not an alert: the
+   data is still usable, it is just the last snapshot. */
+.pr-stale {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  color: var(--warning);
+  font-size: 0.85rem;
 }
 
 /* The batch bar appears only with a selection, so it never occupies space while
@@ -1022,6 +1155,23 @@ watch(
   color: var(--accent);
   font-size: 0.78rem;
   cursor: pointer;
+}
+
+/* Touch: the inline link is only glyph-height, well under the 44px minimum.
+   Grow the hit area with padding and pull the extra back with a matching
+   negative margin, so the control stays visually inline where it sits in the
+   empty-state sentence. Same trick as the History list's clear control. */
+@media (pointer: coarse) {
+  .pr-clear-filter {
+    --pr-clear-visual: 1.1rem;
+    --pr-clear-pad: calc((var(--touch, 44px) - var(--pr-clear-visual)) / 2);
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch, 44px);
+    padding: var(--pr-clear-pad);
+    margin: calc(-1 * var(--pr-clear-pad));
+    margin-left: calc(var(--space-2) - var(--pr-clear-pad));
+  }
 }
 
 .pr-batch-count {
@@ -1120,8 +1270,20 @@ watch(
   font-weight: 600;
 }
 
+/* Full-height tap target around the native checkbox (DESIGN.md's --touch),
+   so a thumb on a phone can hit the row's selection control. */
+.pr-row-check-hit {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding-top: 0.2rem;
+  cursor: pointer;
+}
+
 .pr-row-check {
-  margin-top: 0.2rem;
+  margin: 0;
 }
 
 .pr-row-body {

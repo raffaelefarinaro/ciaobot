@@ -9,7 +9,7 @@ by the ``{{ISSUE_REPORT}}`` schedule placeholder.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from collections.abc import Collection
@@ -19,6 +19,7 @@ from ciao.error_log import DEBUG_LOG_NAME, ERROR_LOG_NAME, tail_debug_log, tail_
 
 DEFAULT_LOG_LINES = 200
 DEFAULT_MAX_FAILED_JOBS = 20
+DEFAULT_MAX_FAILURE_AGE_DAYS = 7
 
 
 def _is_legacy_no_proposal_failure(run: dict) -> bool:
@@ -40,10 +41,22 @@ def _is_legacy_no_proposal_failure(run: dict) -> bool:
     )
 
 
+def _parse_run_ts(raw: object) -> datetime | None:
+    """Parse a recorded ISO timestamp, treating a naive one as UTC."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def recent_job_failures(
     limit: int = DEFAULT_MAX_FAILED_JOBS,
     *,
     exclude_schedule_ids: Collection[str] | None = None,
+    since: datetime | None = None,
 ) -> list[dict]:
     """Return recent failed job runs, newest first, capped at *limit*.
 
@@ -54,8 +67,23 @@ def recent_job_failures(
     error carries that summary in the ``error`` field, which would otherwise
     loop straight back into the next report. Left empty by default so the
     human-facing debug report still surfaces a genuinely broken triage.
+
+    Runs older than ``DEFAULT_MAX_FAILURE_AGE_DAYS`` are dropped. The run log
+    is append-only history and ``job_runs_latest.json`` keeps a job's last run
+    forever, so without a cutoff a one-off failure kept being collected on
+    every boot for the life of the install — a `depcheck:research` failure
+    from 2026-08-31 was still opening triage chats on 2026-09-17.
+
+    ``since`` is an extra, later floor for a caller that acknowledges what it
+    has already processed: the startup triage passes the time of its last
+    dispatch, so a failure already handed to a triage chat is not handed over
+    again unless the job fails afresh.
     """
     excluded = set(exclude_schedule_ids or ())
+    cutoff = datetime.now(UTC) - timedelta(days=DEFAULT_MAX_FAILURE_AGE_DAYS)
+    if since is not None:
+        floor = since if since.tzinfo is not None else since.replace(tzinfo=UTC)
+        cutoff = max(cutoff, floor)
     failures: list[dict] = []
     for job, info in job_runs.load_runs(limit_per_job=10).items():
         for run in info.get("recent") or []:
@@ -65,6 +93,12 @@ def recent_job_failures(
                 continue
             extra = run.get("extra")
             if isinstance(extra, dict) and extra.get("schedule_id") in excluded:
+                continue
+            ended = _parse_run_ts(run.get("ended_at") or run.get("started_at"))
+            # An undatable run can never age out, so it would be re-reported
+            # forever; every recorder path stamps ISO timestamps, so this only
+            # drops corrupt rows.
+            if ended is None or ended < cutoff:
                 continue
             failures.append({
                 "job": job,
@@ -93,17 +127,22 @@ def build_issue_report(
     log_lines: int = DEFAULT_LOG_LINES,
     max_failed_jobs: int = DEFAULT_MAX_FAILED_JOBS,
     exclude_schedule_ids: Collection[str] | None = None,
+    failures_since: datetime | None = None,
 ) -> dict:
     """Collect current runtime issues into a JSON-friendly report.
 
     ``exclude_schedule_ids`` is forwarded to :func:`recent_job_failures`;
     triage-dispatch callers pass their own schedule id to avoid re-triaging
-    their own runs.
+    their own runs. ``failures_since`` is forwarded as that function's
+    ``since`` floor, so a caller that has already processed a report can keep
+    its own acknowledged failures out of the next one.
     """
     error_log = tail_error_log(workspace_root, log_lines)
     debug_log = tail_debug_log(workspace_root, log_lines)
     failed_jobs = recent_job_failures(
-        max_failed_jobs, exclude_schedule_ids=exclude_schedule_ids
+        max_failed_jobs,
+        exclude_schedule_ids=exclude_schedule_ids,
+        since=failures_since,
     )
     error_line_count = sum(1 for line in error_log.splitlines() if line.strip())
     debug_line_count = sum(1 for line in debug_log.splitlines() if line.strip())

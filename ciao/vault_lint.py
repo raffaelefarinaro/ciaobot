@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 import os
@@ -53,6 +54,28 @@ _COMMON_STEMS = {
     "readme", "index", "log", "notes", "general", "overview",
     "changelog", "todo", "template",
 }
+
+# Separators that are a naming *style*, not a different name. A vault filled by
+# more than one writer collects both spellings of the same note — a person
+# captured by hand as `Ben Hempel.md` and by an agent as `Ben-Hempel.md` are one
+# person, and until spaces joined this set the duplicate key put them in
+# different buckets while every other rule (unlinked, weak provenance) flagged
+# both. Accents fold for the same reason: `Christian Kündig` and
+# `Christian-Kundig` are the same name typed on two keyboards.
+_DUPLICATE_SEPARATORS = str.maketrans("", "", " -_.'’")
+
+
+def duplicate_key(stem: str) -> str:
+    """The name two notes share when they are the same note under two spellings.
+
+    Case, accents, and separator style are all dropped: what is left is the
+    letters of the name. Named rather than inlined so the duplicate grouping
+    has one definition — anything reporting a `possible_duplicate` must group
+    by exactly the key that produced it.
+    """
+    folded = unicodedata.normalize("NFKD", stem.casefold())
+    stripped = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return stripped.translate(_DUPLICATE_SEPARATORS)
 
 # Directories that aren't vault content: app state, generated projections, tool
 # caches, and any venv/node_modules checked out inside the vault root (#129).
@@ -159,7 +182,13 @@ def _links_in(text: str):
             yield ref
 
 
-def _is_template(stem: str) -> bool:
+def is_template_stem(stem: str) -> bool:
+    """Whether a filename names a template rather than a note.
+
+    Public because the review queue needs the same answer: a template is not a
+    stale note, and offering `journal/daily/_template.md` for retirement asks
+    the user to delete the thing every future entry is made from.
+    """
     return "template" in stem.lower()
 
 
@@ -603,10 +632,11 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
     files_to_scan = [
         file
         for file in link_target_files
-        if not _is_template(file.path.stem)
+        if not is_template_stem(file.path.stem)
     ]
 
-    normalized_names: dict[str, list[str]] = {}
+    # Keyed by (directory, folded name) — see the duplicate rule below.
+    normalized_names: dict[tuple[str, str], list[str]] = {}
 
     for file in link_target_files:
         target_stem = file.path.stem
@@ -614,8 +644,17 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
 
         # Duplicate detection: skip common structural stems (README/log/etc.)
         # that legitimately repeat per folder, and template files.
-        if target_stem.lower() not in _COMMON_STEMS and not _is_template(target_stem):
-            norm = target_stem.lower().replace("-", "").replace("_", "")
+        #
+        # Keyed by DIRECTORY as well as name. A repeated stem across folders is
+        # how the vault is organised — one report.md per automation, one
+        # slides.md per deck, one evaluation.md per evaluation — and the stem
+        # list could only ever name the handful of those someone had already
+        # tripped over, so five such groups were filling a queue whose terminal
+        # action is deletion. Two notes in ONE folder under one name is the case
+        # that is always worth a second look, and it is the one this vault
+        # actually had: `People/Ben Hempel.md` beside `People/Ben-Hempel.md`.
+        if target_stem.lower() not in _COMMON_STEMS and not is_template_stem(target_stem):
+            norm = (file.relative.parent.as_posix(), duplicate_key(target_stem))
             normalized_names.setdefault(norm, []).append(file.relative.as_posix())
 
     for norm, paths in normalized_names.items():

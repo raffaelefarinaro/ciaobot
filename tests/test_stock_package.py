@@ -43,6 +43,7 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert stock.joinpath("public", "CLAUDE.md").is_file()
     assert stock.joinpath("workspace", "CLAUDE.md").is_file()
     assert stock.joinpath("workspace", "CIAO_CUSTOMIZATION.md").is_file()
+    assert stock.joinpath("evals", "scenarios.json").is_file()
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
     assert stock.joinpath("schedules", "weekly-review-template.md").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
@@ -155,8 +156,10 @@ def test_stock_memory_agent_role_matches_curator_contract() -> None:
     assert "~3000 memory / ~1375 profile" in role
     assert "Workspace/Memory-Consolidations.md" in role
     assert "[review] Keep" in role
-    # New-fact promotion stays reviewed even though consolidation is allowed.
-    assert "Promoting NEW facts into a region is a reviewed action" in role
+    # New-fact promotion follows the archive/curation split even though
+    # consolidation is allowed: archive extraction auto-applies a confident
+    # state-shaped fact, but the unattended curator never promotes a new one.
+    assert "an unattended curation run never promotes a new region fact" in role
 
 
 def test_stock_workspace_guide_carries_default_caps() -> None:
@@ -235,3 +238,4 @@ def test_pyproject_packages_stock_data() -> None:
     assert "workspace/*.md" in package_data["ciao.stock"]
     assert "schedules.json" in package_data["ciao.stock"]
     assert "schedules/*.md" in package_data["ciao.stock"]
+    assert "evals/*.json" in package_data["ciao.stock"]

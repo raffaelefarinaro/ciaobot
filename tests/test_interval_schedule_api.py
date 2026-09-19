@@ -1,4 +1,4 @@
-"""API tests for interval schedules and the retired /api/loops compat routes."""
+"""API tests for interval schedules (the cadence that replaced in-chat loops)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,8 @@ from starlette.testclient import TestClient
 
 from ciao.schedules import INTERVAL_FREQUENCY, ScheduleManager, ScheduleStore
 from ciao.web.routes_api import (
-    create_loop,
     create_schedule,
-    list_loops,
     list_schedules,
-    loop_detail,
-    run_loop_now,
     run_schedule_now,
     schedule_detail,
 )
@@ -109,10 +105,6 @@ def client(tmp_path: Path):
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        Route("/api/loops", list_loops, methods=["GET"]),
-        Route("/api/loops", create_loop, methods=["POST"]),
-        Route("/api/loop-run/{loop_id}", run_loop_now, methods=["POST"]),
-        Route("/api/loops/{loop_id}", loop_detail, methods=["PATCH", "DELETE"]),
     ])
     app.state.schedule_manager = manager
     app.state.project_chat_manager = pcm
@@ -170,6 +162,24 @@ def test_unknown_frequency_is_rejected(client: TestClient) -> None:
     assert client.post(
         "/api/schedules", json={"prompt": "p", "frequency": "hourly", "time": "09:00"}
     ).status_code == 400
+
+
+def test_delete_removes_the_entry_and_is_idempotent(client: TestClient) -> None:
+    """DELETE /api/schedules/{id} is the only destructive schedule path.
+
+    The retired `/api/loops/{id}` DELETE used to be the sole test of this
+    branch; it is now asserted on the supported route so the destructive path
+    keeps coverage.
+    """
+    schedule_id = _create_interval(client)["schedule_id"]
+
+    assert client.delete(f"/api/schedules/{schedule_id}").json() == {"ok": True}
+    assert [
+        s for s in client.get("/api/schedules").json()
+        if s["schedule_id"] == schedule_id
+    ] == []
+    # Unknown id: the store reports nothing deleted rather than raising.
+    assert client.delete(f"/api/schedules/{schedule_id}").json() == {"ok": False}
 
 
 def test_interval_can_open_a_new_chat_per_run(client: TestClient) -> None:
@@ -254,93 +264,6 @@ def test_wall_clock_entry_with_a_recoverable_target_is_available(
     assert body["context_available"] is True
 
 
-# ── /api/loops compatibility ─────────────────────────────────────────────
-
-
-def test_legacy_create_makes_an_interval_schedule(client: TestClient) -> None:
-    resp = client.post("/api/loops", json={
-        "prompt": "check PRs", "web_chat_id": "chat-idle",
-        "interval_minutes": 5, "title": "PR watcher", "start": True,
-    })
-    assert resp.status_code == 201
-    body = resp.json()
-    assert body["running"] is True
-    assert body["autostart"] is True
-    assert body["interval_minutes"] == 5
-    assert body["context_label"] == "Idle chat"
-
-    # The same entry is a first-class schedule.
-    schedules = client.get("/api/schedules").json()
-    assert [s["schedule_id"] for s in schedules] == [body["loop_id"]]
-    assert schedules[0]["frequency"] == INTERVAL_FREQUENCY
-
-
-def test_legacy_create_without_start_stays_stopped(client: TestClient) -> None:
-    body = client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-idle"}
-    ).json()
-    assert body["running"] is False
-    assert body["next_run"] is None
-
-
-def test_legacy_create_validates_its_inputs(client: TestClient) -> None:
-    assert client.post("/api/loops", json={"web_chat_id": "chat-idle"}).status_code == 400
-    assert client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-nope"}
-    ).status_code == 400
-    assert client.post(
-        "/api/loops",
-        json={"prompt": "p", "web_chat_id": "chat-idle", "interval_minutes": 0},
-    ).status_code == 400
-
-
-def test_legacy_patch_toggles_the_one_enabled_flag(client: TestClient) -> None:
-    loop_id = client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-idle"}
-    ).json()["loop_id"]
-
-    body = client.patch(f"/api/loops/{loop_id}", json={"running": True}).json()
-    # autostart and running collapsed into one flag, so both report it.
-    assert body["running"] is True and body["autostart"] is True
-
-    body = client.patch(f"/api/loops/{loop_id}", json={"autostart": False}).json()
-    assert body["running"] is False and body["autostart"] is False
-
-    assert client.patch("/api/loops/loop-nope", json={"prompt": "x"}).status_code == 404
-
-
-def test_legacy_list_shows_only_interval_entries(client: TestClient) -> None:
-    interval = _create_interval(client)["schedule_id"]
-    client.post("/api/schedules", json={
-        "prompt": "daily", "frequency": "daily", "time": "09:00",
-        "web_project_id": "proj-1",
-    })
-    assert [item["loop_id"] for item in client.get("/api/loops").json()] == [interval]
-
-
-def test_legacy_run_now_and_busy_conflict(client: TestClient) -> None:
-    idle = client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-idle"}
-    ).json()["loop_id"]
-    busy = client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-busy"}
-    ).json()["loop_id"]
-
-    assert client.post(f"/api/loop-run/{idle}").status_code == 201
-    assert client.post(f"/api/loop-run/{busy}").status_code == 409
-    assert client.post("/api/loop-run/loop-nope").status_code == 404
-
-
-def test_legacy_delete(client: TestClient) -> None:
-    loop_id = client.post(
-        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-idle"}
-    ).json()["loop_id"]
-    assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": True}
-    assert client.get("/api/loops").json() == []
-    # Gone now, so it resolves like any other unknown id on this route.
-    assert client.delete(f"/api/loops/{loop_id}").status_code == 404
-
-
 def test_interval_to_wall_clock_without_a_time_is_rejected(client: TestClient) -> None:
     """An interval entry carries no ``daily_time_utc``.
 
@@ -400,42 +323,10 @@ def test_manual_and_interval_still_need_no_time(client: TestClient) -> None:
     ).status_code == 200
 
 
-def test_a_legacy_created_loop_keeps_its_project_as_the_rehome_fallback(
-    client: TestClient,
-) -> None:
-    """A cached pre-upgrade PWA can still create loops through this route.
-
-    Migrated loops keep their original project as `fallback_project_id`; ones
-    created here have to as well, or a loop made in a non-General project
-    re-homes into General when its target chat is deleted and the unattended
-    run changes context.
-    """
-    for start in (True, False):
-        resp = client.post("/api/loops", json={
-            "prompt": "p",
-            "web_chat_id": "chat-idle",
-            "start": start,
-        })
-        assert resp.status_code == 201, resp.text
-        loop_id = resp.json()["loop_id"]
-
-        # Read the stored row: fallback_project_id is internal and not part of
-        # the API payload, so asserting on the response would prove nothing.
-        stored = next(
-            e for e in client.app.state.schedule_manager.list_entries()
-            if e.schedule_id == loop_id
-        )
-        assert stored.fallback_project_id == "proj-1"
-        # web_project_id stays unset: on an interval entry it would mean
-        # "a new chat per run" and outrank the fixed chat.
-        assert stored.web_project_id is None
-        assert stored.enabled is start
-
-
 def test_a_chat_bound_interval_records_its_chat_project_as_the_fallback(
     client: TestClient,
 ) -> None:
-    """The path actually in use, not just migration and the legacy route.
+    """The path actually in use: a chat-bound interval, not just migration.
 
     Without the fallback a chat-bound interval whose chat is deleted re-homes
     into the workspace's General and continues the unattended prompt in the
@@ -590,41 +481,3 @@ def test_retargeting_onto_a_fixed_chat_drops_auto_archive(client: TestClient) ->
         if e.schedule_id == schedule_id
     )
     assert stored.archive_policy == "manual"
-
-
-def test_the_loops_route_refuses_to_delete_a_wall_clock_schedule(
-    client: TestClient,
-) -> None:
-    """The route's contract is interval entries only.
-
-    DELETE used to hand the raw id straight to the shared schedule store, so an
-    ordinary schedule's id passed to the deprecated loops route deleted it.
-    """
-    schedule_id = client.post("/api/schedules", json={
-        "prompt": "p", "frequency": "daily", "time": "09:00",
-        "web_chat_id": "chat-idle",
-    }).json()["schedule_id"]
-
-    assert client.delete(f"/api/loops/{schedule_id}").status_code == 404
-    # Still there.
-    assert any(
-        s["schedule_id"] == schedule_id for s in client.get("/api/schedules").json()
-    )
-
-
-def test_the_loops_list_hides_project_bound_intervals(client: TestClient) -> None:
-    """A loop was always bound to a fixed chat.
-
-    The cached pre-upgrade PWA on the other end assumes `web_chat_id` is set;
-    handed a project-bound interval it renders an unavailable-chat row that
-    editing cannot repair, since `web_project_id` keeps taking precedence.
-    """
-    _create_interval(client)  # chat-bound
-    client.post("/api/schedules", json={
-        "prompt": "p", "frequency": INTERVAL_FREQUENCY,
-        "interval_minutes": 5, "web_project_id": "proj-1",
-    })
-
-    loops = client.get("/api/loops").json()
-    assert all(loop["web_chat_id"] for loop in loops)
-    assert len(loops) == 1

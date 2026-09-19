@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.17.0 - 2026-09-18
+
+### Added
+- feat(security): deny the agent its own workspace credentials and runtime state (`f25482b2`)
+- feat(providers): reclaim a chat's provider once it has been idle (`bb42e7b9`)
+- feat(review): talk about a retirement candidate before deciding (`30b86eff`)
+- feat(curation): compute the nightly worklist, then budget and serialize it (`39f15fbc`, #461)
+- feat(recall): add a scoped evidence drill-down for truncated snippets (`8d93ef22`, #460)
+- feat(memory): flatten Review to one navigation level and lead with the decision (`3246108b`, #447)
+- feat(security): deny the agent its own workspace credentials and runtime state (`d8b61bbb`)
+- feat(providers): reclaim a chat's provider once it has been idle (`2460894b`)
+- feat(review): make the retirement queue precise enough to act on (`68be35aa`)
+- feat(review): retire the improve_link disposition (`63eac1be`)
+- feat(review): send an unlinked row hunting for its missing links (`c86ed809`)
+
+### Changed
+- Merge pull request #439 from raffaelefarinaro/chore/sync-develop-v0.16.1 (`2df522a4`)
+- Merge pull request #442 from raffaelefarinaro/raffaelefarinaro/fix-issue-440-deepseek (`6bbb2996`)
+- Merge pull request #443 from raffaelefarinaro/raffaelefarinaro/fix-issue-441-deepseek (`0a76bd73`)
+- SYS-03: isolate FTS database by install (`55658067`)
+- UX-02: separate proposal queue states (`47d5f667`)
+- AI-05: fail safe on lock loss (`5e4351f9`)
+- UX-01: make memory map keyboard and touch accessible (`28ce7f38`)
+- AI-01: document memory and unattended execution policy (`3d125949`)
+- SYS-01: bound heavy vault reads off loop (`6cc43925`)
+- AI-04: add behavioral evaluations (`8ccee63b`)
+- AI-02: make archive processing resumable (`b5a17cb2`)
+- Merge pull request #475 from raffaelefarinaro/raffaelefarinaro/retirement-discuss (`2498929d`)
+- style(desktop): cargo fmt the empty-drop guard (`06478e50`)
+- refactor(web): extract the proposal queue's domain logic from routes_api (`e07b93f6`)
+
+### Fixed
+- fix(schedules): log classifier parse failures as warnings, not tracebacks (`b4215148`)
+- fix(config): align auto_sync_on_start fallback with disabled default (`576110c5`)
+- fix(config): fail closed on non-affirmative auto-sync values (`f7987ec9`)
+- fix(review): resolve General before switching workspace, and put it back (`b3b55497`)
+- fix(review): restore the chat, not just the workspace, on a failed switch (`1c56cdc9`)
+- fix(git): stop leaking file descriptors when a git command times out (`68ba7326`)
+- fix(memory,archive): release review fixes, with regressions (`a11664c4`)
+- fix(archive): make deleting an archived chat stick (`1bb511e6`)
+- fix(archive): repair jobs already stuck, not just new ones (`2ea1c053`)
+- fix(review): stop "Still true" from damaging the note it verifies (`357581c7`)
+- fix(review): finish the "nothing to stamp" signal and the list sorting (`2eb53562`)
+- fix(review): make the stamp failure message true, and the guards reach (`23a958dd`)
+- fix(receipts): keep a redone resolution from erasing the one it replaced (`00b6f09c`)
+- fix(review): make the retirement workflow keep the promises it prints (`e8d4cce6`)
+- fix(eval,archive): close the approval-bypass holes the evaluator missed (`d167c8ac`)
+- fix(review): stop the ledger recording notes that never left (`434cfd78`)
+- fix(receipts): settle a removal by count, and check the journal before promoting (`795dd48b`)
+- fix(archive): keep job manifests private, and block the stage being resumed (`04e19aa6`)
+- fix(triage): stop re-reporting old failed job runs forever (`6d694415`, #476)
+- fix(mcp): bound the tool-call telemetry log and cache the usage aggregate (`5bc926c4`, #452)
+- fix(memory): queue uncertain reconciliation instead of appending (`168b5225`, #459)
+- fix(memory): defer when the reconcile planner itself raises (`d8e2d6ea`)
+- perf(search): make the per-search index pass and the graph scan proportional to the work (`f7b691fb`, #450)
+- fix(chat): stop dropping a message queued as the turn ends (`c63539bb`)
+- fix(memory): require source evidence before auto-saving a region fact (`59fc2365`, #456)
+- fix(review): rename the section computed off the prop's name (`fe95bb93`)
+- fix(review): keep the review panels' promises when a step fails (`5fed1b90`)
+- fix(memory-map): stop a stale return-focus target and a one-note path (`39506b23`)
+- fix(review): bound the temp-file prefix in bytes, and stamp from one parse (`2697deaf`)
+- fix(receipts): settle the row a failed region write opened, drop dead code (`8f8f7010`)
+- fix(tests): stop the auto-sync config tests writing the developer's ~/.ciao (`dbb852cb`)
+- fix(tests): stop 51 tests minting a token in the developer's ~/.ciao (`5447a649`)
+- fix(curation): make the nightly lease actually serialize its run (`69075538`)
+- fix(proposals): guard promotion ordering on both accept paths (`23e2b6c6`)
+- fix(review): keep a failed provider teardown observable, refuse undecodable notes (`f3b4c40d`)
+
+### Maintenance
+- chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
+- chore(deps): patch sharp and vitest for the open advisories (`debf4519`)
+- docs(pwa): drop the retired defer disposition from the review route (`0ffaebf3`)
+- docs(capabilities): qualify what keep actually stamps (`d229f0b2`)
+- docs(mcp): correct the tool count the loop retirement left stale (`362be562`)
+- refactor(web): extract the chat workflow's domain rules from project_chats (`c75ba217`, #453)
+- test(web): add a small real-browser regression suite (`57c83de5`, #448)
+
 ## v0.16.1 - 2026-09-05
 
 ### Changed

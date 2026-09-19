@@ -124,3 +124,41 @@ def test_current_messages_hide_the_injected_context_envelope(tmp_path: Path) -> 
     )
 
 
+def test_filtered_jsonl_numbers_turns_from_one(tmp_path: Path) -> None:
+    """Citation indices must mean the same thing on every provider.
+
+    The extraction prompt tells the model "Indices start at 1; never cite
+    `[idx=0]`", and `ciao.insights.filter_session_jsonl` obeys it. This builder
+    started at 0, so a correct `[idx=1]` citation resolved to the assistant
+    turn — which the source-evidence gate reads as an unsupported fact and
+    queues, for every opencode chat.
+    """
+    import json
+
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "archives")
+    request = AgentRequest(
+        prompt="always deploy on Thursdays",
+        model="opencode/big-pickle",
+        mode="auto",
+        provider="opencode",
+    )
+    store.record_turn(
+        request,
+        ctx=CTX,
+        response_text="Noted.",
+        effective_model="opencode/big-pickle",
+        session_id="ses_1",
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="opencode",
+    )
+
+    records = [
+        json.loads(line)
+        for line in store.current_filtered_jsonl(CTX, "opencode").splitlines()
+    ]
+
+    assert [(r["idx"], r["type"]) for r in records] == [(1, "user"), (2, "assistant")]
+
+

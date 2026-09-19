@@ -12,6 +12,7 @@ npm install          # first-time only
 npm run dev          # local Vite dev server (proxies API to localhost)
 npm run build        # type-check + production build into ../ciao/web/static/
 npm test             # vitest
+npm run test:e2e     # Playwright browser suite (see Testing below)
 ```
 
 Type-checking runs via `vue-tsc --noEmit` as part of `npm run build`. PR-blocking minimum: `npm run build` passes.
@@ -97,6 +98,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 ## Conventions
 
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
+- Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
@@ -106,7 +108,59 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ## Testing
 
-- `npm test` runs vitest.
+- `npm test` runs vitest. This is where almost every test belongs.
 - Mount smoke test: `src/components/__tests__/mountSmoke.test.ts` mounts every top-level pane to catch template / setup errors.
 - Pure-function tests live next to the source (`lib/safeMarkdown.test.ts` pattern).
-- No e2e suite yet. UI changes are verified by deploying and running the PWA.
+
+### Browser suite (`npm run test:e2e`)
+
+`e2e/` holds a deliberately small Playwright suite — four spec files, ten tests,
+about three seconds — that covers only the things a jsdom mount **cannot**
+establish:
+
+| Spec | What only a real browser can decide |
+| --- | --- |
+| `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
+| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. |
+| `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
+| `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
+
+Everything else stays in vitest. Adding to this suite is a trade, not a free
+win: each spec is roughly a hundred times slower than the equivalent unit test
+and can fail for reasons that have nothing to do with the code.
+
+Ground rules, so the suite stays worth blocking CI on:
+
+- **No sleeps.** Wait on an element or a polled condition. A `waitForTimeout` is
+  both slow and the usual cause of a suite that is green locally and red on a
+  loaded runner.
+- **No retries.** `playwright.config.ts` sets `retries: 0` on CI as well. A test
+  that needs a second attempt is broken; fix or delete it rather than masking it.
+- **No real backend.** `e2e/fixture/server.mjs` is a dependency-free Node server
+  that serves the built PWA out of `ciao/web/static`, answers the API routes with
+  the invented workspace in `e2e/fixture/data.mjs`, and speaks just enough
+  RFC 6455 to run a real WebSocket. It never reads a vault, holds a credential,
+  spawns a model, or touches launchd, so a run cannot reach your own data.
+  `/__fixture__/*` is its control surface (rewrite the snapshot, sever the
+  socket); fixture state is keyed by an `e2e_session` cookie so specs running in
+  parallel cannot see each other's.
+
+```bash
+npx playwright install chromium   # first time only, ~95 MB, outside node_modules
+npm run test:e2e                  # rebuilds the PWA, then runs the suite
+npm run test:e2e -- --headed      # watch it
+npm run test:e2e -- --ui          # pick and step through a spec
+```
+
+`@playwright/test` is pinned exactly in `package.json`; the browser binary is
+downloaded separately, so a contributor who never runs this suite pays only the
+package (~18 MB of `node_modules`), not the browser.
+
+CI runs it as a blocking step of the existing `test` job, straight after
+`npm run build`, reusing that job's install and build output.
+
+### Still manual
+
+Browser automation does not reproduce iOS PWA suspension, the software
+keyboard, or native-shell behaviour. The device checklist in "iOS PWA gotchas"
+above still has to be walked by hand on a real phone before a release.

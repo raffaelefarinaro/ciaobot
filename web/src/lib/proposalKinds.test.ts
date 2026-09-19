@@ -253,3 +253,63 @@ describe('discussLabel', () => {
     expect(labelFor('something-new')).toBe('a `something-new` proposal')
   })
 })
+
+/** What accepting a row does, said without a path.
+ *
+ * The row used to show `destination` — `ciao:memory`, `Workspace/Learnings.md`
+ * — which is the same shape of string for every kind and says nothing about
+ * the difference between them. The path is still the tooltip and the details
+ * line; this is what the row itself reads.
+ */
+describe('consequence', () => {
+  function consequenceFor(over: Partial<ProposalRow> = {}): string {
+    const r = row(over)
+    return descriptorFor(r).consequence(r)
+  }
+
+  it('answers for every kind the server can send, naming no file', () => {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill']) {
+      const text = consequenceFor({ kind, target: 'Mo', path: 'skills/x.md' })
+      expect(text, kind).toBeTruthy()
+      expect(text, kind).not.toMatch(/\.md\b/)
+      expect(text, kind).not.toContain('ciao:')
+      expect(text, kind).not.toContain('/')
+    }
+  })
+
+  it('names the person a people row would be filed under', () => {
+    expect(consequenceFor({ kind: 'people', target: 'Mo' }))
+      .toBe('Added to the note about Mo, creating it if there is none')
+  })
+
+  it('separates the two region kinds, which share one destination form', () => {
+    expect(consequenceFor({ kind: 'memory' })).toBe('Kept as a standing fact for this workspace')
+    expect(consequenceFor({ kind: 'profile' })).toBe('Kept as a standing fact about you')
+    expect(consequenceFor({ kind: 'user' })).toBe('Kept as a standing fact about you')
+  })
+
+  it('says a review row has nowhere to go rather than offering one', () => {
+    expect(consequenceFor({ kind: 'review' })).toContain('needs your decision')
+  })
+
+  it('distinguishes the three re-home cases without an arrow', () => {
+    const backed = consequenceFor({
+      kind: 'rehome',
+      rehome: signal({ destination: 'work/People/Mo.md', justified: true }),
+    })
+    expect(backed).toBe('Moves this note to the work workspace')
+
+    const unbacked = consequenceFor({
+      kind: 'rehome',
+      rehome: signal({ destination: 'work/People/Mo.md', justified: false }),
+    })
+    expect(unbacked).toContain('no tag backs that')
+
+    const stale = consequenceFor({ kind: 'rehome', rehome: signal({ stale: true }) })
+    expect(stale).toBe('No longer applies — safe to dismiss')
+  })
+
+  it('answers for a kind this client does not know', () => {
+    expect(consequenceFor({ kind: 'something-new' })).toBe('Kept as a standing note for this workspace')
+  })
+})

@@ -20,7 +20,7 @@
       "workspace": "",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run this workspace's nightly Workspace care. Load and follow the `memory-curation` skill; it is the complete daily procedure and decides from its persisted last-full-pass marker whether the deeper weekly index and hygiene pass is due. Use one memory agent for vault writes and run mutating passes sequentially. If nothing needs processing, reply with the skill's one-line no-op. Otherwise use its plain-language report format, including every cross-project fact still waiting for approval, one numbered line each.",
+      "prompt": "Run this workspace's nightly Workspace care. Load and follow the `memory-curation` skill; it is the complete daily procedure. Start with its pass 0, `ciao curation-begin --json`, which serializes this run against other curation runs and archive-time writes and computes the deterministic worklist, including whether the deeper weekly index and hygiene pass is due. Exit 75 means another run holds the lease: stop without curating. \"empty\": true means nothing needs processing: reply with the skill's one-line no-op. Otherwise work only the planned items, use one memory agent for vault writes, run mutating passes sequentially, pass the `lease.holder` it returned as `--holder` to every `ciao curation-progress` and to `ciao curation-end` (both require it and exit 75 once the lease is no longer yours), and use the skill's plain-language report format, including every cross-project fact still waiting for approval, one numbered line each.",
       "per_workspace": true
     },
     {

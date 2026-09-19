@@ -519,6 +519,7 @@ class ChatStream:
         # cancellation landing anywhere in that stretch was swallowed and the
         # drive loop carried on past its own cancellation.
         "force_closing",
+        "accepting_queue",
         # Open capability questions keyed by request_id, each
         # {"event": asyncio.Event(), "answer": None}. Populated by the
         # image-capability pre-flight, resolved via `resolve_capability`.
@@ -549,6 +550,14 @@ class ChatStream:
         self.background: bool = background
         self.turn_task: asyncio.Task | None = None
         self.force_closing: bool = False
+        # Cleared by the drive loop the moment it decides this stream is over.
+        # `drain_one()` and the stream teardown are not one atomic step, so a
+        # message enqueued between them used to land in `_pending` that nothing
+        # would ever read: the loop had already looked, and `finally` tore the
+        # stream down. `queue_message` refuses once this is False, so the
+        # caller starts a real turn instead of parking a message in a queue
+        # with no reader.
+        self.accepting_queue: bool = True
         self.pending_capability: dict[str, dict] | None = None
 
     def enqueue(

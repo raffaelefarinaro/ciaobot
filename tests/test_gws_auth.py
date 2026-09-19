@@ -676,6 +676,31 @@ def _drive_callback(port: int, query: str) -> None:
         resp.read()
 
 
+def _assert_listener_closed(port: int, *, timeout: float = 5.0) -> None:
+    """Assert a loopback listener stops accepting, allowing for async close.
+
+    ``GwsReloginManager._shutdown_server`` tears the old listener down on a
+    background thread, so a single immediate connect can land in the window
+    before ``server_close()`` runs — and then the connection *succeeds* and a
+    bare ``pytest.raises(OSError)`` flakes. Poll until the port refuses,
+    bounded by ``timeout``, then assert it did, so the test proves the
+    listener was closed without racing the close itself.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/?code=x&state=y", timeout=1
+            ):
+                pass
+        except OSError:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"listener on port {port} was still accepting after {timeout}s")
+
+
 def test_relogin_completes_via_loopback(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     _write_client_secret(gws_auth.profile_config_dir(cfg, "personal"))
@@ -794,12 +819,9 @@ def test_relogin_cancel_tears_down_the_listener(tmp_path: Path) -> None:
     port = started["port"]
 
     assert manager.cancel("personal")["cancelled"] is True
-    # The socket is torn down: the callback port refuses connections.
-    with pytest.raises(OSError):
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/?code=late&state={started['state']}", timeout=2
-        ):
-            pass
+    # The socket is torn down: the callback port refuses connections. The
+    # close is async, so wait for it rather than racing it.
+    _assert_listener_closed(port)
     # The cancelled session reports error, and a late redirect that had
     # already started before the cancel cannot exchange a code.
     final = manager.status("personal")
@@ -884,11 +906,7 @@ def test_relogin_ttl_expiry_tears_down_the_session(tmp_path: Path) -> None:
     assert final["status"] in {"error", "none"}
     # The session is gone from the registry and its socket closed.
     assert manager.status("personal")["status"] == "none"
-    with pytest.raises(OSError):
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{started['port']}/?code=x&state=y", timeout=2
-        ):
-            pass
+    _assert_listener_closed(started["port"])
 
 
 def test_relogin_second_start_replaces_the_first_listener(tmp_path: Path) -> None:
@@ -904,12 +922,9 @@ def test_relogin_second_start_replaces_the_first_listener(tmp_path: Path) -> Non
 
     assert first["port"] != second["port"]
     # The first listener's socket was closed by the replacement: connecting
-    # to it fails, while the second is live.
-    with pytest.raises(OSError):
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{first['port']}/?code=x&state=y", timeout=2
-        ):
-            pass
+    # to it fails, while the second is live. The close is async, so wait for
+    # it rather than racing it.
+    _assert_listener_closed(first["port"])
     _drive_callback(second["port"], f"?code=good&state={second['state']}")
     final = manager.wait("personal", timeout=5)
     assert final["status"] == "completed"

@@ -126,8 +126,19 @@ def test_mode_agents(mode, agent):
 
 
 def _actions(mode: BridgeMode) -> dict[str, str]:
-    """Flatten a ruleset to {permission: action} for readable assertions."""
-    return {rule["permission"]: rule["action"] for rule in mode_settings(mode)[1]}
+    """Flatten a ruleset to {permission: action} for readable assertions.
+
+    Only the ``pattern: "*"`` rules — the ones that define what a *mode* does.
+    The path-scoped credential denies appended to every mode reuse the same
+    permission names (``read``, ``edit``, ...) with a narrow pattern, and
+    flattening those in would read as "this mode denies all reads". They have
+    their own coverage in tests/test_credential_denies.py.
+    """
+    return {
+        rule["permission"]: rule["action"]
+        for rule in mode_settings(mode)[1]
+        if rule["pattern"] == "*"
+    }
 
 
 def test_compose_system_puts_instructions_before_runtime_facts():
@@ -2025,7 +2036,7 @@ def test_destructive_control_plane_tools_still_prompt():
     assert actions["*"] == "allow"
     for destructive in (
         "chat_delete", "project_action", "chat_stop",
-        "schedule_action", "loop_action",
+        "schedule_action",
         "background_run_start", "background_run_cancel",
     ):
         assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive

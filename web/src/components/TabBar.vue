@@ -2,7 +2,7 @@
   <!-- A tablist, not a nav landmark: these switch panels in place rather than
        navigating. `role="tab"` is only meaningful inside `role="tablist"`, and
        each tab owns the panel it names via aria-controls/aria-labelledby. -->
-  <div class="tab-bar" role="tablist" :aria-label="label">
+  <div ref="barEl" class="tab-bar" role="tablist" :aria-label="label">
     <button
       v-for="tab in tabs"
       :key="tab.key"
@@ -25,6 +25,8 @@
 </template>
 
 <script setup lang="ts" generic="K extends string">
+import { nextTick, onMounted, ref, watch } from 'vue'
+
 // One tab bar for the whole app. Three copies of this markup, styling and
 // roving-tabindex handler had grown up independently (project sections,
 // proposal review, memory-map review), and the newest of them shipped without
@@ -53,6 +55,26 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:modelValue', key: K): void }>()
 
 const TAB_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+
+// The bar scrolls sideways when the tabs outrun it, which a four-tab bar does
+// at a phone width. Nothing kept the selected tab inside that window: a
+// selection made anywhere but by clicking the tab itself — a deep link landing
+// on the last tab, a stale note's "review this" button, the bar left scrolled
+// from a previous visit — could leave the active tab entirely off screen, with
+// the underline that says where you are scrolled out of view with it.
+const barEl = ref<HTMLElement | null>(null)
+
+function revealSelected(): void {
+  const bar = barEl.value
+  if (!bar) return
+  const active = bar.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+  // Guarded: jsdom (and any environment without a layout engine) has no
+  // `scrollIntoView`, and this is presentation, not behaviour.
+  active?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+}
+
+onMounted(revealSelected)
+watch(() => props.modelValue, () => { void nextTick(revealSelected) })
 
 function tabId(key: K): string {
   return `${props.idPrefix}-tab-${key}`
@@ -101,6 +123,13 @@ defineExpose({ tabId, panelId })
   gap: var(--space-1);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  /* A bar wider than its window snaps tab-by-tab rather than stopping
+     mid-label, so a swipe always leaves a whole tab at the edge. */
+  scroll-snap-type: x proximity;
+}
+
+.tab-bar > .tab-bar-tab {
+  scroll-snap-align: start;
 }
 
 .tab-bar-tab {

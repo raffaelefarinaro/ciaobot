@@ -1128,11 +1128,24 @@
             <span class="archived-postprocess-dot" aria-hidden="true" />
             {{ archiveTidyLabel }}…
           </p>
-          <p
+          <div
             v-else-if="archiveTidySummary"
-            class="archived-postprocess"
-            :class="{ failed: archiveTidyFailed }"
-          >{{ archiveTidySummary }}</p>
+            class="archived-postprocess-row"
+          >
+            <p
+              class="archived-postprocess"
+              :class="{ failed: archiveTidyFailed }"
+              aria-live="polite"
+            >{{ archiveTidySummary }}</p>
+            <button
+              v-if="archiveNeedsRetry"
+              class="btn-sm archived-postprocess-retry"
+              type="button"
+              :disabled="archiveRetrying"
+              :aria-label="`Retry unfinished post-archive steps for ${chat.title}`"
+              @click="retryArchiveSteps"
+            >{{ archiveRetrying ? 'Retrying…' : 'Retry unfinished steps' }}</button>
+          </div>
         </div>
       </template>
       <template v-else>
@@ -1186,6 +1199,7 @@ import {
   isPostprocessing,
   postprocessFailed,
   postprocessLabel,
+  postprocessNeedsRetry,
   postprocessSummary,
 } from '../lib/postprocessView'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -1555,6 +1569,22 @@ const archiveTidying = computed(() => isPostprocessing(archivePostprocess.value)
 const archiveTidyLabel = computed(() => postprocessLabel(archivePostprocess.value))
 const archiveTidySummary = computed(() => postprocessSummary(archivePostprocess.value))
 const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.value))
+// Whether the archived chat's pipeline still has stages to finish. A partial
+// completion (crash, provider failure) is retryable from here, so the user does
+// not have to hunt for the Home lane.
+const archiveNeedsRetry = computed(() => postprocessNeedsRetry(archivePostprocess.value))
+const archiveRetrying = ref(false)
+async function retryArchiveSteps(): Promise<void> {
+  if (archiveRetrying.value) return
+  archiveRetrying.value = true
+  try {
+    await store.retryInsights(chat.value.chat_id)
+  } catch (e) {
+    store.pushErrorToast('Could not retry unfinished steps', errorMessage(e))
+  } finally {
+    archiveRetrying.value = false
+  }
+}
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
@@ -6618,6 +6648,27 @@ details[open] > .activity-summary::before {
 /* The single exception to the muted rule: a failed step is only ever visible
    here, so it is allowed to say so. */
 .archived-postprocess.failed { color: var(--warning); }
+
+/* Partial completion is actionable, so the row pairs the muted summary with a
+   retry control that meets the 44px touch target. */
+.archived-postprocess-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.archived-postprocess-retry {
+  min-height: 44px;
+  min-width: 44px;
+  cursor: pointer;
+}
+
+.archived-postprocess-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 
 .archived-postprocess-dot {
   width: 6px;

@@ -5,9 +5,10 @@ Handles pulling latest changes on startup and merging before push.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
+
+from ciao.git_proc import run_git
 
 # Startup sync is awaited inline in `_run_server_locked`, BEFORE the server
 # binds, so its ceiling is the user's worst-case cold start staring at a blank
@@ -31,8 +32,8 @@ logger = logging.getLogger(__name__)
 # repairs workspaces that predate that guard, so the two MUST agree: a shorter
 # repair list means `git add -A` stages provider credentials
 # (`.claude/.credentials.json`) on exactly the old workspaces the repair exists
-# for. It lives here rather than in `cli.py` because this module imports
-# nothing from `ciao`, so either side can depend on it.
+# for. It lives here rather than in `cli.py` because this module's only `ciao`
+# import is the leaf `git_proc`, so either side can depend on it.
 #
 # No `.codex/` entry: codex is retired (`sync_skills` only prunes what older
 # versions left behind, it never writes there), so ignoring it would be dead
@@ -191,28 +192,11 @@ def _porcelain_paths(status_out: str) -> list[str]:
 
 async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tuple[int, str, str]:
     """Run a git command and return (returncode, stdout, stderr)."""
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        cwd=str(workspace),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    if timeout is not None:
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            return (-1, "", "git command timed out")
-    else:
-        stdout, stderr = await proc.communicate()
+    rc, stdout, stderr = await run_git(workspace, *args, timeout=timeout)
     return (
-        proc.returncode or 0,
-        stdout.decode(errors="replace").rstrip(),
-        stderr.decode(errors="replace").rstrip(),
+        rc,
+        stdout.rstrip(),
+        stderr.rstrip(),
     )
 
 

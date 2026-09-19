@@ -58,7 +58,7 @@ describe('vaultReview store', () => {
 
     await store.fetch('personal')
 
-    expect(get).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed')
+    expect(get).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed,cleared')
     expect(store.candidates).toHaveLength(1)
     expect(store.trashed).toHaveLength(1)
     expect(store.loadedWorkspace).toBe('personal')
@@ -111,25 +111,12 @@ describe('vaultReview store', () => {
     const ok = await store.decide('personal', 'cid1', 'keep')
 
     expect(ok).toBe(true)
+    // No extra fields: `defer` and its day count are gone, and `keep` is now
+    // the only decision, so a decision is only ever the disposition.
     expect(post).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
       action: 'decide',
       candidate_id: 'cid1',
       disposition: 'keep',
-    })
-  })
-
-  it('sends defer_days only for a defer decision', async () => {
-    get.mockResolvedValue({ candidates: [], trashed: [] })
-    post.mockResolvedValue({ ok: true })
-    const store = useVaultReviewStore()
-
-    await store.decide('personal', 'cid1', 'defer', 14)
-
-    expect(post).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
-      action: 'decide',
-      candidate_id: 'cid1',
-      disposition: 'defer',
-      defer_days: 14,
     })
   })
 
@@ -267,5 +254,118 @@ describe('vaultReview store', () => {
     expect(ok).toBe(false)
     expect(store.error).toBe('candidate changed or no longer exists')
     expect(store.isBusy('cid1')).toBe(false)
+  })
+
+  // ── the "nothing to stamp" notice ──────────────────────────────────────
+
+  const ID = 'abc123abc123abc123abc123'
+
+  it('raises a notice when keep could not stamp the note', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    expect(store.notice).toContain('no frontmatter to stamp')
+    // And what to do about it: this is the one failure the user can fix, and
+    // the generic "verified date is unchanged" on its own does not say that
+    // the note keeps coming back until it has frontmatter.
+    expect(store.notice).toContain('add frontmatter to it')
+  })
+
+  it('names the real reason for a note it could not decode', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'not_utf8' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // One shared "no frontmatter" message would have been simply untrue here.
+    expect(store.notice).toContain('not valid UTF-8')
+    expect(store.notice).not.toContain('no frontmatter')
+  })
+
+  it('stays silent when the note really was stamped', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: true, stamp_status: 'stamped' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    expect(store.notice).toBe('')
+  })
+
+  it('stays silent when the note was already verified today', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: ID, stamped: false, stamp_status: 'already_current' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // "Already current" is a success; warning about it would be noise.
+    expect(store.notice).toBe('')
+  })
+
+  it('does not attach another row\'s outcome to this one', async () => {
+    post.mockResolvedValue({
+      ok: true,
+      result: { candidate_id: 'new', previous_candidate_id: 'some-other-row', stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [],
+      trashed: [],
+    })
+    const store = useVaultReviewStore()
+
+    await store.decide('personal', ID, 'keep')
+
+    // The reason is read off this call's own answer, so a result about
+    // another row can only mean the engine answered about something else.
+    expect(store.notice).toBe('')
+  })
+
+  it('reads its own POST answer when two decisions are in flight', async () => {
+    // Each button is disabled only for its own row, so "Still true" on two
+    // rows in quick succession puts two POSTs in the air. While the result
+    // lived in one store ref, the second response could land between the
+    // first arriving and `decide` reading it — and the id gate then turned a
+    // mis-attributed toast into a silently missing one.
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    const store = useVaultReviewStore()
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    settleFirst({
+      ok: true,
+      result: { candidate_id: 'a2', previous_candidate_id: ID, stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [], trashed: [],
+    })
+    settleSecond({
+      ok: true,
+      result: { candidate_id: 'b2', previous_candidate_id: other, stamped: true, stamp_status: 'stamped' },
+      candidates: [], trashed: [],
+    })
+    await Promise.all([first, second])
+
+    expect(store.notice).toContain('no frontmatter to stamp')
   })
 })

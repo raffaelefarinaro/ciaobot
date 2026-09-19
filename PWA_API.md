@@ -50,7 +50,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/retry-insights` | Re-run session-insights extraction for an archived chat (text-mode, on demand) |
+| POST | `/api/chats/{chat_id}/retry-insights` | Retry unfinished post-archive steps for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (insights when missing, plus project fold, trajectory and memory proposals after a crash). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
+| GET | `/api/chats/{chat_id}/archive-job` | The persisted post-archive manifest for an archived chat: per-stage statuses, `unfinished` list and any `blocked_reason` (or `{job:null}` when none exists) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
@@ -77,15 +78,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
-| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed` also lists the reversible trash inventory) or record an explicit keep/link/defer/restore decision; trash and permanent deletion are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. A successful POST answers `{ok, result, candidates, trashed}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
+| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed,cleared` also lists the reversible trash inventory and the kept notes still in the vault) or record an explicit keep/restore decision; trash, permanent deletion and `reopen` are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. `reopen` undoes a keep by appending to the ledger, putting the note back in the queue. A successful POST answers `{ok, result, candidates, trashed, cleared}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
-| GET, POST | `/api/loops` | **Deprecated** — loops became interval schedules. Translates the legacy Loop shape onto them; removed after the next release |
-| POST | `/api/loop-run/{loop_id}` | **Deprecated** — alias of `/api/schedule-run/{id}` |
-| PATCH, DELETE | `/api/loops/{loop_id}` | **Deprecated** — `{"running": bool}` and `{"autostart": bool}` both set `enabled` |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
 | POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
@@ -210,8 +208,9 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 # Detection is read-only and scoped to one logical workspace.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default"
 
-# The reversible trash inventory (what the Review → Retirement tab renders).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default&include=trashed"
+# The reversible trash inventory (what the Review → Retirement tab renders),
+# and the kept notes still in the vault that "Recently cleared" offers to re-queue.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default&include=trashed,cleared"
 
 # Record a reversible decision. Permanent deletion is only available after trash.
 # The response carries the refreshed `candidates` and `trashed` lists, so render
@@ -220,13 +219,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/
   -H 'content-type: application/json' \
   -d '{"action":"decide","candidate_id":"<candidate-id>","disposition":"keep"}'
 
-# Retire into the 30-day trash, then restore from it.
+# Retire into the reversible trash, then restore from it. Nothing is purged on
+# a timer: a trashed note stays restorable until it is explicitly deleted.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"trash","candidate_id":"<candidate-id>"}'
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"restore","candidate_id":"<candidate-id>"}'
+
+# Undo a keep. The candidate id comes from the `cleared` list above; a keep is
+# otherwise suppressed until the note's own bytes change.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"reopen","candidate_id":"<candidate-id>"}'
 ```
 
 **Agent assets**
@@ -645,6 +651,9 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
+Memory mutations also expose `GET /api/memory/receipts` and
+`POST /api/memory/receipts/{id}/undo` (see below).
+
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
 guide in either layout), and only then is the bullet dropped. Write-then-dismiss,
@@ -699,6 +708,22 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # a wider limit would return the same page - a client paging with "show more"
 # must stop on `at_max` rather than on `truncated`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
+
+# Managed memory mutations (receipts), newest first: every region write, queue
+# resolution and prune with actor/source, destination, before/after revisions
+# and status (prepared | applied | rolled_back | failed | conflict | undone).
+# `undoable` is true only for an applied operation this protocol can reverse;
+# unsupported legacy rows render without an Undo affordance. A multi-row batch
+# (batch accept/dismiss, expiry sweep) is one atomic rewrite, so exactly one
+# row carries the whole-file image and is undoable as a unit; the rest are
+# history-only (`undoable: false`) facts that must not each restore the file.
+# Optional query params: workspace, limit (default 200).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
+
+# Undo one receipt. Refuses with 409 when the destination changed since the
+# operation (undo would otherwise delete an unrelated later fact), 400 when the
+# receipt is unsupported/view-only, 404 when the id is unknown.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID/undo"
 ```
 
 
@@ -717,7 +742,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that extracts session insights, folds the project doc, writes a trajectory and files memory proposals (`ciao/insights.py:extract_and_append`); this event fires when the pipeline starts, as each step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was learned from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
-- `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. `loops_changed` is emitted alongside it, carrying the same meaning, for a PWA build cached before loops were folded into schedules; it will be dropped with the `/api/loops` routes.
+- `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
 Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.

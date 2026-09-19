@@ -5,12 +5,22 @@ import type {
   VaultReviewCandidate,
   VaultReviewResponse,
   VaultTrashedNote,
+  VaultClearedNote,
+  VaultReviewDecisionResult,
 } from '../lib/types'
 
-export type VaultReviewDisposition = 'keep' | 'improve_link' | 'defer'
+export type VaultReviewDisposition = 'keep'
 
-function reviewUrl(workspace: string, includeTrashed: boolean): string {
-  const query = `workspace=${encodeURIComponent(workspace)}${includeTrashed ? '&include=trashed' : ''}`
+/**
+ * The union straight off the wire type, not a re-spelling and not `string`:
+ * typing the reason helpers as `string` would put back the exact hole the
+ * union exists to close — a typo in one of the literals below would compile
+ * clean and silently disable the notice.
+ */
+type StampStatus = VaultReviewDecisionResult['stamp_status']
+
+function reviewUrl(workspace: string, includeLists: boolean): string {
+  const query = `workspace=${encodeURIComponent(workspace)}${includeLists ? '&include=trashed,cleared' : ''}`
   return `/api/vault/review?${query}`
 }
 
@@ -27,9 +37,18 @@ function reviewUrl(workspace: string, includeTrashed: boolean): string {
 export const useVaultReviewStore = defineStore('vaultReview', () => {
   const candidates = ref<VaultReviewCandidate[]>([])
   const trashed = ref<VaultTrashedNote[]>([])
+  // Notes cleared with "Still true" that are still in the vault. The panel's
+  // only route back into the queue: a keep is suppressed by content hash, so
+  // without this, undoing one meant editing the note.
+  const cleared = ref<VaultClearedNote[]>([])
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const error = ref('')
+  // Set when an action succeeded but did not do everything its label claims —
+  // "Still true" on a note with no frontmatter clears the row without writing
+  // a date. Silence there left the button looking broken: the row went away
+  // while `memory-audit` and the Memory Map badge kept flagging the note.
+  const notice = ref('')
   const loadedWorkspace = ref<string | null>(null)
   let fetchPromise: Promise<void> | null = null
   let fetchWorkspace: string | null = null
@@ -85,6 +104,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         if (seq !== fetchSeq) return
         candidates.value = data.candidates ?? []
         trashed.value = data.trashed ?? []
+        cleared.value = data.cleared ?? []
         loadedWorkspace.value = workspace
       } catch (e) {
         if (seq !== fetchSeq) return
@@ -112,14 +132,27 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
    * vault). Falls back to a fetch if an older engine answers without the
    * snapshot, so a stale PWA against a new engine (or the reverse) still
    * refreshes.
+   *
+   * The per-decision `result` is *returned*, never parked in a store ref: two
+   * decisions can be in flight at once (the busy set is per-candidate id, so
+   * "Still true" on row A and row B in quick succession both POST), and a
+   * shared slot lets the second response land between the first one arriving
+   * and its caller reading it. Each call now reads only its own answer.
    */
-  async function mutate(workspace: string, id: string, body: Record<string, unknown>): Promise<boolean> {
+  async function mutate(
+    workspace: string,
+    id: string,
+    body: Record<string, unknown>,
+  ): Promise<{ ok: boolean; result: VaultReviewDecisionResult | null }> {
     setBusy(id, true)
     error.value = ''
+    notice.value = ''
+    let result: VaultReviewDecisionResult | null = null
     try {
       const data = await api.post<VaultReviewResponse & { ok: boolean }>(
         reviewUrl(workspace, false), body,
       )
+      result = data?.result ?? null
       if (data && Array.isArray(data.candidates)) {
         // Only adopt it for the workspace we asked about: the user may have
         // switched scopes while the POST was in flight, and a late response
@@ -142,58 +175,103 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           }
           candidates.value = data.candidates
           trashed.value = data.trashed ?? []
+          cleared.value = data.cleared ?? []
           loadedWorkspace.value = workspace
         }
       } else {
         await fetch(workspace, { force: true })
       }
-      return true
+      return { ok: true, result }
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Action failed'
-      return false
+      return { ok: false, result: null }
     } finally {
       setBusy(id, false)
     }
   }
 
-  /** Record keep / improve_link / defer. Trash/restore/delete are separate actions. */
+  /**
+   * Why the note was not stamped, phrased for a toast — or '' when it was
+   * stamped, was already current, or the disposition never stamps.
+   *
+   * One message for all three failures said "no frontmatter to stamp", which
+   * is wrong for a note that could not be read or decoded — and, before the
+   * BOM fix, wrong for a note whose frontmatter was perfectly good.
+   */
+  function stampFailureReason(status: StampStatus): string {
+    if (status === 'no_frontmatter') return 'this note has no frontmatter to stamp'
+    if (status === 'not_utf8') return 'this note is not valid UTF-8, so it was left untouched'
+    if (status === 'unreadable') return 'this note could not be read'
+    return ''
+  }
+
+  /**
+   * What the user can still do about it, when there is something. The generic
+   * "verified date is unchanged" covers all three failures but drops the one
+   * piece of advice that was actionable: a note with no frontmatter keeps
+   * coming back to the queue until it gets some.
+   */
+  function stampFailureHint(status: StampStatus): string {
+    if (status === 'no_frontmatter') {
+      return ' It will keep showing as needing review until you add frontmatter to it.'
+    }
+    return ''
+  }
+
+  /** Record a keep. Trash/restore/delete are separate actions. */
   async function decide(
     workspace: string,
     id: string,
     disposition: VaultReviewDisposition,
-    deferDays = 7,
   ): Promise<boolean> {
-    return mutate(workspace, id, {
-      action: 'decide',
-      candidate_id: id,
-      disposition,
-      ...(disposition === 'defer' ? { defer_days: deferDays } : {}),
-    })
+    const { ok, result } = await mutate(
+      workspace, id, { action: 'decide', candidate_id: id, disposition },
+    )
+    // Still gated on the row's own id, now as a server-answer check rather
+    // than a race guard: the result belongs to this call, so it can only
+    // mismatch if the engine answered about a different candidate.
+    if (ok && disposition === 'keep' && result?.previous_candidate_id === id) {
+      const reason = stampFailureReason(result.stamp_status)
+      if (reason) {
+        notice.value =
+          `The row is cleared, but ${reason}, so this note's verified date is unchanged.`
+          + stampFailureHint(result.stamp_status)
+      }
+    }
+    return ok
   }
 
-  /** Retire a note into the reversible 30-day trash. */
+  /** Retire a note into the reversible trash. */
   async function trash(workspace: string, id: string): Promise<boolean> {
-    return mutate(workspace, id, { action: 'trash', candidate_id: id })
+    return (await mutate(workspace, id, { action: 'trash', candidate_id: id })).ok
   }
 
   /** Bring a trashed note back to its original path. */
   async function restore(workspace: string, id: string): Promise<boolean> {
-    return mutate(workspace, id, { action: 'restore', candidate_id: id })
+    return (await mutate(workspace, id, { action: 'restore', candidate_id: id })).ok
+  }
+
+  /** Put a cleared note back in the queue, undoing its `keep`. */
+  async function reopen(workspace: string, id: string): Promise<boolean> {
+    return (await mutate(workspace, id, { action: 'reopen', candidate_id: id })).ok
   }
 
   /** Permanently delete a trashed note. The server requires the exact
    * candidate id as confirmation; the panel collects the explicit confirm
    * before calling. */
   async function remove(workspace: string, id: string): Promise<boolean> {
-    return mutate(workspace, id, { action: 'delete', candidate_id: id, confirm: id })
+    return (await mutate(workspace, id, { action: 'delete', candidate_id: id, confirm: id })).ok
   }
 
   return {
     candidates,
     trashed,
+    cleared,
+    reopen,
     loading,
     isBusy,
     error,
+    notice,
     loadedWorkspace,
     fetch,
     ensureLoaded,

@@ -93,6 +93,11 @@ def test_configured_workspace_root_from_plist_fallback(tmp_path, monkeypatch) ->
     fake_home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(fake_home))
     bootstrap = fake_home / ".ciao" / "bootstrap"
+    # The conftest isolates CIAO_BOOTSTRAP_WORKSPACE so no test writes the
+    # developer's real `~/.ciao`. This test needs the bootstrap path to BE the
+    # one it hands the config, since that equality is what the fallback keys
+    # on, so it points the override at its own fake home.
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(bootstrap))
     # config lands on bootstrap (no CIAO_WORKSPACE in a plain terminal)
     cfg = SimpleNamespace(workspace_root=str(bootstrap))
     launch_agents = tmp_path / "LaunchAgents"
@@ -118,6 +123,10 @@ def test_configured_workspace_root_honours_launch_agents_override(
     override = tmp_path / "override-agents"
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(override))
     _write_plist(override, real_root)
+    # Same reason as the test above: the conftest's isolation override has to
+    # name this test's own fake bootstrap for the equality check to mean
+    # anything.
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(fake_home / ".ciao" / "bootstrap"))
     cfg = SimpleNamespace(workspace_root=str(fake_home / ".ciao" / "bootstrap"))
     assert gws_wrapper._configured_workspace_root(cfg) == real_root.resolve()
 

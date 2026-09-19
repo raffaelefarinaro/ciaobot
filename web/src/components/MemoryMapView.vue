@@ -3,13 +3,17 @@
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
     <div v-if="mm.view === 'review'" class="mm-review-wrap">
-      <!-- One surface, two queues: agent proposals (additions) and stale-note
-           retirement live side by side so "decide things" has one address.
-           The tab state is shared (`mm.reviewTab`) so entry points elsewhere
-           — the sidebar's "Needs review" list, a stale note's detail panel —
-           can land directly on retirement. -->
+      <!-- One navigation level for everything Review holds. It used to be two:
+           Proposals/Retirements here, then Queue/History inside the proposal
+           panel and To review/Trash inside the retirement one — so the trash
+           was a tab inside a tab inside a sidebar button, and no single row
+           said what there was to decide. The four destinations are peers: two
+           things waiting for a decision, two records of decisions already
+           made. The underlying state is unchanged, so every existing entry
+           point (the sidebar's "Needs review" list, a stale note's detail
+           panel, /proposals) still lands where it did. -->
       <TabBar
-        v-model="mm.reviewTab"
+        v-model="reviewTab"
         :tabs="reviewTabs"
         label="Review"
         id-prefix="mm-review"
@@ -18,74 +22,61 @@
       <!-- TabBar points every tab at `<id-prefix>-panel-<key>` via
            aria-controls, so those panels have to exist. Both components are
            single-root, so these attributes fall through onto their root
-           element and change no layout. -->
+           element and change no layout.
+
+           The proposal panel is bound without `key`, so moving between
+           Suggested memories and History swaps its section rather than
+           remounting it — which would refetch the queue on every flip. -->
       <ProposalReviewPanel
-        v-if="mm.reviewTab === 'proposals'"
-        id="mm-review-panel-proposals"
+        v-if="reviewTab === 'proposals' || reviewTab === 'history'"
+        :section="reviewTab === 'history' ? 'history' : 'queue'"
+        :id="`mm-review-panel-${reviewTab}`"
         role="tabpanel"
-        aria-labelledby="mm-review-tab-proposals"
+        :aria-labelledby="`mm-review-tab-${reviewTab}`"
       />
+      <!-- One component, two sections: the queue and the trash share the
+           store, the busy set and the error toast, so splitting them into
+           two components would only duplicate all three. -->
       <VaultReviewPanel
         v-else
-        id="mm-review-panel-retirement"
+        :section="reviewTab === 'trash' ? 'trash' : 'candidates'"
+        :id="`mm-review-panel-${reviewTab}`"
         role="tabpanel"
-        aria-labelledby="mm-review-tab-retirement"
+        :aria-labelledby="`mm-review-tab-${reviewTab}`"
       />
     </div>
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
-      <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
-        <div class="mm-brain-skeleton" aria-hidden="true">
-          <svg viewBox="0 0 200 140" class="mm-brain-svg">
-            <!-- brain/network skeleton: nodes + interconnections -->
-            <line x1="45" y1="38" x2="82" y2="52" class="mm-brain-edge" />
-            <line x1="82" y1="52" x2="118" y2="42" class="mm-brain-edge" />
-            <line x1="118" y1="42" x2="155" y2="58" class="mm-brain-edge" />
-            <line x1="82" y1="52" x2="92" y2="92" class="mm-brain-edge" />
-            <line x1="118" y1="42" x2="108" y2="92" class="mm-brain-edge" />
-            <line x1="92" y1="92" x2="108" y2="92" class="mm-brain-edge" />
-            <line x1="45" y1="38" x2="38" y2="86" class="mm-brain-edge" />
-            <line x1="38" y1="86" x2="70" y2="118" class="mm-brain-edge" />
-            <line x1="155" y1="58" x2="162" y2="92" class="mm-brain-edge" />
-            <line x1="162" y1="92" x2="130" y2="118" class="mm-brain-edge" />
-            <line x1="70" y1="118" x2="100" y2="128" class="mm-brain-edge" />
-            <line x1="130" y1="118" x2="100" y2="128" class="mm-brain-edge" />
-            <circle cx="45" cy="38" r="13" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="82" cy="52" r="10" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="118" cy="42" r="11" class="mm-brain-node mm-brain-node--3" />
-            <circle cx="155" cy="58" r="12" class="mm-brain-node mm-brain-node--4" />
-            <circle cx="92" cy="92" r="11" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="108" cy="92" r="10" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="38" cy="86" r="9" class="mm-brain-node mm-brain-node--3" />
-            <circle cx="162" cy="92" r="9" class="mm-brain-node mm-brain-node--2" />
-            <circle cx="70" cy="118" r="10" class="mm-brain-node mm-brain-node--4" />
-            <circle cx="130" cy="118" r="10" class="mm-brain-node mm-brain-node--1" />
-            <circle cx="100" cy="128" r="9" class="mm-brain-node mm-brain-node--3" />
-          </svg>
-        </div>
-        <div class="mm-skeleton-text"><span class="history-loading-spinner" aria-hidden="true"></span> Mapping your vault…</div>
-        <div class="mm-skeleton-bars" aria-hidden="true">
-          <span class="mm-shimmer-line" style="width: 42%; height: 8px;"></span>
-          <span class="mm-shimmer-line" style="width: 58%; height: 8px; margin-top: 8px;"></span>
-        </div>
-      </div>
-      <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-      <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap">
-        <canvas
-          ref="canvasEl"
-          :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
-          @mousedown="onMouseDown"
-          @mousemove="onCanvasHover"
-          @mouseleave="clearHover"
-          @wheel.prevent="onWheel"
-        />
-        <div class="mm-zoom-controls">
-          <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
-          <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
-          <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
-        </div>
-        <div class="mm-toolbar">
-          <div class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
+      <div class="mm-surface">
+        <!-- Graph and List are two drawings of one set of notes, so the choice
+             between them sits with the other "how should this look" controls
+             rather than beside Review in the sidebar, where a rendering of the
+             map read as a third page. That also makes this a real toolbar row
+             shared by both views: floating over the canvas it had nowhere to
+             be in the list, which is why the list had no controls at all. -->
+        <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
+          <div class="mm-seg mm-seg--sm" role="group" aria-label="View">
+            <button
+              type="button"
+              :class="{ active: mm.view === 'graph' }"
+              :aria-pressed="mm.view === 'graph'"
+              title="Show the vault as a graph"
+              @click="setMapView('graph')"
+            >Graph</button>
+            <button
+              type="button"
+              :class="{ active: mm.view === 'list' }"
+              :aria-pressed="mm.view === 'list'"
+              title="Show the vault as a sortable list"
+              @click="setMapView('list')"
+            >List</button>
+          </div>
+
+          <!-- Colour-by is a canvas property: the list paints one dot per row
+               from the same palette but never a cluster hull, so the control
+               has nothing to say there. The orphan filters below scope the set
+               of notes itself, so they belong to both views. -->
+          <div v-if="mm.view === 'graph'" class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
             <button
               type="button"
               :class="{ active: mm.colorMode === 'category' }"
@@ -119,77 +110,177 @@
             @click="mm.toggleOnlyOrphans()"
           >{{ mm.orphanFilter === 'only' ? 'Only orphans ✓' : 'Only orphans' }}</button>
         </div>
-
-        <div class="mm-hint-overlay">
-          <span>
-            {{ mm.visibleNodes.length }} notes ·
-            <template v-if="zoomedOut">hover a note to name it and trace its links · zoom in for titles</template>
-            <template v-else>hover to trace links · click to pin the neighbourhood · shift-click two to find a path</template>
-          </span>
+        <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
+          <div class="mm-brain-skeleton" aria-hidden="true">
+            <svg viewBox="0 0 200 140" class="mm-brain-svg">
+              <!-- brain/network skeleton: nodes + interconnections -->
+              <line x1="45" y1="38" x2="82" y2="52" class="mm-brain-edge" />
+              <line x1="82" y1="52" x2="118" y2="42" class="mm-brain-edge" />
+              <line x1="118" y1="42" x2="155" y2="58" class="mm-brain-edge" />
+              <line x1="82" y1="52" x2="92" y2="92" class="mm-brain-edge" />
+              <line x1="118" y1="42" x2="108" y2="92" class="mm-brain-edge" />
+              <line x1="92" y1="92" x2="108" y2="92" class="mm-brain-edge" />
+              <line x1="45" y1="38" x2="38" y2="86" class="mm-brain-edge" />
+              <line x1="38" y1="86" x2="70" y2="118" class="mm-brain-edge" />
+              <line x1="155" y1="58" x2="162" y2="92" class="mm-brain-edge" />
+              <line x1="162" y1="92" x2="130" y2="118" class="mm-brain-edge" />
+              <line x1="70" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+              <line x1="130" y1="118" x2="100" y2="128" class="mm-brain-edge" />
+              <circle cx="45" cy="38" r="13" class="mm-brain-node mm-brain-node--1" />
+              <circle cx="82" cy="52" r="10" class="mm-brain-node mm-brain-node--2" />
+              <circle cx="118" cy="42" r="11" class="mm-brain-node mm-brain-node--3" />
+              <circle cx="155" cy="58" r="12" class="mm-brain-node mm-brain-node--4" />
+              <circle cx="92" cy="92" r="11" class="mm-brain-node mm-brain-node--2" />
+              <circle cx="108" cy="92" r="10" class="mm-brain-node mm-brain-node--1" />
+              <circle cx="38" cy="86" r="9" class="mm-brain-node mm-brain-node--3" />
+              <circle cx="162" cy="92" r="9" class="mm-brain-node mm-brain-node--2" />
+              <circle cx="70" cy="118" r="10" class="mm-brain-node mm-brain-node--4" />
+              <circle cx="130" cy="118" r="10" class="mm-brain-node mm-brain-node--1" />
+              <circle cx="100" cy="128" r="9" class="mm-brain-node mm-brain-node--3" />
+            </svg>
+          </div>
+          <div class="mm-skeleton-text"><span class="history-loading-spinner" aria-hidden="true"></span> Mapping your vault…</div>
+          <div class="mm-skeleton-bars" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 42%; height: 8px;"></span>
+            <span class="mm-shimmer-line" style="width: 58%; height: 8px; margin-top: 8px;"></span>
+          </div>
         </div>
-        <div
-          v-if="hoveredNode"
-          class="mm-hover-tip"
-          :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
-        >{{ hoveredNode.title }}</div>
-      </div>
-      <div v-else class="mm-list-wrap">
-        <table>
-          <thead>
-            <!-- Sortable headers state which way they are sorted, in both the
-                 caret and aria-sort. They were clickable with no indicator at
-                 all, so a second click on the same column looked like nothing
-                 had happened. -->
-            <tr>
-              <th :aria-sort="ariaSort('title')">
-                <button type="button" class="mm-sort" @click="setSort('title')">
-                  Name<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('title') }}</span>
-                </button>
-              </th>
-              <th :aria-sort="ariaSort('type')">
-                <button type="button" class="mm-sort" @click="setSort('type')">
-                  Type<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('type') }}</span>
-                </button>
-              </th>
-              <th class="th-plain">Tags</th>
-              <th :aria-sort="ariaSort('degree')">
-                <button type="button" class="mm-sort" @click="setSort('degree')">
-                  Links<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('degree') }}</span>
-                </button>
-              </th>
-              <th :aria-sort="ariaSort('age')">
-                <button type="button" class="mm-sort" title="Days since the note's facts were last verified" @click="setSort('age')">
-                  Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
-                </button>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="n in sortedVisibleNodes"
-              :key="n.id"
-              :class="{ current: mm.selectedId === n.id }"
-              @click="mm.selectNode(n.id)"
-            >
-              <td><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</td>
-              <td class="muted">{{ categoryLabelFor(n) }}</td>
-              <td>
-                <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
-              </td>
-              <!-- Link count as a bar as well as a number: sorted by links,
-                   the shape of the distribution (a few hubs, a long tail of
-                   twos) is the useful reading, and a column of digits hides
-                   it. -->
-              <td class="deg-cell">
-                <span class="deg-bar" aria-hidden="true"><span :style="{ width: degreeBarPct(n) + '%' }"></span></span>
-                <span class="deg-n">{{ n.degree }}</span>
-              </td>
-              <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+        <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
+        <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap" tabindex="0" role="region" aria-label="Vault graph">
+          <canvas
+            ref="canvasEl"
+            :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
+            aria-hidden="true"
+            @pointerdown="onPointerDown"
+            @pointermove="onCanvasPointerMove"
+            @pointerleave="clearHover"
+            @pointerup="onPointerUp"
+            @pointercancel="onPointerCancel"
+            @lostpointercapture="onLostPointerCapture"
+            @wheel.prevent="onWheel"
+            @contextmenu.prevent
+          />
+          <div class="mm-zoom-controls">
+            <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
+            <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
+            <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
+          </div>
+          <!-- Path endpoints for the current focus, mirrored from the list/detail
+               controls so a keyboard user can also set them without leaving the
+               canvas. Shown only while a focus exists. -->
+          <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Path finder for the focused note">
+            <span class="mm-path-controls-label">{{ mm.selectedNode.title }}</span>
+            <button
+              v-for="s in PATH_SLOTS"
+              :key="s.slot"
+              type="button"
+              :class="['btn-chip', { active: pathSlotHolds(s.slot, mm.selectedNode.id) }]"
+              :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
+              @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
+            >{{ s.chip }}</button>
+          </div>
+          <div class="mm-hint-overlay">
+            <span>
+              {{ mm.visibleNodes.length }} notes ·
+              <template v-if="zoomedOut">tap or hover a note to name it · zoom in for titles · use the List view to work by keyboard</template>
+              <template v-else>tap or click to pin the neighbourhood · drag to pan · set path start/end from a note's actions</template>
+            </span>
+          </div>
+          <div
+            v-if="hoveredNode"
+            class="mm-hover-tip"
+            :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
+          >{{ hoveredNode.title }}</div>
+        </div>
+        <div v-else class="mm-list-wrap" tabindex="0" role="region" aria-label="Vault notes list">
+          <table>
+            <thead>
+              <!-- Sortable headers state which way they are sorted, in both the
+                   caret and aria-sort. They were clickable with no indicator at
+                   all, so a second click on the same column looked like nothing
+                   had happened. -->
+              <tr>
+                <th :aria-sort="ariaSort('title')">
+                  <button type="button" class="mm-sort" @click="setSort('title')">
+                    Name<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('title') }}</span>
+                  </button>
+                </th>
+                <th :aria-sort="ariaSort('type')">
+                  <button type="button" class="mm-sort" @click="setSort('type')">
+                    Type<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('type') }}</span>
+                  </button>
+                </th>
+                <th class="th-plain">Tags</th>
+                <th :aria-sort="ariaSort('degree')">
+                  <button type="button" class="mm-sort" @click="setSort('degree')">
+                    Links<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('degree') }}</span>
+                  </button>
+                </th>
+                <th :aria-sort="ariaSort('age')">
+                  <button type="button" class="mm-sort" title="Days since the note's facts were last verified" @click="setSort('age')">
+                    Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
+                  </button>
+                </th>
+                <th class="th-plain">Path</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="n in sortedVisibleNodes"
+                :key="n.id"
+                :class="{ current: mm.selectedId === n.id }"
+                @click="activateRow(n, $event)"
+              >
+                <!-- The row opens the note by click, but a plain row handler is
+                     unreachable by keyboard. A native button in the title cell
+                     gives the same action a focusable, named control while the
+                     row click keeps the whole-row pointer target. -->
+                <td class="cell-title">
+                  <button
+                    type="button"
+                    class="mm-title-btn"
+                    :data-mm-return="n.id"
+                    :aria-pressed="mm.selectedId === n.id"
+                    :aria-label="`Open ${n.title}`"
+                    @click.stop="activateRow(n, $event)"
+                  ><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</button>
+                </td>
+                <td class="muted">{{ categoryLabelFor(n) }}</td>
+                <td>
+                  <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
+                </td>
+                <!-- Link count as a bar as well as a number: sorted by links,
+                     the shape of the distribution (a few hubs, a long tail of
+                     twos) is the useful reading, and a column of digits hides
+                     it. -->
+                <td class="deg-cell">
+                  <span class="deg-bar" aria-hidden="true"><span :style="{ width: degreeBarPct(n) + '%' }"></span></span>
+                  <span class="deg-n">{{ n.degree }}</span>
+                </td>
+                <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
+                <!-- Path endpoints, usable without the graph or a pointer: the
+                     list is the complete alternative to the canvas, so choosing
+                     a path may not depend on shift-clicking a dot. Names carry
+                     the note as well as the slot, since every row's control
+                     shares a visible label. -->
+                <td class="path-cell">
+                  <button
+                    v-for="s in PATH_SLOTS"
+                    :key="s.slot"
+                    type="button"
+                    class="mm-path-btn"
+                    :class="{ active: pathSlotHolds(s.slot, n.id) }"
+                    :aria-pressed="pathSlotHolds(s.slot, n.id)"
+                    :aria-label="pathSlotLabel(s.slot, n.title)"
+                    @click.stop="mm.choosePathEndpoint(n.id, s.slot)"
+                  >{{ s.compact }}</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
+      </div>
       <aside v-if="mm.selectedNode" class="mm-detail">
         <div
           class="mm-detail-resizer"
@@ -202,7 +293,7 @@
           class="mm-detail-close"
           title="Close (Esc)"
           aria-label="Close note detail"
-          @click="mm.selectNode(null)"
+          @click="closeDetail"
         >×</button>
         <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
         <div class="mm-detail-title">
@@ -210,6 +301,28 @@
           <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
         </div>
         <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
+        <!-- Explicit, named path controls: the shift-click instructions on the
+             canvas describe a gesture a touch or keyboard user cannot perform,
+             and a note's path endpoints have to be settable from whichever
+             surface actually opened it. -->
+        <div class="mm-detail-path-controls" role="group" aria-label="Path finder for this note">
+          <button
+            v-for="s in PATH_SLOTS"
+            :key="s.slot"
+            type="button"
+            class="btn-chip"
+            :class="{ active: pathSlotHolds(s.slot, mm.selectedNode.id) }"
+            :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
+          >{{ s.chip }}</button>
+          <button
+            v-if="mm.pathStart || mm.pathEnd"
+            type="button"
+            class="btn-chip"
+            @click="mm.resetPath()"
+          >Clear path</button>
+        </div>
+        <p v-if="mm.pathStart || mm.pathEnd" class="mm-detail-path-hint" role="status">{{ mm.pathHint }}</p>
         <button
           v-if="mm.selectedNode.stale"
           type="button"
@@ -258,14 +371,38 @@
             class="mm-link-item"
           >
             <span class="dot" :style="{ background: colorForNode(nb) }" />
-            <span class="label mm-link-label" @click="openNoteFile(nb.id)">{{ nb.title }}</span>
+            <!-- A native button, not a clickable span: opening a neighbor is a
+                 core part of inspecting a note and has to be reachable by
+                 keyboard and Enter/Space. -->
             <button
               type="button"
-              class="mm-link-focus"
-              title="Locate in graph"
-              aria-label="Locate in graph"
-              @click.stop="focusNode(nb.id)"
-            >⌖</button>
+              class="label mm-link-label mm-link-btn"
+              :data-mm-return="nb.id"
+              :aria-label="`Open ${nb.title}`"
+              @click="openNeighbor(nb.id, $event)"
+            >{{ nb.title }}</button>
+            <!-- Actions are grouped and non-shrinking so, at the panel's 220px
+                 minimum, they wrap to a second line instead of being pushed out
+                 of view by the note title. -->
+            <span class="mm-link-actions">
+              <button
+                v-for="s in PATH_SLOTS"
+                :key="s.slot"
+                type="button"
+                class="mm-path-btn"
+                :class="{ active: pathSlotHolds(s.slot, nb.id) }"
+                :aria-pressed="pathSlotHolds(s.slot, nb.id)"
+                :aria-label="pathSlotLabel(s.slot, nb.title)"
+                @click.stop="mm.choosePathEndpoint(nb.id, s.slot)"
+              >{{ s.compact }}</button>
+              <button
+                type="button"
+                class="mm-link-focus"
+                title="Locate in graph"
+                aria-label="Locate in graph"
+                @click.stop="focusNode(nb.id)"
+              >⌖</button>
+            </span>
           </div>
         </div>
 
@@ -298,6 +435,7 @@ import { isLightTheme } from '../lib/theme'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import TabBar, { type TabSpec } from './TabBar.vue'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
+import { GraphGesture } from '../lib/graphGesture'
 import {
   COOLING_DURATION_MS,
   DEFAULT_SCALE,
@@ -314,6 +452,7 @@ import {
   hitTest as hitTestNodes,
   labelDegreeFloor,
   labelsVisible,
+  minHitRadiusForScale,
   nodeRadius,
   screenToWorld as toWorld,
   stepSimulation as stepLayout,
@@ -459,6 +598,35 @@ function openNoteFile(id: string) {
   // content follow, on top of opening the file.
   mm.requestFocus(id)
   void fileViewer.open(id)
+}
+/** Open a linked note, remembering the neighbor control so closing the detail
+ * panel returns focus to it — unless that link unmounts when the panel content
+ * is replaced (see `detailReturnFocus`), in which case the watcher falls back. */
+function openNeighbor(id: string, event: Event) {
+  detailReturnFocus.value = { id, el: (event.currentTarget as HTMLElement | null) }
+  openNoteFile(id)
+}
+
+// ---------- path endpoints ----------
+// Four surfaces offer the same pair of buttons: the canvas overlay, each list
+// row, the detail panel and every neighbor row. Written out by hand that was
+// eight near-identical blocks, each carrying its own copy of the active class,
+// the `aria-pressed` expression and (for the compact pair) the `aria-label`
+// sentence — so a wording or ARIA change had eight places to land and could
+// silently reach only some of them. Each surface now renders one `v-for` over
+// this table, and the three bindings are computed here, once.
+const PATH_SLOTS = [
+  { slot: 'start' as const, chip: 'Start path', compact: 'start' },
+  { slot: 'end' as const, chip: 'End path', compact: 'end' },
+]
+/** Whether `id` currently occupies `slot` — the active class and aria-pressed. */
+function pathSlotHolds(slot: 'start' | 'end', id: string): boolean {
+  return (slot === 'start' ? mm.pathStart : mm.pathEnd) === id
+}
+/** The accessible name for the compact buttons, whose visible text ("start")
+ * is shared by every row and so names neither the note nor the action. */
+function pathSlotLabel(slot: 'start' | 'end', title: string): string {
+  return `Set ${title} as path ${slot}`
 }
 const deletingNote = ref(false)
 async function deleteNote(id: string) {
@@ -1096,8 +1264,118 @@ function tick() {
   rafId = requestAnimationFrame(tick)
 }
 
-function hitTest(wx: number, wy: number): MemoryGraphNode | null {
-  return hitTestNodes(simNodes, wx, wy)
+function hitTest(wx: number, wy: number, minRadius = 0): MemoryGraphNode | null {
+  return hitTestNodes(simNodes, wx, wy, minRadius)
+}
+
+// ---------- pointer gestures ----------
+// One gesture model for mouse, pen and touch: Pointer Events with capture, so
+// the same code drives a click, a drag and a tap on a touchscreen. The rules
+// (tap slop, one pointer at a time, cancellation) live in graphGesture and are
+// unit-tested; this section only maps them onto the camera and the layout.
+const gesture = new GraphGesture()
+let gestureNode: MemoryGraphNode | null = null
+/** A touch tap's target diameter on screen, matching DESIGN.md's --touch token.
+ * Enforced in world units at the current camera scale so it holds at any zoom. */
+const TOUCH_HIT_DIAMETER_PX = 44
+
+function hitTestAt(clientX: number, clientY: number, pointerType?: string): MemoryGraphNode | null {
+  if (!canvasEl.value) return null
+  const rect = canvasEl.value.getBoundingClientRect()
+  const [wx, wy] = screenToWorld((clientX - rect.left) * dpr, (clientY - rect.top) * dpr)
+  // A touch tap gets a 44 CSS-pixel target regardless of zoom, since the
+  // painted node is only ~13px across at fit scale. `camera.scale` is in device
+  // pixels, so the diameter is scaled by dpr to match; a 44px target must stay
+  // 44 CSS px at DPR 2/3, not shrink to 22/15. Mouse/pen keep the precise
+  // painted hit area.
+  const minRadius = pointerType === 'touch'
+    ? minHitRadiusForScale(TOUCH_HIT_DIAMETER_PX * dpr, camera.scale)
+    : 0
+  return hitTest(wx, wy, minRadius)
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (!canvasEl.value) return
+  clearHover()
+  const hit = hitTestAt(e.clientX, e.clientY, e.pointerType)
+  const accepted = gesture.begin(
+    { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, additive: e.shiftKey, isPrimary: e.isPrimary },
+    hit ? hit.id : null,
+  )
+  // A second finger (or a non-primary pointer) is ignored outright: it must
+  // never select a note or take over the pan the first finger started. The drag
+  // target is adopted only for the accepted pointer, so an ignored press can
+  // neither move the node the first finger grips nor replace it with a node
+  // under the extra finger.
+  if (!accepted) return
+  gestureNode = hit
+  // Capture routes every subsequent move/up for this pointer to the canvas even
+  // if the finger leaves it, and is what lets pointercancel arrive here.
+  canvasEl.value.setPointerCapture?.(e.pointerId)
+  e.preventDefault()
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!gesture.active) return
+  const move = gesture.move({
+    pointerId: e.pointerId,
+    clientX: e.clientX,
+    clientY: e.clientY,
+    additive: false,
+    isPrimary: e.isPrimary,
+  })
+  if (!move) return
+  if ('dragging' in move) {
+    const node = gestureNode
+    if (!node) return
+    wakeSimulation()
+    if (!canvasEl.value) return
+    const rect = canvasEl.value.getBoundingClientRect()
+    const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
+    node.x = wx
+    node.y = wy
+    node.vx = 0
+    node.vy = 0
+    return
+  }
+  // Dragging is the user taking the camera: whatever tween was in flight would
+  // otherwise keep pulling the view out from under the gesture.
+  cancelCameraTween()
+  camera.x += move.pan.dx * dpr
+  camera.y += move.pan.dy * dpr
+  requestRedraw()
+}
+
+/** One move handler on the canvas: a live gesture drags/pans, an idle pointer
+ * hovers. Keeping them separate listeners would double-fire on a drag. */
+function onCanvasPointerMove(e: PointerEvent) {
+  if (gesture.active) onPointerMove(e)
+  else onCanvasHover(e)
+}
+
+function onPointerUp(e: PointerEvent) {
+  // Only the pointer that owns the gesture may end it and release the target;
+  // an ignored pointer's `pointerup` must not clear the drag the first finger
+  // is still performing.
+  if (gesture.activePointerId !== e.pointerId) return
+  const result = gesture.end({ pointerId: e.pointerId })
+  gestureNode = null
+  if (result.tap === 'node') mm.handleNodeClick(result.nodeId, result.additive)
+  else if (result.tap === 'empty') mm.selectNode(null)
+}
+
+// `pointercancel` is the browser taking the touch for a scroll/zoom/system
+// gesture; `lostpointercapture` is the capture ending for any reason. Either
+// way the drag must stop cleanly rather than leave a node stuck under a finger.
+function onPointerCancel(e: PointerEvent) {
+  if (gesture.cancel({ pointerId: e.pointerId })) {
+    gestureNode = null
+  }
+}
+function onLostPointerCapture(e: PointerEvent) {
+  if (gesture.cancel({ pointerId: e.pointerId })) {
+    gestureNode = null
+  }
 }
 
 // ---------- hover name overlay ----------
@@ -1108,10 +1386,11 @@ function hitTest(wx: number, wy: number): MemoryGraphNode | null {
 // of a node redraws (the highlight ring).
 const hoveredNode = ref<MemoryGraphNode | null>(null)
 const hoverPos = ref({ x: 0, y: 0 })
-function onCanvasHover(e: MouseEvent) {
+function onCanvasHover(e: PointerEvent) {
   // While a press is held (node drag, pan) the surface is "grabbed", not
-  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise.
-  if (!canvasEl.value || downPos) {
+  // "pointing" — a tooltip chasing the cursor mid-drag reads as noise. Coarse
+  // pointers have no hover at all, so this only ever matters for a mouse/pen.
+  if (!canvasEl.value || gesture.active) {
     clearHover()
     return
   }
@@ -1137,67 +1416,6 @@ function clearHover() {
   hoveredNode.value = null
 }
 
-// A plain click has to survive a few pixels of incidental pointer jitter
-// between mousedown and mouseup, or it reads as a drag every time — this was
-// the "it keeps thinking I want to move it" complaint. Nothing (node move,
-// pan) actually happens until the pointer clears this threshold; a release
-// before that is unambiguously a click.
-const CLICK_DRAG_THRESHOLD_PX = 4
-let hitNode: MemoryGraphNode | null = null
-let dragging: MemoryGraphNode | null = null
-let panStart: { x: number; y: number; cx: number; cy: number } | null = null
-let downPos: { x: number; y: number } | null = null
-let dragged = false
-
-function onMouseDown(e: MouseEvent) {
-  if (!canvasEl.value) return
-  clearHover()
-  const rect = canvasEl.value.getBoundingClientRect()
-  const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
-  hitNode = hitTest(wx, wy)
-  dragged = false
-  downPos = { x: e.clientX, y: e.clientY }
-  if (hitNode) (hitNode as any)._shiftIntent = e.shiftKey
-  else panStart = { x: e.clientX, y: e.clientY, cx: camera.x, cy: camera.y }
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
-}
-function onMouseMove(e: MouseEvent) {
-  if (!downPos) return
-  if (!dragged) {
-    const dx = e.clientX - downPos.x
-    const dy = e.clientY - downPos.y
-    if (Math.hypot(dx, dy) < CLICK_DRAG_THRESHOLD_PX) return
-    dragged = true
-    if (hitNode) { dragging = hitNode; wakeSimulation() }
-  }
-  if (dragging) {
-    if (!canvasEl.value) return
-    const rect = canvasEl.value.getBoundingClientRect()
-    const [wx, wy] = screenToWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr)
-    dragging.x = wx
-    dragging.y = wy
-    dragging.vx = 0
-    dragging.vy = 0
-  } else if (panStart) {
-    // Dragging is the user taking the camera: whatever tween was in flight
-    // would otherwise keep pulling the view out from under the gesture.
-    cancelCameraTween()
-    camera.x = panStart.cx + (e.clientX - panStart.x) * dpr
-    camera.y = panStart.cy + (e.clientY - panStart.y) * dpr
-    requestRedraw()
-  }
-}
-function onMouseUp() {
-  if (hitNode && !dragged) mm.handleNodeClick(hitNode.id, !!(hitNode as any)._shiftIntent)
-  else if (!hitNode && !dragged) mm.selectNode(null)
-  hitNode = null
-  dragging = null
-  panStart = null
-  downPos = null
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
-}
 function onWheel(e: WheelEvent) {
   cancelCameraTween()
   if (!canvasEl.value || !W || !H) return
@@ -1228,20 +1446,73 @@ const vaultReview = useVaultReviewStore()
 // Tab badges, scoped like the lists they count: the workspace toggle scopes
 // both queues, so a global tally would claim rows the tab will not show.
 const proposalCount = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+// Candidates only. The tally used to add the trash in, so a queue with nothing
+// left to decide still wore a badge counting notes already retired — a number
+// asking for attention no click could clear. Retired notes carry their own
+// count on their own tab, which is where a "how much is in there" number
+// belongs.
 const retirementCount = computed(() =>
-  vaultReview.loadedWorkspace === store.activeWorkspace
-    ? vaultReview.candidates.length + vaultReview.trashed.length
-    : 0,
+  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.candidates.length : 0,
 )
-const reviewTabs = computed<TabSpec<'proposals' | 'retirement'>[]>(() => [
+const trashCount = computed(() =>
+  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.trashed.length : 0,
+)
+// Null until the ledger has loaded, and the badge stays hidden while it is: a
+// count rendered before the fetch read "History 0" on a ledger with hundreds
+// of rows. Unfiltered it reports the server's scoped total rather than the
+// rows we happen to hold, because the page is capped.
+const historyCount = computed(() => {
+  if (!proposals.historyLoaded) return null
+  if (proposals.historyFiltersActive) return proposals.visibleHistory(store.activeWorkspace).length
+  return proposals.historyTotal
+})
+
+/** Which of Review's four sections is on screen.
+ *
+ * Derived rather than stored: the underlying state (`mm.reviewTab`,
+ * `mm.retirementTab`, `proposals.view`) is what every other entry point sets,
+ * so flattening the navigation may not fork it into a fifth source of truth
+ * that those entry points would have to learn about.
+ */
+type ReviewTabKey = 'proposals' | 'retirement' | 'trash' | 'history'
+const reviewTab = computed<ReviewTabKey>({
+  get() {
+    if (mm.reviewTab === 'retirement') return mm.retirementTab === 'trash' ? 'trash' : 'retirement'
+    return proposals.view === 'history' ? 'history' : 'proposals'
+  },
+  set(key) {
+    if (key === 'retirement' || key === 'trash') {
+      mm.reviewTab = 'retirement'
+      mm.retirementTab = key === 'trash' ? 'trash' : 'candidates'
+      return
+    }
+    mm.reviewTab = 'proposals'
+    proposals.view = key === 'history' ? 'history' : 'queue'
+    if (key === 'history') void proposals.ensureHistoryLoaded(store.activeWorkspace)
+  },
+})
+
+// Labels name the decision, not the machinery. "Proposals" and "Retirements"
+// described the pipeline that produced the rows; these say what is in them.
+const reviewTabs = computed<TabSpec<ReviewTabKey>[]>(() => [
   // `|| undefined` rather than 0: a zero pill on an empty queue is noise.
-  { key: 'proposals', label: 'Proposals', count: proposalCount.value || undefined },
-  { key: 'retirement', label: 'Retirement', count: retirementCount.value || undefined },
+  { key: 'proposals', label: 'Suggested memories', count: proposalCount.value || undefined },
+  { key: 'retirement', label: 'Notes to revisit', count: retirementCount.value || undefined },
+  { key: 'trash', label: 'Retired', count: trashCount.value || undefined },
+  { key: 'history', label: 'History', count: historyCount.value },
 ])
+
+/** Switch the map's rendering. Both live at /memory, so there is no route to
+ * push — only `mapView` to remember, so leaving Review comes back here. */
+function setMapView(next: 'graph' | 'list') {
+  mm.view = next
+  mm.mapView = next
+}
 
 // A stale note's detail panel lands directly on the retirement queue.
 function openRetirementReview() {
   mm.reviewTab = 'retirement'
+  mm.retirementTab = 'candidates'
   mm.view = 'review'
   if (router.currentRoute.value.path !== '/proposals') void router.push('/proposals')
 }
@@ -1260,11 +1531,20 @@ function openRetirementReview() {
 // previous mount's leftover 'review' (landing on /memory by URL or the back
 // button), paying for both of the app's heaviest reads a line before the
 // seeding switches to 'graph'.
-mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : 'graph'
+// `mm.mapView`, not a literal 'graph': the drawing is a remembered preference
+// now, so arriving at /memory from anywhere restores the one last used instead
+// of snapping every visit back to the canvas.
+mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : mm.mapView
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
-    if (store.activeWorkspace) void vaultReview.ensureLoaded(store.activeWorkspace)
+    // The History tab's count now lives on the shared bar, which is on screen
+    // whichever section is showing — so the ledger has to be loaded even when
+    // the panel that used to prefetch it is not mounted.
+    if (store.activeWorkspace) {
+      void proposals.ensureHistoryLoaded(store.activeWorkspace)
+      void vaultReview.ensureLoaded(store.activeWorkspace)
+    }
   }
 }, { immediate: true })
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
@@ -1272,7 +1552,9 @@ const sortDir = ref(1)
 type SortKey = 'title' | 'type' | 'degree' | 'age'
 function setSort(key: SortKey) {
   if (sortKey.value === key) sortDir.value *= -1
-  else { sortKey.value = key; sortDir.value = 1 }
+  // Age opens oldest-first: the point of sorting by age is triage, and a
+  // larger ageDays is an older note, so that is the descending direction.
+  else { sortKey.value = key; sortDir.value = key === 'age' ? -1 : 1 }
 }
 function sortCaret(key: SortKey): string {
   if (sortKey.value !== key) return ''
@@ -1294,22 +1576,126 @@ const ageLabelOfSelected = computed(() => {
   if (!n) return ''
   return mm.ageLabelOf(n)
 })
+
+// Which control opened the note currently in the detail panel, and the element
+// to return focus to. Closing the panel returns focus there — otherwise a
+// keyboard user who opened a note and pressed the close button landed back at
+// the top of the document, having to tab through the whole list to get where
+// they were.
+//
+// The element is captured by reference rather than looked up by id, because
+// opening a note from a neighbor link unmounts that link: the panel's content
+// is replaced with the neighbor's, so the `[data-mm-return]` node for it no
+// longer exists by the time the panel closes. When the initiating control is
+// gone (the graph-view neighbor case), focus falls back to the graph region,
+// which is a stable, always-mounted destination in the same surface.
+const detailReturnFocus = ref<{ id: string; el: HTMLElement | null } | null>(null)
+/** Resolve the control to restore focus to: the clicked button itself, or the
+ * title button inside a clicked row. */
+function returnControlFor(event: Event): HTMLElement | null {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target) return null
+  if (target.matches('button')) return target
+  return target.querySelector<HTMLElement>('[data-mm-return]')
+}
+function activateRow(n: MemoryGraphNode, event: Event) {
+  detailReturnFocus.value = { id: n.id, el: returnControlFor(event) }
+  mm.selectNode(n.id)
+}
+function closeDetail() {
+  mm.selectNode(null)
+}
+watch(() => mm.selectedId, (id) => {
+  if (id !== null) {
+    // The selection moves through paths that never record a return control: a
+    // canvas tap (`mm.handleNodeClick`), `focusNode`, `openNoteFile`,
+    // `deliverPendingFocus` and the sidebar's `mm.requestFocus`. An entry left
+    // over from an earlier note is stale the moment one of those lands — on
+    // close, focus would jump to the other note's button while it is still
+    // mounted (list view), or the fallback would re-find that other note's
+    // title. Only the control that opened the note actually on screen may
+    // claim the restore, so the stale element is dropped — but the entry is
+    // re-pointed at the new note rather than cleared, so the fallback below
+    // still lands on that note's own title (or the surface region) instead of
+    // letting focus fall to the document body mid-journey.
+    if (detailReturnFocus.value && detailReturnFocus.value.id !== id) {
+      detailReturnFocus.value = { id, el: null }
+    }
+    return
+  }
+  if (!detailReturnFocus.value) return
+  const { id: returnId, el } = detailReturnFocus.value
+  detailReturnFocus.value = null
+  void nextTick(() => {
+    if (el && el.isConnected) {
+      el.focus()
+      return
+    }
+    // The initiating link is gone (graph-view neighbor navigation). Prefer the
+    // list's title button when this note has one on screen, else the active
+    // surface's own region, so focus never drops to the document body.
+    const listTitle = Array.from(document.querySelectorAll<HTMLElement>('[data-mm-return]'))
+      .find(candidate => candidate.dataset.mmReturn === returnId)
+    if (listTitle) listTitle.focus()
+    else document.querySelector<HTMLElement>('.mm-canvas-wrap, .mm-list-wrap')?.focus()
+  })
+})
+// Hoisted: constructing a collator per comparison is roughly an order of
+// magnitude slower than `<`, and this list re-sorts on every search keystroke.
+const listCollator = new Intl.Collator(undefined, { sensitivity: 'base' })
+
+// The number of days the "Checked" cell is actually showing. `ageLabelOf`
+// falls back to mtime when a note has no `updated:` frontmatter, so sorting on
+// `ageDays` alone pinned a note displaying "3y" below one displaying "2mo" —
+// the same display/sort mismatch fixed for the Type column, on exactly the
+// stale notes triage exists to surface. Only a node with nothing to show at
+// all (`ageLabelOf` returns '') sorts last.
+function sortableAgeDays(n: MemoryGraphNode): number | null {
+  if (!mm.ageLabelOf(n)) return null
+  return n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
+}
+
 const sortedVisibleNodes = computed(() => {
-  const arr = [...mm.visibleNodes]
-  arr.sort((a, b) => {
+  const key = sortKey.value
+  const dir = sortDir.value
+  // Precomputed once per node rather than per comparison: categoryLabelFor
+  // walks into personSubtype, which allocates a Set from the node's tags.
+  const decorated = mm.visibleNodes.map((n) => ({
+    n,
+    label: key === 'type' ? categoryLabelFor(n) : '',
+    age: key === 'age' ? sortableAgeDays(n) : null,
+  }))
+  decorated.sort((x, y) => {
     let av: string | number
     let bv: string | number
-    if (sortKey.value === 'degree') { av = a.degree; bv = b.degree }
-    else if (sortKey.value === 'age') {
-      // Oldest first by default: the point of sorting by age is triage.
-      av = a.ageDays ?? Number.MAX_SAFE_INTEGER
-      bv = b.ageDays ?? Number.MAX_SAFE_INTEGER
-    } else { av = (a as any)[sortKey.value] || ''; bv = (b as any)[sortKey.value] || '' }
-    if (av < bv) return -1 * sortDir.value
-    if (av > bv) return 1 * sortDir.value
+    if (key === 'degree') { av = x.n.degree; bv = y.n.degree }
+    else if (key === 'age') {
+      // Undated notes sort last in BOTH directions. A MAX_SAFE_INTEGER
+      // sentinel only held while ascending, so the second click — the one
+      // that actually gives oldest-first triage — floated them above the
+      // genuinely stale ones it was meant to surface.
+      if (x.age === null && y.age === null) return 0
+      if (x.age === null) return 1
+      if (y.age === null) return -1
+      av = x.age; bv = y.age
+    } else if (key === 'type') {
+      av = x.label; bv = y.label
+    } else {
+      // Every other key has been eliminated above, so `key` narrows to
+      // 'title' and this indexes MemoryGraphNode as a plain string — no cast.
+      av = x.n[key] || ''; bv = y.n[key] || ''
+    }
+    if (typeof av === 'string' && typeof bv === 'string') {
+      // Collator, not `<`: raw comparison orders by code point, so every
+      // capitalised title sorts ahead of every lowercase one ('Zebra' < 'apple')
+      // and a vault mixing both spellings reads as unsorted.
+      return listCollator.compare(av, bv) * dir
+    }
+    if (av < bv) return -1 * dir
+    if (av > bv) return 1 * dir
     return 0
   })
-  return arr
+  return decorated.map((d) => d.n)
 })
 
 // ---------- lifecycle ----------
@@ -1334,9 +1720,8 @@ onBeforeUnmount(() => {
   if (animRafId) cancelAnimationFrame(animRafId)
   camTween = null
   pulse = null
+  gesture.cancel()
   ro?.disconnect()
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('mousemove', handleDetailDrag)
   window.removeEventListener('mouseup', stopDetailDrag)
   window.removeEventListener('resize', onResizeNarrow)
@@ -1351,9 +1736,8 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
 }
-/* The Review surface holds two queues — agent proposals and stale-note
-   retirement — under one tab bar, matching ProposalReviewPanel's own
-   Queue/History underline style so switching sub-views reads the same way. */
+/* The Review surface holds all four sections — two queues waiting on a
+   decision and two records of decisions already made — under one tab bar. */
 .mm-review-wrap {
   flex: 1;
   min-height: 0;
@@ -1361,8 +1745,9 @@ onBeforeUnmount(() => {
   flex-direction: column;
 }
 /* Layout only. The tab styling itself lives in TabBar, which this bar renders
-   through — it sits directly above ProposalReviewPanel's own bar, so a copied
-   ruleset here would visibly desync two adjacent rows of identical tabs. */
+   through. It is now the only tab row on the Review surface; at a phone width
+   the four tabs scroll sideways inside it rather than wrapping, so the panel
+   below always starts at the same height. */
 .mm-review-tabs {
   padding: 0 var(--space-4);
   flex: none;
@@ -1474,23 +1859,44 @@ onBeforeUnmount(() => {
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
+/* A neighbor row wraps its action group below the title at narrow widths
+   instead of overflowing horizontally. */
 .mm-link-item {
-  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
   font-size: var(--text-sm); color: var(--fg);
 }
 .mm-link-item:hover { background: var(--bg3); }
-.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-.mm-link-label { cursor: pointer; flex: 1; }
+/* The neighbor's name is a real button: opening it is a core action, and a
+   clickable span is unreachable by keyboard. Reset to read like the text it
+   replaced, then give it the app's focus ring. `min-width: 0` lets a long title
+   shrink and wrap; the actions keep their own row when there is no room. */
+.mm-link-btn {
+  background: none; border: none; padding: 0; margin: 0; text-align: left;
+  font: inherit; color: inherit; cursor: pointer; min-height: var(--touch);
+  display: flex; align-items: center; flex: 1 1 auto; min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mm-link-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.mm-link-label { cursor: pointer; }
 .mm-link-label:hover { text-decoration: underline; }
+.mm-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mm-link-focus {
   background: none; border: none; color: var(--fg3); cursor: pointer; padding: 2px 4px;
   border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: 1; flex: none;
+  min-width: var(--touch); min-height: var(--touch);
 }
 .mm-link-focus:hover { background: var(--bg2); color: var(--fg); }
 
-.mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
-.mm-canvas-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+.mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); flex: 1; min-height: 0; }
+/* touch-action:none makes the canvas own its touches so a drag pans instead of
+   scrolling the page underneath. It is scoped to the canvas on purpose: panning
+   and pinch-zoom of the page remain available everywhere else, per DESIGN.md. */
+.mm-canvas-wrap canvas {
+  display: block; width: 100%; height: 100%; cursor: grab;
+  touch-action: none; -webkit-user-select: none; user-select: none;
+}
 .mm-canvas-wrap canvas.mm-canvas--node-hover { cursor: pointer; }
 /* Name overlay for the label-free far-out view. pointer-events:none so it can
    never sit between the cursor and the node it names. */
@@ -1510,6 +1916,19 @@ onBeforeUnmount(() => {
   z-index: 2;
 }
 .mm-zoom-controls { position: absolute; top: var(--space-3); right: var(--space-3); display: flex; flex-direction: column; gap: 6px; }
+/* Path endpoints for the focused note, without requiring a shift-click on a
+   dot (impossible on touch, undiscoverable without a mouse). Sits under the
+   zoom controls so the two never overlap. */
+.mm-path-controls {
+  position: absolute; top: calc(var(--space-3) + 3 * var(--touch) + 12px); right: var(--space-3);
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
+  max-width: 200px;
+}
+.mm-path-controls-label {
+  font-size: var(--text-xs); color: var(--fg3); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
+}
+.mm-path-controls .btn-chip { min-height: var(--touch); }
 .mm-hint-overlay {
   position: absolute; bottom: var(--space-3); left: var(--space-3); font-size: var(--text-xs); color: var(--fg3);
   background: color-mix(in srgb, var(--bg) 70%, transparent); padding: 4px 8px; border-radius: var(--radius-sm);
@@ -1597,7 +2016,8 @@ onBeforeUnmount(() => {
   .mm-skeleton-bars .mm-shimmer-line { animation: none; }
 }
 
-.mm-list-wrap { overflow: auto; padding: var(--space-4); }
+.mm-list-wrap { overflow: auto; padding: var(--space-4); flex: 1; min-height: 0; }
+.mm-list-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .mm-list-wrap thead th {
   text-align: left; padding: 0; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
@@ -1623,6 +2043,28 @@ onBeforeUnmount(() => {
 .mm-list-wrap tbody tr.current { background: var(--bg2); box-shadow: inset 2px 0 0 var(--accent); }
 .mm-list-wrap .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; }
 .mm-list-wrap .muted { color: var(--fg3); }
+/* The note title is a button so the row's action is keyboard reachable. It
+   reads as the plain text it replaced, and carries a full 44px hit target. */
+.cell-title { padding-top: 0; padding-bottom: 0; }
+.mm-title-btn {
+  display: flex; align-items: center; width: 100%; min-height: var(--touch);
+  background: none; border: none; padding: 0; margin: 0; text-align: left;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.mm-title-btn:hover { text-decoration: underline; }
+.mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.path-cell { white-space: nowrap; }
+.mm-path-btn {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--fg3); font-family: var(--font); font-size: var(--text-xs);
+  min-height: var(--touch); min-width: 44px; padding: 0 8px; margin-right: 4px; cursor: pointer;
+}
+.mm-path-btn:hover { color: var(--fg); border-color: var(--fg2); }
+.mm-path-btn.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Inside the neighbor row the flex gap owns spacing, so drop the trailing
+   margin that the list cell needs. */
+.mm-link-actions .mm-path-btn { margin-right: 0; }
+.mm-path-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .deg-cell { white-space: nowrap; }
 .deg-bar {
   display: inline-block; width: 46px; height: 4px; border-radius: 2px;
@@ -1653,6 +2095,12 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs); font-weight: 500; letter-spacing: normal; text-transform: none;
 }
 .mm-detail-verified { color: var(--fg3); font-size: var(--text-xs); margin: -2px 0 var(--space-2); }
+.mm-detail-path-controls {
+  display: flex; flex-wrap: wrap; gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+.mm-detail-path-controls .btn-chip { min-height: var(--touch); }
+.mm-detail-path-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0 0 var(--space-2); }
 .mm-detail-path {
   display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
   font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;
@@ -1755,10 +2203,24 @@ onBeforeUnmount(() => {
 /* Canvas toolbar: overlays the graph top-left, opposite the zoom controls.
    Wraps rather than scrolls so a narrow window stacks the groups instead of
    hiding the orphan toggle off the edge. */
+/* The map's own column: a toolbar row above whichever rendering is showing.
+   The two renderings take the remaining height (`min-height: 0` so the canvas
+   can shrink and the list can scroll rather than stretching the page). */
+.mm-surface {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* Static, not absolutely positioned over the canvas: the row is shared with
+   the list now, where an overlay would sit on top of the table header. The
+   `max-width` that used to keep it clear of the zoom controls goes with it. */
 .mm-toolbar {
-  position: absolute; top: var(--space-3); left: var(--space-3);
+  flex: none;
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  max-width: calc(100% - 96px);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 .mm-seg--sm button { padding: 4px 10px; font-size: var(--text-xs); }
 .mm-toggle {

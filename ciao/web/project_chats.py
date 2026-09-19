@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
+import math
 import mimetypes
 import copy
 import os
@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover
 
 import yaml
 
-from ciao import job_runs, provider_registry, subagent_tracking
+from ciao import job_runs, subagent_tracking
 from ciao.subagent_tracking import SubagentInfo
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
@@ -71,7 +71,6 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.error_log import clear_error_log, tail_error_log
-from ciao.schedules import supports_auto_archive
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -88,7 +87,7 @@ from ciao.models import (
     ThinkingEvent,
     ToolUseEvent,
 )
-from ciao.model_tiers import canonical_tier, is_tier
+from ciao.model_tiers import is_tier
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
     OpencodeProvider,
@@ -110,6 +109,7 @@ from ciao.web.chat_broker import (
     remove_pending_list,
     reorder_pending_list,
 )
+from ciao.web import chat_service
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 
@@ -132,26 +132,6 @@ _CAPABILITY_IMAGE_MSG = (
     "Pick a model that supports images and re-send."
 )
 
-# Project-files surface (list + upload). Mirrors the union of the read-only
-# workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
-# docs). Kept in sync intentionally: anything we let users upload, we also
-# need to be able to serve back via one of the workspace endpoints.
-_PROJECT_TEXT_EXTS = frozenset({
-    ".md", ".markdown", ".txt",
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".vue",
-    ".css", ".html", ".json",
-    ".yaml", ".yml", ".toml",
-    ".sh", ".rs", ".go", ".java", ".xml", ".sql",
-    ".cfg", ".ini", ".log", ".csv",
-})
-_PROJECT_IMAGE_EXTS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
-})
-_PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
-})
-_PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
-_PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
@@ -221,11 +201,6 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # /messages renderer collapses it into a system line rather than showing a user
 # bubble nobody typed).
 _SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
-_HANDOVER_ROLES = {"user", "assistant", "system"}
-_FORK_MAX_MESSAGES = 80
-_FORK_MAX_CHARS = 60_000
-_PROVIDER_HANDOVER_MAX_MESSAGES = 12
-_PROVIDER_HANDOVER_MAX_CHARS = 12_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
@@ -238,6 +213,70 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
+# ── Idle provider reaping ────────────────────────────────────────────────
+# `self._providers` is keyed by chat id and, before this, was only ever
+# emptied by a lifecycle event (session reset, handover, archive, delete).
+# That is fine for Claude, whose provider is an in-process SDK client, but
+# opencode runs **one `opencode serve` process per chat** — see the module
+# docstring in ciao/providers/opencode.py for why the control plane's per-chat
+# MCP token forces that. Without a reaper, a day of touching chats leaves a
+# server process, a port, an SSE stream and a stderr reader alive for every
+# one of them until the app restarts.
+#
+# A provider is only reclaimed when the chat has been quiet for the timeout
+# AND has no work in flight (`active_chat_ids`, a between-turns drain, a retry
+# loop or a pending background wake). Reclaiming is cheap to undo: the chat's
+# `session_id` is persisted, so the next turn reconnects and resumes rather
+# than starting a new conversation — the same path a token rotation already
+# takes (ciao/providers/opencode.py::_ensure_server,
+# ciao/providers/claude.py::_ensure_connected).
+# Overridable per install with ``CIAO_PROVIDER_IDLE_TIMEOUT`` (read in
+# ``__init__``, so a test can set it before constructing a manager).
+_PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
+# How often the sweep runs. Well under the timeout so a provider is reclaimed
+# within roughly one interval of becoming eligible, and far above any per-turn
+# cadence so an idle install is not woken constantly.
+_PROVIDER_REAP_INTERVAL_SECONDS = 120.0
+# How many sweeps may try to disconnect the same provider before the sweep
+# gives up on it. A `disconnect()` that raises leaves the process it was meant
+# to end possibly alive, so the reference must not simply be dropped — the
+# shutdown hook reads `self._providers` and is the last chance to finish the
+# job. But a provider that fails forever (a wedged `process.wait()`, a
+# transport that raises on every close) would be pinned in that map forever,
+# which is the same leak from the other end, and it would be handed back to
+# the chat's next turn. So the retry is bounded: `MAX - 1` further sweeps,
+# then the reference is dropped with an ERROR naming the chat, and the sweep
+# does NOT report it as reclaimed.
+_PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
+
+
+def _positive_env_seconds(name: str, default: float) -> float:
+    """A finite, positive float from the environment, or the default.
+
+    A zero, negative, non-finite or unparseable override falls back rather
+    than raising: this only tunes a background sweep, and a typo in an env var
+    must not stop the app from starting. Three values in particular are worth
+    naming, because ``float()`` accepts two of them happily and each breaks
+    the sweep differently: ``0`` busy-loops it, ``nan`` makes the sleep timer
+    never come due (every comparison against it is False), and ``inf`` as the
+    idle timeout means nothing is ever old enough to reclaim.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "Ignoring non-positive or non-finite %s=%r; using %s", name, raw, default
+        )
+        return default
+    return value
+
+
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 
 
@@ -256,274 +295,9 @@ def _state_file_lock(path: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _classify_file(path: Path) -> str:
-    """Map a file path to one of: ``markdown | image | text | binary``.
-
-    Anything outside the three allowlists falls back to ``binary`` so the UI
-    can show it greyed-out with a download fallback. The file may not be
-    representable by any of our viewers, but we still list it.
-    """
-    ext = path.suffix.lower()
-    if ext in {".md", ".markdown"}:
-        return "markdown"
-    if ext in _PROJECT_IMAGE_EXTS:
-        return "image"
-    if ext in _PROJECT_TEXT_EXTS:
-        return "text"
-    return "binary"
-
 # Legacy IDs from the removed auto-imported Claude Code CLI view.
 _CC_CLI_PROJECT_ID = "proj-cc-cli"
 _CC_CHAT_PREFIX = "chat-cc-"
-
-# A vault_folder must be a single directory name under projects/active/ or
-# projects/completed/. Reject path separators, parent-directory traversal,
-# leading dots, and non-printable characters. Names are free-form (lowercase
-# kebab-case is preferred but not enforced); see README "Project naming
-# convention".
-_VAULT_FOLDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _restored_postprocess(raw: object) -> dict:
-    """Sanitize a persisted post-archive record on load.
-
-    The pipeline is an in-process ``asyncio`` task, so a record still marked
-    "running" is a record whose task died with the previous process. Downgrading
-    it to "done" keeps the chat reporting the steps that did land instead of
-    showing an activity indicator nothing is left alive to clear."""
-    if not isinstance(raw, dict) or not raw:
-        return {}
-    state = dict(raw)
-    if state.get("state") == "running":
-        state["state"] = "done"
-        state["step"] = ""
-        state["interrupted"] = True
-    return state
-
-
-def _project_reference_key(value: str) -> str:
-    """Normalize a display name or vault-folder slug for context matching."""
-
-    return re.sub(r"[\W_]+", "-", str(value).casefold()).strip("-")
-
-
-def _stable_vault_project_id(workspace: str, vault_folder: str) -> str:
-    """Return the convergent id for a newly discovered vault-backed project."""
-
-    identity = f"{workspace.casefold()}\0{vault_folder.casefold()}".encode("utf-8")
-    return f"proj-{hashlib.sha256(identity).hexdigest()[:12]}"
-
-
-def _iso_after(seconds: int) -> str:
-    return (datetime.now(UTC) + timedelta(seconds=seconds)).replace(
-        microsecond=0
-    ).isoformat().replace("+00:00", "Z")
-
-
-def _parse_iso(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _provider_label(provider: str) -> str:
-    if not provider:
-        return "Provider"
-    return provider_registry.label(provider, short=True)
-
-
-def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
-    """Sanitize visible chat rows without applying history limits."""
-    rows: list[dict] = []
-    for raw in messages or []:
-        if not isinstance(raw, dict):
-            continue
-        role = str(raw.get("role", "")).strip().lower()
-        if role not in _HANDOVER_ROLES:
-            continue
-        content = str(raw.get("content", "")).strip()
-        if not content:
-            continue
-        entry: dict = {
-            "role": role,
-            "content": content,
-        }
-        timestamp = str(raw.get("timestamp", "") or raw.get("sent_at", "")).strip()
-        if timestamp:
-            entry["timestamp"] = timestamp
-        tool_name = str(raw.get("tool_name", "")).strip()
-        if tool_name:
-            entry["tool_name"] = tool_name
-        if bool(raw.get("is_error")):
-            entry["is_error"] = True
-        images = raw.get("images")
-        if isinstance(images, list):
-            refs = [str(ref) for ref in images if str(ref)]
-            if refs:
-                entry["images"] = refs
-        file_path = str(raw.get("file_path", "")).strip()
-        if file_path:
-            entry["file_path"] = file_path
-        action = str(raw.get("action", "")).strip()
-        if action:
-            entry["action"] = action
-        tool = str(raw.get("tool", "")).strip()
-        if tool:
-            entry["tool"] = tool
-        rows.append(entry)
-    return rows
-
-
-def _normalize_handover_messages(
-    messages: list[dict] | None,
-    *,
-    max_messages: int = _FORK_MAX_MESSAGES,
-    max_chars: int = _FORK_MAX_CHARS,
-) -> list[dict]:
-    """Sanitize and bound visible rows for a fork or provider handover."""
-    rows = _clean_handover_messages(messages)
-    total_chars = sum(len(str(row.get("content", ""))) for row in rows)
-    while (
-        len(rows) > max_messages
-        or total_chars > max_chars
-    ) and rows:
-        removed = rows.pop(0)
-        total_chars -= len(str(removed.get("content", "")))
-    return rows
-
-
-def _handover_marker(
-    *,
-    old_provider: str,
-    old_model: str,
-    new_provider: str,
-    new_model: str,
-) -> dict:
-    return {
-        "role": "system",
-        "content": (
-            "Handed over from "
-            f"{_provider_label(old_provider)} / {old_model} to "
-            f"{_provider_label(new_provider)} / {new_model}."
-        ),
-        "timestamp": _now_iso(),
-    }
-
-
-def _is_retryable_quota_error(text: str) -> bool:
-    low = (text or "").lower()
-    # Claude Code uses "You've hit your session limit" in its user-facing
-    # exhaustion banner, while the API-shaped error says "reached your
-    # session usage limit". Both should arm the deferred hourly retry.
-    if (
-        "reached your session usage limit" in low
-        or "hit your session limit" in low
-    ):
-        return True
-    # Temporary model saturation is a capacity error rather than a 429/quota
-    # error. Treat it as hourly retryable so the user does not have to keep the
-    # chat open and press Retry manually.
-    if "at capacity" in low:
-        return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
-        return True
-    # A provider that just states the limit, with no 429 and none of the vendor
-    # phrasings above — opencode/OpenAI surfaces "The usage limit has been
-    # reached". Pairing a limit noun with an exhaustion verb is unambiguous in a
-    # way the bare nouns are not, which is why those still need the 429 marker
-    # below: "quota" or "session" alone appears in plenty of prose that is not
-    # an exhaustion error.
-    if any(noun in low for noun in ("usage limit", "rate limit", "quota", "token limit")) and any(
-        verb in low for verb in ("reached", "exceeded", "exhausted")
-    ):
-        return True
-    if "429" not in low and "too many requests" not in low:
-        return False
-    return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
-
-
-
-def _is_retryable_connection_error(text: str) -> bool:
-    low = (text or "").lower()
-    connection_indicators = (
-        "enotfound",
-        "econnrefused",
-        "econnreset",
-        "etimedout",
-        "unable to connect",
-        "failed to fetch",
-        "network request failed",
-        "temporary failure in name resolution",
-        "dns resolution failed",
-        "socket timeout",
-        "gateway timeout",
-        "bad gateway",
-        "service unavailable",
-        "502 bad gateway",
-        "503 service unavailable",
-        "504 gateway timeout",
-        "connect timeout",
-        "connection timeout",
-        "connection timed out",
-        # Upstream API dropped the streaming connection mid-response. The CLI
-        # surfaces this as a banner; the Claude provider re-flags it as an
-        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
-        # ``ciao/providers/claude.py``.
-        "connection closed mid-response",
-        "response above may be incomplete",
-    )
-    return any(indicator in low for indicator in connection_indicators)
-
-
-def _is_retryable_provider_startup_error(text: str) -> bool:
-    """Recognize a transient provider-launch failure before turn progress."""
-    low = (text or "").lower()
-    if "opencode serve exited" in low and (
-        "database is locked" in low or "database is busy" in low
-    ):
-        return True
-    # A server that stays alive but never answers /global/health is the same
-    # transient startup wedge (shared SQLite contention with other opencode
-    # processes); _ensure_server already retries it internally, so a chat
-    # turn that still lands here should get the same bounded auto-retry as
-    # the database-locked exit instead of failing outright.
-    return "opencode serve did not become healthy" in low
-
-
-def _is_retryable_auth_error(text: str) -> bool:
-    """Recognize a transient OAuth session expiry that can recover on retry.
-
-    The Claude CLI surfaces ``Failed to authenticate: OAuth session expired
-    and could not be refreshed`` when its in-memory credentials lapsed
-    mid-turn. The credentials are refreshed on the next process spawn, so
-    retrying the turn (fast 30s interval, bounded like connection errors)
-    recovers without user intervention. Keep this narrow: only the
-    ``oauth session expired`` / ``could not be refreshed`` shape is
-    retried, not every ``Failed to authenticate`` (e.g. revoked keys).
-
-    ``Not logged in · Please run /login`` is the same class: the CLI reports
-    it when the credentials it holds lapsed mid-turn, and the next spawn
-    re-reads them from disk. It is retried on the same bounded ladder, so a
-    genuinely signed-out install stops after ``_MAX_CONNECTION_DROP_RETRIES``
-    instead of looping.
-    """
-    low = (text or "").lower()
-    if "oauth session expired" in low:
-        return True
-    if "failed to authenticate" in low and "could not be refreshed" in low:
-        return True
-    if "session expired" in low and "could not be refreshed" in low:
-        return True
-    if "not logged in" in low and "/login" in low:
-        return True
-    return False
 
 
 def _has_running_loop() -> bool:
@@ -534,399 +308,13 @@ def _has_running_loop() -> bool:
         return False
 
 
-def _uuid8() -> str:
-    return uuid.uuid4().hex[:8]
-
-
-_REENTRY_SUMMARY_MAX_CHARS = 600
-_REENTRY_SUMMARY_MAX_BULLETS = 4
-
-
-def _reentry_summary_lines(text: str) -> list[str]:
-    """Return summary content without markdown/list wrapper syntax."""
-    lines: list[str] = []
-    for raw_line in (text or "").splitlines():
-        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw_line).strip()
-        if not line or re.fullmatch(r"```(?:[a-zA-Z0-9_-]+)?\s*", line):
-            continue
-        lines.append(line)
-    return lines
-
-
-def _parse_reentry_summary_json(text: str) -> Any | None:
-    """Parse a JSON response, including a fenced or bullet-wrapped object."""
-    cleaned = "\n".join(_reentry_summary_lines(text))
-    candidates = [candidate for candidate in (text.strip(), cleaned) if candidate]
-    decoder = json.JSONDecoder()
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-        # Apple occasionally adds a short preamble before the structured
-        # response. Decode from the first object/array rather than exposing
-        # that preamble or the JSON punctuation in the UI.
-        for marker in ("{", "["):
-            start = candidate.find(marker)
-            if start == -1:
-                continue
-            try:
-                value, _ = decoder.raw_decode(candidate[start:])
-            except json.JSONDecodeError:
-                continue
-            return value
-    return None
-
-
-# Keys that carry transcript plumbing rather than anything a returning reader
-# wants. Apple's on-device model mirrors the shape of the records it is handed,
-# so a "summary" can come back as a synthetic envelope of its own
-# ({"type": "event", "event_id": "..."}). Those fields are noise even when the
-# JSON parses cleanly.
-_SUMMARY_METADATA_KEY_RE = re.compile(
-    r"^(?:id|idx|index|type|kind|role|event|schema|version|timestamp|time|date"
-    r"|session|\w+_id)$",
-    re.IGNORECASE,
-)
-
-# A line that is bare JSON punctuation, a quoted `"key": value` pair, or a key
-# opening a nested object is transcript residue, not a summary. It reaches the
-# plain-line fallback when the model answers with JSON that does not parse -
-# output truncated mid-object, or several records concatenated.
-_JSON_RESIDUE_RE = re.compile(
-    r"""^(?:
-        [\[\]{}(),;]+
-        | "[^"]*"\s*:.*
-        | [\w .-]+\s*:\s*[\[{]\s*,?
-    )$""",
-    re.VERBOSE,
-)
-
-
-def _summary_field_label(key: object) -> str:
-    if _SUMMARY_METADATA_KEY_RE.fullmatch(str(key).strip()):
-        return ""
-    label = re.sub(r"[_-]+", " ", str(key)).strip()
-    return label[:1].upper() + label[1:] if label else ""
-
-
-def _summary_value_text(value: Any) -> str:
-    """Render a JSON value as compact human-readable text."""
-    if isinstance(value, str):
-        return " ".join(value.split())
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        parts = [_summary_value_text(item) for item in value]
-        return "; ".join(part for part in parts if part)
-    if isinstance(value, dict):
-        field_parts: list[str] = []
-        for key, item in value.items():
-            item_text = _summary_value_text(item)
-            label = _summary_field_label(key)
-            if item_text and label:
-                field_parts.append(f"{label}: {item_text}")
-        return "; ".join(field_parts)
-    return str(value)
-
-
-def _reentry_summary_phrases(parsed: Any) -> list[str]:
-    if isinstance(parsed, dict):
-        phrases: list[str] = []
-        for key, value in parsed.items():
-            label = _summary_field_label(key)
-            value_text = _summary_value_text(value)
-            if label and value_text:
-                phrases.append(f"{label}: {value_text}")
-        return phrases
-    if isinstance(parsed, list):
-        return [value for item in parsed if (value := _summary_value_text(item))]
-    value = _summary_value_text(parsed)
-    return [value] if value else []
-
-
-def _reentry_transcript_text(filtered_jsonl: str) -> str:
-    """Flatten line-oriented transcript JSON into speaker-prefixed prose.
-
-    Apple's on-device model mirrors the shape of what it is given: handed
-    JSON records it answers with a JSON envelope of its own instead of a
-    summary. Prose in, prose out. Dropping the tool_use records at the same
-    time spends the small Apple input budget on what the chat was about
-    rather than on tool plumbing the summary would never mention.
-    """
-    lines: list[str] = []
-    for raw_line in (filtered_jsonl or "").splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        content = record.get("content")
-        texts: list[str] = []
-        if isinstance(content, str):
-            texts = [" ".join(content.split())]
-        else:
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict) or block.get("type") != "text":
-                    continue
-                text = " ".join(str(block.get("text") or "").split())
-                if text:
-                    texts.append(text)
-        body = " ".join(text for text in texts if text)
-        if not body:
-            continue
-        speaker = "User" if record.get("type") == "user" else "Assistant"
-        lines.append(f"{speaker}: {body}")
-    return "\n".join(lines)
-
-
-def _cap_reentry_summary(text: str) -> str:
-    """Normalize an orientation summary to a small, predictable UI note."""
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return ""
-
-    parsed = _parse_reentry_summary_json(raw)
-    if parsed is not None:
-        phrases = _reentry_summary_phrases(parsed)
-    else:
-        phrases = [
-            line
-            for line in _reentry_summary_lines(raw)
-            if not line.startswith("#") and not _JSON_RESIDUE_RE.match(line)
-        ]
-    # Nothing survived: the model answered with structure instead of a summary.
-    # Show no note rather than JSON punctuation dressed up as bullet points.
-    if not phrases:
-        return ""
-    if len(phrases) == 1:
-        phrases = [
-            phrase.strip()
-            for phrase in re.split(r"(?<=[.!?])\s+", phrases[0])
-            if phrase.strip()
-        ]
-
-    bullets = [f"• {phrase}" for phrase in phrases[:_REENTRY_SUMMARY_MAX_BULLETS]]
-    result = "\n".join(bullets)
-    if len(result) <= _REENTRY_SUMMARY_MAX_CHARS:
-        return result
-    return result[: _REENTRY_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
-
-_PLACEHOLDER_TITLE_RE = re.compile(r"^New session\b", re.IGNORECASE)
-
-
-def _normalize_tier(model: str) -> str:
-    """Canonicalize a tier alias; a concrete model id passes through unchanged."""
-    return canonical_tier(model) if is_tier(model) else model
-
-
-_INJECTED_CONTEXT_MARKER = "[CIAO_CONTEXT_BEGIN]"
-
-
-def _real_title(title: str) -> str | None:
-    """Return *title* if it is a real provider title, else None.
-
-    Providers seed a session with a placeholder default (opencode uses
-    ``New session - <timestamp>``) and only later write the generated title.
-    Treating the placeholder as a real title would let the auto-title poll
-    stop early and leave the sidebar stuck on it, so it is filtered out here.
-
-    Also rejected: a provider whose own summarizer degrades and echoes the
-    literal first session message back as the "title". That message carries
-    our injected context capsule (see `_build_prompt_prefix`), which is meant
-    to stay invisible to the user - accepting it verbatim both leaked
-    internal state into the sidebar and skipped the 6-word
-    `_fallback_title` truncation, which only runs when no native title is
-    accepted.
-    """
-    title = (title or "").strip()
-    if not title or _PLACEHOLDER_TITLE_RE.match(title) or _INJECTED_CONTEXT_MARKER in title:
-        return None
-    return title
-
-
-_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-
-
-def _fallback_title(user_text: str) -> str | None:
-    """Deterministic fallback title derived from the user's first message.
-
-    Used when the model call fails, so the
-    sidebar never stays stuck on "New Chat" indefinitely.
-    """
-    snippet = (user_text or "").strip()
-    if not snippet:
-        return None
-    # First line only, strip surrounding quotes.
-    snippet = snippet.splitlines()[0].strip().strip('"').strip("'").strip()
-    if not snippet:
-        return None
-    # A leading URL truncates mid-host ("Check Zendesk ticket https://scand…"),
-    # which reads as broken text in the sidebar. Keep only the words before
-    # the first URL when there are any; a bare-URL prompt keeps the URL.
-    url_match = _URL_RE.search(snippet)
-    if url_match and url_match.start() > 0:
-        before = snippet[: url_match.start()].strip()
-        if before:
-            snippet = before
-    # Cap at ~6 words or 60 chars.
-    words = snippet.split()
-    if len(words) > 6:
-        snippet = " ".join(words[:6])
-    snippet = snippet.rstrip(".!?:,")
-    if len(snippet) > 60:
-        snippet = snippet[:57].rstrip() + "..."
-    return snippet or None
-
-
 # One-shot titler budget. Hosted models answer in a couple of seconds; a slow
 # local backend simply times out and the deterministic fallback applies, the
 # same trade the schedule attention classifier makes with a longer window.
 _TITLE_LLM_TIMEOUT_S = 45.0
 
-_TITLE_MAX_CHARS = 60
-
-
-def _clean_llm_title(text: str | None) -> str | None:
-    """Normalize a model-produced title, or None when it is not usable.
-
-    Models answer with trailing newlines, wrapping quotes, or — when their
-    own summarizer degrades — the literal first session message, which
-    carries our injected ``[CIAO_CONTEXT_BEGIN]`` capsule. Accepting any of
-    those would put them straight into the sidebar.
-    """
-    title = (text or "").strip()
-    if not title:
-        return None
-    # First non-empty line only; the prompt asks for one line anyway.
-    for line in title.splitlines():
-        line = line.strip()
-        if line:
-            title = line
-            break
-    title = title.strip().strip('"').strip("'").strip("`").strip()
-    title = title.rstrip(".!?:,")
-    if not title or _PLACEHOLDER_TITLE_RE.match(title):
-        return None
-    if _INJECTED_CONTEXT_MARKER in title:
-        return None
-    if len(title) > _TITLE_MAX_CHARS:
-        title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
-    return title or None
-
-
-_FRONTMATTER_DELIM = "---"
-_DESCRIPTION_KEY_RE = re.compile(r"^description\s*:")
-
-
-def _yaml_quote(value: str) -> str:
-    """Encode *value* as a YAML double-quoted scalar.
-
-    JSON string syntax is a subset of YAML's double-quoted style, so
-    ``json.dumps`` already escapes the characters that break an unquoted
-    scalar - colons, quotes, leading ``#``, newlines - without hand-rolling an
-    encoder. ``ensure_ascii=False`` keeps accented descriptions readable in the
-    file rather than exploding them into ``\\uXXXX``.
-    """
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _set_frontmatter_description(text: str, description: str) -> str | None:
-    """Return *text* with its YAML frontmatter ``description:`` set.
-
-    Surgical by design: every other line of the document, frontmatter included,
-    survives byte-for-byte. Round-tripping the block through ``yaml.safe_dump``
-    would reorder keys and strip the comments out of docs people hand-write.
-
-    Creates the frontmatter block when the document has none - that block is
-    what auto-discovery reads, so a doc without one cannot carry a description
-    at all. Returns ``None`` when the frontmatter is open but never closed:
-    that document is malformed, and guessing where the block ends risks
-    rewriting prose.
-    """
-    quoted = f"description: {_yaml_quote(description)}"
-    lines = text.split("\n")
-
-    # The delimiter only opens frontmatter on line 1. Anywhere else it is a
-    # horizontal rule in the body.
-    if not lines or lines[0].strip() != _FRONTMATTER_DELIM:
-        block = f"{_FRONTMATTER_DELIM}\n{quoted}\n{_FRONTMATTER_DELIM}\n"
-        return f"{block}\n{text}" if text.strip() else block
-
-    close = next(
-        (i for i in range(1, len(lines)) if lines[i].strip() == _FRONTMATTER_DELIM),
-        None,
-    )
-    if close is None:
-        return None
-
-    start = next(
-        (i for i in range(1, close) if _DESCRIPTION_KEY_RE.match(lines[i])),
-        None,
-    )
-    if start is None:
-        # Append rather than prepend: `name:`/`status:` conventionally lead the
-        # block, and a new key at the bottom reads as the addition it is.
-        return "\n".join(lines[:close] + [quoted] + lines[close:])
-
-    # Consume the value's continuation lines. Block scalars (`description: |`)
-    # and wrapped flow scalars both continue on more-indented lines, and a
-    # blank line inside a block scalar is still part of the value.
-    end = start + 1
-    while end < close:
-        line = lines[end]
-        if line.strip() and not line[:1].isspace():
-            break
-        end += 1
-    # A trailing run of blank lines separates keys; it belongs to whatever
-    # comes next, not to the value we are replacing.
-    while end > start + 1 and not lines[end - 1].strip():
-        end -= 1
-    return "\n".join(lines[:start] + [quoted] + lines[end:])
-
-
-
 
 # ── Data models ──────────────────────────────────────────────────────────
-
-
-def _normalize_chat_helper(value: Any) -> dict[str, Any]:
-    """Fail closed on lifecycle metadata supplied by older or invalid clients."""
-    if not isinstance(value, dict) or value.get("kind") != "proposal":
-        return {}
-    intent = str(value.get("intent") or "")
-    policy = str(value.get("archive_policy") or "")
-    if (intent, policy) not in {
-        ("resolve", "when_resolved"),
-        ("review", "manual"),
-    }:
-        return {}
-    raw_ids = value.get("proposal_ids")
-    if not isinstance(raw_ids, list):
-        return {}
-    proposal_ids = list(
-        dict.fromkeys(
-            item
-            for item in raw_ids[:100]
-            if isinstance(item, str) and 0 < len(item) <= 128
-        )
-    )
-    if not proposal_ids:
-        return {}
-    return {
-        "kind": "proposal",
-        "intent": intent,
-        "proposal_ids": proposal_ids,
-        "archive_policy": policy,
-    }
 
 
 @dataclass(slots=True)
@@ -1180,55 +568,6 @@ class ArchiveOutcome:
 
 
 @dataclass(slots=True)
-class ScheduleRunOutcome:
-    completed: bool = False
-    is_error: bool = False
-    permission_requested: bool = False
-    question_requested: bool = False
-    stream_error: bool = False
-    retry_pending: bool = False
-    final_text: str = ""
-    archived_to: str = ""
-    # True when the run dispatched background subagents that had not finished
-    # by the time we stopped waiting. Such a run is not "done" yet, so it must
-    # stay visible rather than auto-archive on a half-complete result.
-    subagents_pending: bool = False
-
-
-def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
-    return (
-        outcome.completed
-        and not outcome.is_error
-        and not outcome.permission_requested
-        and not outcome.question_requested
-        and not outcome.stream_error
-        and not outcome.retry_pending
-        and not outcome.subagents_pending
-    )
-
-
-def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | None]:
-    """Classify a scheduled turn for job-run history.
-
-    A pending retry means the provider deferred the work, such as after a
-    quota rejection. It remains unclean and visible, but is not an app error.
-    Unsettled background subagents (or a run that ended on an interim message
-    with no synthesis turn) mean the work is not done yet either — not a
-    failure to report as such, but not a healthy run either: recording "ok"
-    would clear a previous error while the follow-up never completed.
-    """
-    if outcome.retry_pending:
-        return "skipped", None
-    if outcome.stream_error or outcome.is_error:
-        return "error", (outcome.final_text or "stream error")[:1000]
-    if outcome.permission_requested or outcome.question_requested:
-        return "skipped", None
-    if outcome.subagents_pending:
-        return "skipped", None
-    return "ok", None
-
-
-@dataclass(slots=True)
 class _StreamOutcome:
     """Terminal result of a single ``provider.execute_streaming`` pass.
 
@@ -1246,22 +585,6 @@ class _StreamOutcome:
     quota: dict[str, str] = field(default_factory=dict)
     cost_usd: float = 0.0
     tool_events: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _should_auto_archive_schedule_run(
-    entry: object, outcome: ScheduleRunOutcome, *, needs_user: bool = False
-) -> bool:
-    archive_policy = getattr(entry, "archive_policy", "manual")
-    if archive_policy != "auto":
-        return False
-    # Never auto-archive the chat an interval entry is bound to: archiving it
-    # makes the next run fork a replacement and archive that too, forever. One
-    # predicate, shared with the store-side normalisation that keeps `auto`
-    # from being persisted for such an entry in the first place — two copies of
-    # this rule would drift, and the dispatcher's copy is the one that decides.
-    if not supports_auto_archive(entry):
-        return False
-    return _schedule_run_clean(outcome) and not needs_user
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -1301,6 +624,24 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # Monotonic stamp of the last time each chat's provider was handed
+        # out, plus the single sweep task that reclaims the idle ones. See
+        # `_PROVIDER_IDLE_TIMEOUT_SECONDS` for why this exists; the task is
+        # started lazily on first use so a manager built in a test (or any
+        # process with no running loop) never creates one it does not need.
+        self._provider_last_used: dict[str, float] = {}
+        # Consecutive failed disconnect attempts per chat, kept only while a
+        # provider is being retried (see `_PROVIDER_DISCONNECT_MAX_ATTEMPTS`)
+        # and cleared by `_pop_provider`, so it cannot outlive the provider it
+        # counts for or be inherited by a recycled chat id.
+        self._provider_disconnect_failures: dict[str, int] = {}
+        self._provider_reaper: asyncio.Task | None = None
+        self._provider_idle_timeout = _positive_env_seconds(
+            "CIAO_PROVIDER_IDLE_TIMEOUT", _PROVIDER_IDLE_TIMEOUT_SECONDS
+        )
+        self._provider_reap_interval = _positive_env_seconds(
+            "CIAO_PROVIDER_REAP_INTERVAL", _PROVIDER_REAP_INTERVAL_SECONDS
+        )
         # Fold turn journals left behind by a crashed process into their
         # transcripts as is_partial turns before anything reads history.
         try:
@@ -1434,6 +775,16 @@ class ProjectChatManager:
         # `postprocess["state"] == "running"` on the chat, kept as a set so the
         # /ws/events connect snapshot and the home-screen count are O(1) reads.
         self._postprocessing: set[str] = set()
+        # Persisted per-archive pipeline manifests (ciao/archive_jobs.py), so a
+        # crash between stages can be resumed by stage instead of re-running
+        # model extraction. Keyed by chat id; the on-disk manifest is the
+        # durable copy and this map is only a read cache for the same process.
+        self._archive_jobs: dict[str, Any] = {}
+        # The live post-archive task per chat, so a delete can cancel a stage
+        # that is currently awaiting a model call (the tombstone flag alone only
+        # stops the *next* stage).
+        self._archive_tasks: dict[str, asyncio.Task] = {}
+        self._runtime_root = Path(config.state_path).parent
         # The loop the manager was constructed on, so job-run events arriving
         # from a worker thread can be marshalled back onto it before touching
         # EventsHub (whose asyncio.Queue wants the loop thread).
@@ -1525,7 +876,7 @@ class ProjectChatManager:
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
-                handover_messages=_normalize_handover_messages(
+                handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
@@ -1541,12 +892,12 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
-                helper=_normalize_chat_helper(cd.get("helper")),
+                helper=chat_service._normalize_chat_helper(cd.get("helper")),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
                 # forever on a spinner nothing will ever clear.
-                postprocess=_restored_postprocess(cd.get("postprocess")),
+                postprocess=chat_service._restored_postprocess(cd.get("postprocess")),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1749,7 +1100,7 @@ class ProjectChatManager:
             return
         audit_path = self._path.with_name(f"{self._path.stem}.audit.jsonl")
         event = {
-            "timestamp": _now_iso(),
+            "timestamp": chat_service._now_iso(),
             "pid": os.getpid(),
             "revision": revision,
             "reason": reason,
@@ -1949,12 +1300,12 @@ class ProjectChatManager:
                 None,
             )
             if general is None:
-                pid = _stable_vault_project_id(ws, "general")
+                pid = chat_service._stable_vault_project_id(ws, "general")
                 general = ProjectInfo(
                     project_id=pid,
                     name="General",
                     workspace=ws,
-                    created_at=_now_iso(),
+                    created_at=chat_service._now_iso(),
                     order=0,
                     vault_folder="general",
                 )
@@ -2297,7 +1648,7 @@ class ProjectChatManager:
         that may be absolute for vaults outside the workspace root.
         """
         folder_name = project.vault_folder
-        if not folder_name or not _VAULT_FOLDER_RE.fullmatch(folder_name):
+        if not folder_name or not chat_service._VAULT_FOLDER_RE.fullmatch(folder_name):
             return None
         try:
             active_root = self._vault_active_root(project.workspace).resolve()
@@ -2328,7 +1679,7 @@ class ProjectChatManager:
             return False
         try:
             current = doc.read_text(encoding="utf-8")
-            updated = _set_frontmatter_description(current, project.context)
+            updated = chat_service._set_frontmatter_description(current, project.context)
             if updated is None or updated == current:
                 return False
             doc.write_text(updated, encoding="utf-8")
@@ -2426,19 +1777,19 @@ class ProjectChatManager:
 
         project_map: dict[tuple[str, str], str] = {}
         for project in self._projects.values():
-            name_key = _project_reference_key(project.name)
+            name_key = chat_service._project_reference_key(project.name)
             if name_key:
                 project_map.setdefault((name_key, project.workspace), project.project_id)
         # A canonical vault slug wins over a colliding display-name alias.
         for project in self._projects.values():
-            folder_key = _project_reference_key(project.vault_folder)
+            folder_key = chat_service._project_reference_key(project.vault_folder)
             if folder_key:
                 project_map[(folder_key, project.workspace)] = project.project_id
         return project_map
 
     def _resolve_project_reference(self, workspace: str, value: str) -> str:
         project_id = self._project_reference_map().get(
-            (_project_reference_key(value), workspace), ""
+            (chat_service._project_reference_key(value), workspace), ""
         )
         if project_id:
             return project_id
@@ -2624,8 +1975,8 @@ class ProjectChatManager:
             title = str(transcript.get("context_label") or "").strip()
             if not title or title == "New Chat":
                 # Input is always non-empty, so the fallback returns a str.
-                title = cast(str, _fallback_title(visible_prompt or "Recovered Chat"))
-            created_at = str(transcript.get("started_at") or "") or _now_iso()
+                title = cast(str, chat_service._fallback_title(visible_prompt or "Recovered Chat"))
+            created_at = str(transcript.get("started_at") or "") or chat_service._now_iso()
             updated_at = str(transcript.get("updated_at") or created_at)
             mode: BridgeMode = cast(
                 BridgeMode, str(valid_turns[-1].get("mode") or self._config.claude_mode)
@@ -2894,13 +2245,13 @@ class ProjectChatManager:
                     })
                     continue
 
-                pid = _stable_vault_project_id(ws, stem)
+                pid = chat_service._stable_vault_project_id(ws, stem)
                 project = ProjectInfo(
                     project_id=pid,
                     name=name,
                     workspace=ws,
                     context=context,
-                    created_at=_now_iso(),
+                    created_at=chat_service._now_iso(),
                     order=len(self._projects),
                     vault_folder=stem,
                     vault_doc_path=self._display_path(readme) if readme is not None else "",
@@ -2942,13 +2293,13 @@ class ProjectChatManager:
         workspace: str,
         context: str = "",
     ) -> ProjectInfo:
-        pid = f"proj-{_uuid8()}"
+        pid = f"proj-{chat_service._uuid8()}"
         project = ProjectInfo(
             project_id=pid,
             name=name,
             workspace=workspace,
             context=context,
-            created_at=_now_iso(),
+            created_at=chat_service._now_iso(),
             order=len(self._projects),
         )
         self._projects[pid] = project
@@ -2979,7 +2330,7 @@ class ProjectChatManager:
             # Reject anything that could escape projects/active/<folder>/.
             # Empty string clears the binding; a non-empty value must be a
             # single safe folder name (no separators, no traversal, no NUL).
-            if vault_folder and not _VAULT_FOLDER_RE.fullmatch(vault_folder):
+            if vault_folder and not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
                 raise ValueError(
                     f"Invalid vault_folder {vault_folder!r}: "
                     "must match [A-Za-z0-9._-]+ with no path separators."
@@ -3065,7 +2416,7 @@ class ProjectChatManager:
         if vault_folder and self._is_known_workspace(project.workspace):
             # Defence in depth: even though update_project validates
             # vault_folder, double-check before any filesystem operation.
-            if not _VAULT_FOLDER_RE.fullmatch(vault_folder):
+            if not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
                 raise ValueError(
                     f"Invalid vault_folder {vault_folder!r} stored on project."
                 )
@@ -3147,7 +2498,7 @@ class ProjectChatManager:
         """
         if not self._is_known_workspace(workspace):
             raise ValueError("Invalid workspace.")
-        if not _VAULT_FOLDER_RE.fullmatch(stem):
+        if not chat_service._VAULT_FOLDER_RE.fullmatch(stem):
             raise ValueError(f"Invalid project folder {stem!r}.")
 
         completed_root = self._vault_completed_root(workspace).resolve()
@@ -3304,7 +2655,7 @@ class ProjectChatManager:
         # response), which closed the panel and caused the "new chat flashes
         # and then opens" bug. Empty chats now live until the user deletes
         # them explicitly.
-        cid = f"chat-{_uuid8()}"
+        cid = f"chat-{chat_service._uuid8()}"
         # Per-provider default thinking level for new chats; a missing entry
         # leaves it to the provider default ("" = auto).
         default_thinking = (self._config.provider_default_thinking or {}).get(
@@ -3318,8 +2669,8 @@ class ProjectChatManager:
             provider=chat_provider,
             mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
             thinking_level=default_thinking,
-            created_at=_now_iso(),
-            helper=_normalize_chat_helper(helper),
+            created_at=chat_service._now_iso(),
+            helper=chat_service._normalize_chat_helper(helper),
         )
         self._chats[cid] = chat
         self._save()
@@ -3379,7 +2730,7 @@ class ProjectChatManager:
             # No session, no images, no transcript -> nothing else to clean
             # up. Still cancel any in-flight provider just in case.
             self._cancel_between_turns_drain(cid)
-            provider = self._providers.pop(cid, None)
+            provider = self._pop_provider(cid)
             if provider:
                 asyncio.ensure_future(provider.disconnect())
             logger.info("Cleaned up empty chat %s", cid)
@@ -3589,10 +2940,10 @@ class ProjectChatManager:
         new_chat.thinking_level = chat.thinking_level
         
         # Seed handover messages
-        new_chat.handover_messages = _normalize_handover_messages(
+        new_chat.handover_messages = chat_service._normalize_handover_messages(
             parsed_messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         new_chat.handover_context_pending = True
         
@@ -3615,7 +2966,7 @@ class ProjectChatManager:
         if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
             raise ValueError("Fork turn must be a non-negative integer")
 
-        clean_rows = _clean_handover_messages(messages)
+        clean_rows = chat_service._clean_handover_messages(messages)
         if not clean_rows:
             raise ValueError("Fork history must be non-empty")
         if clean_rows[-1].get("role") != "assistant" or clean_rows[-1].get("is_error"):
@@ -3632,8 +2983,8 @@ class ProjectChatManager:
             len(str(row.get("content", ""))) for row in selected_rows
         )
         if (
-            len(selected_rows) > _FORK_MAX_MESSAGES
-            or selected_chars > _FORK_MAX_CHARS
+            len(selected_rows) > chat_service._FORK_MAX_MESSAGES
+            or selected_chars > chat_service._FORK_MAX_CHARS
         ):
             raise ValueError("The selected turn is too large to fork")
 
@@ -3641,8 +2992,8 @@ class ProjectChatManager:
         total_chars = sum(len(str(row.get("content", ""))) for row in rows)
         truncated = False
         while (
-            len(rows) > _FORK_MAX_MESSAGES
-            or total_chars > _FORK_MAX_CHARS
+            len(rows) > chat_service._FORK_MAX_MESSAGES
+            or total_chars > chat_service._FORK_MAX_CHARS
         ):
             removed = rows.pop(0)
             total_chars -= len(str(removed.get("content", "")))
@@ -3672,14 +3023,14 @@ class ProjectChatManager:
         )
 
         fork = ChatInfo(
-            chat_id=f"chat-{_uuid8()}",
+            chat_id=f"chat-{chat_service._uuid8()}",
             project_id=source.project_id,
             title=f"{base_title} · Fork {next_index}",
             model=source.model,
             mode=source.mode,
             provider=source.provider,
             thinking_level=source.thinking_level,
-            created_at=_now_iso(),
+            created_at=chat_service._now_iso(),
             handover_messages=rows,
             handover_context_pending=True,
             forked_from_chat_id=source.chat_id,
@@ -3758,13 +3109,13 @@ class ProjectChatManager:
 
         old_provider = chat.provider
         old_model = chat.model
-        rows = _normalize_handover_messages(
+        rows = chat_service._normalize_handover_messages(
             messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         rows.append(
-            _handover_marker(
+            chat_service._handover_marker(
                 old_provider=old_provider,
                 old_model=old_model,
                 new_provider=provider,
@@ -3784,12 +3135,12 @@ class ProjectChatManager:
         # the old lineage doesn't apply. Visible history instead carries over
         # via `handover_messages` above.
         chat.previous_session_ids = []
-        chat.last_activity_at = _now_iso()
+        chat.last_activity_at = chat_service._now_iso()
 
         ctx = ChatContext.for_web(chat_id)
         self._state.reset_active_session(ctx)
         self._cancel_between_turns_drain(chat_id)
-        provider_service = self._providers.pop(chat_id, None)
+        provider_service = self._pop_provider(chat_id)
         if provider_service:
             asyncio.ensure_future(provider_service.disconnect())
         self._save()
@@ -3871,15 +3222,28 @@ class ProjectChatManager:
 
     async def _disconnect_provider(
         self, chat_id: str, provider: ProviderService | None
-    ) -> None:
-        """Close a chat's provider before deleting its provider-side session."""
+    ) -> bool:
+        """Close a chat's provider before deleting its provider-side session.
+
+        Returns whether the provider is actually gone. A failure is still
+        swallowed — cleanup must not block the lifecycle write that scheduled
+        it — but it is no longer invisible: the idle sweep drops its only
+        reference to the provider the moment it pops it from
+        ``self._providers``, and an opencode server that refused to terminate
+        would then stay alive with nothing left to retry the teardown, exactly
+        the process leak the sweep exists to prevent. Callers on the
+        lifecycle paths are free to ignore the answer; the sweep is not (see
+        ``reap_idle_providers``).
+        """
 
         if provider is None:
-            return
+            return True
         try:
             await provider.disconnect()
         except Exception:  # noqa: BLE001 — cleanup must not block lifecycle writes
             logger.exception("Failed to disconnect provider for chat %s", chat_id)
+            return False
+        return True
 
     def _schedule_provider_cleanup(
         self,
@@ -3929,7 +3293,7 @@ class ProjectChatManager:
             task.cancel()
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
@@ -3940,6 +3304,13 @@ class ProjectChatManager:
         # Archive intentionally keeps them: archived chats are read-only but
         # their history viewer should still work.
         self._snapshots.delete_chat(chat_id)
+        # Deleting an archived chat must cancel/tombstone its pending archive
+        # job: a running task would otherwise finish and write derived memory
+        # for a chat that no longer exists, and a startup resume could revive
+        # it. The tombstone is durable even if the in-process task is mid-write.
+        # The row is already out of `self._chats`, so hand it over explicitly.
+        self._cancel_archive_job(chat_id, chat)
+        self._delete_archived_transcript(chat_id)
         self._save(reason="user_chat_delete")
         self._events.publish({
             "type": "chat_deleted",
@@ -3954,7 +3325,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
             return False
-        helper = _normalize_chat_helper(chat.helper)
+        helper = chat_service._normalize_chat_helper(chat.helper)
         if helper.get("archive_policy") != "when_resolved":
             return False
         if (
@@ -4103,7 +3474,7 @@ class ProjectChatManager:
             self._clear_chat_retry(chat)
         self._cancel_pending_push(chat_id)
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         await self._disconnect_provider(chat_id, provider)
         await self._reclaim_provider_sessions_async(chat)
         self._unlink_chat_images(chat)
@@ -4203,7 +3574,7 @@ class ProjectChatManager:
                 # Leave `step` pointing at the last thing that ran: between two
                 # steps there is no current one, and blanking it would make the
                 # UI flicker back to a generic label for a few milliseconds.
-            state["updated_at"] = _now_iso()
+            state["updated_at"] = chat_service._now_iso()
             chat.postprocess = state
             self._publish_postprocess(chat)
         except Exception:  # noqa: BLE001
@@ -4232,8 +3603,8 @@ class ProjectChatManager:
             "step": expected[0] if expected else "",
             "expected": list(expected),
             "steps": {},
-            "started_at": _now_iso(),
-            "updated_at": _now_iso(),
+            "started_at": chat_service._now_iso(),
+            "updated_at": chat_service._now_iso(),
         }
         self._publish_postprocess(chat)
 
@@ -4243,9 +3614,19 @@ class ProjectChatManager:
         if chat is None:
             return
         state = dict(chat.postprocess or {})
-        state["state"] = "done"
+        # Settle to the manifest's own outcome: a job that still has failed
+        # stages is "incomplete" (retryable), one that needs a config/human
+        # change is "blocked", and only an all-settled job is "done". Without
+        # this a partly-failed pipeline would report success and hide its
+        # retry affordance.
+        job = self._archive_jobs.get(chat_id)
+        job_state = getattr(job, "state", "") if job is not None else ""
+        if job_state in ("incomplete", "blocked"):
+            state["state"] = job_state
+        else:
+            state["state"] = "done"
         state["step"] = ""
-        state["updated_at"] = _now_iso()
+        state["updated_at"] = chat_service._now_iso()
         chat.postprocess = state
         # Persisted so an archived chat can still report what was learned from
         # it after a restart — the run log rotates, this does not.
@@ -4260,13 +3641,19 @@ class ProjectChatManager:
             self._end_postprocess(chat_id)
 
     def retry_insights(self, chat_id: str) -> str:
-        """Kick off a text-mode insights retry for an archived chat.
+        """Resume the unfinished post-archive stages for an archived chat.
 
-        Returns a job status string: ``"started"`` when the retry task is
-        launched, ``"running"`` when this chat's pipeline is already live
-        (nothing is re-launched), or ``"not_found"`` / ``"not_archived"`` /
-        ``"no_archive"`` / ``"already_has"`` for the non-starts. Used by the
-        ``/api/chats/{chat_id}/retry-insights`` route.
+        An archive that already carries insights but whose project fold,
+        trajectory or memory writes never landed is exactly the case this
+        repairs (see ``ciao/archive_jobs.py``). Returns ``"started"`` when a
+        resume task is launched, ``"running"`` when the chat's pipeline is
+        already live, ``"complete"`` when nothing is left to do, ``"blocked"``
+        when the job needs a config/human change, or ``"not_found"`` /
+        ``"not_archived"`` / ``"no_archive"`` for the non-starts. Used by
+        ``/api/chats/{chat_id}/retry-insights``.
+
+        The method name is kept for route/back-compat; PWA_API.md documents it
+        as "retry unfinished steps".
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -4278,47 +3665,559 @@ class ProjectChatManager:
         if chat_id in self._postprocessing:
             return "running"
 
+        archive_path = self._archive_path_for_chat(chat)
+        if not archive_path.exists():
+            return "no_archive"
+
+        job, inputs = self._resume_job(chat_id, archive_path)
+        if job is None or inputs is None:
+            return "no_archive"
+        if job.tombstoned:
+            return "complete"
+        if not job.unfinished():
+            return "complete"
+        # An explicit user retry is a deliberate action: always clear failed
+        # stages, blocks, and exhausted attempt budgets before launching, even
+        # when `resumable()` is nominally non-empty because a *dependent*
+        # pending stage kept it so. Otherwise an exhausted `insights` whose
+        # dependents are still pending would be skipped, and the launch would
+        # run only work that immediately waits for it — a silent no-op retry.
+        job.reset_failed(include_blocked=True)
+        if not job.resumable():
+            return "complete"
+        self._launch_job(chat_id, job, inputs)
+        return "started"
+
+    def retry_archive_steps(self, chat_id: str) -> dict[str, Any]:
+        """Retry every unfinished stage and report the manifest to the caller.
+
+        The richer sibling of :meth:`retry_insights` used by the postprocess
+        UI: same launch path, but it returns the current manifest view so the
+        archived-chat panel can render partial completion immediately.
+        """
+        status = self.retry_insights(chat_id)
+        return {"status": status, "job": self.archive_job_view(chat_id)}
+
+    def archive_job_view(self, chat_id: str) -> dict[str, Any] | None:
+        """The persisted manifest for a chat, projected for the PWA, or None."""
+        from ciao.archive_jobs import load_job, manifest_view, new_job_id
+
+        chat = self._chats.get(chat_id)
+        if chat is None or not chat.archive_path:
+            return None
+        job = self._archive_jobs.get(chat_id)
+        if job is None:
+            job = load_job(
+                self._runtime_root, new_job_id(chat_id, chat.archive_path)
+            )
+        if job is None:
+            return None
+        return manifest_view(job)
+
+    def _delete_archived_transcript(self, chat_id: str) -> None:
+        """Remove a deleted chat's archived transcript directory.
+
+        Without this, an explicit delete does not stick. `_discover_archived_chats`
+        treats ``<logs_root>/Chats`` as the source of truth and re-imports any
+        directory that is not in the registry, so the very next `list_projects()`
+        poll brought the chat back — with the same ``chat_id`` and
+        ``archive_path``, hence the same `new_job_id`, which `_cancel_archive_job`
+        had just tombstoned for good. The resurrected chat could therefore never
+        run insights, the project-doc fold, trajectories or memory proposals
+        again, and `retry_insights` reported "complete" for a pipeline that had
+        never run.
+
+        Scoped to this chat's own directory under the derived transcript
+        archive: that tree is Ciaobot-generated, one directory per chat, and the
+        user asked for this chat to be deleted. Everything else in the vault is
+        left alone.
+        """
+        chats_root = self._config.logs_root / "Chats"
+        chat_dir = chats_root / chat_id
+        # Defend the path: `chat_id` reaching a filesystem join must not escape
+        # the archive root, whatever it contains.
+        try:
+            resolved = chat_dir.resolve()
+            if resolved.parent != chats_root.resolve():
+                return
+        except OSError:
+            return
+        if not resolved.is_dir():
+            return
+        try:
+            shutil.rmtree(resolved)
+        except OSError:
+            logger.warning(
+                "Could not delete archived transcript for %s", chat_id, exc_info=True
+            )
+
+    def _cancel_archive_job(
+        self, chat_id: str, chat: ChatInfo | None = None
+    ) -> None:
+        """Tombstone a deleted chat's archive job and stop its live task.
+
+        Called on explicit delete. The tombstone is the durable half: it is
+        written even when the manifest does not exist yet, and ``save_job``
+        refuses to clear it, so a task that finishes after this point (or a
+        startup resume on the next boot) cannot recreate work for the chat.
+
+        ``chat`` is passed in because ``delete_chat`` pops the row from the
+        registry first: looking it up here found nothing, so the on-disk
+        manifest lookup and the "no manifest yet" tombstone were both dead and
+        a deleted chat could leave a live job record behind.
+        """
+        from ciao.archive_jobs import load_job, tombstone_job
+
+        # Cancel an in-flight stage first: a task awaiting a model call would
+        # otherwise resume after the delete and write derived state. The
+        # tombstone below then stops any next stage and any startup resume.
+        task = self._archive_tasks.pop(chat_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        if chat is None:
+            chat = self._chats.get(chat_id)
+        job = self._archive_jobs.pop(chat_id, None)
+        if job is None and chat is not None and chat.archive_path:
+            from ciao.archive_jobs import new_job_id
+
+            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
+        if job is not None:
+            job.tombstoned = True
+            job.state = "tombstoned"
+            job.blocked_reason = "chat deleted"
+            job.save()
+            return
+        # No manifest yet: create the tombstone so a racing task cannot write
+        # one afterwards.
+        if chat is not None and chat.archive_path:
+            from ciao.archive_jobs import new_job_id
+
+            tombstone_job(
+                self._runtime_root,
+                new_job_id(chat_id, chat.archive_path),
+                reason="chat deleted",
+                chat_id=chat_id,
+                archive_path=chat.archive_path,
+            )
+
+    # ── Archive job wiring ────────────────────────────────────────────────
+
+    def _archive_path_for_chat(self, chat: ChatInfo) -> Path:
         archive_path = Path(chat.archive_path)
         if not archive_path.is_absolute():
             archive_path = self._config.workspace_root / archive_path
+        return archive_path
 
-        from ciao.insights import _has_insights_section, retry_insights_for_chat
+    def _job_inputs(
+        self,
+        chat: ChatInfo,
+        project: ProjectInfo | None,
+        *,
+        filtered_jsonl: str = "",
+        session_id: str = "",
+        text_mode: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve every stage input for one chat's archive job.
+
+        Paths are re-derived from the live config rather than stored, so a
+        resume after a workspace move still finds the right guide/vault; the
+        JSON-safe subset is persisted on the manifest by
+        :meth:`_persist_job_inputs`.
+        """
+        config = self._config
+        workspace = project.workspace if project else ""
+        is_system_chat = False
+        if chat.schedule_id:
+            from ciao.schedules import is_system_schedule_id
+
+            is_system_chat = is_system_schedule_id(chat.schedule_id)
+        trajectories_enabled = bool(
+            getattr(config, "trajectories_enabled", True)
+            and session_id
+            and filtered_jsonl
+        )
+        project_doc_path = (
+            project.vault_doc_path
+            if project and not project.is_auto and not is_system_chat
+            else ""
+        )
+        proposal_vault_root = (
+            self._workspace_vault_root(workspace) if workspace else None
+        )
+        guide_path = (
+            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            if workspace and config.workspace(workspace) is not None
+            else None
+        )
+        return {
+            "archive_path": self._archive_path_for_chat(chat),
+            "config": config,
+            "model": self._insights_model_for(chat, workspace),
+            "provider": chat.provider or "claude",
+            "session_id": session_id,
+            "filtered_jsonl": filtered_jsonl,
+            "text_mode": text_mode,
+            "trajectory_meta": {
+                "context": project.context if project else "",
+                "project_id": chat.project_id,
+                "chat_id": chat.chat_id,
+                "task_summary": chat.title,
+                "workspace": workspace,
+            },
+            "workspace_root": config.workspace_root,
+            "vault_root": config.vault_root,
+            "proposal_vault_root": proposal_vault_root,
+            "guide_path": guide_path,
+            "trajectories_enabled": trajectories_enabled,
+            "memory_proposals_enabled": True,
+            "project_doc_path": project_doc_path,
+        }
+
+    def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
+        from ciao.insights import resolve_insights_model
+
+        insights_models = getattr(self._config, "provider_insights_models", {}) or {}
+        return insights_models.get(chat.provider or "", "") or resolve_insights_model(
+            self._config, workspace or None, chat.provider or None
+        )
+
+    def _persist_job_inputs(self, job: Any, inputs: dict[str, Any]) -> None:
+        """Store the JSON-safe subset a resume needs on the manifest."""
+        job.inputs.update(
+            {
+                "model": str(inputs.get("model") or ""),
+                "provider": str(inputs.get("provider") or "claude"),
+                "session_id": str(inputs.get("session_id") or ""),
+                "filtered_jsonl": str(inputs.get("filtered_jsonl") or ""),
+                "text_mode": bool(inputs.get("text_mode", False)),
+                "trajectory_meta": dict(inputs.get("trajectory_meta") or {}),
+                "trajectories_enabled": bool(inputs.get("trajectories_enabled", True)),
+                "memory_proposals_enabled": bool(
+                    inputs.get("memory_proposals_enabled", True)
+                ),
+                "project_doc_path": str(inputs.get("project_doc_path") or ""),
+                "workspace": str(
+                    (inputs.get("trajectory_meta") or {}).get("workspace", "")
+                ),
+            }
+        )
+
+    def _restore_job_inputs(
+        self, chat: ChatInfo, project: ProjectInfo | None, job: Any
+    ) -> dict[str, Any]:
+        """Rebuild live stage inputs from a persisted manifest + live config."""
+        meta = dict(job.inputs.get("trajectory_meta") or {})
+        workspace = str(job.inputs.get("workspace") or "")
+        if not workspace and project is not None:
+            workspace = project.workspace
+        config = self._config
+        guide_path = (
+            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            if workspace and config.workspace(workspace) is not None
+            else None
+        )
+        proposal_vault_root = (
+            self._workspace_vault_root(workspace) if workspace else None
+        )
+        return {
+            "archive_path": self._archive_path_for_chat(chat),
+            "config": config,
+            "model": str(job.inputs.get("model") or ""),
+            "provider": str(job.inputs.get("provider") or chat.provider or "claude"),
+            "session_id": str(job.inputs.get("session_id") or ""),
+            "filtered_jsonl": str(job.inputs.get("filtered_jsonl") or ""),
+            "text_mode": bool(job.inputs.get("text_mode", False)),
+            "trajectory_meta": meta,
+            "workspace_root": config.workspace_root,
+            "vault_root": config.vault_root,
+            "proposal_vault_root": proposal_vault_root,
+            "guide_path": guide_path,
+            "trajectories_enabled": bool(job.inputs.get("trajectories_enabled", True)),
+            "memory_proposals_enabled": bool(
+                job.inputs.get("memory_proposals_enabled", True)
+            ),
+            "project_doc_path": str(job.inputs.get("project_doc_path") or ""),
+        }
+
+    def _new_job_for_chat(self, chat: ChatInfo, inputs: dict[str, Any]) -> Any:
+        from ciao.archive_jobs import archive_content_revision, create_job
+
+        job = create_job(
+            self._runtime_root,
+            chat_id=chat.chat_id,
+            archive_path=chat.archive_path,
+            content_revision_value=archive_content_revision(inputs["archive_path"]),
+        )
+        self._persist_job_inputs(job, inputs)
+        job.save()
+        self._archive_jobs[chat.chat_id] = job
+        return job
+
+    def _resume_job(
+        self, chat_id: str, archive_path: Path
+    ) -> tuple[Any, dict[str, Any]] | tuple[None, None]:
+        """Load (or seed) the manifest for an archived chat.
+
+        A chat archived before this feature has no manifest, so one is seeded
+        from the archive's current state: insights settled when the section is
+        present, trajectory unavailable (the raw JSONL is gone), and the fold
+        and proposals pending — which is what makes a legacy archive
+        repairable.
+        """
+        from ciao.archive_jobs import (
+            SKIPPED,
+            SUCCEEDED,
+            archive_content_revision,
+            create_job,
+            load_job,
+            new_job_id,
+        )
+
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None, None
+        project = self._projects.get(chat.project_id) if chat.project_id else None
+        job = self._archive_jobs.get(chat_id)
+        if job is None:
+            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
+        if job is None:
+            inputs = self._job_inputs(chat, project, text_mode=True)
+            job = create_job(
+                self._runtime_root,
+                chat_id=chat_id,
+                archive_path=chat.archive_path,
+                content_revision_value=archive_content_revision(archive_path),
+            )
+            self._persist_job_inputs(job, inputs)
+            from ciao.insights import _has_insights_section
+
+            if _has_insights_section(archive_path):
+                job.mark("insights", SUCCEEDED)
+            if not job.inputs.get("filtered_jsonl"):
+                job.mark("trajectory", SKIPPED, "raw session no longer available")
+            job.save()
+            self._archive_jobs[chat_id] = job
+        else:
+            inputs = self._restore_job_inputs(chat, project, job)
+            self._archive_jobs[chat_id] = job
+        return job, inputs
+
+    def _launch_job(
+        self,
+        chat_id: str,
+        job: Any,
+        inputs: dict[str, Any],
+        *,
+        stages: list[str] | None = None,
+    ) -> None:
+        self._begin_postprocess(chat_id, list(stages or job.resumable()))
+        task = asyncio.create_task(
+            self._tracked_postprocess(
+                chat_id, self._run_job(chat_id, job, inputs, stages=stages)
+            )
+        )
+        # Retained so a delete can cancel an in-flight stage. The tombstone alone
+        # is not enough: a stage already awaiting a model call would otherwise
+        # resume and write derived state (append insights, fold the doc) after
+        # the chat was deleted.
+        self._archive_tasks[chat_id] = task
+
+        def _drop_finished(_task: asyncio.Task, _chat_id: str = chat_id) -> None:
+            self._archive_tasks.pop(_chat_id, None)
+
+        task.add_done_callback(_drop_finished)
+
+    async def _run_job(
+        self,
+        chat_id: str,
+        job: Any,
+        inputs: dict[str, Any],
+        *,
+        stages: list[str] | None = None,
+    ) -> None:
+        """Check the archive revision, run the stages, settle the record."""
+        from ciao.archive_jobs import (
+            PENDING,
+            RUNNING,
+            resume_revision_matches,
+        )
+        from ciao.insights import run_archive_pipeline
 
         try:
-            if _has_insights_section(archive_path):
-                return "already_has"
-        except OSError:
-            return "no_archive"
+            # Revision validation runs for every resume, not only an
+            # insights-pending one. While insights is still pending/running the
+            # recorded revision is the pre-insights one, and the pipeline's own
+            # append is accepted only when the on-disk section authenticates
+            # against the exact output the pipeline recorded before writing it.
+            # Once insights settles, a full-file match against the
+            # post-insights revision is required.
+            insights_pending = job.status_of("insights") in (PENDING, RUNNING)
+            recorded = (
+                job.content_revision if insights_pending else job.post_insights_revision
+            ) or job.content_revision
+            expected_append = job.insights_append_revision if insights_pending else ""
+            if not resume_revision_matches(
+                inputs["archive_path"],
+                recorded,
+                expected_append_revision=expected_append,
+            ):
+                if insights_pending:
+                    blocked = ["insights"]
+                else:
+                    # Whatever this resume was actually asked to run and has
+                    # not settled — not a hardcoded stage. Blocking
+                    # `project_doc_update` unconditionally overwrote the audit
+                    # state of a fold that had already succeeded while leaving
+                    # the genuinely pending stage untouched, so a retry reset
+                    # the fold and could run it a second time.
+                    requested = list(stages) if stages else list(job.resumable())
+                    blocked = [
+                        name
+                        for name in requested
+                        if job.status_of(name) in (PENDING, RUNNING)
+                    ] or list(job.unfinished())
+                for name in blocked:
+                    job.block(
+                        name,
+                        "archive content changed since the job was created",
+                    )
+                job.save()
+                return
+            await run_archive_pipeline(job, inputs, stages=stages)
+        except Exception:  # noqa: BLE001 — the tracked wrapper always settles
+            logger.exception("Archive job failed for chat %s", chat_id)
+        finally:
+            job.save()
+            self._overlay_job_postprocess(chat_id, job)
 
-        project = self._projects.get(chat.project_id) if chat.project_id else None
-        workspace = project.workspace if project else ""
-        self._begin_postprocess(chat_id, ["insights"])
+    def _overlay_job_postprocess(self, chat_id: str, job: Any) -> None:
+        """Fold a manifest's stage states into the chat's postprocess record.
 
-        async def _run() -> None:
-            try:
-                from ciao.insights import resolve_insights_model
+        The live step events already fill ``steps`` with counts and paths; the
+        manifest adds what they cannot: which stages are still unfinished,
+        whether the job is blocked, and the reason. Applied on settle and on
+        load so a partially-complete archive reports accurately without a live
+        pipeline.
+        """
+        from ciao.archive_jobs import manifest_view
 
-                workspace_ctx = workspace or None
-                insights_models = getattr(self._config, "provider_insights_models", {}) or {}
-                model = insights_models.get(chat.provider or "", "") or resolve_insights_model(
-                    self._config, workspace_ctx, chat.provider or None
-                )
-                await retry_insights_for_chat(
-                    config=self._config,
-                    archive_path=archive_path,
-                    model=model,
-                    provider=chat.provider or "claude",
-                    workspace=workspace,
-                    trajectory_meta={"chat_id": chat_id, "project_id": chat.project_id},
-                    workspace_root=self._config.workspace_root,
-                    vault_root=self._config.vault_root,
-                    project_doc_path=project.vault_doc_path if project and not project.is_auto else "",
-                )
-            except Exception:  # noqa: BLE001 — the job event already surfaces failures
-                logger.exception("Insights retry failed for chat %s", chat_id)
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        view = manifest_view(job)
+        state = dict(chat.postprocess or {})
+        steps = dict(state.get("steps") or {})
+        # Only terminal outcomes become step entries. Pending/running/blocked
+        # stages are named by the manifest's `unfinished` list instead; folding
+        # them in would make a blocked insights stage read as "insights added".
+        terminal = {"ok": "ok", "skipped": "skipped", "error": "error"}
+        for name, status in (view.get("steps") or {}).items():
+            manifest_status = status.get("status")
+            if manifest_status not in terminal:
+                continue
+            entry = steps.get(name)
+            if not isinstance(entry, dict):
+                entry = {"status": terminal[manifest_status], "extra": {}}
+            entry["manifest_status"] = manifest_status
+            steps[name] = entry
+        state["steps"] = steps
+        state["job"] = view
+        if view.get("blocked_reason"):
+            state["blocked_reason"] = view["blocked_reason"]
+        # Reflect the manifest outcome on the record itself, so a blocked or
+        # partly-complete job is visible even before `_end_postprocess` runs.
+        if view.get("state") in ("incomplete", "blocked") and state.get("state") != "running":
+            state["state"] = view["state"]
+        state["updated_at"] = chat_service._now_iso()
+        chat.postprocess = state
+        self._publish_postprocess(chat)
 
-        asyncio.create_task(self._tracked_postprocess(chat_id, _run()))
-        return "started"
+    # ── Startup resume ────────────────────────────────────────────────────
+
+    async def resume_interrupted_jobs(self, *, max_concurrency: int = 2) -> int:
+        """Resume eligible local archive jobs left incomplete by a crash.
+
+        Called once at startup after the registry loads. Interrupted ``running``
+        stages are made retryable first (nothing is running yet in this
+        process), then unfinished jobs with a live chat are resumed with
+        bounded concurrency. Blocked and tombstoned jobs are left alone.
+        """
+        from ciao.archive_jobs import MAX_AUTO_ATTEMPTS, RUNNING, list_jobs
+
+        jobs = list_jobs(self._runtime_root)
+        semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        started = 0
+        for job in jobs:
+            if job.tombstoned:
+                continue
+            for name in list(job.stages):
+                if job.status_of(name) == RUNNING:
+                    # The old process died with the stage in flight; make it
+                    # retryable rather than a stuck "running" forever. An
+                    # interrupted *final* attempt had already counted toward the
+                    # automatic budget, so reset the counter too: otherwise the
+                    # stage is pending but immediately excluded by
+                    # `resumable()`, and an explicit retry (which resets
+                    # failed/running/blocked, not a pending stage) would launch a
+                    # pipeline that runs nothing.
+                    stage = job.stage(name)
+                    stage.status = "pending"
+                    if stage.attempts >= MAX_AUTO_ATTEMPTS:
+                        stage.attempts = 0
+            # The per-stage writes above bypass `mark`, so the job-level state
+            # is still the dead process's "running". Recompute it before the
+            # save, or a job this pass does not resume (its chat is gone, or it
+            # is out of attempts) reports a pipeline that will never move as
+            # still in flight.
+            job._refresh_state()
+            job.save()
+            chat = self._chats.get(job.chat_id)
+            if chat is None or not chat.archived:
+                continue
+            project = self._projects.get(chat.project_id) if chat.project_id else None
+            inputs = self._restore_job_inputs(chat, project, job)
+            if not inputs["archive_path"].exists():
+                # The archive is gone, so no stage can run. Block (and surface
+                # it) rather than silently leaving a stale running/incomplete
+                # record that a client then downgrades to done, hiding the
+                # retry affordance.
+                for name in job.resumable() or job.unfinished():
+                    job.block(name, "archive file is missing")
+                job.save()
+                self._archive_jobs[job.chat_id] = job
+                self._overlay_job_postprocess(job.chat_id, job)
+                continue
+            if not job.resumable():
+                self._overlay_job_postprocess(job.chat_id, job)
+                continue
+            self._archive_jobs[job.chat_id] = job
+            self._begin_postprocess(job.chat_id, list(job.resumable()))
+
+            async def _guarded(
+                job: Any = job, inputs: dict[str, Any] = inputs
+            ) -> None:
+                async with semaphore:
+                    await self._run_job(job.chat_id, job, inputs)
+
+            task = asyncio.create_task(
+                self._tracked_postprocess(job.chat_id, _guarded())
+            )
+            self._detached_tasks.add(task)
+            task.add_done_callback(self._detached_tasks.discard)
+            # Also retain it as this chat's live archive task so a delete can
+            # cancel it. `_cancel_archive_job` cancels `_archive_tasks`, and a
+            # startup-resumed stage awaiting `update_project_doc` would
+            # otherwise write the canonical doc after the chat was deleted.
+            self._archive_tasks[job.chat_id] = task
+
+            def _drop_resumed(
+                _task: asyncio.Task, _chat_id: str = job.chat_id
+            ) -> None:
+                self._archive_tasks.pop(_chat_id, None)
+
+            task.add_done_callback(_drop_resumed)
+            started += 1
+        return started
 
     def run_archive_postprocess(
         self,
@@ -4328,148 +4227,189 @@ class ProjectChatManager:
         project_meta: ProjectInfo | None,
     ) -> None:
         config = self._config
-        trajectory_meta = {
-            "context": project_meta.context if project_meta else "",
-            "project_id": chat_meta.project_id if chat_meta else "",
-            "chat_id": chat_id,
-            "task_summary": chat_meta.title if chat_meta else "",
-            "workspace": project_meta.workspace if project_meta else "",
-        }
-        trajectories_enabled = (
+        trajectories_enabled = bool(
             getattr(config, "trajectories_enabled", True)
             and outcome.filtered_jsonl is not None
             and outcome.session_id != ""
         )
-        run_insights = (
-            getattr(config, "insights_enabled", False)
-            and outcome.filtered_jsonl
+        run_insights = bool(
+            getattr(config, "insights_enabled", False) and outcome.filtered_jsonl
         )
-        if run_insights:
-            from ciao.insights import extract_and_append, resolve_insights_model
-            from ciao.schedules import is_system_schedule_id
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            # Nothing durable to key a manifest on; index the archive below so
+            # the file is still searchable.
+            pass
+        if chat is not None:
+            from ciao.archive_jobs import SKIPPED
 
-            # A system-schedule chat (memory curation, hygiene, skill
-            # evolution) is the memory machinery itself. Its archive keeps the
-            # insights section — the audit trail of what an unattended run did
-            # — and memory proposals still run, but extraction is told to
-            # ignore unattended (automation) turns: a real user statement made
-            # mid-run is caught, while the machinery's self-description is not
-            # lifted as a fact. See the "unattended" rule in ciao/insights.py.
-            is_system_chat = is_system_schedule_id(
-                chat_meta.schedule_id if chat_meta else ""
+            # The archive path may not be on the chat yet (this runs right after
+            # `archive_chat` set it, but a caller can pass the outcome directly);
+            # use the outcome's path as the authoritative one for the job.
+            if not chat.archive_path and outcome.path is not None:
+                try:
+                    chat.archive_path = str(
+                        outcome.path.relative_to(self._config.workspace_root)
+                    )
+                except ValueError:
+                    chat.archive_path = str(outcome.path)
+            inputs = self._job_inputs(
+                chat,
+                project_meta,
+                filtered_jsonl=outcome.filtered_jsonl or "",
+                session_id=outcome.session_id,
             )
-            workspace = project_meta.workspace if project_meta else None
-            insights_models = getattr(config, "provider_insights_models", {}) or {}
-            insights_model = insights_models.get(
-                chat_meta.provider if chat_meta else "", ""
-            ) or resolve_insights_model(
-                config, workspace, chat_meta.provider if chat_meta else None
-            )
-            # Auto projects (General, Claude Code CLI) are catch-alls whose
-            # docs would become junk drawers; only real projects get the
-            # archive-time canonical-doc update.
-            project_doc_path = (
-                project_meta.vault_doc_path
-                if project_meta and not project_meta.is_auto and not is_system_chat
-                else ""
-            )
-            proposal_vault_root = (
-                self._workspace_vault_root(workspace) if workspace else None
-            )
-            # Which steps can actually run for *this* chat, in execution order.
-            # Declared up front so a surface can say "3 steps" honestly instead
-            # of discovering the shape as events trickle in — and so a step that
-            # was never going to run is not reported as one that failed to.
-            expected = ["insights"]
-            if project_doc_path:
-                expected.append("project_doc_update")
+            inputs["archive_path"] = outcome.path
+            inputs["trajectories_enabled"] = trajectories_enabled
+
+            # Declare the plan up front so a surface can say "3 steps" honestly
+            # and a stage that was never going to run is not reported as a
+            # failure. System chats keep insights and memory proposals but skip
+            # the project-doc fold (there is no canonical doc to fold into).
+            # `project_doc_update` and `memory_proposals` consume the insights
+            # text, so they are only planned when extraction actually runs;
+            # otherwise there is nothing to fold or route.
+            expected: list[str] = []
+            if run_insights:
+                expected.append("insights")
+                if inputs["project_doc_path"]:
+                    expected.append("project_doc_update")
             if trajectories_enabled:
                 expected.append("trajectory")
-            if proposal_vault_root is not None:
+            if run_insights and inputs["proposal_vault_root"] is not None:
                 expected.append("memory_proposals")
-            self._begin_postprocess(chat_id, expected)
-            asyncio.create_task(
-                self._tracked_postprocess(
-                    chat_id,
-                    extract_and_append(
-                        archive_path=outcome.path,
-                        filtered_jsonl=outcome.filtered_jsonl or "",
-                        config=config,
-                        model=insights_model,
-                        session_id=outcome.session_id,
-                        trajectory_meta=trajectory_meta,
-                        trajectories_enabled=trajectories_enabled,
-                        workspace_root=config.workspace_root,
-                        vault_root=config.vault_root,
-                        proposal_vault_root=proposal_vault_root,
-                        # Region auto-promotion writes the workspace the chat
-                        # ran in. Without this the live archive path left every
-                        # [memory]/[profile] fact queued instead of promoted,
-                        # because `apply_proposals` will not guess a guide.
-                        guide_path=(
-                            Path(config.agent_root(workspace)) / "CLAUDE.md"
-                            if workspace and config.workspace(workspace) is not None
-                            else None
-                        ),
-                        provider=chat_meta.provider if chat_meta else "claude",
-                        project_doc_path=project_doc_path,
-                        memory_proposals_enabled=True,
-                    ),
-                )
-            )
-        elif trajectories_enabled:
-            from ciao import job_runs
-            from ciao.trajectory_builder import build_and_persist_trajectory
 
-            # Insights is off, or the chat is under the size gate, so the
-            # trajectory is the whole pipeline here. Tracked like the pipeline
-            # step it mirrors: this path previously reported nothing at all, so
-            # the Automation page showed "never run" on a job that had run
-            # hundreds of times.
-            self._begin_postprocess(chat_id, ["trajectory"])
-            try:
-                with job_runs.track_sync(
-                    "trajectory", "Trajectory capture",
-                    extra={
-                        "session_id": outcome.session_id,
-                        "chat_id": chat_id,
-                        "standalone": True,
-                    },
-                ) as run:
-                    written = build_and_persist_trajectory(
-                        session_id=outcome.session_id,
-                        filtered_jsonl=outcome.filtered_jsonl or "",
-                        archive_path=outcome.path,
-                        workspace_root=config.workspace_root,
-                        **cast("dict[str, Any]", trajectory_meta),
+            if expected:
+                job = self._new_job_for_chat(chat, inputs)
+                # Stages that cannot run for this chat settle as skipped now, so
+                # the manifest is an accurate plan even before the task starts
+                # and a stage that was intentionally never planned is not left
+                # pending (which would read as "incomplete" and offer a retry).
+                if not run_insights:
+                    # Extraction is disabled or there is no transcript, so all
+                    # three insights-dependent stages are settled together.
+                    job.mark("insights", SKIPPED, "insights disabled or no transcript")
+                    job.mark(
+                        "project_doc_update", SKIPPED, "no insights extraction planned"
                     )
-                    if written:
-                        run.extra["path"] = str(written)
-                    else:
-                        run.skip("empty session / no trajectory written")
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Inline trajectory write failed for chat %s", chat_id
+                    job.mark(
+                        "memory_proposals", SKIPPED, "no insights extraction planned"
+                    )
+                else:
+                    if not inputs["project_doc_path"]:
+                        job.mark(
+                            "project_doc_update", SKIPPED, "no canonical project doc"
+                        )
+                    if inputs["proposal_vault_root"] is None:
+                        if inputs["trajectory_meta"].get("workspace"):
+                            # The chat runs in a workspace but its vault root did
+                            # not resolve: recoverable once the registry is fixed.
+                            job.block(
+                                "memory_proposals", "workspace owner unavailable"
+                            )
+                        else:
+                            job.mark(
+                                "memory_proposals",
+                                SKIPPED,
+                                "workspace owner unavailable",
+                            )
+                if not trajectories_enabled:
+                    job.mark(
+                        "trajectory", SKIPPED, "no session input or trajectories disabled"
+                    )
+                job.save()
+
+                self._begin_postprocess(chat_id, expected)
+                task = self._spawn_detached(
+                    self._tracked_postprocess(
+                        chat_id, self._run_job(chat_id, job, inputs, stages=expected)
+                    ),
+                    name=f"archive-postprocess-{chat_id}",
                 )
-            finally:
-                self._end_postprocess(chat_id)
+                # Retain as the chat's live archive task so a delete can cancel
+                # a stage that is mid-model-call; see `_cancel_archive_job`.
+                self._archive_tasks[chat_id] = task
 
-        # Index the newly archived file in the FTS5 database
+                def _drop_archive(_task: asyncio.Task, _cid: str = chat_id) -> None:
+                    self._archive_tasks.pop(_cid, None)
+
+                task.add_done_callback(_drop_archive)
+
+        # Index the newly archived file in the FTS5 database. The control
+        # plane now runs its own index passes in bounded workers, so this
+        # formerly loop-serialized writer can overlap them. Run it through the
+        # same off-loop executor and the same per-database `keyed_lock`, or a
+        # concurrent scan holds SQLite's write lock past the connection timeout
+        # and this write is skipped with "database is locked".
+        operation = self._make_archive_index_operation(outcome)
         try:
-            import sqlite3
-            from ciao.fts_search import get_db_path, init_db, index_file
-
-            db_path = get_db_path()
-            conn = sqlite3.connect(db_path)
-            init_db(conn)
-            index_file(
-                conn,
-                config.vault_root,
-                outcome.path,
-                path_base=Path(config.workspace_root),
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            # Synchronous caller (CLI/tests): run inline. Best-effort like the
+            # async branch — an optional FTS update must never fail an archive
+            # that already succeeded.
+            self._run_archive_index_best_effort(chat_id, outcome, operation)
+        else:
+            self._spawn_detached(
+                self._index_archive_file_off_loop(chat_id, outcome, operation),
+                name=f"archive-index-{chat_id}",
             )
-            conn.close()
-        except Exception:  # noqa: BLE001
+
+    def _run_archive_index_best_effort(
+        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
+    ) -> None:
+        """Run the archive index write inline, logging but never raising."""
+        try:
+            operation()
+        except Exception:  # noqa: BLE001 — archiving already succeeded
+            logger.exception(
+                "FTS search: failed to index archived file %s for chat %s",
+                outcome.path,
+                chat_id,
+            )
+
+    def _make_archive_index_operation(
+        self, outcome: ArchiveOutcome
+    ) -> Callable[[], None]:
+        """A closure that indexes one archived file under the shared write lock."""
+        config = self._config
+
+        def _operation() -> None:
+            import sqlite3
+
+            from ciao.async_reads import keyed_lock
+            from ciao.fts_search import get_db_path, index_file, init_db
+
+            # Install-owned: the same database the MCP tools, the CLI and
+            # startup indexing resolve, so an archived chat cannot land in the
+            # legacy global `~/.ciao` index that a second install then clears.
+            db_path = get_db_path(Path(config.state_path).parent)
+            conn = sqlite3.connect(db_path)
+            try:
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_file(
+                        conn,
+                        config.vault_root,
+                        outcome.path,
+                        path_base=Path(config.workspace_root),
+                    )
+            finally:
+                conn.close()
+
+        return _operation
+
+    async def _index_archive_file_off_loop(
+        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
+    ) -> None:
+        """Run the archive index write in a bounded worker, logging failures."""
+        from ciao.async_reads import run_read
+
+        try:
+            await run_read(f"archive-index:{outcome.path}", operation)
+        except Exception:  # noqa: BLE001 — archiving already succeeded
             logger.exception(
                 "FTS search: failed to index archived file %s for chat %s",
                 outcome.path,
@@ -4528,7 +4468,7 @@ class ProjectChatManager:
         self._state.reset_active_session(ctx)
         # Disconnect old provider so a fresh one is created
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
         return chat
@@ -4544,8 +4484,231 @@ class ProjectChatManager:
                 self._config,
                 provider=provider_name,
                 agent_root=agent_root,
+                workspace=self._workspace_for_chat(chat_id),
             )
+        # Stamped on every hand-out, not just on creation: a long conversation
+        # reuses one ProviderService for its whole life, so creation time says
+        # nothing about whether the chat is still in use.
+        self._provider_last_used[chat_id] = time.monotonic()
+        self._ensure_provider_reaper()
         return self._providers[chat_id]
+
+    def _pop_provider(self, chat_id: str) -> ProviderService | None:
+        """Detach a chat's provider and forget its idle stamp.
+
+        Every lifecycle path that used to call ``self._providers.pop`` goes
+        through here so the stamp map cannot outlive the provider it describes
+        (a recycled chat id would otherwise inherit a stale last-used time).
+        Disconnecting is still the caller's job — some do it inline, some hand
+        it to ``_schedule_provider_cleanup``.
+        """
+        self._provider_last_used.pop(chat_id, None)
+        self._provider_disconnect_failures.pop(chat_id, None)
+        return self._providers.pop(chat_id, None)
+
+    # ── Idle provider reaping ────────────────────────────────────────────
+
+    def _ensure_provider_reaper(self) -> None:
+        """Start the idle sweep once, if there is a loop to run it on.
+
+        Called from ``_get_provider`` rather than ``__init__`` because managers
+        are constructed in tests and CLI paths with no running event loop, and
+        an install that never opens a chat needs no sweep at all.
+        """
+        if self._provider_reaper is not None and not self._provider_reaper.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._provider_reaper = loop.create_task(
+            self._provider_reap_loop(), name="provider-idle-reaper"
+        )
+
+    async def _provider_reap_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._provider_reap_interval)
+            try:
+                await self.reap_idle_providers()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill the loop
+                logger.exception("Idle provider sweep failed")
+
+    def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
+        """Whether a chat has work that a provider teardown would interrupt.
+
+        ``active_chat_ids`` covers live streams, running background subagents
+        and pending subagent watchers. The rest are per-chat tasks that hold a
+        provider without necessarily opening a broker stream.
+        """
+        if chat_id in active:
+            return True
+        for tasks in (
+            self._between_turn_drains,
+            self._retry_tasks,
+            self._background_wake_tasks,
+        ):
+            task = tasks.get(chat_id)
+            if task is not None and not task.done():
+                return True
+        if self._background_wake_pending.get(chat_id):
+            return True
+        # A parked question or approval card is held by the provider session
+        # (for opencode, by the server process itself), and the reply routes
+        # back through it. The stream may already be closed, so this is not
+        # covered by `active_chat_ids`: tearing the provider down here would
+        # strand the card the user is looking at.
+        #
+        # `chat.pending_queue` is deliberately NOT part of this test. It is
+        # persisted chat state, not provider state: `start_stream` re-seeds it
+        # on the next turn (see `_park_pending_for_retry`), so a teardown
+        # cannot lose it. Treating it as busy would pin the provider forever
+        # for a chat that parked messages and was never opened again — the
+        # exact leak this sweep exists to close. The cases where a parked
+        # queue really does need its provider (a paused question, an armed
+        # retry) are already covered above.
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return False
+        return bool(
+            getattr(chat, "pending_question", "")
+            or getattr(chat, "pending_permission", "")
+        )
+
+    async def reap_idle_providers(self, *, force: bool = False) -> list[str]:
+        """Disconnect providers for chats idle past the timeout.
+
+        Returns the chat ids reclaimed — only those whose ``disconnect()``
+        actually returned. A provider whose disconnect raised is NOT in that
+        list: it is kept for a bounded number of later sweeps instead (see
+        ``_PROVIDER_DISCONNECT_MAX_ATTEMPTS``). ``force`` ignores the timeout
+        (but not the busy check) and exists for tests and for an explicit
+        operator sweep; it is never used by the periodic loop.
+
+        Only the provider is released. The chat row, its ``session_id`` and its
+        transcript are untouched, so the next turn reconnects and resumes — see
+        ``_PROVIDER_IDLE_TIMEOUT_SECONDS``.
+        """
+        if not self._providers:
+            return []
+        now = time.monotonic()
+        active = set(self.active_chat_ids())
+        reclaimed: list[str] = []
+        for chat_id in list(self._providers):
+            if self._provider_is_busy(chat_id, active):
+                # Refresh the stamp so a chat that was busy for the whole
+                # window is not reclaimed the instant its work finishes.
+                self._provider_last_used[chat_id] = now
+                # A provider that is serving work again is healthy; earlier
+                # failed teardowns say nothing about the next one, and letting
+                # them accumulate across weeks of use would spend the retry
+                # budget before the teardown that matters.
+                self._provider_disconnect_failures.pop(chat_id, None)
+                continue
+            last_used = self._provider_last_used.get(chat_id)
+            if last_used is None:
+                # A provider with no stamp predates the reaper or was attached
+                # by another path; adopt it now rather than reclaiming a chat
+                # that may have been used a second ago.
+                self._provider_last_used[chat_id] = now
+                continue
+            if not force and now - last_used < self._provider_idle_timeout:
+                continue
+            failures = self._provider_disconnect_failures.get(chat_id, 0)
+            provider = self._pop_provider(chat_id)
+            self._cancel_between_turns_drain(chat_id)
+            try:
+                disconnected = await self._disconnect_provider(chat_id, provider)
+            except asyncio.CancelledError:
+                # Shutdown cancelled the sweep mid-disconnect. `disconnect()`
+                # awaits on both providers (the SDK transport, and
+                # `process.terminate()/wait()` for opencode), and
+                # `CancelledError` is a BaseException, so
+                # `_disconnect_provider`'s `except Exception` does not absorb
+                # it. The provider is already out of the map by now, so the
+                # shutdown hook's snapshot would miss it and leave exactly the
+                # half-closed transport that hook exists to prevent. Put it
+                # back — `stop_provider_reaper` is awaited before that
+                # snapshot is taken, so the hook still finishes the job.
+                self._providers[chat_id] = provider  # type: ignore[assignment]
+                self._provider_last_used[chat_id] = now
+                self._provider_disconnect_failures[chat_id] = failures
+                raise
+            if not disconnected:
+                # `disconnect()` raised. The provider is out of the map, so
+                # dropping it here would leave (for opencode) a serve process
+                # holding a port, an SSE stream and a stderr reader with no
+                # reference left for the shutdown hook to retry — and the
+                # sweep would report it as reclaimed on top of that.
+                failures += 1
+                if failures < _PROVIDER_DISCONNECT_MAX_ATTEMPTS:
+                    # Put it back, keeping the STALE last-used stamp so the
+                    # next sweep retries immediately rather than waiting out
+                    # another full idle timeout, and record the attempt so the
+                    # retry is bounded.
+                    self._providers[chat_id] = provider  # type: ignore[assignment]
+                    self._provider_last_used[chat_id] = last_used
+                    self._provider_disconnect_failures[chat_id] = failures
+                    logger.warning(
+                        "Idle provider for chat %s failed to disconnect "
+                        "(attempt %d/%d); keeping it for another sweep",
+                        chat_id,
+                        failures,
+                        _PROVIDER_DISCONNECT_MAX_ATTEMPTS,
+                    )
+                else:
+                    # Out of attempts. Holding it forever would pin a provider
+                    # that never closes and hand it to the chat's next turn, so
+                    # the reference goes — loudly, and NOT as a reclaim: this
+                    # is the one case where a process may have been left
+                    # behind, and the log is what says so.
+                    logger.error(
+                        "Giving up on the idle provider for chat %s after %d "
+                        "failed disconnects; a provider process may have been "
+                        "left running",
+                        chat_id,
+                        failures,
+                    )
+                continue
+            reclaimed.append(chat_id)
+        if reclaimed:
+            logger.info(
+                "Reclaimed %d idle provider(s) after %.0fs: %s",
+                len(reclaimed),
+                self._provider_idle_timeout,
+                ", ".join(reclaimed),
+            )
+        return reclaimed
+
+    async def stop_provider_reaper(self) -> None:
+        """Cancel the sweep task. Called from the server's shutdown hook."""
+        task = self._provider_reaper
+        self._provider_reaper = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — teardown is fail-safe
+            # Swallowed, but not silently: a sweep that died mid-disconnect
+            # left providers behind, and that must not look like a clean stop.
+            logger.exception("Idle provider reaper did not stop cleanly")
+
+    def _workspace_for_chat(self, chat_id: str) -> str:
+        """The logical workspace a chat runs in, or the primary fallback.
+
+        Mirrors ``_agent_root_for_chat`` so the provider's prune receipt lands
+        in the vault journal that workspace owns.
+        """
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat else None
+        workspace = project.workspace if project else ""
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        return workspace
 
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
@@ -4669,10 +4832,10 @@ class ProjectChatManager:
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
-        rows = _normalize_handover_messages(
+        rows = chat_service._normalize_handover_messages(
             chat.handover_messages,
-            max_messages=_PROVIDER_HANDOVER_MAX_MESSAGES,
-            max_chars=_PROVIDER_HANDOVER_MAX_CHARS,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
         lines = [
             "[Provider handover messages]",
@@ -4689,7 +4852,7 @@ class ProjectChatManager:
             ])
         for msg in rows:
             role = str(msg.get("role", "")).strip().lower()
-            if role not in _HANDOVER_ROLES:
+            if role not in chat_service._HANDOVER_ROLES:
                 continue
             content = str(msg.get("content", "")).strip()
             if not content:
@@ -4835,12 +4998,20 @@ class ProjectChatManager:
         in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
         does not name.
 
+        It also always carries the unconditional credential/runtime-state file
+        denies (``ciao.execution_modes.credential_path_deny_rules``), which no
+        workspace override or ``none`` opt-out clears.
+
         Two limits stated plainly. This scopes REACHABILITY, not authority: a
         shared account behind a reachable server still holds that account's full
-        authority. And ``disallowed_tools`` is only applied when the chat's
-        provider is ``claude`` (see the guard below); it does NOT constrain
-        opencode chats at all. Closing that non-Claude gap needs a
-        per-provider mechanism and is out of scope.
+        authority. And this list is only applied when the chat's provider is
+        ``claude`` (see the guard below). opencode is not left unconstrained:
+        it gets the equivalent credential denies as session permission rules
+        from its own provider
+        (``ciao.providers.opencode.mode_settings``, sharing the patterns in
+        ``ciao.execution_modes``). The part that remains Claude-only is the
+        harness denylist and the derived ``mcp__<server>`` allowlist; closing
+        that needs a per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
             return []
@@ -5012,7 +5183,7 @@ class ProjectChatManager:
         resolved = (model or "").strip()
         if provider != "claude" and is_tier(resolved):
             return self._config.default_model_for_provider(provider)
-        return _normalize_tier(resolved)
+        return chat_service._normalize_tier(resolved)
 
     def _resolve_and_validate_chat_model(
         self, model: str, provider: str, project_id: str
@@ -5253,7 +5424,7 @@ class ProjectChatManager:
         """
         path = Path(self._config.state_path).parent / "agent_tool_calls.jsonl"
         record = {
-            "timestamp": _now_iso(),
+            "timestamp": chat_service._now_iso(),
             "chat_id": chat.chat_id,
             "project_id": chat.project_id,
             "provider": chat.provider,
@@ -5675,7 +5846,7 @@ class ProjectChatManager:
         journal.begin({
             "provider": chat.provider,
             "prompt": (request.display_prompt or request.prompt)[:2000],
-            "started_at": _now_iso(),
+            "started_at": chat_service._now_iso(),
         })
 
         async def _journalled_stream():
@@ -5785,9 +5956,12 @@ class ProjectChatManager:
         should fall through to `start_stream`).
         """
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is None or stream.background or not stream.accepting_queue:
             # Background drain streams have no drive loop to flush a queue;
             # the caller starts a real turn instead (which cancels the drain).
+            # `accepting_queue` is the same refusal for a stream whose loop has
+            # already decided it is finished: queueing there is a message the
+            # user is told was accepted and that no turn will ever pick up.
             return False
         chat = self._chats.get(chat_id)
         if chat is not None and self._invalidate_reentry_summary(chat):
@@ -6094,7 +6268,7 @@ class ProjectChatManager:
         chat.retry_last_error = reason
         if interval_seconds is not None:
             chat.retry_interval_seconds = interval_seconds
-        chat.retry_next_at = next_at or _iso_after(chat.retry_interval_seconds)
+        chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
         self._ensure_retry_task(chat_id)
@@ -6117,7 +6291,7 @@ class ProjectChatManager:
             return None
         images = self._resolve_retry_images(chat)
         chat.retry_attempts += 1
-        chat.retry_next_at = _iso_after(chat.retry_interval_seconds)
+        chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
         return self.start_stream(
@@ -6190,7 +6364,7 @@ class ProjectChatManager:
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
-                due = _parse_iso(chat.retry_next_at)
+                due = chat_service._parse_iso(chat.retry_next_at)
                 delay = 0.0
                 if due is not None:
                     delay = max(0.0, (due - datetime.now(UTC)).total_seconds())
@@ -6200,7 +6374,7 @@ class ProjectChatManager:
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
                 if self._broker.get(chat_id) is not None:
-                    chat.retry_next_at = _iso_after(chat.retry_interval_seconds)
+                    chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
                     self._save()
                     self._publish_retry(chat)
                     continue
@@ -6356,7 +6530,7 @@ class ProjectChatManager:
             chat_meta.user_turn_count = turn_index + 1
             if image_refs:
                 chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
-            sent_at_iso = _now_iso()
+            sent_at_iso = chat_service._now_iso()
             chat_meta.last_activity_at = sent_at_iso
             chat_meta.last_read_at = sent_at_iso  # user sending = implicitly read
             chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
@@ -6487,7 +6661,7 @@ class ProjectChatManager:
                                 and isinstance(event, ResultEvent)
                                 and current_turn_index is not None
                             ):
-                                completed_at = _now_iso()
+                                completed_at = chat_service._now_iso()
                                 started_perf = self._turn_perf_started.pop(
                                     (chat_id, current_turn_index), None
                                 )
@@ -6644,7 +6818,7 @@ class ProjectChatManager:
                                     # a session that already streamed with
                                     # "continue" rather than replaying, so
                                     # progress mid-turn never gets double-run.
-                                    if _is_retryable_quota_error(result_text):
+                                    if chat_service._is_retryable_quota_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -6654,7 +6828,7 @@ class ProjectChatManager:
                                             had_progress=had_provider_progress,
                                             reason=result_text or "quota limit",
                                         )
-                                    elif _is_retryable_connection_error(result_text):
+                                    elif chat_service._is_retryable_connection_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -6664,7 +6838,7 @@ class ProjectChatManager:
                                             had_progress=had_provider_progress,
                                             reason=result_text or "connection error",
                                         )
-                                    elif _is_retryable_auth_error(result_text):
+                                    elif chat_service._is_retryable_auth_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -6706,7 +6880,7 @@ class ProjectChatManager:
                         )
                         turn_assistant_text = turn_streamed_text
                         chat_now = self._chats.get(chat_id)
-                        completed_at = _now_iso()
+                        completed_at = chat_service._now_iso()
                         duration_ms = None
                         sent_at_rec = ""
                         if current_turn_index is not None:
@@ -6826,7 +7000,7 @@ class ProjectChatManager:
                                         "Failed to persist stream error for chat %s",
                                         chat_id,
                                     )
-                            if _is_retryable_provider_startup_error(error_msg):
+                            if chat_service._is_retryable_provider_startup_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -6836,7 +7010,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_quota_error(error_msg):
+                            elif chat_service._is_retryable_quota_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -6846,7 +7020,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_connection_error(error_msg):
+                            elif chat_service._is_retryable_connection_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -6856,7 +7030,7 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
-                            elif _is_retryable_auth_error(error_msg):
+                            elif chat_service._is_retryable_auth_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -6913,16 +7087,29 @@ class ProjectChatManager:
                         if next_pending is not None:
                             had_error = False
                     if next_pending is None or had_error:
-                        if had_error and next_pending is not None:
-                            # A real error broke the loop after we'd already
-                            # popped the next queued message (and possibly
-                            # more behind it) for the follow-up turn. Park
-                            # all of it instead of letting it vanish when
-                            # `finally` tears the stream down.
-                            remaining = stream.drain_pending()
+                        # Shut the queue before anything else. `drain_one()`
+                        # above and the teardown in `finally` are not one
+                        # atomic step, so a send landing in that window was
+                        # accepted into `_pending` that nothing would ever
+                        # read — the loop had already looked. The user saw a
+                        # QUEUED chip for a message that was never going to be
+                        # sent, and `queue_message` had told the caller it was
+                        # safely queued, so nothing started a turn for it.
+                        stream.accepting_queue = False
+                        # Re-drain after closing: this is the clean-completion
+                        # path too, which parked nothing before. Whatever
+                        # arrived between the check and the close still has to
+                        # survive, and it flushes on the next user turn.
+                        late = stream.drain_pending()
+                        parked = (
+                            [next_pending, *late]
+                            if had_error and next_pending is not None
+                            else late
+                        )
+                        if parked:
                             cm_park = self._chats.get(chat_id)
                             if cm_park is not None:
-                                cm_park.pending_queue = [next_pending, *remaining]
+                                cm_park.pending_queue = list(parked)
                                 self._save()
                         break
 
@@ -6954,7 +7141,7 @@ class ProjectChatManager:
                             chat_meta2.user_turn_images[str(turn_index2)] = list(
                                 merged_image_refs
                             )
-                        sent_at_iso2 = _now_iso()
+                        sent_at_iso2 = chat_service._now_iso()
                         chat_meta2.last_activity_at = sent_at_iso2
                         chat_meta2.last_read_at = sent_at_iso2  # user sending = implicitly read
                         chat_meta2.user_turn_timings[str(turn_index2)] = {
@@ -6993,7 +7180,7 @@ class ProjectChatManager:
                 # Also re-run when the early poll fell back to the deterministic
                 # truncation — the late poll can then upgrade that fallback to
                 # the provider's native title once it finally lands.
-                _late_fallback = _fallback_title(prompt) if prompt else None
+                _late_fallback = chat_service._fallback_title(prompt) if prompt else None
                 if prompt and chat_meta and (
                     chat_meta.title == "New Chat"
                     or (_late_fallback is not None and chat_meta.title == _late_fallback)
@@ -7015,7 +7202,7 @@ class ProjectChatManager:
                 # looking like it still needs approval.
                 if chat_meta is not None:
                     permission_pending = bool(chat_meta.pending_permission)
-                    chat_meta.last_response = last_assistant_text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                    chat_meta.last_response = last_assistant_text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
                     chat_meta.last_response_status = (
                         "error" if had_error
                         else "question" if chat_meta.pending_question
@@ -7090,7 +7277,7 @@ class ProjectChatManager:
                     if chat_now is not None:
                         if chat_now.retry_status == "pending" and is_retry:
                             self._clear_chat_retry(chat_now)
-                        chat_now.last_activity_at = _now_iso()
+                        chat_now.last_activity_at = chat_service._now_iso()
                         chat_now.last_snippet = snippet
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
@@ -7186,7 +7373,7 @@ class ProjectChatManager:
         if chat is None:
             return None
         was_unread = (chat.last_activity_at or "") > (chat.last_read_at or "")
-        chat.last_read_at = _now_iso()
+        chat.last_read_at = chat_service._now_iso()
         self._save()
         self._cancel_pending_push(chat_id)
         self._events.publish({
@@ -7226,7 +7413,7 @@ class ProjectChatManager:
         chat_ids that were touched. Emits one `chat_read` event per chat so
         WS handlers can update incrementally.
         """
-        now = _now_iso()
+        now = chat_service._now_iso()
         touched: list[str] = []
         for chat in self._chats.values():
             if chat.archived:
@@ -7657,7 +7844,7 @@ class ProjectChatManager:
                     if ready_to_nudge:
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
-                            chat_now.last_activity_at = _now_iso()
+                            chat_now.last_activity_at = chat_service._now_iso()
                             self._save()
                         # Poke the parent to synthesize a final report. The
                         # CLI won't auto-continue the turn on its own, so
@@ -7785,7 +7972,7 @@ class ProjectChatManager:
                 count, had_subagents = opencode_collab_tree_counts(tree)
                 if count != last_count:
                     if count == 0 and last_count > 0:
-                        chat.last_activity_at = _now_iso()
+                        chat.last_activity_at = chat_service._now_iso()
                         self._save()
                         # No separate "Background agents finished" push — the
                         # chat's own result notification covers it; the extra
@@ -7960,7 +8147,7 @@ class ProjectChatManager:
                     continue
                 if chat.provider != "claude":
                     continue
-                last_active = _parse_iso(chat.last_activity_at)
+                last_active = chat_service._parse_iso(chat.last_activity_at)
                 if (
                     last_active is not None
                     and datetime.now(UTC) - last_active
@@ -8353,9 +8540,9 @@ class ProjectChatManager:
                         snippet = self._result_snippet(text)
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
-                            chat_now.last_activity_at = _now_iso()
+                            chat_now.last_activity_at = chat_service._now_iso()
                             chat_now.last_snippet = snippet
-                            chat_now.last_response = text[-_PROVIDER_HANDOVER_MAX_CHARS:]
+                            chat_now.last_response = text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
                             chat_now.last_response_status = "success"
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
@@ -8731,12 +8918,12 @@ class ProjectChatManager:
            ≥ 2.1.246 skips its own title generation for prompts that open
            with our injected ``[CIAO_CONTEXT_BEGIN]`` capsule — i.e. every
            Ciaobot chat — so without this tier new chats sat on tier 3.
-        3. The deterministic ``_fallback_title`` (first 6 words of the
+        3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
            prompt) so the sidebar never stays stuck on "New Chat". The
            late-turn poll can still upgrade it with a native title when one
            finally lands.
         """
-        fallback = _fallback_title(user_text)
+        fallback = chat_service._fallback_title(user_text)
 
         def _is_titling_target(title: str) -> bool:
             # "New Chat" is always a target; the deterministic fallback is also
@@ -8840,7 +9027,7 @@ class ProjectChatManager:
         except Exception:  # noqa: BLE001 — any titler failure degrades to tier 3
             logger.info("LLM title fallback failed for %s", chat.chat_id, exc_info=True)
             return None
-        return _clean_llm_title(text)
+        return chat_service._clean_llm_title(text)
 
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
@@ -8866,7 +9053,7 @@ class ProjectChatManager:
                 thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
                 info = thread.get("info") if isinstance(thread, dict) else None
                 title = str(info.get("title") or "") if isinstance(info, dict) else ""
-                return _real_title(title)
+                return chat_service._real_title(title)
             if provider != "claude":
                 return None
             # Claude Code: custom title wins, else the AI-generated title.
@@ -8875,7 +9062,7 @@ class ProjectChatManager:
                 return None
             custom_title = (session_info.custom_title or "").strip()
             summary = (session_info.summary or "").strip()
-            return _real_title(custom_title) or _real_title(summary)
+            return chat_service._real_title(custom_title) or chat_service._real_title(summary)
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None
@@ -8994,7 +9181,7 @@ class ProjectChatManager:
             await asyncio.sleep(1)
         return None
 
-    async def _schedule_run_needs_user(self, entry: object, outcome: ScheduleRunOutcome) -> bool:
+    async def _schedule_run_needs_user(self, entry: object, outcome: chat_service.ScheduleRunOutcome) -> bool:
         """Return True when an auto-archive schedule result deserves attention.
 
         Conservative default: if the classifier cannot produce strict JSON,
@@ -9083,7 +9270,19 @@ class ProjectChatManager:
 
                 verdict = extract_json(text)
                 if verdict is None:
-                    raise ValueError("classifier returned no parseable JSON")
+                    # Expected degradation, not a fault: the conservative
+                    # default below already handles it, so a full traceback in
+                    # server_errors.log only pollutes the triage report.
+                    run.status = "error"
+                    run.error = "classifier returned no parseable JSON"
+                    head = (text or "").strip()[:200]
+                    logger.warning(
+                        "Schedule attention classifier returned no parseable "
+                        "JSON with model %s; keeping chat visible (output head: %r)",
+                        model,
+                        head,
+                    )
+                    return True
                 needs_user = bool(verdict.get("needs_user", True))
                 run.extra["needs_user"] = needs_user
                 reason = str(verdict.get("reason", "")).strip()
@@ -9314,7 +9513,7 @@ class ProjectChatManager:
             return {}
 
         result: dict[str, str] = {"chat_id": target_id}
-        outcome = ScheduleRunOutcome()
+        outcome = chat_service.ScheduleRunOutcome()
 
         # Job-run recording: this method swallows its own errors (the broad
         # except below sets outcome.stream_error and continues) and has a
@@ -9386,7 +9585,7 @@ class ProjectChatManager:
             # the backlog it never processed.
             if (
                 (had_error_placeholder or had_issue_placeholder)
-                and _schedule_run_clean(outcome)
+                and chat_service._schedule_run_clean(outcome)
             ):
                 await asyncio.to_thread(
                     clear_error_log, self._config.workspace_root
@@ -9412,7 +9611,7 @@ class ProjectChatManager:
         # before the archive decision so the classifier judges the completed
         # result — not an interim "dispatched, will report later" message. If
         # they don't settle in time, mark the run pending so it stays visible.
-        if _schedule_run_clean(outcome):
+        if chat_service._schedule_run_clean(outcome):
             # Drop any stale synthesis result before waiting so we only pick up
             # the turn that runs when *these* subagents finish. The drain that
             # captures it was started by start_stream's completion handler.
@@ -9457,10 +9656,10 @@ class ProjectChatManager:
             self._last_drain_result.pop(target_id, None)
 
         needs_user = False
-        if getattr(entry, "archive_policy", "manual") == "auto" and _schedule_run_clean(outcome):
+        if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):
             needs_user = await self._schedule_run_needs_user(entry, outcome)
 
-        if _should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
+        if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
             chat_meta = self._chats.get(target_id)
             project_meta = (
                 self._projects.get(chat_meta.project_id) if chat_meta else None
@@ -9488,7 +9687,7 @@ class ProjectChatManager:
                     target_id,
                 )
 
-        _sched_status, _sched_error = _schedule_dispatch_status(outcome)
+        _sched_status, _sched_error = chat_service._schedule_dispatch_status(outcome)
         # Interval entries surface their own last_status in the UI, so hand the
         # classification back. "skipped" (a permission prompt or a deferred
         # retry) is not an error, but it is not a completed run either -- report
@@ -9711,7 +9910,7 @@ class ProjectChatManager:
         if chat.archived:
             return ""
         if chat.reentry_summary:
-            normalized = _cap_reentry_summary(chat.reentry_summary)
+            normalized = chat_service._cap_reentry_summary(chat.reentry_summary)
             if normalized:
                 if normalized != chat.reentry_summary:
                     chat.reentry_summary = normalized
@@ -9742,7 +9941,7 @@ class ProjectChatManager:
         if not filtered.strip():
             return ""
 
-        transcript = _reentry_transcript_text(filtered)
+        transcript = chat_service._reentry_transcript_text(filtered)
         if not transcript.strip():
             return ""
 
@@ -9782,7 +9981,7 @@ class ProjectChatManager:
             instructions=instructions,
             timeout=30.0,
         )
-        summary = _cap_reentry_summary(generated)
+        summary = chat_service._cap_reentry_summary(generated)
         current = self._chats.get(chat_id)
         if (
             not summary
@@ -9800,7 +9999,7 @@ class ProjectChatManager:
         ext = Path(filename).suffix.lower() or ".webm"
         if ext not in _ALLOWED_VOICE_EXTENSIONS:
             raise ValueError(f"Unsupported voice format: {ext}")
-        target = self._config.media_root / f"web_voice_{_uuid8()}{ext}"
+        target = self._config.media_root / f"web_voice_{chat_service._uuid8()}{ext}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if len(data) > self._config.max_voice_size_bytes:
@@ -9922,7 +10121,7 @@ class ProjectChatManager:
             out.append({
                 "path": rel.as_posix(),
                 "vault_path": self._display_path(resolved),
-                "kind": _classify_file(resolved),
+                "kind": chat_service._classify_file(resolved),
                 "size": stat.st_size,
                 "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)
                     .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -9956,9 +10155,9 @@ class ProjectChatManager:
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:
             raise ValueError("invalid filename")
         ext = Path(base).suffix.lower()
-        if ext not in _PROJECT_UPLOAD_EXTS:
+        if ext not in chat_service._PROJECT_UPLOAD_EXTS:
             raise ValueError(f"unsupported file type: {ext or '(none)'}")
-        if len(data) > _PROJECT_UPLOAD_MAX_BYTES:
+        if len(data) > chat_service._PROJECT_UPLOAD_MAX_BYTES:
             raise ValueError("file too large")
         # Collision: foo.png -> foo-2.png -> foo-3.png ...
         target = vault_dir / base
@@ -9993,7 +10192,7 @@ class ProjectChatManager:
             "path": rel.as_posix(),
             "vault_path": self._display_path(resolved),
             "absolute_path": str(resolved),
-            "kind": _classify_file(resolved),
+            "kind": chat_service._classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)
                 .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -10006,7 +10205,7 @@ class ProjectChatManager:
         ext = Path(filename).suffix.lower() or ".jpg"
         if ext not in _ALLOWED_IMAGE_EXTENSIONS:
             raise ValueError(f"Unsupported image format: {ext}")
-        ref = f"web_{_uuid8()}{ext}"
+        ref = f"web_{chat_service._uuid8()}{ext}"
         target = self._config.media_root / ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -10071,6 +10270,6 @@ class ProjectChatManager:
             self._unlink_chat_images(chat)
         self._chats.pop(chat_id, None)
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         if provider:
             asyncio.ensure_future(provider.disconnect())

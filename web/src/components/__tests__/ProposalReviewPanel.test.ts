@@ -72,6 +72,86 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('opens with one sentence and folds the mechanism into a disclosure', async () => {
+    // The paragraph this replaces ran nine lines of internal routing, bounded
+    // regions, stub notes and file removal BEFORE the first row — about 230px
+    // of a 390px viewport. The lede has to be one sentence's worth of prose
+    // and the rest has to start closed.
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const lede = wrapper.find('.pr-lede')
+    expect(lede.exists()).toBe(true)
+    expect(lede.text().length).toBeLessThan(200)
+
+    const how = wrapper.find('.pr-how')
+    expect(how.exists()).toBe(true)
+    expect(how.attributes('open')).toBeUndefined()
+    expect(wrapper.find('.pr-how-summary').text()).toBe('How memory works')
+    wrapper.unmount()
+  })
+
+  it('keeps bounded regions and vault filenames out of the opening copy', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const opening = `${wrapper.find('.pr-lede').text()} ${wrapper.find('.pr-how').text()}`
+    for (const jargon of ['bounded', 'region', 'Workspace/Learnings.md', 'stub note', 'fallback queue']) {
+      expect(opening, jargon).not.toContain(jargon)
+    }
+    wrapper.unmount()
+  })
+
+  it('says what keeping a row does, with the path one disclosure away', async () => {
+    // `ciao:memory` is the same shape of string as `Workspace/Learnings.md`
+    // and says nothing about the difference between them.
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', kind: 'memory', region: 'memory' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const sub = wrapper.find('.pr-row-sub')
+    expect(sub.text()).toBe('Kept as a standing fact for this workspace')
+    // Still reachable: the tooltip and the details line carry the path.
+    expect(sub.attributes('title')).toBe('ciao:memory')
+    expect(wrapper.find('.pr-row-detail').text()).toContain('Goes to ciao:memory')
+    wrapper.unmount()
+  })
+
+  it('names every row checkbox by its kind and fact', async () => {
+    // A bare checkbox is announced as "checkbox" with no clue which proposal it
+    // selects; two rows were indistinguishable to a screen reader.
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'a', text: 'Remember the thing' }),
+        row({ id: 'b', kind: 'profile', text: 'Prefers concise answers' }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-row-check').map(c => c.attributes('aria-label'))
+    expect(labels).toEqual([
+      'Select memory: Remember the thing',
+      'Select profile: Prefers concise answers',
+    ])
+    // Unique, or the names do not distinguish the rows.
+    expect(new Set(labels).size).toBe(labels.length)
+    wrapper.unmount()
+  })
+
+  it('wraps the row checkbox in a 44px hit target', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const hit = wrapper.find('.pr-row-check-hit')
+    expect(hit.exists()).toBe(true)
+    expect(hit.find('input[type="checkbox"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('renders a no-signal rehome row as a question, not a pre-filled accept', async () => {
     apiGet.mockResolvedValue({ rows: [rehomeRow()] })
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
@@ -382,6 +462,127 @@ describe('ProposalReviewPanel', () => {
   })
 })
 
+describe('queue load states', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  it('never shows a zero-state success message while the first GET is delayed', async () => {
+    // The bug: a slow initial fetch fell through to "Nothing queued here." and
+    // read as a successfully cleared queue before the server had answered.
+    let release!: (value: { rows: ProposalRow[] }) => void
+    const pendingQueue = new Promise<{ rows: ProposalRow[] }>((r) => { release = r })
+    apiGet.mockImplementation((path: string) => {
+      if (String(path).startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      return pendingQueue
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    expect(wrapper.text()).toContain('Loading proposals…')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+
+    // The delayed response lands: the zero-state is replaced by the real queue.
+    release({ rows: [row({ id: 'a' })] })
+    await flushPromises()
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reports a rejected first GET with Retry and no empty-queue claim', async () => {
+    apiGet.mockRejectedValue(new Error('proposals are unreachable'))
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.pr-error-block').exists()).toBe(true)
+    expect(wrapper.text()).toContain('proposals are unreachable')
+    expect(wrapper.find('.pr-error-block').text()).toContain('retry')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    // No rows section at all while the list could not be read.
+    expect(wrapper.find('.pr-group').exists()).toBe(false)
+
+    // Retry issues a fresh request and renders the rows it returns.
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    await wrapper.find('.pr-error-block .btn-chip').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(wrapper.find('.pr-error-block').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps existing rows after a failed refresh and labels them stale', async () => {
+    apiGet.mockResolvedValueOnce({ rows: [row({ id: 'a' }), row({ id: 'b' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.findAll('.pr-row')).toHaveLength(2)
+
+    // A forced refresh (as after a mutation) fails. Rows must stay.
+    apiGet.mockRejectedValueOnce(new Error('refresh broke'))
+    await useProposalsStore().fetch({ force: true })
+    await nextTick()
+
+    expect(wrapper.findAll('.pr-row')).toHaveLength(2)
+    expect(wrapper.find('.pr-stale').exists()).toBe(true)
+    expect(wrapper.find('.pr-stale').text()).toContain('last loaded queue')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    expect(wrapper.find('.pr-error-block').exists()).toBe(false)
+
+    // Retry succeeds: the stale notice clears.
+    apiGet.mockResolvedValueOnce({ rows: [row({ id: 'a' })] })
+    await wrapper.find('.pr-stale .btn-chip').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-stale').exists()).toBe(false)
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('offers Clear filters when a filter hides the whole queue', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', kind: 'memory' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    useProposalsStore().search = 'nothing matches this'
+    await nextTick()
+
+    expect(wrapper.text()).toContain('No proposals match the current filters')
+    expect(wrapper.text()).not.toContain('All reviewed.')
+    await wrapper.find('.pr-clear-filter').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('says "All reviewed." only after a successful load of an empty queue', async () => {
+    apiGet.mockResolvedValue({ rows: [] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('All reviewed.')
+    expect(wrapper.text()).not.toContain('Loading proposals…')
+    expect(wrapper.text()).not.toContain('Nothing queued here.')
+    wrapper.unmount()
+  })
+})
+
 describe('talk about it', () => {
   let pinia: ReturnType<typeof createPinia>
 
@@ -668,27 +869,26 @@ describe('Queue / History tabs', () => {
     })
   }
 
-  it('defaults to the Queue tab', async () => {
+  it('defaults to the queue and carries no tab bar of its own', async () => {
+    // The Queue/History tablist moved up to the Review surface, which now
+    // renders one bar for all four of its sections instead of three stacked
+    // rows of tabs. A bar left behind here would render directly under it.
     mockProposalApi()
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const tabs = wrapper.findAll('[role="tab"]')
-    expect(tabs).toHaveLength(2)
-    expect(tabs[0]!.text()).toBe('Queue')
-    expect(tabs[1]!.text()).toContain('History')
-    expect(tabs[0]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.findAll('[role="tab"]')).toHaveLength(0)
     expect(wrapper.find('.pr-row').exists()).toBe(true)
     expect(apiGet).toHaveBeenCalledWith('/api/proposals')
     wrapper.unmount()
   })
 
-  it('switching to History fetches and renders the decision ledger', async () => {
+  it('renders the decision ledger when the parent selects the history section', async () => {
     mockProposalApi()
-    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-    await flushPromises()
-
-    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    const wrapper = mount(ProposalReviewPanel, {
+      props: { section: 'history' as const },
+      global: { plugins: [pinia] },
+    })
     await flushPromises()
 
     expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
@@ -698,49 +898,21 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
-  it('prefetches the ledger so the History count is there before the first open', async () => {
-    // The count used to wait for the tab switch, so the badge appeared only
-    // after the one moment it had something to tell you.
+  it('switches section when the parent changes the prop, without remounting', async () => {
     mockProposalApi()
-    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-    await flushPromises()
-
-    expect(apiGet).toHaveBeenCalledWith('/api/proposals/history?limit=200&workspace=personal')
-    expect(wrapper.find('.tab-bar-count').text()).toBe('1')
-    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
-    wrapper.unmount()
-  })
-
-  it('reports the scoped total in the badge, not the page size', async () => {
-    // The page is capped, so a workspace with more decisions than the limit
-    // showed the limit itself as though it were the whole ledger.
-    apiGet.mockImplementation((path: string) => {
-      if (path.startsWith('/api/proposals/history')) {
-        return Promise.resolve({
-          rows: [
-            {
-              id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
-              kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
-              destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
-            },
-          ],
-          total: 500,
-          truncated: true,
-          limit: 200,
-          at_max: false,
-        })
-      }
-      return Promise.resolve({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, {
+      props: { section: 'queue' as const },
+      global: { plugins: [pinia] },
     })
-    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+
+    await wrapper.setProps({ section: 'history' as const })
     await flushPromises()
 
-    expect(wrapper.find('.tab-bar-count').text()).toBe('500')
-
-    // Under a filter the visible count is the honest number.
-    useProposalsStore().kindFilter = 'skill'
-    await nextTick()
-    expect(wrapper.find('.tab-bar-count').text()).toBe('0')
+    expect(wrapper.find('.pr-row').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Remember the thing')
+    expect(useProposalsStore().view).toBe('history')
     wrapper.unmount()
   })
 
@@ -765,17 +937,7 @@ describe('Queue / History tabs', () => {
     wrapper.unmount()
   })
 
-  it('renders no History count while the ledger is still unloaded', async () => {
-    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
-    // opposite of what a badge is for.
-    apiGet.mockImplementation((path: string) => {
-      if (path.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
-      return Promise.resolve({ rows: [row({ id: 'a' })] })
-    })
-    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-    await flushPromises()
-
-    expect(wrapper.find('.tab-bar-count').exists()).toBe(false)
-    wrapper.unmount()
-  })
 })
+
+// The History badge itself is now rendered by the Review surface's single tab
+// bar, so its counting rules are pinned in `MemoryMapView.test.ts`.

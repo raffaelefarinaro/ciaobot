@@ -14,8 +14,10 @@ from pathlib import Path
 
 from types import SimpleNamespace
 
+from ciao.git_proc import GIT_TIMEOUT_DETAIL
 from ciao.local_session import (
     LocalSessionManager,
+    backoff_reason,
     has_origin_remote,
     is_git_repo,
     repo_toplevel,
@@ -623,3 +625,37 @@ def test_startup_sync_keeps_its_own_shorter_ceiling() -> None:
         assert timeout == "GIT_STARTUP_TIMEOUT", (
             f"ciao.git_sync: git {verb} uses timeout={timeout}"
         )
+
+
+# ── backoff classification (issue #470) ──────────────────────────────────────
+
+
+def test_backoff_reason_none_for_an_ordinary_failure() -> None:
+    assert backoff_reason("error: failed to push some refs") is None
+    assert backoff_reason("") is None
+
+
+def test_backoff_reason_flags_credential_failures() -> None:
+    for detail in (
+        "fatal: could not read Username for 'https://github.com'",
+        "remote: Authentication failed for 'https://example.com'",
+        "remote: Invalid username or token",
+        "git@host: Permission denied (publickey).",
+    ):
+        assert backoff_reason(detail) == "auth", detail
+
+
+def test_backoff_reason_flags_a_timeout_as_unreachable() -> None:
+    """A timed-out push means an unreachable remote, not a transient blip.
+
+    Before #470 this returned None, so the loop kept retrying every 30s
+    forever against a host that was never going to answer.
+    """
+    assert backoff_reason(GIT_TIMEOUT_DETAIL) == "unreachable"
+    assert backoff_reason("Git Command Timed Out") == "unreachable"
+
+
+def test_backoff_reason_prefers_auth_over_timeout() -> None:
+    """Credentials are the actionable half; the message must say so."""
+    detail = f"authentication failed; {GIT_TIMEOUT_DETAIL}"
+    assert backoff_reason(detail) == "auth"

@@ -74,6 +74,40 @@ jobs:
         cd web
         npm run build
 
+    # Browser regression suite. It lives inside this job rather than in one of
+    # its own so it reuses the node_modules and the build that the two steps
+    # above just produced; the only marginal cost is the Chromium download,
+    # which the cache below removes on every run but the first for a given
+    # Playwright version.
+    - name: Cache Playwright browsers
+      id: playwright-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+    - name: Install Playwright Chromium
+      working-directory: web
+      run: npx playwright install chromium
+
+    # Blocking, with no retries configured. A browser test that only passes on
+    # the second attempt is a broken test, and hiding that behind a retry is
+    # how a suite ends up being ignored. The suite is hermetic (a synthetic
+    # Node backend, no Python, no credentials, no sleeps), so if it ever does
+    # flake the answer is to delete the offending spec, not to soften the gate.
+    - name: Run PWA browser tests
+      working-directory: web
+      run: npm run test:e2e
+
+    - name: Upload browser test traces
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-traces
+        path: web/test-results/
+        retention-days: 7
+        if-no-files-found: ignore
+
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@1.90.0
       with:

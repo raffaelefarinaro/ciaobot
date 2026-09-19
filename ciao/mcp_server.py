@@ -29,7 +29,6 @@ from ciao.control_plane import (
     McpPrincipal,
     _UNSET,
 )
-from ciao.schedules import DEFAULT_INTERVAL_MINUTES
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
@@ -39,6 +38,61 @@ from ciao.web.routes_mcp import (
 logger = logging.getLogger(__name__)
 
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# One telemetry line per tool call with no retention meant a long-lived
+# install grew ``mcp_tool_calls.jsonl`` without bound and made every Settings
+# usage read reparse the whole history. Same coarse size guard as the job-run
+# recorder in ``ciao/job_runs.py`` rather than a second retention scheme.
+TELEMETRY_MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
+TELEMETRY_KEEP_LINES = 2000            # detailed records retained after a trim
+
+# Aggregate shape shared by the rollup sidecar and the live log scan:
+# ``{tool: {calls, errors, total_ms, providers, last_used}}`` plus the derived
+# call and error totals.
+_UsageTotals = tuple[dict[str, dict[str, Any]], int, int]
+
+
+def _usage_entry() -> dict[str, Any]:
+    return {"calls": 0, "errors": 0, "total_ms": 0, "providers": set(), "last_used": ""}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> None:
+    """Add one telemetry line to the per-tool aggregate.
+
+    Blank, malformed, and non-object lines are skipped: the log is appended
+    to live, so a reader can meet a half-written final record and must not
+    turn that into a failed usage read.
+    """
+    line = line.strip()
+    if not line:
+        return
+    try:
+        record = json.loads(line)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(record, dict):
+        return
+    name = str(record.get("tool") or "")
+    if not name:
+        return
+    entry = tools.setdefault(name, _usage_entry())
+    entry["calls"] += 1
+    if record.get("status") != "ok":
+        entry["errors"] += 1
+    entry["total_ms"] += _as_int(record.get("duration_ms"))
+    provider = str(record.get("provider") or "")
+    if provider:
+        entry["providers"].add(provider)
+    timestamp = str(record.get("timestamp") or "")
+    if timestamp > entry["last_used"]:
+        entry["last_used"] = timestamp
 
 
 def _workspace_env_path(workspace_root: Path) -> Path:
@@ -132,16 +186,14 @@ _DESTRUCTIVE = ToolAnnotations(
 )
 
 
-# Create-time defaults for the merged `schedule` and `loop` tools. Their
-# signatures default every field to None instead, so an "update" can tell a
-# field the caller left out from one the caller set to the create default.
-# Encoding the defaults in the signature made those two cases identical, and
-# update stripped every field equal to a default: daily_time="09:00",
-# frequency="weekly", archive_policy="manual" and every ""-clear vanished, so
-# "move the daily report to 09:00" called schedule_update with an empty payload
-# and still returned ok. The same comparison left loop's start=False in the
-# payload (False != True), where loop_update rejected it as
-# `invalid_fields: start`.
+# Create-time defaults for the `schedule` tool. Its signature defaults every
+# field to None instead, so an "update" can tell a field the caller left out
+# from one the caller set to the create default. Encoding the defaults in the
+# signature made those two cases identical, and update stripped every field
+# equal to a default: daily_time="09:00", frequency="weekly",
+# archive_policy="manual" and every ""-clear vanished, so "move the daily
+# report to 09:00" called schedule_update with an empty payload and still
+# returned ok.
 _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "prompt": "",
     "daily_time": "09:00",
@@ -153,16 +205,6 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "model": "",
     "archive_policy": "manual",
     "workspace": "",
-}
-# Retained for the deprecated `loop` tool; the merged `schedule` tool takes
-# interval_minutes through _SCHEDULE_CREATE_DEFAULTS-less None handling.
-_LOOP_CREATE_DEFAULTS: dict[str, Any] = {
-    "prompt": "",
-    "chat_id": "",
-    "interval_minutes": DEFAULT_INTERVAL_MINUTES,
-    "title": "",
-    "autostart": False,
-    "start": True,
 }
 
 
@@ -279,12 +321,18 @@ class CiaoMcpService:
         self._tool_names: set[str] = set()
         self._last_error = ""
         self._telemetry_path = Path(config.state_path).parent / "mcp_tool_calls.jsonl"
+        # Trimming drops detailed records, so their counters are folded into
+        # this sidecar first: without it a rotation would silently reset the
+        # lifetime totals the Settings usage table reports.
+        self._telemetry_totals_path = Path(config.state_path).parent / "mcp_tool_calls_totals.json"
+        self._usage_lock = threading.Lock()
+        self._usage_cache: tuple[tuple[Any, ...], _UsageTotals] | None = None
         issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
         self.server = FastMCP(
             "ciaobot",
             instructions=(
                 "Use these tools for Ciaobot memory, vault, projects, chats, "
-                "schedules, loops, files, and application state. Prefer them "
+                "schedules, files, and application state. Prefer them "
                 "over curl, the ciao CLI, or direct .runtime edits. All paths "
                 "are relative to the active workspace or vault."
             ),
@@ -729,47 +777,13 @@ class CiaoMcpService:
     def usage(self, *, limit: int | None = None) -> dict[str, Any]:
         """Aggregate per-tool call counts from the telemetry log.
 
-        Reads ``mcp_tool_calls.jsonl`` (written by :meth:`_record_tool_call`) and
-        groups the records by tool name so the PWA can render a usage table.
+        Counts are lifetime: the retained window of ``mcp_tool_calls.jsonl``
+        (written by :meth:`_record_tool_call`) is folded on top of the
+        counters the size guard already rolled into the totals sidecar, so
+        rotation does not change what a total means. The detailed records
+        themselves only cover the retained window.
         """
-        tools: dict[str, dict[str, Any]] = {}
-        total = 0
-        total_errors = 0
-        if self._telemetry_path.exists():
-            try:
-                with self._telemetry_path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except (ValueError, TypeError):
-                            continue
-                        name = str(record.get("tool") or "")
-                        if not name:
-                            continue
-                        entry = tools.setdefault(
-                            name,
-                            {"calls": 0, "errors": 0, "total_ms": 0, "providers": set(), "last_used": ""},
-                        )
-                        entry["calls"] += 1
-                        total += 1
-                        if record.get("status") != "ok":
-                            entry["errors"] += 1
-                            total_errors += 1
-                        try:
-                            entry["total_ms"] += int(record.get("duration_ms") or 0)
-                        except (ValueError, TypeError):
-                            pass
-                        provider = str(record.get("provider") or "")
-                        if provider:
-                            entry["providers"].add(provider)
-                        timestamp = str(record.get("timestamp") or "")
-                        if timestamp > entry["last_used"]:
-                            entry["last_used"] = timestamp
-            except OSError:
-                pass
+        tools, total, total_errors = self._usage_totals()
         rows: list[dict[str, Any]] = []
         for name, entry in tools.items():
             calls = entry["calls"]
@@ -799,6 +813,109 @@ class CiaoMcpService:
             "tool_count": len(self._tool_names),
             "tools": rows,
         }
+
+    def _telemetry_fingerprint(self) -> tuple[Any, ...]:
+        """Identify the on-disk telemetry state.
+
+        Settings polls the usage endpoint, so without a change marker every
+        poll reparsed the whole retained window. Size and mtime move on every
+        append and on every trim, which is all the cache needs to know.
+        """
+        marks: list[Any] = []
+        for path in (self._telemetry_totals_path, self._telemetry_path):
+            try:
+                info = path.stat()
+            except OSError:
+                marks.append(None)
+            else:
+                marks.append((info.st_mtime_ns, info.st_size))
+        return tuple(marks)
+
+    def _usage_totals(self) -> _UsageTotals:
+        fingerprint = self._telemetry_fingerprint()
+        with self._usage_lock:
+            cached = self._usage_cache
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+        tools = self._load_telemetry_totals()
+        try:
+            with self._telemetry_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    _fold_telemetry_line(tools, line)
+        except OSError:
+            pass
+        total = sum(_as_int(entry["calls"]) for entry in tools.values())
+        total_errors = sum(_as_int(entry["errors"]) for entry in tools.values())
+        result: _UsageTotals = (tools, total, total_errors)
+        with self._usage_lock:
+            self._usage_cache = (fingerprint, result)
+        return result
+
+    def _load_telemetry_totals(self) -> dict[str, dict[str, Any]]:
+        """Read the counters for records the size guard already dropped."""
+        try:
+            raw = json.loads(self._telemetry_totals_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        stored = raw.get("tools") if isinstance(raw, dict) else None
+        if not isinstance(stored, dict):
+            return {}
+        tools: dict[str, dict[str, Any]] = {}
+        for name, entry in stored.items():
+            if not isinstance(entry, dict):
+                continue
+            providers = entry.get("providers")
+            tools[str(name)] = {
+                "calls": _as_int(entry.get("calls")),
+                "errors": _as_int(entry.get("errors")),
+                "total_ms": _as_int(entry.get("total_ms")),
+                "providers": {str(item) for item in providers if item} if isinstance(providers, list) else set(),
+                "last_used": str(entry.get("last_used") or ""),
+            }
+        return tools
+
+    def _trim_telemetry_if_large(self) -> None:
+        """Roll the oldest records into the totals sidecar and drop them."""
+        try:
+            if self._telemetry_path.stat().st_size < TELEMETRY_MAX_BYTES:
+                return
+        except OSError:
+            return
+        try:
+            with self._telemetry_path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+            if len(lines) <= TELEMETRY_KEEP_LINES:
+                return
+            dropped = lines[:-TELEMETRY_KEEP_LINES]
+            kept = lines[-TELEMETRY_KEEP_LINES:]
+            totals = self._load_telemetry_totals()
+            for line in dropped:
+                _fold_telemetry_line(totals, line)
+            payload = {
+                "tools": {
+                    name: {
+                        "calls": entry["calls"],
+                        "errors": entry["errors"],
+                        "total_ms": entry["total_ms"],
+                        "providers": sorted(entry["providers"]),
+                        "last_used": entry["last_used"],
+                    }
+                    for name, entry in totals.items()
+                }
+            }
+            # Rename the sidecar into place before truncating. The pair is not
+            # atomic, so a crash between them double-counts the dropped
+            # records; truncating first would instead lose those counts for
+            # good, and an inflated total is the recoverable half of that
+            # trade.
+            staged = self._telemetry_totals_path.with_name(
+                self._telemetry_totals_path.name + ".tmp"
+            )
+            staged.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            staged.replace(self._telemetry_totals_path)
+            self._telemetry_path.write_text("".join(kept), encoding="utf-8")
+        except OSError:
+            logger.debug("Failed to trim the MCP telemetry log", exc_info=True)
 
     def _principal(self) -> McpPrincipal:
         access = get_access_token()
@@ -902,6 +1019,7 @@ class CiaoMcpService:
                 record["result_paths"] = paths[:50]
         try:
             self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+            self._trim_telemetry_if_large()
             with self._telemetry_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
@@ -952,8 +1070,11 @@ class CiaoMcpService:
             """Add, replace, or remove one entry in native CLAUDE.md memory.
 
             ``region`` is ``memory`` or ``profile``. Use ``match`` for
-            replace/remove; use ``entry`` for add/replace. The operation
-            enforces the configured bounded-region limit.
+            replace/remove; use ``entry`` for add/replace. The region cap is
+            advisory: the write always goes through, and the result carries
+            ``over_cap`` with ``used_chars`` and ``char_limit`` when it exceeds
+            the configured limit. Consolidation, not refusal, is what bounds a
+            region.
             """
             return await self._invoke(
                 "memory_update",
@@ -972,10 +1093,34 @@ class CiaoMcpService:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
+        @tool(name="vault_expand", annotations=_READ, structured_output=True)
+        async def vault_expand(
+            path: str, query: str = "", windows: int = 3
+        ) -> dict[str, Any]:
+            """Return bounded extra context from ONE note ``vault_search``
+            already matched.
+
+            Use it when a snippet is cut short and the answer depends on what
+            it omits — a qualification, a negation, or which value is current.
+            ``path`` must be a path a ``vault_search`` result carried; ``query``
+            is the same query, and decides which lines are expanded around.
+
+            The reply is the markdown section around each matched line, capped
+            in windows, lines and characters — not the note. It cannot reach a
+            different note, another workspace, or a transcript: anything that
+            is not a current search result of this workspace is refused. It is
+            not a substitute for a file read, and it is the only permitted way
+            to widen the evidence for a pure recall question.
+            """
+            return await self._invoke(
+                "vault_expand",
+                lambda cp, p: cp.vault_expand(p, path, query, windows),
+            )
+
         @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
         async def vault_review(
             action: str = "list", path: str = "", candidate_id: str = "",
-            disposition: str = "", confirm: str = "", defer_days: int = 7,
+            disposition: str = "", confirm: str = "",
         ) -> dict[str, Any]:
             """List and decide scoped vault-note review candidates.
 
@@ -987,7 +1132,7 @@ class CiaoMcpService:
                 "vault_review",
                 lambda cp, p: cp.vault_review(
                     p, action, path=path, candidate_id=candidate_id,
-                    disposition=disposition, confirm=confirm, defer_days=defer_days,
+                    disposition=disposition, confirm=confirm,
                 ),
                 mutating=action != "list" and action != "inspect",
             )
@@ -1592,158 +1737,6 @@ class CiaoMcpService:
                     "invalid_action", "action must be pause, resume, run, or delete."
                 )
             return await self._invoke("schedule_action", op, mutating=True)
-
-        @tool(name="loops_list", annotations=_READ, structured_output=True)
-        async def loops_list() -> dict[str, Any]:
-            """DEPRECATED — use `schedules_list` and read the interval entries.
-
-            Loops became the `interval` cadence of a schedule. This lists the
-            interval schedules bound to a chat in the active workspace, in the
-            retired loop shape, and will be removed.
-            """
-            return await self._invoke("loops_list", lambda cp, p: cp.loops_list(p))
-
-        @tool(name="loop", annotations=_WRITE, structured_output=True)
-        async def loop(
-            action: str,
-            prompt: str | None = None,
-            chat_id: str | None = None,
-            interval_minutes: int | None = None,
-            title: str | None = None,
-            autostart: bool | None = None,
-            start: bool | None = None,
-            loop_id: str = "",
-        ) -> dict[str, Any]:
-            """DEPRECATED — call `schedule` with frequency="interval" instead.
-
-            Loops became one cadence of the schedule primitive. Prefer:
-            `schedule(action="create", frequency="interval",
-            interval_minutes=N, chat_id=..., prompt=...)`, which does the same
-            thing, reports the same fields as every other automation, and can
-            also open a fresh chat per run (pass project_id instead of
-            chat_id). This tool remains for one release and will be removed.
-
-            It creates or updates an interval schedule bound to one chat: the
-            prompt is re-sent into that chat every N minutes, retaining its
-            context and running with that chat's own model and mode.
-
-            action:
-                "create" — create an interval entry and (by default) start it.
-                "update" — update an existing entry. Pass loop_id to target it;
-                    all other fields are optional overrides.
-
-            Args (create):
-                chat_id: An existing chat id, or omit / pass empty / "this" for
-                    the calling chat. If you must target another chat, resolve
-                    its id via chats_list first — chat titles aren't unique.
-                prompt: Give a short, fixed no-change response for a no-op
-                    run, so repeated runs stay cheap and scannable.
-                interval_minutes: Whole minutes, minimum 1, default 10. There
-                    is no model field — each run uses the target chat's current
-                    model and mode.
-                autostart, start: These collapsed into one enabled flag when
-                    loops merged into schedules. Either being true means "run
-                    it"; only both false leaves it stopped. The returned
-                    payload carries the real `running` flag — report that, not
-                    your intent.
-
-            Args (update): loop_id is required; every other field is unset by
-                default and only a field you pass is changed. `start` is
-                honoured here too: True starts the cadence, False stops it
-                (same as loop_action), and the returned payload carries the
-                resulting `running` flag.
-
-            If the target chat is busy when a run comes due, that run is
-            skipped and retried on the next tick (not queued). If the target
-            chat is gone, the run continues in a replacement chat in the same
-            project, or the entry is disabled when no project resolves either.
-            Interval entries do not catch up runs missed during downtime
-            (unlike wall-clock schedules, which fire once for a missed
-            occurrence on startup).
-            """
-            # Snapshot the arguments before any other local exists, so no helper
-            # local can leak into the control-plane payload.
-            supplied: dict[str, Any] = {
-                key: value for key, value in locals().items()
-                if key not in {"self", "action", "loop_id"}
-            }
-            if action == "create":
-                values: dict[str, Any] = {
-                    key: _LOOP_CREATE_DEFAULTS.get(key, value) if value is None else value
-                    for key, value in supplied.items()
-                }
-                return await self._invoke(
-                    "loop",
-                    lambda cp, p: cp.loop_create(p, **values),
-                    mutating=True,
-                )
-            if action == "update":
-                if not loop_id:
-                    raise ControlPlaneError("invalid_action", "loop_id is required for update.")
-                # Only the fields the caller passed, keyed off None rather than
-                # off equality with the create defaults: that comparison dropped
-                # interval_minutes=10 and every ""-clear (reporting ok while
-                # changing nothing) and, because False != True, forwarded
-                # start=False to loop_update, which rejected it as
-                # `invalid_fields: start`.
-                values = {
-                    key: value for key, value in supplied.items()
-                    if key != "start" and value is not None
-                }
-                if not values and start is None:
-                    raise ControlPlaneError(
-                        "invalid_action",
-                        "update needs at least one field to change besides loop_id.",
-                    )
-                # loop_create refuses an empty prompt; loop_update does not, and
-                # a loop with a blank prompt keeps ticking on nothing.
-                if values.get("prompt") == "":
-                    raise ControlPlaneError(
-                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
-                    )
-
-                def _update(cp: CiaoControlPlane, principal: McpPrincipal) -> dict[str, Any]:
-                    result: dict[str, Any] = cp.loop_update(principal, loop_id, **values)
-                    if start is None:
-                        return result
-                    # `start` is a runtime cadence flag, not a stored loop field,
-                    # so it has to go through the lifecycle calls instead of the
-                    # update payload.
-                    if start:
-                        cp.loop_start(principal, loop_id)
-                    else:
-                        cp.loop_stop(principal, loop_id)
-                    return {"ok": True, "data": {**result.get("data", {}), "running": bool(start)}}
-
-                return await self._invoke("loop", _update, mutating=True)
-            raise ControlPlaneError("invalid_action", "action must be create or update.")
-
-        @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
-        async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
-            """DEPRECATED — use `schedule_action` on the interval schedule.
-
-            Loops became interval schedules, and their ids are schedule ids:
-            `schedule_action(schedule_id=..., action="pause"|"resume"|"run"
-            |"delete")` is the replacement. This tool remains for one release.
-
-            action:
-                "start"  — start the cadence (same as schedule_action resume).
-                "stop"   — stop it without deleting (same as pause).
-                "run"    — run once immediately.
-                "delete" — delete the entry (destructive).
-            """
-            dispatch = {
-                "start": lambda cp, p: cp.loop_start(p, loop_id),
-                "stop": lambda cp, p: cp.loop_stop(p, loop_id),
-                "run": lambda cp, p: cp.loop_run(p, loop_id),
-                "delete": lambda cp, p: cp.loop_delete(p, loop_id),
-            }
-            op = dispatch.get(action)
-            if op is None:
-                raise ControlPlaneError(
-                    "invalid_action", "action must be start, stop, run, or delete."
-                )
-            return await self._invoke("loop_action", op, mutating=True)
 
         # Workspace file read/write use the provider's native filesystem tools.
         @tool(name="file_surface", annotations=_READ, structured_output=True)

@@ -243,6 +243,9 @@ ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao critique --input plan.md --type plan # Multi-model adversarial review panel
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
+ciao eval contracts --json # Deterministic behavioral-eval guard checks (model-free; CI half)
+ciao eval run --model <id> --label candidate # Bounded model-backed behavioral probe (explicit; cost ceiling)
+ciao eval compare --baseline a.json --candidate b.json # Baseline/candidate delta with provenance
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -259,6 +262,8 @@ schedule is the job's *sole* trigger: such a job is hidden on machines where
 that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
+
+For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercises the manifest in isolation and the resumable stage runner against a synthetic vault/guide, covering: a failure after each stage (including after insights already exist), no duplication on retry (region entries, proposal rows, learning recurrence, project updates), deletion tombstoning, and the blocked/recoverable states (changed archive content, missing archive, broken workspace owner, model unavailability). `tests/test_archive_postprocess_state.py` owns the chat-visible lifecycle and the retry route; `web/src/lib/postprocessView.test.ts` owns the settled/partial wording. The runner is the single implementation behind both `extract_and_append` (backfill/retry) and the manager's live archive path, so a change to stage ordering belongs in `ciao/insights.py:run_archive_pipeline`.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
@@ -324,6 +329,17 @@ checks (caps, expiry, exact duplicates) that `audit_memory` already ran. It rest
 on one rule: a remembered fact is either **state**, a current value that gets
 replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
+
+The write policy for every path that can touch durable memory — attended
+remember, archive extraction, unattended curation, direct edit, and proposal
+acceptance — is stated once in `ciao/memory_policy.py` and described in
+`docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
+any change here: the region cap is **advisory** on every path (a write goes
+through and reports `over_cap`; consolidation, not refusal, bounds a region),
+and an **unattended run defers** approval-requiring work and reports it instead
+of asking or routing around the missing reviewer. `tests/test_memory_policy.py`
+pins the matrix to the stock assets and the docs, so a copy that contradicts it
+fails the suite.
 
 Three detectors, all model-free, because a model asked to tally a few hundred
 entries returns a confident number and a different one tomorrow:
@@ -414,6 +430,44 @@ Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
 See `docs/MCP.md` for the catalog and provider configuration.
+
+### Off-loop vault reads
+
+Vault reads are synchronous disk/SQLite work and must never run inline in an
+async handler. Use `ciao/async_reads.py`:
+
+- `await run_read(key, operation)` runs a complete read on a dedicated bounded
+  executor (`MAX_VAULT_READ_WORKERS`, default 4) and coalesces identical
+  in-flight reads by `key`. `operation` must open and close its own SQLite
+  connection so a connection never crosses threads. Admission is capped at
+  `MAX_VAULT_READ_BACKLOG` (default 12) outstanding reads; over the cap a caller
+  waits for a slot without blocking the loop. Do not bypass `run_read` for heavy
+  reads, or that backpressure is lost.
+- Keep the operation whole: walk + parse + query for one logical read, not a
+  per-file `to_thread` call. `control_plane.vault_search` /
+  `vault_index_refresh` and the `vault_backlinks` / `vault_markdown_paths`
+  routes are the reference shapes.
+- Resolve scope (workspace, principal, paths) on the calling thread before
+  submitting, so a bad principal fails fast and the worker only does I/O.
+- Cancellation only detaches the awaiter; the worker cannot be stopped. Each
+  caller awaits its own bridge future, so cancelling one waiter of a coalesced
+  key does not cancel the shared work its other waiters depend on. The
+  coalescing map and bounded width keep that from becoming unbounded background
+  work, and every future's error is observed. Do not wrap mutations of
+  event-loop-owned managers this way — only complete read operations.
+- Serialize the write phase of any operation that shares a synchronous store
+  with `keyed_lock(key)`: concurrent `index_vault` passes against one
+  `vault-fts.db` race SQLite's single file-level write lock and fail with
+  `database is locked`. Take the lock only around the writes; leave the
+  read-only query outside it so reads stay concurrent. Every same-database
+  writer must take it — the archive postprocess's `index_file` is dispatched
+  through `run_read` under `keyed_lock(f"fts-index:{db_path}")` too, since its
+  callers are async and the control plane's index passes now run in workers.
+- Call `reset_vault_read_executor()` in test setup/teardown for isolation.
+
+Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,
+bounded-concurrency, no-cross-thread-SQLite, cancellation and recovery
+contracts and reports p50/p95 heartbeat latency before and after.
 
 ## Change guidelines
 

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ciao.vault_index import temp_prefix
+
 logger = logging.getLogger(__name__)
 
 
@@ -348,14 +350,15 @@ def read_region(
     return parse_entries(_normalize(body)), []
 
 
-def write_region(guide: Path, region: str, entries: list[str]) -> None:
-    """Rewrite only the body of *region* inside *guide*.
+def replace_region_body(text: str, region: str, entries: list[str]) -> str:
+    """Return *text* with the body of *region* replaced by *entries*.
 
-    Used by the one-time legacy migration and archive-time auto-promotion.
-    Refuses if markers are missing, duplicated, or inverted.
+    Pure and total over well-formed markers: the caller has already diagnosed
+    them (or is the migration path, which refuses before calling). Split out so
+    the receipt protocol can prepare the replacement under one lock and write
+    it without a second read that a concurrent writer could win.
     """
     canonical = resolve_region(region)
-    text = guide.read_text(encoding="utf-8")
     diags = diagnose_region(text, canonical)
     if diags:
         raise ValueError("; ".join(d.message for d in diags))
@@ -369,10 +372,19 @@ def write_region(guide: Path, region: str, entries: list[str]) -> None:
         body += serialized
     else:
         body += "\n"
-    guide.write_text(
-        text[: start.end()] + body + text[end.start() :],
-        encoding="utf-8",
-    )
+    return text[: start.end()] + body + text[end.start() :]
+
+
+def write_region(guide: Path, region: str, entries: list[str]) -> None:
+    """Rewrite only the body of *region* inside *guide*.
+
+    Used by the one-time legacy migration and archive-time auto-promotion.
+    Refuses if markers are missing, duplicated, or inverted.
+    """
+    canonical = resolve_region(region)
+    text = guide.read_text(encoding="utf-8")
+    updated = replace_region_body(text, canonical, entries)
+    guide.write_text(updated, encoding="utf-8")
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -381,7 +393,9 @@ def _write_text_atomically(path: Path, text: str) -> None:
 
     mode = path.stat().st_mode if path.exists() else None
     fd, raw_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        # Truncated for the same reason as `vault_review`: a note name near
+        # NAME_MAX plus ".", 8 random chars and ".tmp" raises ENAMETOOLONG.
+        prefix=temp_prefix(path.name), suffix=".tmp", dir=str(path.parent)
     )
     temporary = Path(raw_name)
     try:
@@ -399,6 +413,16 @@ def _write_text_atomically(path: Path, text: str) -> None:
             pass
 
 
+def write_guide_atomically(path: Path, text: str) -> None:
+    """Public atomic guide replacement for the receipt protocol.
+
+    Same temp-file-plus-``os.replace`` guarantee as the private helper: a
+    reader never observes a half-written guide, and the replacement preserves
+    the destination's mode.
+    """
+    _write_text_atomically(path, text)
+
+
 def _guide_lock(guide: Path):
     """Return a best-effort process lock for read/merge/write operations."""
     import fcntl
@@ -408,6 +432,76 @@ def _guide_lock(guide: Path):
     handle = lock.open("a+", encoding="utf-8")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     return handle
+
+
+class MemoryLockError(RuntimeError):
+    """A guide lock could not be acquired.
+
+    Deliberately fatal to the write it guards: the whole point of the lock is
+    that the read-merge-write is serialized. A caller that swallowed this and
+    wrote anyway would reintroduce exactly the lost-update race the lock exists
+    to prevent, so the exception propagates and no guide write happens.
+    """
+
+    retryable = True
+
+
+DEFAULT_LOCK_TIMEOUT_S = 30.0
+"""How long a managed write waits for the guide lock before failing.
+
+Bounded rather than infinite so a wedged holder cannot pin a request (or a
+startup pass) forever; long enough that ordinary concurrency never trips it.
+"""
+
+
+def guide_lock(guide: Path, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
+    """Acquire the guide's exclusive lock, or raise :class:`MemoryLockError`.
+
+    Uses a non-blocking acquisition in a short retry loop so a timeout is
+    reportable instead of a silent, unbounded wait. Failure is retryable:
+    callers must let it propagate rather than fall through to an unlocked
+    write.
+    """
+    import fcntl
+    import time
+
+    lock = guide.with_name(f"{guide.name}.lock")
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock.open("a+", encoding="utf-8")
+    except OSError as exc:
+        raise MemoryLockError(f"could not open guide lock {lock}: {exc}") from exc
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise MemoryLockError(
+                    f"guide lock {lock} is held; the write was not applied"
+                )
+            time.sleep(0.05)
+        except OSError as exc:
+            handle.close()
+            raise MemoryLockError(f"could not lock {lock}: {exc}") from exc
+
+
+def release_guide_lock(handle: Any | None) -> None:
+    """Release a lock returned by :func:`guide_lock`. Never raises."""
+    if handle is None:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:  # noqa: BLE001 — releasing is best-effort
+        pass
+    try:
+        handle.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def memory_status(
@@ -441,6 +535,10 @@ def prune_expired_entries(
     guide: Path,
     *,
     today: datetime.date | None = None,
+    actor: str = "system",
+    source: str = "startup",
+    vault_root: Path | None = None,
+    workspace: str = "",
 ) -> dict[str, Any]:
     """Remove only valid, expired entries from the guide's bounded regions.
 
@@ -448,13 +546,20 @@ def prune_expired_entries(
     human review, and a malformed/missing region is reported rather than
     rewritten. The file is locked and replaced atomically when anything
     changes, so provider startup can safely call this on every turn.
+
+    The lock is required: a lock that cannot be taken raises
+    :class:`MemoryLockError` rather than degrading to an unlocked write. Each
+    changed region is committed through :func:`ciao.memory_receipts.commit_region_change`
+    so an unattended prune is reversible from the same History surface as a
+    user-visible edit.
     """
     if not guide.exists():
         return {"ok": True, "removed": {"memory": 0, "profile": 0}, "guide": str(guide)}
-    lock = _guide_lock(guide)
+    lock = guide_lock(guide)
     try:
         text = guide.read_text(encoding="utf-8")
         filtered: dict[MemoryRegion, list[str]] = {}
+        removed_entries: dict[MemoryRegion, list[str]] = {}
         removed: dict[str, int] = {"memory": 0, "profile": 0}
         diagnostics: list[dict[str, str]] = []
         for region in REGIONS:
@@ -463,31 +568,36 @@ def prune_expired_entries(
                 diagnostics.extend({"region": d.region, "code": d.code, "message": d.message} for d in diags)
                 continue
             active = [entry for entry in entries if not is_entry_expired(entry, today)]
+            removed_entries[region] = [entry for entry in entries if is_entry_expired(entry, today)]
             removed[region] = len(entries) - len(active)
             filtered[region] = active
         if diagnostics:
             return {"ok": False, "removed": removed, "diagnostics": diagnostics, "guide": str(guide)}
 
-        updated = text
-        for region in REGIONS:
-            starts, ends = _find_marker_spans(updated, region)
-            start, end = starts[0], ends[0]
-            meta = _REGION_META[region]
-            body = f"\n{meta['heading']}\n\n"
-            serialized = serialize_entries(filtered[region])
-            if serialized:
-                body += serialized
-            else:
-                body += "\n"
-            updated = updated[: start.end()] + body + updated[end.start() :]
-        if updated != text:
-            _write_text_atomically(guide, updated)
-        return {"ok": True, "removed": removed, "guide": str(guide)}
-    finally:
-        import fcntl
+        from ciao.memory_receipts import commit_region_change
 
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        lock.close()
+        changed = False
+        for region in REGIONS:
+            if not removed_entries[region]:
+                continue
+            commit_region_change(
+                guide,
+                region,
+                entries=filtered[region],
+                actor=actor,
+                source=source,
+                workspace=workspace,
+                vault_root=vault_root,
+                lock=lock,
+                fact_text="",
+                destination=f"ciao:{region}",
+                removed_texts=removed_entries[region],
+                kind="prune_expired",
+            )
+            changed = True
+        return {"ok": True, "removed": removed, "guide": str(guide), "changed": changed}
+    finally:
+        release_guide_lock(lock)
 
 
 def update_region(
@@ -498,6 +608,10 @@ def update_region(
     entry: str = "",
     match: str = "",
     char_limit: int | None = None,
+    actor: str = "agent",
+    source: str = "mcp",
+    workspace: str = "",
+    vault_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply one bounded-memory edit while keeping storage in ``CLAUDE.md``.
 
@@ -517,7 +631,15 @@ def update_region(
     ``used_chars`` and ``char_limit``, for callers that want to surface it. Bounding
     the region is the job of the thing that can actually shrink it — consolidation
     during memory curation — not of the write that noticed.
+
+    Fail-safe locking: the guide lock is required, and a lock that cannot be
+    taken raises :class:`MemoryLockError` with zero writes. The write itself is
+    committed through :func:`ciao.memory_receipts.commit_region_change`, so a
+    managed edit leaves a reversible receipt and a concurrent external edit is
+    reported as a revision conflict rather than overwritten.
     """
+    from ciao.memory_receipts import commit_region_change
+
     canonical = resolve_region(region)
     normalized_entry = _normalize(entry)
     needle = _normalize(match)
@@ -525,7 +647,7 @@ def update_region(
         raise ValueError("entry is required for add and replace")
     if action in {"replace", "remove"} and not needle:
         raise ValueError("match is required for replace and remove")
-    lock = _guide_lock(guide)
+    lock = guide_lock(guide)
     try:
         entries, diagnostics = read_region(guide, canonical)
         if diagnostics:
@@ -534,6 +656,7 @@ def update_region(
             if normalized_entry in entries:
                 return {"ok": True, "changed": False, "action": action, "region": canonical}
             candidate = [*entries, normalized_entry]
+            removed_texts: list[str] = []
         else:
             matches = [index for index, value in enumerate(entries) if needle.casefold() in value.casefold()]
             if not matches:
@@ -542,13 +665,34 @@ def update_region(
                 raise ValueError("the requested text matched more than one memory entry")
             candidate = list(entries)
             index = matches[0]
+            removed_texts = []
             if action == "remove":
+                removed_texts = [candidate[index]]
                 del candidate[index]
             else:
+                removed_texts = [candidate[index]]
                 candidate[index] = normalized_entry
         used = total_chars(candidate)
         over_cap = char_limit is not None and used > char_limit
-        write_region(guide, canonical, candidate)
+        kind = {
+            "add": "region_apply",
+            "replace": "region_update",
+            "remove": "region_remove",
+        }[action]
+        commit_region_change(
+            guide,
+            canonical,
+            entries=candidate,
+            actor=actor,
+            source=source,
+            workspace=workspace,
+            vault_root=vault_root,
+            lock=lock,
+            fact_text=normalized_entry or needle,
+            destination=f"ciao:{canonical}",
+            removed_texts=removed_texts,
+            kind=kind,
+        )
         result: dict[str, Any] = {
             "ok": True,
             "changed": True,
@@ -562,10 +706,7 @@ def update_region(
             result["over_cap"] = over_cap
         return result
     finally:
-        import fcntl
-
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        lock.close()
+        release_guide_lock(lock)
 
 
 def _empty_region_block(region: MemoryRegion) -> str:
@@ -647,12 +788,12 @@ def migrate_region_caps(
     """Restamp region markers carrying a known shipped default cap.
 
     ``ensure_regions`` never rewrites existing markers, so guides can end up
-    advertising a cap number the runtime does not enforce: a pre-3000 guide
+    advertising a cap number the runtime does not apply: a pre-3000 guide
     still says ``cap=2200``, and a freshly seeded guide says ``cap=3000``
     even when an explicit limit overrides the shipped default. Any marker
     whose cap is a KNOWN shipped default (the former or the current one) is
-    restamped to the EFFECTIVE limit so the guide advertises what the runtime
-    actually enforces: ``char_limit`` when the caller resolved configuration (including
+    restamped to the EFFECTIVE advisory budget so the guide advertises what the
+    runtime actually uses: ``char_limit`` when the caller resolved configuration (including
     a workspace ``.env``, which this module cannot see), else an explicit
     ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
     default. Any other marker value is an intentional custom cap and is never

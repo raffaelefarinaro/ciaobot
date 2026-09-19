@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ciao.context.entity_tagger import find_entities, format_entities
+from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
 
 
 def _field(value: str, *, limit: int = 1200) -> str:
@@ -80,10 +81,7 @@ def build_context_capsule(
         if formatted:
             dynamic.append(formatted)
     if unattended:
-        dynamic.append(
-            "unattended=true; this turn was fired automatically. Do not ask "
-            "questions or wait for approval."
-        )
+        dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
 
     parts: list[str] = []
     if include_stable:

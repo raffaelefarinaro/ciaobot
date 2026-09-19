@@ -531,7 +531,13 @@ class TranscriptStore:
         if not isinstance(turns, list):
             return ""
         lines: list[str] = []
-        index = 0
+        # 1-based to match `ciao.insights.filter_session_jsonl`: the extraction
+        # prompt tells the model "Indices start at 1; never cite `[idx=0]`", so
+        # a 0-based transcript shifted every citation by one turn. Harmless
+        # while citations were only decoration, but they are now checked — a
+        # correct `[idx=1]` citation resolved to the assistant turn here and
+        # the fact was queued as unsupported.
+        index = 1
         for turn in turns:
             if not isinstance(turn, dict):
                 continue

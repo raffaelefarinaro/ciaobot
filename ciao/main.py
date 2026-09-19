@@ -452,6 +452,24 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("refresh_vault_index", "index refresh failed")
             logger.exception("Vault index refresh failed")
 
+    # Reconcile any memory receipt interrupted between its prepared row and its
+    # terminal state. Runs after the re-rooting so the journals it reads are the
+    # ones beside each workspace's vault, and before the server binds so no chat
+    # can resolve a queue while its earlier operation is still ambiguous.
+    tracker.start("recover_memory_receipts")
+    try:
+        from ciao.memory_receipts import recover_memory_journals
+
+        recovery = await asyncio.to_thread(recover_memory_journals, config)
+        tracker.done(
+            "recover_memory_receipts",
+            f"{len(recovery.get('reconciled') or [])} reconciled, "
+            f"{len(recovery.get('conflicts') or [])} conflict(s)",
+        )
+    except Exception:
+        tracker.fail("recover_memory_receipts", "receipt recovery failed")
+        logger.exception("Memory receipt recovery failed")
+
     # The PWA ships pre-built in the installed package; workspaces never
     # contain app source, so there is no frontend rebuild at startup.
 
@@ -878,6 +896,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         if swept:
             logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
 
+        # Resume post-archive pipelines the previous process left incomplete.
+        # Stages still marked "running" at load were interrupted (the task died
+        # with the old process); they become retryable here and only the
+        # unfinished local work is re-run, never model extraction that already
+        # landed. Bounded concurrency so a large backlog cannot stampede the
+        # provider or the disk.
+        try:
+            resumed = await pcm.resume_interrupted_jobs(max_concurrency=2)
+            if resumed:
+                logger.info("Resuming %d interrupted archive job(s)", resumed)
+        except Exception:
+            logger.exception("Archive job resume failed")
+
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
@@ -916,6 +947,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # remote skip this gracefully.
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
+        backoff_reason,
         has_origin_remote,
         is_diverged_backup,
         push_branch,
@@ -936,21 +968,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             )
             return
         logger.info("Working on branch '%s'", branch)
-        # Credential failures cannot self-heal (there is no TTY to prompt
-        # under launchd), so retrying at the normal cadence is pure waste.
-        auth_markers = (
-            "could not read username",
-            "authentication failed",
-            "invalid username or token",
-            "permission denied (publickey",
-        )
-        auth_backoff_multiplier = 12
+        backoff_multiplier = 12
         last_failure_detail: str | None = None
         repeated_failures = 0
-        auth_backoff = False
+        # Set when the failure cannot self-heal at the normal cadence: bad
+        # credentials, or a remote that is simply unreachable. Both back off to
+        # the hourly multiplier; only a successful push clears it.
+        failure_backoff = False
+        last_loop_error: str | None = None
+        repeated_loop_errors = 0
         # Set once push_branch falls back to a per-commit backup ref because
         # the shared branch has a real merge conflict with origin. Backs off
-        # the cadence the same way auth_backoff does: retrying a merge that
+        # the cadence the same way failure_backoff does: retrying a merge that
         # will conflict the same way every 30s is pure waste, and the backup
         # ref push is idempotent (its name is derived from the HEAD sha), so
         # slower retries do not lose any coverage — only a fast-forwardable
@@ -960,7 +989,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             try:
                 await asyncio.sleep(
                     BACKUP_PUSH_INTERVAL
-                    * (auth_backoff_multiplier if (auth_backoff or diverged_backoff) else 1)
+                    * (backoff_multiplier if (failure_backoff or diverged_backoff) else 1)
                 )
                 async with job_runs.track(
                     "branch_backup", "Branch backup",
@@ -996,35 +1025,64 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                             logger.info("Branch backup push recovered.")
                         last_failure_detail = None
                         repeated_failures = 0
-                        auth_backoff = False
+                        failure_backoff = False
+                        # A success closes any open exception episode too: without
+                        # this, the same fault recurring later is logged at debug
+                        # as a continuation of the pre-success sequence instead
+                        # of a fresh traceback.
+                        last_loop_error = None
+                        repeated_loop_errors = 0
                         continue
                     if detail == last_failure_detail:
                         repeated_failures += 1
                         run.skip("same failure as previous backup attempt")
                         run.extra["repeat_count"] = repeated_failures
-                        is_auth = any(
-                            marker in detail.lower() for marker in auth_markers
-                        )
-                        if is_auth and repeated_failures >= 3 and not auth_backoff:
-                            auth_backoff = True
-                            logger.warning(
-                                "Branch backup authentication keeps failing; "
-                                "retrying hourly instead. Store credentials to "
-                                "resume (e.g. `gh auth setup-git`, or switch "
-                                "the remote to SSH).",
-                            )
+                        reason = backoff_reason(detail)
+                        if reason and repeated_failures >= 3 and not failure_backoff:
+                            failure_backoff = True
+                            if reason == "auth":
+                                logger.warning(
+                                    "Branch backup authentication keeps failing; "
+                                    "retrying hourly instead. Store credentials to "
+                                    "resume (e.g. `gh auth setup-git`, or switch "
+                                    "the remote to SSH).",
+                                )
+                            else:
+                                logger.warning(
+                                    "Branch backup keeps timing out; origin looks "
+                                    "unreachable. Retrying hourly until it answers.",
+                                )
                         logger.debug("Branch backup push still failing: %s", detail)
                         continue
                     last_failure_detail = detail
                     repeated_failures = 1
-                    auth_backoff = False
+                    failure_backoff = False
                     run.status = "error"
                     run.error = detail
                     logger.warning("Branch backup push failed: %s", detail)
             except asyncio.CancelledError:
                 break
-            except Exception:
-                logger.exception("Branch backup push failed")
+            except Exception as exc:
+                # One persistent fault fires every tick. Logging a full
+                # traceback each time buried the real signal under megabytes of
+                # identical frames (issue #470 reported 1387 copies over two
+                # days), so an unchanged error is counted, not re-dumped.
+                signature = f"{type(exc).__name__}: {exc}"
+                if signature == last_loop_error:
+                    repeated_loop_errors += 1
+                    logger.debug(
+                        "Branch backup push failed again (%dx): %s",
+                        repeated_loop_errors, signature,
+                    )
+                else:
+                    if repeated_loop_errors > 1:
+                        logger.warning(
+                            "Previous branch backup error repeated %d times.",
+                            repeated_loop_errors,
+                        )
+                    last_loop_error = signature
+                    repeated_loop_errors = 1
+                    logger.exception("Branch backup push failed")
 
     asyncio.create_task(_branch_backup_loop())
 
@@ -1206,8 +1264,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # outlive the loop and asyncio.run wedges in its cleanup phase
         # (cancelled tasks + open subprocess transports = no exit). Bounded
         # in parallel so one stuck provider can't block the rest.
+        # Stop the idle sweep first: it awaits provider disconnects of its
+        # own, and a sweep racing this teardown would disconnect a service
+        # already being torn down here.
+        await pcm.stop_provider_reaper()
         services = list(pcm._providers.values())
         pcm._providers.clear()
+        pcm._provider_last_used.clear()
         async def _one(svc):
             try:
                 await asyncio.wait_for(svc.disconnect(), timeout=3)
@@ -1227,7 +1290,23 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
-    app.state.shutdown_callbacks = [_shutdown_providers, _shutdown_background_runs]
+    async def _shutdown_vault_reads() -> None:
+        # Discard vault reads still queued for the off-loop executor (bounded,
+        # cancel_futures=True) so a restart is not held up by a backlog of
+        # full-vault scans left by disconnected callers; workers already
+        # running cannot be interrupted, but there are at most pool-width of
+        # them. `close()` polls with time.sleep, so it runs in a worker
+        # thread: awaiting it inline would stall the remaining teardown (and
+        # the loop) for up to the timeout.
+        from ciao.async_reads import shutdown_vault_read_executor
+
+        await asyncio.to_thread(shutdown_vault_read_executor)
+
+    app.state.shutdown_callbacks = [
+        _shutdown_providers,
+        _shutdown_background_runs,
+        _shutdown_vault_reads,
+    ]
 
     try:
         await server.serve()

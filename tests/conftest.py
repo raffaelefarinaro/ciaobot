@@ -77,6 +77,36 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_bootstrap_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test mint a token under the developer's own `~/.ciao`.
+
+    A config built without `CIAO_WORKSPACE` takes the bootstrap branch, and
+    `_read_or_create_secret` then writes
+    `~/.ciao/bootstrap/.runtime/bootstrap-auth-token`. `CiaoConfig.from_env({})`
+    and the common `from_env({"PWA_AUTH_TOKEN": "t"})` idiom both do this, so 51
+    tests across 7 files were fabricating a bootstrap install under the
+    developer's home — on a fresh checkout, creating one that was never
+    installed.
+
+    Autouse and unconditional, for the same reason as its two siblings above:
+    the per-test argument is exactly the step that gets forgotten, and the
+    blast radius is the developer's own install.
+    """
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(tmp_path / "bootstrap"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_queue_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep proposal-queue lock files out of the shared system temp directory.
+
+    Queue locks live outside the vault by design; without this they would
+    accumulate in ``/tmp/ciao-queue-locks`` across the suite and could collide
+    between tests that reuse a path.
+    """
+    monkeypatch.setenv("CIAO_QUEUE_LOCK_DIR", str(tmp_path / "queue-locks"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_job_runs(tmp_path: Path) -> None:
     """Isolate job runs recording by pointing to a temp directory for every test.
 

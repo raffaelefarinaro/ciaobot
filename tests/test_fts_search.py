@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -734,3 +735,85 @@ def test_read_search_hit_paths_tolerates_junk_lines(tmp_path: Path) -> None:
         f.write('null\n42\n["x"]\n{"ts": "2999-01-01T00:00:00+00:00", "paths": 5}\nnot json\n')
 
     assert fts_search.read_search_hit_paths(runtime) == {"Wedding.md"}
+
+
+def test_concurrent_hits_rotation_never_drops_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #467 review: the append+rotation must be one critical section.
+
+    Distinct concurrent searches finish in the worker pool, and each reaches
+    `record_search_hits` independently. An unlocked read/truncate rewrite can
+    drop a record another worker just appended (or leave a malformed line), so
+    the audit misses genuine retrievals. With the log over its cap and many
+    writers racing, every writer must take the log's one shared lock — never two
+    inside the section — and the file must stay coherent.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    log = runtime / fts_search.SEARCH_HITS_NAME
+
+    # Force every call to rotate, keeping only a few lines per rotation.
+    keep_lines = 8
+    monkeypatch.setattr(fts_search, "_HITS_MAX_BYTES", 1)
+    monkeypatch.setattr(fts_search, "_HITS_KEEP_LINES", keep_lines)
+
+    real_keyed_lock = fts_search.keyed_lock
+    guard = threading.Lock()
+    inside = 0
+    max_inside = 0
+    acquisitions = 0
+
+    class _TrackingLock:
+        def __init__(self, lock: object) -> None:
+            self._lock = lock
+
+        def __enter__(self):
+            nonlocal inside, max_inside, acquisitions
+            self._lock.acquire()  # type: ignore[attr-defined]
+            with guard:
+                inside += 1
+                acquisitions += 1
+                max_inside = max(max_inside, inside)
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            nonlocal inside
+            with guard:
+                inside -= 1
+            self._lock.release()  # type: ignore[attr-defined]
+
+    def _recording_keyed_lock(key: str):
+        assert key == f"search-hits:{log}", key
+        return _TrackingLock(real_keyed_lock(key))
+
+    monkeypatch.setattr(fts_search, "keyed_lock", _recording_keyed_lock)
+
+    def _record(index: int) -> None:
+        fts_search.record_search_hits(runtime, f"q{index}", [f"Note{index}.md"])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_record, range(120)))
+
+    # Every append+rotation ran under the one per-log lock, and never two at once.
+    assert acquisitions == 120
+    assert max_inside == 1
+
+    # The file is coherent JSONL with no half-written tail.
+    raw = log.read_text(encoding="utf-8")
+    assert raw.endswith("\n")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    for line in lines:
+        json.loads(line)
+
+    # A rotation keeps the newest records, and the read side sees them: the
+    # surviving lines are a suffix of the lock-ordered stream, so they must all
+    # parse and the file must hold at most the keep cap.
+    assert len(lines) <= keep_lines
+    hits = fts_search.read_search_hit_paths(runtime, since_days=90)
+    assert hits is not None
+    assert len(hits) == len(lines)
+

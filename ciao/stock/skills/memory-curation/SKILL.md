@@ -5,18 +5,50 @@ description: Nightly Workspace care — process memory proposals and learnings e
 
 # Memory curation
 
-Care for this workspace's durable memory and vault. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use one memory agent for vault writes, and run every mutating pass sequentially. Work through the passes below in order; skip any pass with nothing to do.
+Care for this workspace's durable memory and vault. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use one memory agent for vault writes, and run every mutating pass sequentially. Pass 0 computes which of the passes below actually have work; run those in order and skip the rest without checking them yourself.
 
 ## Ground rules
 
+- **You are an unattended run: defer, never ask, never route around the absent reviewer.** Do not ask questions or wait for approval, and do not find another path to an approval-requiring action. Finish the safe work, then report every deferred item in the final reply under **What needs you**. The full deferred list: promoting a NEW fact into a bounded region, trashing/restoring/permanently deleting a vault note, writing another workspace, creating or moving an automation into another workspace, and public or destructive git actions.
 - **Do not promote new facts into the bounded `ciao:memory` or `ciao:profile` regions.** A promotion rewrites what every session of this workspace loads, and an unattended run has no reviewer. Leave cross-project facts in the proposals queue for the user to promote. Consolidating entries ALREADY in a region is different and allowed under the undo-log rule below.
 - **Nothing is dropped silently.** Before removing or replacing any region entry, copy its original text into `<vault>/Workspace/Memory-Consolidations.md` under a `## YYYY-MM-DD` heading naming the region — create the file if missing. It is the undo log; the user can restore any line.
+- **The region cap is advisory.** Nothing refuses a write at edit time; an over-cap write reports `over_cap` and consolidation afterwards is what bounds the region. Never treat a full region as a reason to refuse or drop a durable fact.
 - **Queue and log stay separate.** `Workspace/Memory-Proposals.md` holds pending proposal bullets and nothing else — never append pass reports, notes, or prose there. Pass reports go to `Workspace/Curation-Log.md` only.
 - Report only what was processed. If nothing needs processing, reply with a one-line no-op and stop.
 
+## 0. Start the run
+
+**Do this before reading anything else in the vault.** Run:
+
+```
+ciao curation-begin --json
+```
+
+It does three jobs, and each replaces work you would otherwise do by hand:
+
+1. **It serializes the run.** One curation run per vault at a time, and archive-time auto-apply stands down while the lease is held — so a chat being archived cannot append to a region you are halfway through rewriting. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
+2. **It computes the worklist.** Pending proposals, region usage, aging entries, learnings, the weekly marker, log sizes and skill proposals are all mechanical checks; code has already run them. **`"empty": true` means there is genuinely nothing to do — reply with the one-line no-op and stop.** The lease is already released in that case. Do not open a single file to double-check.
+3. **It applies the run budget.** Work only the passes under `planned`, and only the `keys` listed there. Anything under `deferred` is next run's work, not yours — it is already recorded and will not be lost.
+
+**Keep the `lease.holder` string from that JSON.** Every follow-up command of this run must carry it as `--holder`; both require it and refuse to act once the lease is no longer yours. That is what stops a run that ran past its lease from writing the vault underneath the run that replaced it, so do not invent a holder and do not omit the flag.
+
+As you finish items, record them so a short run resumes rather than restarts:
+
+```
+ciao curation-progress --holder <lease.holder> --key <key> --key <key>
+```
+
+Close every run, including a failed one:
+
+```
+ciao curation-end --holder <lease.holder> --status ok|failed --planned <n> --completed <n>
+```
+
+`curation-end` releases the lease, records planned/completed/deferred counts so a quiet night is distinguishable from skipped or failed work, and stamps `last_full_pass` itself — but only when both weekly checks (pass 6) were recorded done, the status is `ok`, and the lease is still yours. You never write that marker by hand. Exit 75 from either command means the lease was lost: stop curating and report the run as failed.
+
 ## Choose the pass
 
-`Workspace/Curation-Log.md` carries `last_full_pass: YYYY-MM-DD` in its YAML frontmatter. Create the file/frontmatter if needed without discarding an existing body. Run the daily passes every night. Also run every pass marked **weekly** when the marker is absent or more than seven days old; this overdue rule matters more than the weekday, because a powered-off server must not permanently miss its weekly care. Update `last_full_pass` only after both the index refresh and final audit complete reliably. A failed or unreliable full pass remains due for the next run.
+`Workspace/Curation-Log.md` carries `last_full_pass: YYYY-MM-DD` in its YAML frontmatter. Create the file/frontmatter if needed without discarding an existing body. Run the daily passes every night. Also run every pass marked **weekly** when the marker is absent or more than seven days old; this overdue rule matters more than the weekday, because a powered-off server must not permanently miss its weekly care. `curation-begin` has already evaluated this rule and reports it as `weekly_due`; trust it rather than re-reading the date. Update `last_full_pass` only after both the index refresh and final audit complete reliably — `curation-end` enforces that. A failed or unreliable full pass remains due for the next run.
 
 ## 1. Process the proposals queue
 
@@ -53,12 +85,12 @@ Never drop a durable fact merely to fit a cap. If a region remains over cap beca
 
 Run `ciao memory-audit --json` daily and act on `aging_state_entries`, `event_shaped_entries`, and `superseded_state_candidates` under the pass-2 contract.
 
-For the **weekly** pass, first run the scoped `vault_review` tool (or the equivalent review endpoint) and inspect its evidence, then run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates, but unattended care must never trash or permanently delete a note. Keep, improve/link, archive non-destructively, and defer are allowed; trash and permanent deletion require an attended action. Orphan status is only a linking signal, never proof that a note is disposable.
+For the **weekly** pass, first run the scoped `vault_review` tool (or the equivalent review endpoint) and inspect its evidence, then run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates, but unattended care must never trash or permanently delete a note. Keep and archiving non-destructively are allowed; trash and permanent deletion require an attended action. Leaving a candidate undecided is also fine — it stays queued for the next attended pass. Orphan status is only a linking signal, never proof that a note is disposable.
 
 Act on these sections:
 
 - **`aging_state_entries`** — region entries whose `[as-of:]` or learned-at stamp has aged past its horizon. Re-verify each against recent chats and project docs: update the entry (fresh stamp) if the fact changed, refresh the stamp if it still holds, or treat it as a consolidation candidate (pass 2) if it no longer matters. Report malformed date tags instead of guessing.
-- **`stale_notes`** — open each note and re-verify its facts. If a fact changed, correct the note; if it still holds, set frontmatter `updated:` to today (YYYY-MM-DD); if it no longer matters, fold anything still useful into MEMORY.md, a person note, or the relevant project doc, then archive it non-destructively or defer it for attended review. Never delete it unattended. A note marked `"retrieved_recently": false` is both stale and unused by recall — the strongest demotion candidate — but disuse alone never justifies removing a durable fact.
+- **`stale_notes`** — open each note and re-verify its facts. If a fact changed, correct the note; if it still holds, set frontmatter `updated:` to today (YYYY-MM-DD) — the review workflow's keep disposition does this for you; if it no longer matters, fold anything still useful into MEMORY.md, a person note, or the relevant project doc, then archive it non-destructively or leave it queued for attended review. Never delete it unattended. A note marked `"retrieved_recently": false` is both stale and unused by recall — the strongest demotion candidate — but disuse alone never justifies removing a durable fact.
 - **`event_shaped_entries` / `superseded_state_candidates`** — rephrase or merge under the pass-2 contract.
 
 ## 4. Maintain learnings
@@ -77,10 +109,12 @@ When you create or update People and project notes, add an `aliases:` frontmatte
 
 On a full pass:
 
-1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health or update `last_full_pass`.
+1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health. On success record it: `ciao curation-progress --holder <lease.holder> --key hygiene:vault-index`.
 2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is safe to continue; exit 2 means unreliable evidence, so report scan errors, make no audit-derived repair, and leave the full pass due.
 3. When reliable, apply only low-risk unambiguous repairs: dead links, obvious MEMORY.md path drift, and a non-canonical `type:` whose exact canonical target is already named by VOCABULARY.md. Do not rewrite instruction conflicts, skills, orphaned or duplicate notes, expiration tags, schedules, or vocabulary proposals.
-4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. Update `last_full_pass` only when this verification is reliable.
+4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. When that verification is reliable, record it: `ciao curation-progress --holder <lease.holder> --key hygiene:os-audit`.
+
+Those two keys are what lets `curation-end` stamp `last_full_pass`. Record neither and the weekly pass stays due, which is the correct outcome for a run whose evidence was unreliable — do not write the marker by hand to make the page look green.
 
 Install-wide runtime failures remain visible through startup triage and Settings → Automation; pending upgrade work appears in housekeeping. Do not duplicate those global checks in every workspace.
 
