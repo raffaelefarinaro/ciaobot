@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
@@ -213,26 +215,121 @@ def _rewrite_queue_batch(
     return removed_here
 
 
-def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
-    """Drop the bullet *raw*, verifying the index before trusting it.
+def _find_bullet_line(lines: list[str], line_index: int, raw: str) -> int | None:
+    """Where the bullet *raw* sits now, verifying the index before trusting it.
 
     `_scan_proposal_rows` captures a line index, and an accept can then await an
     unbounded model call before the queue file is rewritten - with no lock
     anywhere. A second accept or dismiss landing in that window shifts every
-    later index, so deleting by index alone removed an UNRELATED proposal and
-    left the accepted one queued. The index is now only a hint: the content has
-    to match, otherwise the bullet is located by text, and a bullet that is
-    already gone is a no-op rather than someone else's line.
+    later index, so trusting the index alone addressed an UNRELATED proposal.
+    The index is only a hint: the content has to match, otherwise the bullet is
+    located by text, and a bullet that is already gone is reported as gone
+    rather than as someone else's line.
     """
     wanted = raw.strip()
     if 0 <= line_index < len(lines) and lines[line_index].strip() == wanted:
-        del lines[line_index]
-        return True
+        return line_index
     for index, line in enumerate(lines):
         if line.strip() == wanted:
-            del lines[index]
-            return True
-    return False
+            return index
+    return None
+
+
+def _remove_bullet_line(lines: list[str], line_index: int, raw: str) -> bool:
+    """Drop the bullet *raw* from *lines*; a bullet already gone is a no-op."""
+    found = _find_bullet_line(lines, line_index, raw)
+    if found is None:
+        return False
+    del lines[found]
+    return True
+
+
+def bullets_present(queue: Path, rows: Sequence[tuple[int, str]]) -> set[int]:
+    """Which of *rows* (line index, raw bullet) are still queued.
+
+    The revalidation half of the accept guard: an accept promotes into its
+    destination first and rewrites the queue last, so between this request's
+    scan and its promotion another resolver - the CLI, the undo path, a second
+    server process - may already have taken the row. Promoting it anyway folds
+    the doc, writes the note or increments the recurrence count a second time
+    for a bullet this request will then fail to remove.
+
+    Read under `queue_lock` so it cannot observe a half-written queue, which
+    makes it a synchronous wait: callers run it in a worker thread, never on
+    the event loop. Returns line indices, matching the `keep_lines` the batch
+    rewrite already speaks in.
+    """
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(queue):
+        try:
+            lines = queue.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            # No queue file, no bullets: treat every row as already resolved
+            # rather than promoting into a destination we cannot then update.
+            return set()
+    return {
+        line for line, raw in rows if _find_bullet_line(lines, line, raw) is not None
+    }
+
+
+# Proposal ids whose promotion is in flight in this process, keyed as
+# `_claim_key` builds them, plus the guard that makes test-and-add atomic.
+_CLAIMED: set[str] = set()
+_CLAIM_GUARD = threading.Lock()
+
+
+def _claim_key(queue: Path, proposal_id: str) -> str:
+    """Identity of one in-flight accept: the queue's lock key plus the row id.
+
+    Derived from `memory_receipts.lock_path_for`, the same resolution
+    `queue_lock` uses, so a claim and the file lock name the same queue instead
+    of the codebase growing a second notion of queue identity.
+    """
+    from ciao.memory_receipts import lock_path_for
+
+    try:
+        resolved = str(queue.resolve())
+    except OSError:
+        resolved = str(queue)
+    return f"{lock_path_for(resolved)}::{proposal_id}"
+
+
+@contextmanager
+def claim_proposals(queue: Path, ids: Sequence[str]) -> Iterator[set[str]]:
+    """Reserve rows so only one in-flight request promotes each of them.
+
+    Two tabs accepting the same proposal both passed the id lookup, both
+    promoted - a doc folded twice, a recurrence count incremented twice - and
+    only then contended on the queue rewrite, where the loser removed nothing
+    and still reported success. The claim is taken BEFORE the first
+    destination mutation and held until the rewrite has landed, so the second
+    request is turned away instead of promoting again.
+
+    In-process only, and deliberately: the lock the CLI shares is a file lock
+    taken with a synchronous wait, and holding it across a promotion - a model
+    call, for a fold - would block every other queue writer for its duration
+    and, from the event loop, stall the whole server. A resolver in another
+    process is caught by `bullets_present` instead, which re-reads the queue
+    under that file lock immediately before the promotion.
+
+    Yields the subset of *ids* this call claimed; the rest are in flight
+    elsewhere and must not be promoted here.
+    """
+    keys = {pid: _claim_key(queue, pid) for pid in ids}
+    claimed: set[str] = set()
+    with _CLAIM_GUARD:
+        for pid, key in keys.items():
+            if key in _CLAIMED:
+                continue
+            _CLAIMED.add(key)
+            claimed.add(pid)
+    try:
+        yield claimed
+    finally:
+        with _CLAIM_GUARD:
+            for pid in claimed:
+                _CLAIMED.discard(keys[pid])
 
 
 # A content-derived, stable id for one queued proposal.

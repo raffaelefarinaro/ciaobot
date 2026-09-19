@@ -230,25 +230,49 @@ def weekly_pass_due(last_full_pass: str, today: date) -> bool:
     return (today - marker) >= timedelta(days=WEEKLY_PASS_DAYS)
 
 
-def _proposal_items(vault_root: Path) -> list[WorklistItem]:
-    from ciao.memory_proposals import list_proposals
+def _proposal_subject(bullet: Any, dup: int) -> str:
+    """Identity of one queued proposal row, as :func:`item_key` hashes it.
 
-    rows = list_proposals(vault_root / PROPOSALS_RELATIVE)
-    if not rows:
+    The bullet text alone is not an identity. Two actionable rows carrying the
+    same sentence — a different kind, or the same kind bound for a different
+    destination — hashed to one key, so recording the first one done made
+    `build_worklist` filter out every other row sharing it: curation reported
+    an empty queue with unprocessed proposals still in it.
+
+    The basis is the queue's own identity tuple (kind, text, source, and
+    :func:`ciao.proposal_tracking.walk_proposal_queue`'s duplicate ordinal,
+    which is what already tells two byte-identical bullets apart) widened with
+    the destination, because where a row is filed is part of the work even when
+    everything else about it matches.
+    """
+    return "\x00".join((bullet.kind, bullet.target, bullet.source, str(dup), bullet.text))
+
+
+def _proposal_items(vault_root: Path) -> list[WorklistItem]:
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    try:
+        text = (vault_root / PROPOSALS_RELATIVE).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         return []
     # `[memory]`/`[profile]` rows stay queued for the user by contract, so they
     # are not work: counting them would make every workspace with one pending
     # cross-project fact look busy forever, and the nightly run would spend a
-    # model turn re-reading a row it is forbidden to act on.
-    actionable = [row for row in rows if row.get("kind") not in {"memory", "profile"}]
-    if not actionable:
+    # model turn re-reading a row it is forbidden to act on. They are skipped
+    # after the walk, not before it, so leaving one out cannot renumber a later
+    # duplicate's ordinal.
+    keys = tuple(
+        item_key(PASS_PROPOSALS, _proposal_subject(entry.bullet, entry.dup))
+        for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text)
+        if entry.bullet.kind not in {"memory", "profile"}
+    )
+    if not keys:
         return []
-    keys = tuple(item_key(PASS_PROPOSALS, row.get("text", "")) for row in actionable)
     return [
         WorklistItem(
             pass_id=PASS_PROPOSALS,
             label="File queued facts into their destinations",
-            reason=f"{len(actionable)} routable proposal(s) pending",
+            reason=f"{len(keys)} routable proposal(s) pending",
             keys=keys,
         )
     ]
@@ -819,6 +843,8 @@ def end_run(
     deferred: int = 0,
     reasons: list[str] | tuple[str, ...] = (),
     live_keys: frozenset[str] | set[str] | None = None,
+    advance_marker: bool = False,
+    today: date | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
@@ -827,6 +853,13 @@ def end_run(
     Done keys outside that set are dropped: the work they named is gone from
     the vault, so keeping them would grow the cursor without bound and, worse,
     would suppress a later item that hashed to the same subject again.
+
+    ``advance_marker`` stamps ``last_full_pass`` here rather than in the
+    caller, under the same lock and *after* the ownership check. Stamping it
+    outside let a run whose lease had expired — one this call is about to
+    reject — still suppress the weekly hygiene passes for seven days. Returned
+    as ``full_pass_advanced``; the weekly checks gate it exactly as
+    :func:`advance_full_pass` does.
     """
     now = now or datetime.now(UTC)
     with _state_lock(vault_root):
@@ -834,6 +867,10 @@ def end_run(
         held = _live_lease(state, now)
         if holder and held is not None and held.get("holder") != holder:
             raise CurationBusy("this run no longer holds the curation lease")
+        advanced = False
+        if advance_marker and status == "ok" and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
+            _write_full_pass_marker(Path(vault_root), today=today)
+            advanced = True
         if live_keys is not None:
             state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
         summary = {
@@ -847,7 +884,7 @@ def end_run(
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
-    return summary
+    return {**summary, "full_pass_advanced": advanced}
 
 
 def hygiene_complete(vault_root: Path) -> bool:
@@ -867,9 +904,19 @@ def advance_full_pass(
     refresh and audit; saying it is not enforcing it, and a run that reported a
     scan error and stamped anyway made the weekly pass silently skip a week.
     Returns False and leaves the marker alone when either check is missing.
+
+    Ownership-blind on purpose: this is the standalone entry point. The nightly
+    CLI goes through ``end_run(advance_marker=True)`` instead, which stamps the
+    marker only after it has confirmed the caller still holds the lease.
     """
     if not hygiene_complete(vault_root):
         return False
+    _write_full_pass_marker(Path(vault_root), today=today)
+    return True
+
+
+def _write_full_pass_marker(vault_root: Path, *, today: date | None = None) -> None:
+    """Write today's ``last_full_pass`` into the curation log's frontmatter."""
     stamp = (today or datetime.now(UTC).date()).isoformat()
     log = Path(vault_root) / CURATION_LOG_RELATIVE
     text = _read_text(log)
@@ -892,4 +939,3 @@ def advance_full_pass(
         )
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(text, encoding="utf-8")
-    return True

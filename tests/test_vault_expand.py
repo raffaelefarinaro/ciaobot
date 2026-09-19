@@ -435,3 +435,66 @@ def test_core_prompt_directs_recall_to_the_bounded_drill_down() -> None:
     text = _system_instructions()
     assert "vault_expand" in text
     assert "do not open a full vault note with a generic file-read tool" in text
+
+
+# ── A note that stops being valid UTF-8 after it was indexed ───────────────
+#
+# The incremental pass logs a decode failure and KEEPS the note's existing FTS
+# row (ciao/fts_search.py::index_vault), so the key still resolves and the
+# lookup still reaches the file. The read is what fails, with a
+# UnicodeDecodeError — not an OSError. `vault_expand` is a read-only tool whose
+# contract is that it fails closed and answers `note_not_matched` for anything
+# it cannot serve, so an escaping decode error is a contract break.
+
+_INVALID_UTF8 = b"# Northwind retainer\n\nrate is \xff\xfe billed at 180\n"
+
+
+def _corrupt_after_indexing(vault: Path) -> Path:
+    """Rewrite the already-indexed note as bytes that are not valid UTF-8."""
+    note = vault / "projects" / "Northwind.md"
+    note.write_bytes(_INVALID_UTF8)
+    with pytest.raises(UnicodeDecodeError):
+        note.read_text(encoding="utf-8")
+    return note
+
+
+def test_expansion_refuses_a_note_that_is_no_longer_valid_utf8(
+    tmp_path: Path,
+) -> None:
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    _corrupt_after_indexing(vault)
+    # The re-index sees the change, fails to decode it, and leaves the row —
+    # which is exactly why the lookup below still reaches the file.
+    fts_search.index_vault(conn, vault, path_base=base)
+    assert conn.execute(
+        "SELECT 1 FROM vault_fts WHERE path = ?", (_key(),)
+    ).fetchone() is not None
+
+    assert _expand(conn, base, vault, _key()) is None
+
+
+def test_control_plane_expand_answers_note_not_matched_for_undecodable_bytes(
+    tmp_path: Path,
+) -> None:
+    """The documented refusal, not an internal error."""
+    base, vault = _vault(tmp_path)
+    plane = _plane(base)
+    rows = asyncio.run(plane.vault_search(_principal(), QUERY))["data"]
+    assert rows, "the note must be indexed before it is corrupted"
+    _corrupt_after_indexing(vault)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        asyncio.run(plane.vault_expand(_principal(), rows[0]["path"], QUERY))
+    assert excinfo.value.code == "note_not_matched"
+
+
+def test_force_reindexing_an_undecodable_note_is_skipped_not_fatal(
+    tmp_path: Path,
+) -> None:
+    """`index_file` runs inline on lifecycle writes; it must not raise either."""
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    note = _corrupt_after_indexing(vault)
+
+    assert fts_search.index_file(conn, vault, note, path_base=base) is False

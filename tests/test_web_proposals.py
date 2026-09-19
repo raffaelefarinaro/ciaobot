@@ -11,7 +11,10 @@ from __future__ import annotations
 import pathlib
 
 import json
+import re
+import threading
 from pathlib import Path
+from typing import Any
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -19,6 +22,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
+from ciao.web import routes_api
 from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
     dismiss_older_than,
@@ -1506,3 +1510,164 @@ def test_a_live_rehome_row_is_not_marked_stale(tmp_path: Path) -> None:
     _config, _client_, row = _rehome_fixture(tmp_path, ["person", "colleague"])
 
     assert row["rehome"]["stale"] is False, row["rehome"]
+
+
+_LEARNINGS_TEXT = "Check the queue lock before writing the destination."
+
+
+def _learnings_queue(text: str = _LEARNINGS_TEXT) -> str:
+    return (
+        "# Memory Proposals\n\n"
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        f"- [learnings] {text}  _(from: Decisions)_\n"
+    )
+
+
+def _learnings_vault(tmp_path: Path) -> CiaoConfig:
+    config = _config(tmp_path)
+    (config.workspace_vault_root("personal") / "Workspace").mkdir(
+        parents=True, exist_ok=True
+    )
+    _write_queue(config, "personal", _learnings_queue())
+    return config
+
+
+def _learnings_count(config: CiaoConfig) -> int:
+    """The recurrence count on the seeded learning, or 0 if nothing was written."""
+    path = config.workspace_vault_root("personal") / "Workspace" / "Learnings.md"
+    if not path.exists():
+        return 0
+    match = re.search(r"\(x(\d+)\)", path.read_text(encoding="utf-8"))
+    return int(match.group(1)) if match else 0
+
+
+def test_batch_accept_does_not_promote_before_the_receipt_can_be_written(
+    tmp_path: Path,
+) -> None:
+    """The batch's pre-flight, the same one the single-row accept runs.
+
+    `_rewrite_queue_batch` is what raises `QueueReceiptUnavailable`, and it runs
+    after every destination mutation — so an unwritable journal returned 503
+    with the learning already appended (or a region written, a doc folded) and
+    every bullet still queued, and the operator's retry applied the whole batch
+    a second time.
+    """
+    config = _learnings_vault(tmp_path)
+    # A directory where the journal file belongs: the receipt append cannot
+    # succeed, the same way a read-only vault leaves it.
+    journal = config.workspace_vault_root("personal") / "Workspace" / "Memory-Receipts.jsonl"
+    journal.mkdir()
+    client = _client(config)
+    row = _accept_kind_row(client, "learnings")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 503, resp.json()
+    # The fact must NOT have been written: a 503 with the destination already
+    # mutated is what turns the operator's retry into a double promotion.
+    assert _learnings_count(config) == 0
+    # And the row is still queued, so the retry has something to apply.
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_two_concurrent_accepts_promote_the_row_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two tabs accepting one proposal must not write the fact twice.
+
+    An accept promotes first and rewrites the queue last, so both requests
+    passed the id lookup, both promoted — the recurrence count incremented
+    twice — and only then contended on `_rewrite_queue_single`, where the loser
+    removed nothing and still reported success.
+    """
+    config = _learnings_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    from ciao.memory_proposals import append_learning
+
+    # Seed the learning at (x1) so each promotion is visible as an increment.
+    append_learning(vault, _LEARNINGS_TEXT)
+    assert _learnings_count(config) == 1
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_accept = proposal_service._accept_learnings_row
+    calls: list[str] = []
+
+    def blocking_accept(cfg, row):
+        """Hold the FIRST request inside its promotion: the real race window."""
+        calls.append(row["id"])
+        if len(calls) == 1:
+            entered.set()
+            release.wait(10)
+        return real_accept(cfg, row)
+
+    monkeypatch.setattr(proposal_service, "_accept_learnings_row", blocking_accept)
+
+    # Two clients, so the second request runs on its own event loop instead of
+    # queueing behind the first one's blocked handler.
+    first_client, second_client = _client(config), _client(config)
+    pid = _accept_kind_row(first_client, "learnings")["id"]
+    first: dict[str, Any] = {}
+
+    def run_first() -> None:
+        first["resp"] = first_client.post(f"/api/proposals/{pid}/accept")
+
+    thread = threading.Thread(target=run_first)
+    thread.start()
+    try:
+        assert entered.wait(10), "the first accept never reached its promotion"
+        second = second_client.post(f"/api/proposals/{pid}/accept")
+    finally:
+        release.set()
+        thread.join(20)
+
+    assert _learnings_count(config) == 2, "the fact was promoted twice"
+    assert first["resp"].status_code == 200, first["resp"].json()
+    # The loser is told the row is spoken for instead of reporting a success it
+    # never performed.
+    assert second.status_code == 409, second.json()
+    # One promotion, one removal: the bullet is gone exactly once.
+    assert first_client.get("/api/proposals").json()["rows"] == []
+
+
+def test_an_accept_revalidates_the_row_another_resolver_took(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half of the guard: a resolver outside this process.
+
+    The claim is in-process (holding the file lock across a promotion would
+    block every other queue writer for a model call), so the CLI, the undo
+    path or a second server can still resolve a row between this request's scan
+    and its promotion. Promoting anyway writes the fact a second time for a
+    bullet this request then fails to remove.
+    """
+    config = _learnings_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    from ciao.memory_proposals import append_learning
+
+    append_learning(vault, _LEARNINGS_TEXT)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    real_probe = routes_api._accept_journal_writable
+
+    def steal_the_row(cfg, workspace, queue_path):
+        """Another resolver lands in the window the pre-flight sits in."""
+        text = queue.read_text(encoding="utf-8")
+        queue.write_text(
+            "\n".join(
+                line for line in text.splitlines() if "[learnings]" not in line
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return real_probe(cfg, workspace, queue_path)
+
+    monkeypatch.setattr(routes_api, "_accept_journal_writable", steal_the_row)
+    client = _client(config)
+    pid = _accept_kind_row(client, "learnings")["id"]
+
+    resp = client.post(f"/api/proposals/{pid}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert _learnings_count(config) == 1, "the fact was promoted a second time"

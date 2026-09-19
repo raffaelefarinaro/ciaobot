@@ -237,6 +237,17 @@ _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # within roughly one interval of becoming eligible, and far above any per-turn
 # cadence so an idle install is not woken constantly.
 _PROVIDER_REAP_INTERVAL_SECONDS = 120.0
+# How many sweeps may try to disconnect the same provider before the sweep
+# gives up on it. A `disconnect()` that raises leaves the process it was meant
+# to end possibly alive, so the reference must not simply be dropped — the
+# shutdown hook reads `self._providers` and is the last chance to finish the
+# job. But a provider that fails forever (a wedged `process.wait()`, a
+# transport that raises on every close) would be pinned in that map forever,
+# which is the same leak from the other end, and it would be handed back to
+# the chat's next turn. So the retry is bounded: `MAX - 1` further sweeps,
+# then the reference is dropped with an ERROR naming the chat, and the sweep
+# does NOT report it as reclaimed.
+_PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
 
 
 def _positive_env_seconds(name: str, default: float) -> float:
@@ -619,6 +630,11 @@ class ProjectChatManager:
         # started lazily on first use so a manager built in a test (or any
         # process with no running loop) never creates one it does not need.
         self._provider_last_used: dict[str, float] = {}
+        # Consecutive failed disconnect attempts per chat, kept only while a
+        # provider is being retried (see `_PROVIDER_DISCONNECT_MAX_ATTEMPTS`)
+        # and cleared by `_pop_provider`, so it cannot outlive the provider it
+        # counts for or be inherited by a recycled chat id.
+        self._provider_disconnect_failures: dict[str, int] = {}
         self._provider_reaper: asyncio.Task | None = None
         self._provider_idle_timeout = _positive_env_seconds(
             "CIAO_PROVIDER_IDLE_TIMEOUT", _PROVIDER_IDLE_TIMEOUT_SECONDS
@@ -3206,15 +3222,28 @@ class ProjectChatManager:
 
     async def _disconnect_provider(
         self, chat_id: str, provider: ProviderService | None
-    ) -> None:
-        """Close a chat's provider before deleting its provider-side session."""
+    ) -> bool:
+        """Close a chat's provider before deleting its provider-side session.
+
+        Returns whether the provider is actually gone. A failure is still
+        swallowed — cleanup must not block the lifecycle write that scheduled
+        it — but it is no longer invisible: the idle sweep drops its only
+        reference to the provider the moment it pops it from
+        ``self._providers``, and an opencode server that refused to terminate
+        would then stay alive with nothing left to retry the teardown, exactly
+        the process leak the sweep exists to prevent. Callers on the
+        lifecycle paths are free to ignore the answer; the sweep is not (see
+        ``reap_idle_providers``).
+        """
 
         if provider is None:
-            return
+            return True
         try:
             await provider.disconnect()
         except Exception:  # noqa: BLE001 — cleanup must not block lifecycle writes
             logger.exception("Failed to disconnect provider for chat %s", chat_id)
+            return False
+        return True
 
     def _schedule_provider_cleanup(
         self,
@@ -4474,6 +4503,7 @@ class ProjectChatManager:
         it to ``_schedule_provider_cleanup``.
         """
         self._provider_last_used.pop(chat_id, None)
+        self._provider_disconnect_failures.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
     # ── Idle provider reaping ────────────────────────────────────────────
@@ -4549,9 +4579,12 @@ class ProjectChatManager:
     async def reap_idle_providers(self, *, force: bool = False) -> list[str]:
         """Disconnect providers for chats idle past the timeout.
 
-        Returns the chat ids reclaimed. ``force`` ignores the timeout (but not
-        the busy check) and exists for tests and for an explicit operator
-        sweep; it is never used by the periodic loop.
+        Returns the chat ids reclaimed — only those whose ``disconnect()``
+        actually returned. A provider whose disconnect raised is NOT in that
+        list: it is kept for a bounded number of later sweeps instead (see
+        ``_PROVIDER_DISCONNECT_MAX_ATTEMPTS``). ``force`` ignores the timeout
+        (but not the busy check) and exists for tests and for an explicit
+        operator sweep; it is never used by the periodic loop.
 
         Only the provider is released. The chat row, its ``session_id`` and its
         transcript are untouched, so the next turn reconnects and resumes — see
@@ -4567,6 +4600,11 @@ class ProjectChatManager:
                 # Refresh the stamp so a chat that was busy for the whole
                 # window is not reclaimed the instant its work finishes.
                 self._provider_last_used[chat_id] = now
+                # A provider that is serving work again is healthy; earlier
+                # failed teardowns say nothing about the next one, and letting
+                # them accumulate across weeks of use would spend the retry
+                # budget before the teardown that matters.
+                self._provider_disconnect_failures.pop(chat_id, None)
                 continue
             last_used = self._provider_last_used.get(chat_id)
             if last_used is None:
@@ -4577,10 +4615,11 @@ class ProjectChatManager:
                 continue
             if not force and now - last_used < self._provider_idle_timeout:
                 continue
+            failures = self._provider_disconnect_failures.get(chat_id, 0)
             provider = self._pop_provider(chat_id)
             self._cancel_between_turns_drain(chat_id)
             try:
-                await self._disconnect_provider(chat_id, provider)
+                disconnected = await self._disconnect_provider(chat_id, provider)
             except asyncio.CancelledError:
                 # Shutdown cancelled the sweep mid-disconnect. `disconnect()`
                 # awaits on both providers (the SDK transport, and
@@ -4594,7 +4633,44 @@ class ProjectChatManager:
                 # snapshot is taken, so the hook still finishes the job.
                 self._providers[chat_id] = provider  # type: ignore[assignment]
                 self._provider_last_used[chat_id] = now
+                self._provider_disconnect_failures[chat_id] = failures
                 raise
+            if not disconnected:
+                # `disconnect()` raised. The provider is out of the map, so
+                # dropping it here would leave (for opencode) a serve process
+                # holding a port, an SSE stream and a stderr reader with no
+                # reference left for the shutdown hook to retry — and the
+                # sweep would report it as reclaimed on top of that.
+                failures += 1
+                if failures < _PROVIDER_DISCONNECT_MAX_ATTEMPTS:
+                    # Put it back, keeping the STALE last-used stamp so the
+                    # next sweep retries immediately rather than waiting out
+                    # another full idle timeout, and record the attempt so the
+                    # retry is bounded.
+                    self._providers[chat_id] = provider  # type: ignore[assignment]
+                    self._provider_last_used[chat_id] = last_used
+                    self._provider_disconnect_failures[chat_id] = failures
+                    logger.warning(
+                        "Idle provider for chat %s failed to disconnect "
+                        "(attempt %d/%d); keeping it for another sweep",
+                        chat_id,
+                        failures,
+                        _PROVIDER_DISCONNECT_MAX_ATTEMPTS,
+                    )
+                else:
+                    # Out of attempts. Holding it forever would pin a provider
+                    # that never closes and hand it to the chat's next turn, so
+                    # the reference goes — loudly, and NOT as a reclaim: this
+                    # is the one case where a process may have been left
+                    # behind, and the log is what says so.
+                    logger.error(
+                        "Giving up on the idle provider for chat %s after %d "
+                        "failed disconnects; a provider process may have been "
+                        "left running",
+                        chat_id,
+                        failures,
+                    )
+                continue
             reclaimed.append(chat_id)
         if reclaimed:
             logger.info(

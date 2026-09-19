@@ -3250,22 +3250,43 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _curation_holder(args: argparse.Namespace) -> str:
+    """The lease holder a follow-up command must carry, or "" with an error.
+
+    `record_done` and `end_run` skip their ownership check when the holder is
+    empty, so a follow-up command that omitted it was not leased at all: an
+    over-budget run kept writing the vault after its lease expired, and could
+    go on to clear the lease a *newer* run had since taken. Required rather
+    than defaulted, because only `curation-begin` knows the value — guessing
+    `host:pid` here would match nothing and reject every honest run.
+    """
+    holder = (getattr(args, "holder", "") or "").strip()
+    if not holder:
+        print(
+            "pass --holder with the value `curation-begin` reported as lease.holder",
+            file=sys.stderr,
+        )
+    return holder
+
+
 def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
     from ciao.curation_run import CurationBusy, record_done, renew_run
 
     _workspace, vault, _guide, budget = _curation_context(args)
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
     keys = [key.strip() for key in (args.key or []) if key.strip()]
     if not keys:
         print("pass at least one --key from `curation-begin`", file=sys.stderr)
         return 2
     try:
-        added = record_done(vault, keys, holder=args.holder)
+        added = record_done(vault, keys, holder=holder)
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
-    if args.holder:
-        renew_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+    renew_run(vault, holder=holder, ttl_s=budget.max_seconds)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -3278,38 +3299,43 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
 def _curation_end_command(args: argparse.Namespace) -> int:
     """Release the lease, record the counts, and stamp the weekly marker.
 
-    The marker is stamped here rather than by the agent because the rule — both
-    weekly checks reliably done — is mechanical, and an agent that stamped it
-    after a failed audit made the weekly pass skip a week with nothing to show
-    for it.
+    The marker is stamped by code rather than by the agent because the rule —
+    both weekly checks reliably done — is mechanical, and an agent that stamped
+    it after a failed audit made the weekly pass skip a week with nothing to
+    show for it. `end_run` does the stamping, so it happens only for the run
+    that still owns the lease.
     """
-    from ciao.curation_run import CurationBusy, advance_full_pass, end_run
+    from ciao.curation_run import CurationBusy, end_run
 
     _workspace, vault, _guide, _budget = _curation_context(args)
-    # Stamp the marker before rebuilding the worklist, so the rebuild sees the
-    # weekly pass as no longer due and stops listing its two checks. Their done
-    # keys are then outside `live_keys` and the prune below drops them —
-    # without which next week's hygiene pass would be filtered out as already
-    # finished and never run again.
-    advanced = advance_full_pass(vault) if args.status == "ok" else False
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
     payload, worklist = _curation_plan(args)
     live_keys = frozenset(key for item in worklist.items for key in item.keys)
     deferred = int(payload.get("deferred_count", 0))
     try:
+        # `end_run` stamps the marker itself, inside the lease check. Stamping
+        # it out here let a run whose lease had expired — one this call then
+        # rejected with 75 — still suppress the weekly passes for seven days.
+        # The worklist above already excludes the two hygiene keys, since they
+        # are recorded done, so the prune inside `end_run` still forgets them
+        # and next week's pass is planned again.
         summary = end_run(
             vault,
-            holder=args.holder,
+            holder=holder,
             status=args.status,
             planned=args.planned,
             completed=args.completed,
             deferred=deferred,
             reasons=args.reason or [],
             live_keys=live_keys,
+            advance_marker=args.status == "ok",
         )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
-    summary["full_pass_advanced"] = advanced
+    advanced = bool(summary.get("full_pass_advanced"))
     if args.json:
         json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
@@ -4566,7 +4592,9 @@ def build_parser() -> argparse.ArgumentParser:
             "held. Prints the same plan as `curation-plan`. Exit 0 when the "
             "lease was taken, 75 when another run holds it (do not curate), "
             "and 0 with `\"empty\": true` when there is nothing to do — the "
-            "lease is released again in that case."
+            "lease is released again in that case. Pass the reported "
+            "`lease.holder` to every `curation-progress` and `curation-end` "
+            "of this run; they require it and refuse to act for another owner."
         ),
     )
     _add_curation_arguments(curation_begin_parser)
@@ -4596,8 +4624,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     curation_progress_parser.add_argument(
         "--holder",
-        default="",
-        help="The lease holder recording this progress. Checked when given.",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
     )
     curation_progress_parser.set_defaults(func=_curation_progress_command)
 
@@ -4633,8 +4661,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     curation_end_parser.add_argument(
         "--holder",
-        default="",
-        help="The lease holder ending the run. Checked when given.",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
     )
     curation_end_parser.set_defaults(func=_curation_end_command)
 
