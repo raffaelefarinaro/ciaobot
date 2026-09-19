@@ -5643,9 +5643,12 @@ class ProjectChatManager:
         should fall through to `start_stream`).
         """
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is None or stream.background or not stream.accepting_queue:
             # Background drain streams have no drive loop to flush a queue;
             # the caller starts a real turn instead (which cancels the drain).
+            # `accepting_queue` is the same refusal for a stream whose loop has
+            # already decided it is finished: queueing there is a message the
+            # user is told was accepted and that no turn will ever pick up.
             return False
         chat = self._chats.get(chat_id)
         if chat is not None and self._invalidate_reentry_summary(chat):
@@ -6771,16 +6774,29 @@ class ProjectChatManager:
                         if next_pending is not None:
                             had_error = False
                     if next_pending is None or had_error:
-                        if had_error and next_pending is not None:
-                            # A real error broke the loop after we'd already
-                            # popped the next queued message (and possibly
-                            # more behind it) for the follow-up turn. Park
-                            # all of it instead of letting it vanish when
-                            # `finally` tears the stream down.
-                            remaining = stream.drain_pending()
+                        # Shut the queue before anything else. `drain_one()`
+                        # above and the teardown in `finally` are not one
+                        # atomic step, so a send landing in that window was
+                        # accepted into `_pending` that nothing would ever
+                        # read — the loop had already looked. The user saw a
+                        # QUEUED chip for a message that was never going to be
+                        # sent, and `queue_message` had told the caller it was
+                        # safely queued, so nothing started a turn for it.
+                        stream.accepting_queue = False
+                        # Re-drain after closing: this is the clean-completion
+                        # path too, which parked nothing before. Whatever
+                        # arrived between the check and the close still has to
+                        # survive, and it flushes on the next user turn.
+                        late = stream.drain_pending()
+                        parked = (
+                            [next_pending, *late]
+                            if had_error and next_pending is not None
+                            else late
+                        )
+                        if parked:
                             cm_park = self._chats.get(chat_id)
                             if cm_park is not None:
-                                cm_park.pending_queue = [next_pending, *remaining]
+                                cm_park.pending_queue = list(parked)
                                 self._save()
                         break
 
