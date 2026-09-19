@@ -272,6 +272,10 @@ describe('vaultReview store', () => {
     await store.decide('personal', ID, 'keep')
 
     expect(store.notice).toContain('no frontmatter to stamp')
+    // And what to do about it: this is the one failure the user can fix, and
+    // the generic "verified date is unchanged" on its own does not say that
+    // the note keeps coming back until it has frontmatter.
+    expect(store.notice).toContain('add frontmatter to it')
   })
 
   it('names the real reason for a note it could not decode', async () => {
@@ -330,8 +334,38 @@ describe('vaultReview store', () => {
 
     await store.decide('personal', ID, 'keep')
 
-    // `lastResult` is one shared slot and each button is disabled only for its
-    // own row, so a second decision landing first must not toast this one.
+    // The reason is read off this call's own answer, so a result about
+    // another row can only mean the engine answered about something else.
     expect(store.notice).toBe('')
+  })
+
+  it('reads its own POST answer when two decisions are in flight', async () => {
+    // Each button is disabled only for its own row, so "Still true" on two
+    // rows in quick succession puts two POSTs in the air. While the result
+    // lived in one store ref, the second response could land between the
+    // first arriving and `decide` reading it — and the id gate then turned a
+    // mis-attributed toast into a silently missing one.
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    const store = useVaultReviewStore()
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    settleFirst({
+      ok: true,
+      result: { candidate_id: 'a2', previous_candidate_id: ID, stamped: false, stamp_status: 'no_frontmatter' },
+      candidates: [], trashed: [],
+    })
+    settleSecond({
+      ok: true,
+      result: { candidate_id: 'b2', previous_candidate_id: other, stamped: true, stamp_status: 'stamped' },
+      candidates: [], trashed: [],
+    })
+    await Promise.all([first, second])
+
+    expect(store.notice).toContain('no frontmatter to stamp')
   })
 })

@@ -14,6 +14,7 @@ import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useProposalsStore } from '../../stores/proposals'
 import { useVaultReviewStore } from '../../stores/vaultReview'
+import { useMemoryMapStore } from '../../stores/memoryMap'
 import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
 
 const EVIDENCE: VaultReviewCandidate['evidence'] = {
@@ -165,6 +166,55 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     expect(wrapper.findAll('.view-toggle button')[1]!.find('.view-count').text()).toBe('3')
+  })
+
+  it('says the retirement queue is still loading rather than reporting zero', async () => {
+    // "Not loaded yet" and "empty" are different claims. Printing 0/0/0 while
+    // the panel beside it reads "Loading candidates…" is the stats-vs-rows
+    // contradiction this column exists to avoid.
+    const mm = useMemoryMapStore()
+    mm.reviewTab = 'retirement'
+
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).toContain('Loading candidates…')
+    expect(wrapper.findAll('.mm-stat--skeleton')).toHaveLength(3)
+    expect(wrapper.findAll('.mm-stat .n')).toHaveLength(0)
+  })
+
+  it('reports the retirement queue as a failure rather than as empty', async () => {
+    const mm = useMemoryMapStore()
+    mm.reviewTab = 'retirement'
+    const vaultReview = useVaultReviewStore()
+    vaultReview.error = 'Could not load retirement candidates'
+
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).toContain('could not load the retirement queue')
+    expect(wrapper.text()).not.toContain('Loading candidates…')
+    expect(wrapper.findAll('.mm-stat .n')).toHaveLength(0)
+  })
+
+  it('prints the retirement counts once a load for this workspace succeeded', async () => {
+    const mm = useMemoryMapStore()
+    mm.reviewTab = 'retirement'
+    const vaultReview = useVaultReviewStore()
+    vaultReview.loadedWorkspace = 'personal'
+    vaultReview.candidates = [
+      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
+    ]
+    vaultReview.trashed = [
+      { candidate_id: 't1', workspace: 'personal', original_path: 'old.md', content_hash: 'h3', trashed_at: '2026-09-01T00:00:00Z' },
+    ]
+
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).not.toContain('Loading candidates…')
+    const stats = wrapper.findAll('.mm-stat').map(s => s.text())
+    expect(stats[0]).toContain('1')
+    expect(stats[0]).toContain('to revisit')
+    expect(stats[1]).toContain('1')
+    expect(stats[1]).toContain('retired')
   })
 
   it('does not render the review section for other modes', async () => {
