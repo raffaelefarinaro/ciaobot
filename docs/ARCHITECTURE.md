@@ -278,11 +278,24 @@ subagent, vault, memory, file-history, workspace-health, local-session, and
 lifecycle managers; `CiaoMcpService` only performs bearer authentication, tool
 registration, plan-mode mutation policy, stable error envelopes, and
 telemetry. Each managed provider process receives a short-lived capability
-scoped to one chat/project/workspace/provider. Claude receives the server and
+carrying a chat/project/workspace/provider principal. What that principal
+enforces is workspace confinement plus chat attribution, not isolation between
+chats: every ownership check resolves through `_workspace`, so a chat token
+reaches sibling chats in its own workspace and no others. The chat half drives
+plan mode, the child-mode ceiling, background-run ownership, revocation and
+telemetry. Claude receives the server and
 Authorization header through `ClaudeAgentOptions.mcp_servers`; opencode receives
-equivalent per-process configuration. Project servers remain in `.mcp.json`
+equivalent per-process configuration, which is why it runs one server process
+per chat (reclaimed by the idle sweep in
+`ProjectChatManager.reap_idle_providers`). Project servers remain in `.mcp.json`
 and credentials stay as environment references. Self-disconnecting operations
-defer until their caller chat drains. See `docs/MCP.md`.
+defer until their caller chat drains. The native file tools are denied `.env`,
+`.runtime/` (by name, plus the resolved `CIAO_RUNTIME_ROOT` path) and
+`secrets/` on both providers
+(`ciao/execution_modes.py::credential_path_deny_rules`), because
+`PWA_AUTH_TOKEN` in `.env` buys strictly more than any scoped MCP token. The
+`.env.example`-style templates are deliberately not denied, matching
+`git_sync._protected_path`. See `docs/MCP.md`.
 
 The MCP control plane is mandatory and is the only agent-facing control
 surface: there is no CLI/skill/direct-file fallback and no per-chat or

@@ -25,9 +25,30 @@ flowchart LR
     CP --> MANAGERS["PWA domain managers and stores"]
 ```
 
-- The server issues a random bearer token scoped to chat, project, workspace,
-  provider, and role. Tokens are reused only for that scope, expire, and are
-  revoked on session reset, handover, archive, or deletion.
+- The server issues a random bearer token carrying a principal of chat,
+  project, workspace, provider, and role. Tokens are reused only for that
+  scope, expire after 12 h, and are revoked on session reset, handover,
+  archive, or deletion.
+- **What that scope enforces, precisely.** The authorization checks are
+  *workspace* confinement plus *chat attribution* — not chat isolation. Every
+  ownership test terminates in `CiaoControlPlane._workspace`, which compares
+  against `principal.workspace`, and `_chat_scope` authorizes any chat through
+  the workspace of the project that owns it. So a chat's token can read,
+  message, retitle, fork, archive and delete **other chats in the same
+  workspace**; it cannot touch another workspace. The chat half of the
+  principal is what drives the plan-mode gate, the child-mode ceiling,
+  background-run ownership, revocation granularity, and per-chat telemetry —
+  and it lets a tool recognise its own chat so it does not tear down its own
+  caller. Do not read "scoped to chat" as a sandbox between chats.
+- The scope is also not a containment boundary against the model itself. The
+  same process holds native Read/Bash/Edit over its workspace root, so the
+  control plane is the *convenient* path to Ciaobot state, not the only one.
+  `.env` (which holds `PWA_AUTH_TOKEN`, a strictly wider credential),
+  `.runtime/` (by name, and by the resolved `CIAO_RUNTIME_ROOT` path when a
+  caller can reach it), and `secrets/` are denied to the native file tools on
+  both providers — see `credential_path_deny_rules` in
+  `ciao/execution_modes.py`, which also states what that deny does not cover
+  (the shell) and why `.env.example` and the other templates are excluded.
 - Ciaobot injects credentials only while it launches the provider process.
   They are not placed in the normal model shell environment. Claude receives
   the token in the SDK MCP header configuration; opencode receives equivalent
@@ -96,6 +117,16 @@ needed to surface that case.
 For opencode, Ciaobot launches a per-chat server with the scoped MCP endpoint
 and token. Project-scoped servers remain in the workspace `.mcp.json`; generated
 provider assets are marker-owned and are pruned only when their markers match.
+
+This is the real cost of per-chat scope: opencode's MCP configuration is
+server-wide, so one token per chat means one `opencode serve` per chat. Those
+processes are reclaimed by an idle sweep —
+`ProjectChatManager.reap_idle_providers`, every
+`CIAO_PROVIDER_REAP_INTERVAL` seconds (default 120), for any chat quiet for
+`CIAO_PROVIDER_IDLE_TIMEOUT` seconds (default 900) with no stream, drain,
+retry loop, pending background wake, or parked question. Reclaiming only
+releases the provider: the chat's `session_id` is persisted, so the next turn
+reconnects and resumes.
 
 Static configuration in an unrelated terminal is intentionally unsupported:
 the token is a live chat capability, not an operator credential. Use Ciaobot's
