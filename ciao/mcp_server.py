@@ -39,6 +39,61 @@ logger = logging.getLogger(__name__)
 
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+# One telemetry line per tool call with no retention meant a long-lived
+# install grew ``mcp_tool_calls.jsonl`` without bound and made every Settings
+# usage read reparse the whole history. Same coarse size guard as the job-run
+# recorder in ``ciao/job_runs.py`` rather than a second retention scheme.
+TELEMETRY_MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
+TELEMETRY_KEEP_LINES = 2000            # detailed records retained after a trim
+
+# Aggregate shape shared by the rollup sidecar and the live log scan:
+# ``{tool: {calls, errors, total_ms, providers, last_used}}`` plus the derived
+# call and error totals.
+_UsageTotals = tuple[dict[str, dict[str, Any]], int, int]
+
+
+def _usage_entry() -> dict[str, Any]:
+    return {"calls": 0, "errors": 0, "total_ms": 0, "providers": set(), "last_used": ""}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> None:
+    """Add one telemetry line to the per-tool aggregate.
+
+    Blank, malformed, and non-object lines are skipped: the log is appended
+    to live, so a reader can meet a half-written final record and must not
+    turn that into a failed usage read.
+    """
+    line = line.strip()
+    if not line:
+        return
+    try:
+        record = json.loads(line)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(record, dict):
+        return
+    name = str(record.get("tool") or "")
+    if not name:
+        return
+    entry = tools.setdefault(name, _usage_entry())
+    entry["calls"] += 1
+    if record.get("status") != "ok":
+        entry["errors"] += 1
+    entry["total_ms"] += _as_int(record.get("duration_ms"))
+    provider = str(record.get("provider") or "")
+    if provider:
+        entry["providers"].add(provider)
+    timestamp = str(record.get("timestamp") or "")
+    if timestamp > entry["last_used"]:
+        entry["last_used"] = timestamp
+
 
 def _workspace_env_path(workspace_root: Path) -> Path:
     return workspace_root.resolve() / ".env"
@@ -266,6 +321,12 @@ class CiaoMcpService:
         self._tool_names: set[str] = set()
         self._last_error = ""
         self._telemetry_path = Path(config.state_path).parent / "mcp_tool_calls.jsonl"
+        # Trimming drops detailed records, so their counters are folded into
+        # this sidecar first: without it a rotation would silently reset the
+        # lifetime totals the Settings usage table reports.
+        self._telemetry_totals_path = Path(config.state_path).parent / "mcp_tool_calls_totals.json"
+        self._usage_lock = threading.Lock()
+        self._usage_cache: tuple[tuple[Any, ...], _UsageTotals] | None = None
         issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
         self.server = FastMCP(
             "ciaobot",
@@ -716,47 +777,13 @@ class CiaoMcpService:
     def usage(self, *, limit: int | None = None) -> dict[str, Any]:
         """Aggregate per-tool call counts from the telemetry log.
 
-        Reads ``mcp_tool_calls.jsonl`` (written by :meth:`_record_tool_call`) and
-        groups the records by tool name so the PWA can render a usage table.
+        Counts are lifetime: the retained window of ``mcp_tool_calls.jsonl``
+        (written by :meth:`_record_tool_call`) is folded on top of the
+        counters the size guard already rolled into the totals sidecar, so
+        rotation does not change what a total means. The detailed records
+        themselves only cover the retained window.
         """
-        tools: dict[str, dict[str, Any]] = {}
-        total = 0
-        total_errors = 0
-        if self._telemetry_path.exists():
-            try:
-                with self._telemetry_path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except (ValueError, TypeError):
-                            continue
-                        name = str(record.get("tool") or "")
-                        if not name:
-                            continue
-                        entry = tools.setdefault(
-                            name,
-                            {"calls": 0, "errors": 0, "total_ms": 0, "providers": set(), "last_used": ""},
-                        )
-                        entry["calls"] += 1
-                        total += 1
-                        if record.get("status") != "ok":
-                            entry["errors"] += 1
-                            total_errors += 1
-                        try:
-                            entry["total_ms"] += int(record.get("duration_ms") or 0)
-                        except (ValueError, TypeError):
-                            pass
-                        provider = str(record.get("provider") or "")
-                        if provider:
-                            entry["providers"].add(provider)
-                        timestamp = str(record.get("timestamp") or "")
-                        if timestamp > entry["last_used"]:
-                            entry["last_used"] = timestamp
-            except OSError:
-                pass
+        tools, total, total_errors = self._usage_totals()
         rows: list[dict[str, Any]] = []
         for name, entry in tools.items():
             calls = entry["calls"]
@@ -786,6 +813,109 @@ class CiaoMcpService:
             "tool_count": len(self._tool_names),
             "tools": rows,
         }
+
+    def _telemetry_fingerprint(self) -> tuple[Any, ...]:
+        """Identify the on-disk telemetry state.
+
+        Settings polls the usage endpoint, so without a change marker every
+        poll reparsed the whole retained window. Size and mtime move on every
+        append and on every trim, which is all the cache needs to know.
+        """
+        marks: list[Any] = []
+        for path in (self._telemetry_totals_path, self._telemetry_path):
+            try:
+                info = path.stat()
+            except OSError:
+                marks.append(None)
+            else:
+                marks.append((info.st_mtime_ns, info.st_size))
+        return tuple(marks)
+
+    def _usage_totals(self) -> _UsageTotals:
+        fingerprint = self._telemetry_fingerprint()
+        with self._usage_lock:
+            cached = self._usage_cache
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+        tools = self._load_telemetry_totals()
+        try:
+            with self._telemetry_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    _fold_telemetry_line(tools, line)
+        except OSError:
+            pass
+        total = sum(_as_int(entry["calls"]) for entry in tools.values())
+        total_errors = sum(_as_int(entry["errors"]) for entry in tools.values())
+        result: _UsageTotals = (tools, total, total_errors)
+        with self._usage_lock:
+            self._usage_cache = (fingerprint, result)
+        return result
+
+    def _load_telemetry_totals(self) -> dict[str, dict[str, Any]]:
+        """Read the counters for records the size guard already dropped."""
+        try:
+            raw = json.loads(self._telemetry_totals_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        stored = raw.get("tools") if isinstance(raw, dict) else None
+        if not isinstance(stored, dict):
+            return {}
+        tools: dict[str, dict[str, Any]] = {}
+        for name, entry in stored.items():
+            if not isinstance(entry, dict):
+                continue
+            providers = entry.get("providers")
+            tools[str(name)] = {
+                "calls": _as_int(entry.get("calls")),
+                "errors": _as_int(entry.get("errors")),
+                "total_ms": _as_int(entry.get("total_ms")),
+                "providers": {str(item) for item in providers if item} if isinstance(providers, list) else set(),
+                "last_used": str(entry.get("last_used") or ""),
+            }
+        return tools
+
+    def _trim_telemetry_if_large(self) -> None:
+        """Roll the oldest records into the totals sidecar and drop them."""
+        try:
+            if self._telemetry_path.stat().st_size < TELEMETRY_MAX_BYTES:
+                return
+        except OSError:
+            return
+        try:
+            with self._telemetry_path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+            if len(lines) <= TELEMETRY_KEEP_LINES:
+                return
+            dropped = lines[:-TELEMETRY_KEEP_LINES]
+            kept = lines[-TELEMETRY_KEEP_LINES:]
+            totals = self._load_telemetry_totals()
+            for line in dropped:
+                _fold_telemetry_line(totals, line)
+            payload = {
+                "tools": {
+                    name: {
+                        "calls": entry["calls"],
+                        "errors": entry["errors"],
+                        "total_ms": entry["total_ms"],
+                        "providers": sorted(entry["providers"]),
+                        "last_used": entry["last_used"],
+                    }
+                    for name, entry in totals.items()
+                }
+            }
+            # Rename the sidecar into place before truncating. The pair is not
+            # atomic, so a crash between them double-counts the dropped
+            # records; truncating first would instead lose those counts for
+            # good, and an inflated total is the recoverable half of that
+            # trade.
+            staged = self._telemetry_totals_path.with_name(
+                self._telemetry_totals_path.name + ".tmp"
+            )
+            staged.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            staged.replace(self._telemetry_totals_path)
+            self._telemetry_path.write_text("".join(kept), encoding="utf-8")
+        except OSError:
+            logger.debug("Failed to trim the MCP telemetry log", exc_info=True)
 
     def _principal(self) -> McpPrincipal:
         access = get_access_token()
@@ -889,6 +1019,7 @@ class CiaoMcpService:
                 record["result_paths"] = paths[:50]
         try:
             self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+            self._trim_telemetry_if_large()
             with self._telemetry_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
