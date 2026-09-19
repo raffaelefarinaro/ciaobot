@@ -14,6 +14,7 @@ These pin AI-05's acceptance criteria:
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -279,6 +280,75 @@ def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     assert observed == [True], "trim ran after the append lock was released"
 
 
+def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monkeypatch):
+    """A row appended while a trim is running must survive it.
+
+    `_trim_if_large` reads the whole journal and then `os.replace`s it with
+    that snapshot. Run outside the append flock, a second appender lands
+    between those two steps: its row goes into the inode the replace is about
+    to unlink and is gone without a trace. Lose a `prepared` row that way and
+    `recover_pending` has no evidence the operation ever started, so its
+    half-finished side effects can never be settled — the exact unrecoverable
+    state this journal exists to rule out.
+
+    The sibling test proves the lock is *held* during the trim; this one
+    proves what that buys, by racing a real appender against it.
+    """
+    import fcntl
+    import time
+
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # ...but drops nothing
+    journal = _journal(tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        json.dumps({"id": "mrcpt_seed", "status": mr.APPLIED, "ts": "t0", "v": 1}) + "\n",
+        encoding="utf-8",
+    )
+
+    def concurrent_append() -> None:
+        # A second appender, reduced to what matters: take the journal lock,
+        # append one row. A full `_append` would also trim, and the two trims
+        # would collide on the shared temp name — an accident that would mask
+        # the race under test rather than exercise it.
+        lock = journal.with_name(journal.name + ".lock")
+        with lock.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                with journal.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {"id": "mrcpt_concurrent", "status": mr.PREPARED, "ts": "t2", "v": 1}
+                        )
+                        + "\n"
+                    )
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    real_replace = os.replace
+    started: list[threading.Thread] = []
+
+    def replace_after_a_concurrent_append(src, dst):  # type: ignore[no-untyped-def]
+        if not started:
+            worker = threading.Thread(target=concurrent_append)
+            started.append(worker)
+            worker.start()
+            # Long enough for the other appender to land when nothing
+            # serializes it; simply waited out when the lock makes it queue.
+            time.sleep(0.25)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_after_a_concurrent_append)
+    mr._append(journal, {"id": "mrcpt_trimmer", "status": mr.APPLIED, "ts": "t1"})
+    assert started, "the trim never reached its os.replace"
+    started[0].join(timeout=5)
+    monkeypatch.undo()
+
+    ids = {r["id"] for r in mr.read_receipts(journal)}
+    assert "mrcpt_concurrent" in ids, "the trim deleted a receipt appended while it ran"
+    assert "mrcpt_trimmer" in ids
+
+
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
     """A prepared receipt whose after-image is on disk settles to applied."""
     guide = _guide(tmp_path, memory=["fact one"])
@@ -400,6 +470,44 @@ def test_crash_between_guide_write_and_outcome_recovers_once(tmp_path):
     # Idempotent: running recovery again does nothing new.
     second = mr.recover_pending(journal=j)
     assert second.reconciled == []
+
+
+def test_a_failed_region_write_settles_the_row_it_opened(tmp_path, monkeypatch):
+    """One failed write must leave one receipt, not a failure plus an orphan.
+
+    The failure row was keyed off a basis of its own — no ``before_revision``,
+    and no journal for the generation step — so it landed on a different id
+    than the ``prepared`` row the very same attempt had already appended.
+    `read_receipts` folds by id, so a single failed write showed up twice in
+    History, and the orphaned ``prepared`` row stayed non-terminal: startup
+    recovery then reconciled an operation that had already reported ``failed``
+    and stamped it ``rolled_back`` — a second, contradictory verdict on it.
+    """
+    guide = _guide(tmp_path, memory=["fact one"])
+    journal = _journal(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("the disk went away mid-write")
+
+    monkeypatch.setattr(mt, "write_guide_atomically", boom)
+    with pytest.raises(OSError):
+        mr.commit_region_change(
+            guide,
+            "memory",
+            entries=["fact one", "fact two"],
+            actor="operator",
+            source="pwa",
+            vault_root=tmp_path,
+            fact_text="fact two",
+        )
+    monkeypatch.undo()
+
+    rows = mr.read_receipts(journal)
+    assert [r["status"] for r in rows] == [mr.FAILED], (
+        "the failure row must settle the prepared row, not open a second receipt"
+    )
+    # Nothing left for startup recovery to re-judge.
+    assert mr.recover_pending(journal=journal).reconciled == []
 
 
 # ── Undo ──────────────────────────────────────────────────────────────────
