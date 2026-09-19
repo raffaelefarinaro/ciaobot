@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from ciao.execution_modes import HARNESS_DISABLED_SKILLS
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.models import BridgeMode
 from ciao.providers.opencode import OpencodeSettings
 
@@ -1206,13 +1206,22 @@ class CiaoConfig:
         that predates the allowlist is seeded at load; a brand new one has
         ``None``, which denies every declared server (the fail-closed default).
 
+        Prepended to all of it, unconditionally, is
+        :func:`credential_path_deny_rules` — the ``.env`` / ``.runtime`` /
+        ``secrets`` file-tool denies. Those are not part of ``extras``, so a
+        workspace that overrides ``disallowed_tools`` (or opts out with the
+        literal ``none``) still gets them. See that function for what they do
+        and do not cover.
+
         Two limits stated plainly. First, this scopes REACHABILITY, not
         authority: a shared account behind a reachable server still holds that
         account's full authority. Second, ``disallowed_tools`` is only applied
         when the chat's provider is ``claude`` (see the ``if chat.provider !=
-        "claude": return []`` guard in project_chats); it does NOT constrain
-         opencode chats at all. Closing that non-Claude gap needs a
-        per-provider mechanism and is out of scope here.
+        "claude": return []`` guard in project_chats). opencode is constrained
+        by the equivalent session permission rules its own provider builds
+        (``ciao/providers/opencode.py::mode_settings``), not by this list, so
+        the credential denies above exist in both places and must stay in
+        sync; the MCP-server allowlist below is still Claude-only.
 
         When ``.mcp.json`` exists but cannot be parsed, every server any
         workspace's allowlist names is denied by explicit name: the known
@@ -1244,7 +1253,11 @@ class CiaoConfig:
             denied = [
                 f"mcp__{name}" for name in declared if name not in allow_set
             ]
-        return list(dict.fromkeys([*extras, *denied]))
+        # The resolved runtime root, not just the `**/.runtime/**` name: an
+        # operator who moved it with `CIAO_RUNTIME_ROOT` must not lose the
+        # guard on the stores it holds.
+        fixed = credential_path_deny_rules(self.state_path.parent)
+        return list(dict.fromkeys([*fixed, *extras, *denied]))
 
     def _seed_allowed_mcp_servers(self) -> None:
         """Migrate pre-existing workspaces onto the allowlist, losslessly.
