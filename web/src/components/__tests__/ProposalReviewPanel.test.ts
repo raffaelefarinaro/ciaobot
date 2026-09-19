@@ -1055,7 +1055,11 @@ describe('decision card', () => {
 
     const actions = wrapper.findAll('.pr-actions--card button').map(b => b.text())
     expect(actions[0]).toBe('save to ciao:memory')
-    expect(actions.slice(1)).toEqual(['edit suggestion', 'talk about it', 'dismiss', 'cancel'])
+    // "check first" is the same write with a reconcile in front of it, so it is
+    // a secondary beside edit/discuss/dismiss rather than a second primary.
+    expect(actions.slice(1)).toEqual([
+      'check first', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+    ])
     expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
     wrapper.unmount()
   })
@@ -1178,6 +1182,203 @@ describe('decision card', () => {
     expect(summary.text()).toContain('1 of 2 applied')
     expect(summary.text()).toContain('1 changed underneath')
     expect(summary.text()).toContain('1 still queued')
+    wrapper.unmount()
+  })
+})
+
+describe('reconcile before writing', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+    useProjectStore().activeWorkspace = 'personal'
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  /** A 409 the way `lib/api` throws one: the message for people, the body for us. */
+  function refusal(payload: Record<string, unknown>): Error {
+    const err = new Error(String(payload.error ?? 'refused'))
+    Object.assign(err, { status: 409, payload })
+    return err
+  }
+
+  const deferral = {
+    error: 'reconciling against ciao:memory could not decide (reconcile unavailable), '
+      + 'so nothing was written and this stays queued.',
+    id: 'row-1',
+    region: 'memory',
+    deferred: true,
+    reason: 'reconcile unavailable for ciao:memory',
+    competing: ['Office is in Zurich. [2026-01-01]'],
+  }
+
+  /** Queue + preview for one row, so the decision card can be opened on it. */
+  function mockQueue(rowOverrides: Partial<ProposalRow> = {}, previewOverrides: Partial<ProposalPreview> = {}) {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({ rows: [], total: 0, truncated: false })
+      }
+      if (url.startsWith('/api/proposals/row-1/preview')) {
+        return Promise.resolve({ ok: true, preview: preview(previewOverrides) })
+      }
+      return Promise.resolve({ rows: [row(rowOverrides)] })
+    })
+  }
+
+  /** The check is offered on the card, not on the row: it is the same write as
+   * the primary, so it belongs where the change being written is on screen. */
+  async function openCard() {
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  function cardLabels(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll('.pr-actions--card button').map((b) => b.text())
+  }
+
+  function clickCard(wrapper: ReturnType<typeof mount>, label: string) {
+    return wrapper.findAll('.pr-actions--card button').find((b) => b.text() === label)!.trigger('click')
+  }
+
+  it('asks the server to reconcile only when the check is requested', async () => {
+    // The plain save is one synchronous write; reconciling is a model call, so
+    // the query parameter has to be absent unless it was asked for.
+    mockQueue()
+    apiPost.mockResolvedValue({} as never)
+    const wrapper = await openCard()
+
+    await clickCard(wrapper, 'save to ciao:memory')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
+      expected_revision: 'rev-1',
+    })
+
+    apiPost.mockClear()
+    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await flushPromises()
+    await clickCard(wrapper, 'check first')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+      expected_revision: 'rev-1',
+    })
+    wrapper.unmount()
+  })
+
+  it('offers no check on a kind that has no entries to be weighed against', async () => {
+    // Only the bounded regions hold entries a new fact can supersede. A person
+    // note or the learnings list would take the parameter and ignore it.
+    mockQueue({ kind: 'learnings' }, { kind: 'learnings', destination: 'Workspace/Learnings.md' })
+    const wrapper = await openCard()
+
+    expect(cardLabels(wrapper)).toEqual([
+      'save to Workspace/Learnings.md', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+    ])
+    wrapper.unmount()
+  })
+
+  it('offers the check beside the primary on a region row', async () => {
+    mockQueue()
+    const wrapper = await openCard()
+
+    expect(cardLabels(wrapper)).toEqual([
+      'save to ciao:memory', 'check first', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+    ])
+    // One primary: the check is the same write, not a competing decision.
+    expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('shows what a deferred accept was weighed against, and retries from there', async () => {
+    // The whole point of deferring rather than appending: the fact may replace
+    // an entry the region already holds. A refusal that does not say which one
+    // leaves nothing to decide with.
+    mockQueue()
+    apiPost.mockRejectedValueOnce(refusal(deferral))
+    const wrapper = await openCard()
+
+    await clickCard(wrapper, 'check first')
+    await flushPromises()
+
+    const box = wrapper.find('.pr-actions--deferred')
+    expect(box.exists()).toBe(true)
+    expect(box.text()).toContain('reconcile unavailable for ciao:memory')
+    expect(box.text()).toContain('Office is in Zurich. [2026-01-01]')
+    // It replaces the decisions rather than sitting beside them: the next step
+    // is about these entries, not save-or-dismiss. The card closes with it.
+    expect(wrapper.find('.pr-card').exists()).toBe(false)
+    expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
+      .toEqual(['try again', 'leave it queued'])
+    // A deferral is not one of the refusals that hand the row to a merge chat —
+    // it has a cheaper remedy right here.
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    // Nor is it a toast: the reason belongs on the row it describes.
+    expect(useProposalsStore().error).toBe('')
+    // And the row is still queued, because nothing was written.
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+
+    // Retrying reconciles again, against the region as it stands now.
+    apiPost.mockResolvedValue({} as never)
+    await wrapper.find('.pr-actions--deferred .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {})
+    expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the notice when a retry defers again, and clears it on dismissal', async () => {
+    mockQueue()
+    apiPost.mockRejectedValue(refusal(deferral))
+    const wrapper = await openCard()
+
+    await clickCard(wrapper, 'check first')
+    await flushPromises()
+    await wrapper.find('.pr-actions--deferred .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.pr-actions--deferred').exists()).toBe(true)
+
+    // Dismissing the notice is not a decision about the row: it goes back to
+    // review/dismiss with the fact still queued.
+    await wrapper.find('.pr-actions--deferred .btn-chip').trigger('click')
+    await nextTick()
+    expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
+    expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
+      .toEqual(['review', 'dismiss', 'talk about it'])
+    wrapper.unmount()
+  })
+
+  it('carries the leak warning into the card the check is confirmed from', async () => {
+    // The check still writes the region, so the row that warns about writing a
+    // guide every workspace loads must warn about this one too. The card is
+    // that confirmation — clicking the check on it IS the consent, which is why
+    // nothing is posted until then.
+    mockQueue(
+      { leak_warning: true, region: 'memory' },
+      { leak_warning: true },
+    )
+    apiPost.mockResolvedValue({} as never)
+    const wrapper = await openCard()
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.find('.pr-card').text()).toContain('visible in every workspace')
+
+    await clickCard(wrapper, 'check first')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+      expected_revision: 'rev-1',
+    })
     wrapper.unmount()
   })
 })

@@ -8386,7 +8386,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             keep_lines.add(int(row["line"]))
                             continue
                     if accept.action == "edit_region":
-                        outcome = proposal_service._promote_region_row(config, row)
+                        # No reconcile in the batch path: it is one model call
+                        # per row, and a large selection would spend a timeout
+                        # on each. A row that needs it is retried singly.
+                        outcome = await proposal_service._promote_region_row(
+                            config, row
+                        )
                     elif accept.action == "fold_doc":
                         # A fold is a model call, so a large selection folds
                         # sequentially; write-then-dismiss still holds per row.
@@ -8849,19 +8854,39 @@ async def proposal_action(request: Request) -> JSONResponse:
                     )
                 promoted = outcome
             elif accept.action == "edit_region":
-                promoted = proposal_service._promote_region_row(config, promote_row)
+                # `?reconcile=1` re-runs the write-time reconcile against the
+                # region's current entries before writing, which is how a fact
+                # the archive-time pass deferred (timed-out call, stale index)
+                # gets resolved rather than appended beside what it supersedes.
+                # Opt-in: it is a model call, and the plain accept is one
+                # synchronous write.
+                reconcile = (
+                    request.query_params.get("reconcile", "").strip().lower()
+                    in {"1", "true", "yes"}
+                )
+                promoted = await proposal_service._promote_region_row(
+                    config, promote_row, reconcile=reconcile
+                )
                 if not promoted.get("ok"):
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
                     # retry. Losing it silently is the one outcome to avoid.
-                    return JSONResponse(
-                        {
-                            "error": promoted.get("error", "could not write the region"),
-                            "id": pid,
-                            "region": promoted.get("region", ""),
-                        },
-                        status_code=409,
-                    )
+                    refusal: dict[str, Any] = {
+                        "error": promoted.get("error", "could not write the region"),
+                        "id": pid,
+                        "region": promoted.get("region", ""),
+                    }
+                    if promoted.get("deferred"):
+                        # The one refusal another `?reconcile=1` can resolve, so
+                        # it is marked as such and carries what it was weighed
+                        # against. Every other refusal here needs a human to
+                        # change something first (an over-cap region, event-shaped
+                        # text), and offering a retry for those would be a button
+                        # that cannot do what it says.
+                        refusal["deferred"] = True
+                        refusal["reason"] = promoted.get("reason", "")
+                        refusal["competing"] = promoted.get("competing", [])
+                    return JSONResponse(refusal, status_code=409)
             elif accept.action == "fold_doc":
                 promoted = await proposal_service._accept_project_row(config, promote_row)
                 if not promoted.get("ok"):

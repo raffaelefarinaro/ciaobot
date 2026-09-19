@@ -374,12 +374,19 @@ export const useProposalsStore = defineStore('proposals', () => {
     id: string,
     action: 'accept' | 'dismiss',
     workspace = '',
-    opts?: { expectedRevision?: string; text?: string },
-  ): Promise<{ ok: boolean; error?: string; conflict?: boolean }> {
+    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean },
+  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
     setBusy(id, true)
     error.value = ''
     try {
-      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      const params = new URLSearchParams()
+      if (workspace) params.set('workspace', workspace)
+      // Opt-in per click: the server spends one model call reconciling the fact
+      // against the region, so a plain accept stays one synchronous write and
+      // only a row that was asked to be checked pays for it.
+      if (opts?.reconcile) params.set('reconcile', '1')
+      const queryString = params.toString()
+      const query = queryString ? `?${queryString}` : ''
       const body: Record<string, string> = {}
       // Only sent when a preview was actually shown. Without it the server
       // keeps its pre-preview behaviour, which is what the batch bar and any
@@ -392,12 +399,16 @@ export const useProposalsStore = defineStore('proposals', () => {
       return { ok: true }
     } catch (e) {
       const conflict = adoptConflict(id, e)
+      const payload = (e as { payload?: unknown } | null)?.payload
+      const deferred = Boolean((payload as { deferred?: boolean } | undefined)?.deferred)
       const msg = e instanceof Error ? e.message : 'Action failed'
       // A conflict is not an action failure: the card is already re-rendering
       // with the refreshed preview, and a toast on top of it would say the
-      // same thing twice in two places.
-      if (!conflict) error.value = msg
-      return { ok: false, error: msg, conflict }
+      // same thing twice in two places. Nor is a deferral: the caller renders
+      // it on the row, with the entries it was weighed against and a retry, and
+      // a toast would take all three away the moment they became relevant.
+      if (!conflict && !deferred) error.value = msg
+      return { ok: false, error: msg, conflict, payload }
     } finally {
       setBusy(id, false)
     }

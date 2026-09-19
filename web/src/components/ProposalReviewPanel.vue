@@ -3,9 +3,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import type { ProposalPreview, ProposalRow } from '../lib/types'
+import type { ProposalAcceptRefusal, ProposalPreview, ProposalRow } from '../lib/types'
 import { lineChanges, type LineChange } from '../lib/textDiff'
-import { descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
+import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
 
@@ -48,6 +48,29 @@ function reviewHelper(...proposalIds: string[]): ProposalHelper {
 }
 
 const olderThanDays = ref(30)
+
+/**
+ * Rows whose last accept was deferred: the fact may supersede something the
+ * region already holds and the reconcile could not say what, so nothing was
+ * written and the row is still queued.
+ *
+ * Held per row rather than in `store.error` because it is not an error to read
+ * and dismiss — it is a state the row is in, with its own next step. A toast
+ * would take the reason and the competing entries away the moment they became
+ * relevant, and the retry that resolves it belongs next to them.
+ */
+const deferredById = ref<Record<string, { reason: string; competing: string[] }>>({})
+
+function deferredFor(row: ProposalRow) {
+  return deferredById.value[row.id]
+}
+
+function clearDeferred(id: string) {
+  if (!(id in deferredById.value)) return
+  const next = { ...deferredById.value }
+  delete next[id]
+  deferredById.value = next
+}
 
 // -- Decision card ----------------------------------------------------------
 //
@@ -141,25 +164,27 @@ function previewChanges(preview: ProposalPreview): LineChange[] {
 /** Confirm the change the card is showing, pinned to the revision it was
  * computed against. A destination that moved since then comes back as a
  * conflict with a refreshed preview, and the card stays open on it. */
-async function confirmPreview(row: ProposalRow, workspace = '') {
+async function confirmPreview(row: ProposalRow, workspace = '', reconcile = false) {
   const preview = store.previews[row.id]
   if (!preview) return
   const edited = preview.text !== row.text ? preview.text : ''
   const result = await store.act(row.id, 'accept', workspace, {
     expectedRevision: preview.revision,
     text: edited,
+    reconcile,
   })
   if (result.conflict) return
   if (result.ok) {
     previewId.value = ''
     editingPreview.value = false
     store.dropPreview(row.id)
+    clearDeferred(row.id)
     return
   }
   // A refusal that is not a conflict (an over-cap guard, a people note that
   // needs a manual merge) still has the kind's merge-chat fallback behind it.
   closePreview()
-  await handleAcceptRefusal(row, result.error || '')
+  await handleAcceptRefusal(row, result.error || '', result.payload)
 }
 
 // Proposal → chat link: when an accept fallback or skill implement spawns a
@@ -258,6 +283,15 @@ function pruneProposalChatLinks() {
 }
 
 watch(() => store.rows.map(r => r.id).join(','), pruneProposalChatLinks)
+// A deferral describes a row; a row that left the queue (resolved elsewhere, or
+// dismissed here) has no state left to describe, and leaving the notice behind
+// would attach it to whatever row the id is next reused for.
+watch(() => store.rows.map(r => r.id).join(','), () => {
+  const live = new Set(store.rows.map(r => r.id))
+  for (const id of Object.keys(deferredById.value)) {
+    if (!live.has(id)) clearDeferred(id)
+  }
+})
 watch(() => projectStore.chats.map(c => `${c.chat_id}:${c.archived}`).join(','), pruneProposalChatLinks)
 
 // Filter and selection live in the store: the sidebar renders the controls, the
@@ -497,6 +531,51 @@ async function doAccept(row: ProposalRow, workspace = '') {
   await acceptWithFallback(row, workspace)
 }
 
+/** Confirm the card's change, but reconcile it against the destination first.
+
+ * Same write as the primary action, with one check in front of it: a fact that
+ * supersedes an entry already in the region is merged over it instead of added
+ * beside it. Opt-in per click because the server spends a model call on it, and
+ * because the plain save is the routine decision.
+ *
+ * The leak warning needs no separate confirmation: it rides on the card, so the
+ * click that releases this write is already the consent for it.
+ */
+async function reconcileFirst(row: ProposalRow) {
+  await confirmPreview(row, '', true)
+}
+
+/** Retry a deferred accept, reconciling against the region as it stands now.
+ *
+ * No further confirmation: this is only reachable from a row that already
+ * refused an accept the operator confirmed on the card, so the consent it would
+ * ask for has been given for this exact write.
+ */
+async function retryReconcile(row: ProposalRow) {
+  const result = await store.act(row.id, 'accept', '', { reconcile: true })
+  if (result.ok) {
+    clearDeferred(row.id)
+    return
+  }
+  if (result.conflict) return
+  await handleAcceptRefusal(row, result.error || '', result.payload)
+}
+
+/** The deferral behind a 409, or null when the refusal was some other kind.
+ *
+ * Read off the error's payload rather than matched against its message: the
+ * message is prose meant for a person, and a UI that switches behaviour on it
+ * changes meaning the next time the sentence is reworded.
+ */
+function deferralFrom(payload: unknown): { reason: string; competing: string[] } | null {
+  const refusal = payload as ProposalAcceptRefusal | null | undefined
+  if (!refusal || typeof refusal !== 'object' || !refusal.deferred) return null
+  return {
+    reason: refusal.reason || 'the reconcile could not decide',
+    competing: Array.isArray(refusal.competing) ? refusal.competing.map(String) : [],
+  }
+}
+
 async function acceptWithFallback(row: ProposalRow, workspace = '') {
   // Direct accept is best-effort by design – create-only for people
   // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
@@ -510,6 +589,7 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
   try {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     await api.post(`/api/proposals/${row.id}/accept${query}`)
+    clearDeferred(row.id)
     await store.fetch()
     // `store.fetch` deliberately leaves history alone, so this direct post -
     // the only mutation that does not go through `store.act` - has to say so
@@ -519,7 +599,7 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    await handleAcceptRefusal(row, msg)
+    await handleAcceptRefusal(row, msg, (e as { payload?: ProposalAcceptRefusal })?.payload)
     return
   } finally {
     store.setBusy(row.id, false)
@@ -532,8 +612,22 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
  * preview gets the same merge-chat fallback a direct accept always got —
  * otherwise adding the card would have quietly removed the recovery path for
  * a people note that needs a manual merge or a fold the guard rejected.
+ *
+ * A deferral is read off the refusal's payload and handled first, before the
+ * merge-chat fallback every region kind has: it is the one refusal another
+ * check can resolve on its own, so it becomes a state on the row rather than
+ * an agent spawned to merge the fact by hand.
  */
-async function handleAcceptRefusal(row: ProposalRow, msg: string) {
+async function handleAcceptRefusal(row: ProposalRow, msg: string, payload?: unknown) {
+  const deferral = deferralFrom(payload)
+  if (deferral) {
+    // Checked before the merge chat, which every region kind falls back to on
+    // any refusal. A deferral already has a cheaper remedy — one more retry,
+    // against the entries the row now names — so spawning an agent to merge by
+    // hand would skip past the fix and leave a chat to clean up.
+    deferredById.value = { ...deferredById.value, [row.id]: deferral }
+    return
+  }
   const fallback = descriptorFor(row).fallback
   if (fallback && fallback.when(msg)) {
     await mergeViaChat(row, msg, fallback)
@@ -1100,12 +1194,53 @@ watch(
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="confirmPreview(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : previewPrimaryLabel(row) }}</button>
+                <!-- The same write, with one check in front of it: a fact that
+                     replaces something already remembered is merged over it
+                     instead of added beside it. A chip, not a second primary —
+                     the plain save remains the routine decision, and this one
+                     costs a model call, which is why it is asked for rather
+                     than always done. The card's replacement is what a plain
+                     save would write; a check can land on a different line,
+                     which is what the title says. -->
+                <button
+                  v-if="store.previews[row.id].can_accept && canReconcile(row)"
+                  type="button"
+                  class="btn-small btn-chip"
+                  title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
+                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+                  @click="reconcileFirst(row)"
+                >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
                 <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">edit suggestion</button>
                 <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
                 <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
                 <button type="button" class="btn-small btn-chip" @click="closePreview">cancel</button>
               </div>
             </template>
+          </div>
+
+          <!-- Deferred: the last accept reconciled this fact against the region
+               and could not tell whether it supersedes something already there,
+               so nothing was written and the row is still queued. Shown in place
+               of the row's actions, and of the decision card that raised it,
+               because the next step is not "save or dismiss" but "decide about
+               these entries": the
+               reason, what it was weighed against, and one more attempt against
+               the region as it stands now. -->
+          <div v-else-if="deferredFor(row)" class="pr-actions pr-actions--deferred">
+            <p class="pr-deferred-reason">Nothing was written: {{ deferredFor(row)!.reason }}</p>
+            <template v-if="deferredFor(row)!.competing.length">
+              <p class="pr-deferred-label">Weighed against</p>
+              <ul class="pr-deferred-competing">
+                <li v-for="entry in deferredFor(row)!.competing" :key="entry">{{ entry }}</li>
+              </ul>
+            </template>
+            <button
+              type="button"
+              class="btn-small btn-primary"
+              :disabled="store.isBusy(row.id)"
+              @click="retryReconcile(row)"
+            >{{ store.isBusy(row.id) ? 'checking…' : 'try again' }}</button>
+            <button type="button" class="btn-small btn-chip" @click="clearDeferred(row.id)">leave it queued</button>
           </div>
 
           <!-- Linked: this proposal already spawned a merge/implement chat that
@@ -1330,6 +1465,39 @@ watch(
 
 .pr-actions--confirm {
   min-width: 12rem;
+}
+
+/* Wider than the other action columns because it carries prose and a list of
+   region entries, not just buttons. It still collapses to the full row width
+   under 640px, where `.pr-actions` spans the grid. */
+.pr-actions--deferred {
+  min-width: 16rem;
+  max-width: 22rem;
+}
+
+.pr-deferred-reason {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--warning);
+  overflow-wrap: anywhere;
+}
+
+.pr-deferred-label {
+  margin: var(--space-1) 0 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.pr-deferred-competing {
+  margin: 0;
+  padding-left: var(--space-3);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
 }
 
 /* ── Decision card ────────────────────────────────────────────────────────

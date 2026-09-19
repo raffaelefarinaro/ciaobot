@@ -1640,6 +1640,10 @@ def test_defer_region_facts_covers_exactly_the_reconcile_candidates(
     assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")] == {
         "action": "defer",
         "reason": "planner raised",
+        # The entry the fact is in conflict with travels with the deferral:
+        # a queued fact and a bare reason still leave a human guessing what it
+        # was weighed against.
+        "competing": ["Deploys run on Tuesdays."],
     }
 
 
@@ -1690,6 +1694,7 @@ def test_reconcile_timeout_leaves_the_region_unchanged(
 
     decisions = asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet"))
     stats: dict[str, int] = {}
+    deferrals: list[mp.DeferredFact] = []
     written = mp.proposals_from_archive(
         archive,
         vault,
@@ -1697,6 +1702,7 @@ def test_reconcile_timeout_leaves_the_region_unchanged(
         guide_path=guide,
         stats=stats,
         region_decisions=decisions,
+        deferrals=deferrals,
     )
 
     entries, _diags = mt.read_region(guide, "memory")
@@ -1704,6 +1710,308 @@ def test_reconcile_timeout_leaves_the_region_unchanged(
     assert stats["deferred"] == 1
     assert written is not None
     assert "950 EUR" in written.read_text(encoding="utf-8")
+    # A deferral that cannot say why, or against what, has moved the problem
+    # rather than solved it: the reason and the competing entry both travel.
+    assert len(deferrals) == 1
+    assert deferrals[0].region == "memory"
+    assert "reconcile unavailable" in deferrals[0].reason
+    assert deferrals[0].competing == ("Contractor day rate is 800 EUR. [2026-01-01]",)
+
+
+# ---- Typed decision statuses ----------------------------------------------
+
+
+def test_decision_and_outcome_vocabularies_are_closed() -> None:
+    """Every state the reconcile path can be in is named, not implied.
+
+    The defect this replaced was a bare ``None`` meaning both "no reconcile was
+    needed" and "the reconcile could not decide" — opposite instructions that
+    read identically downstream. Pinning the vocabularies here makes adding a
+    state without handling it a visible change rather than a silent one.
+    """
+    from typing import get_args
+
+    assert set(get_args(mp.ReconcileAction)) == {"add", "covered", "update", "defer"}
+    assert set(get_args(mp.PromotionOutcome)) == {
+        "written",
+        "duplicate",
+        "conflict",
+        "failed",
+        "unshaped",
+        "deferred",
+    }
+
+
+def test_defer_rows_always_carry_a_reason_and_the_competing_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unreadable rows defer *with* the entries the model was weighing them against.
+
+    ``_parse_reconcile_reply`` cannot know the region, so a row it rejects
+    arrives bare; ``_reconcile_region`` is where the snapshot is, and it fills
+    it in before the row leaves.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Standup is at 09:30. [2026-01-01]"],
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: Standup is at 10:00. [idx=1] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def junk_row(prompt: str, **kwargs: object) -> str:
+        return '[{"action": "teleport"}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", junk_row)
+
+    decisions = asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet"))
+    assert decisions is not None
+    row = decisions[mp._decision_key("memory", "Standup is at 10:00.")]
+    assert row["action"] == "defer"
+    assert row["reason"]
+    assert row["competing"] == ["Standup is at 09:30. [2026-01-01]"]
+
+
+# ---- Competing facts: rate, location, preference, negation, expiry --------
+
+
+def test_promote_location_update_replaces_the_obsolete_entry(tmp_path: Path) -> None:
+    """A validated update of a moved location replaces it; it never stacks."""
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Office is in Zurich. [2026-01-01]"]
+    )
+    proposal = mp.MemoryProposal(
+        target="memory", text="Office is in Berlin.", source_section="Decisions"
+    )
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Office is in Berlin.",
+            "old": "Office is in Zurich. [2026-01-01]",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+    assert entries[0].startswith("Office is in Berlin.")
+    assert "Zurich" not in entries[0]
+
+
+def test_promote_preference_negation_supersedes_its_positive(tmp_path: Path) -> None:
+    """A preference and its negation must never both be live.
+
+    "Prefers Slack" and "does not want Slack" loaded together is the worst
+    version of the append defect: the guide asserts both sides of one choice.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Prefers Slack for status updates. [2026-01-01]"],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Does not want Slack status updates; use email instead.",
+        source_section="User corrections",
+    )
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Does not want Slack status updates; use email instead.",
+            "old": "Prefers Slack for status updates. [2026-01-01]",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+    assert "Prefers Slack" not in entries[0]
+
+
+def test_promote_update_keeps_an_expiry_tag(tmp_path: Path) -> None:
+    """An ``[expires:]`` tag that still applies survives the merge.
+
+    The aging audit reads it; dropping it on a merge turns a fact that retires
+    itself into one that asserts forever.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=[
+            "Retainer covers 10 days a month. [expires: 2026-12-31] [2026-01-01]"
+        ],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Retainer covers 12 days a month.",
+        source_section="Decisions",
+    )
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Retainer covers 12 days a month. [expires: 2026-12-31]",
+            "old": "Retainer covers 10 days a month. [expires: 2026-12-31] [2026-01-01]",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
+    )
+    assert promoted and not remaining
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+    assert "[expires: 2026-12-31]" in entries[0]
+    assert "12 days" in entries[0]
+
+
+def test_simultaneous_edit_defers_and_a_fresh_retry_resolves_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The whole loop: a stale decision defers, and a retry against now applies.
+
+    The reconcile plans against a snapshot and the model call takes up to two
+    minutes, so a concurrent ``/remember`` can move the entry the plan names.
+    Replacing it would overwrite an unrelated fact and appending would assert
+    both, so the fact is queued — and stays resolvable, because a second pass
+    reads the region as it is now.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Office is in Zurich. [2026-01-01]"]
+    )
+    proposal = mp.MemoryProposal(
+        target="memory", text="Office is in Berlin.", source_section="Decisions"
+    )
+    stale = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Office is in Berlin.",
+            "old": "Office is in Zurich. [2026-01-01]",
+        }
+    }
+    # A concurrent writer lands between the plan and the apply.
+    mt.write_region(guide, "memory", ["Office is in Zurich, Binz. [2026-02-02]"])
+
+    deferrals: list[mp.DeferredFact] = []
+    remaining, promoted = mp.apply_proposals(
+        [proposal],
+        guide_path=guide,
+        vault_root=vault,
+        region_decisions=stale,
+        deferrals=deferrals,
+    )
+    assert promoted == []
+    assert remaining == [proposal]
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Office is in Zurich, Binz. [2026-02-02]"]
+    assert len(deferrals) == 1
+    assert "changed while the reconcile was running" in deferrals[0].reason
+    assert deferrals[0].competing == ("Office is in Zurich, Binz. [2026-02-02]",)
+
+    # The retry: one call against the region as it stands now.
+    async def fresh_reply(prompt: str, **kwargs: object) -> str:
+        assert "Zurich, Binz" in prompt
+        return '[{"action": "update", "index": 1, "text": "Office is in Berlin."}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fresh_reply)
+    decision = asyncio.run(
+        mp.reconcile_region_fact(guide, "memory", proposal.text, model="sonnet")
+    )
+    assert decision is not None
+    assert decision["action"] == "update"
+    assert decision["old"] == "Office is in Zurich, Binz. [2026-02-02]"
+
+    outcome, promotable = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text=proposal.text,
+        vault_root=vault,
+        decision=decision,
+    )
+    assert outcome == "written"
+    assert promotable == "Office is in Berlin."
+    entries, _diags = mt.read_region(guide, "memory")
+    assert len(entries) == 1
+    assert entries[0].startswith("Office is in Berlin.")
+
+
+def test_reconcile_region_fact_skips_the_model_for_deterministic_cases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An empty region and an exact duplicate need no model call.
+
+    They are the two outcomes a model cannot improve on, and paying a timeout
+    for them is what makes a conservative fallback expensive.
+    """
+
+    async def never(prompt: str, **kwargs: object) -> str:  # pragma: no cover
+        raise AssertionError("the deterministic paths must not call a model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", never)
+
+    empty = write_guide(tmp_path / "empty.md")
+    assert (
+        asyncio.run(
+            mp.reconcile_region_fact(empty, "memory", "Deploys run on Thursdays.",
+                                     model="sonnet")
+        )
+        is None
+    )
+
+    seeded = write_guide(
+        tmp_path / "seeded.md",
+        memory_entries=["Deploys run on Thursdays. [2026-01-01]"],
+    )
+    assert (
+        asyncio.run(
+            mp.reconcile_region_fact(seeded, "memory", "Deploys run on Thursdays.",
+                                     model="sonnet")
+        )
+        is None
+    )
+
+
+def test_reconcile_region_fact_defers_when_the_retry_also_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A retry that cannot decide is not a licence to append either."""
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Office is in Zurich. [2026-01-01]"]
+    )
+
+    async def timing_out(prompt: str, **kwargs: object) -> str:
+        raise TimeoutError("still down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", timing_out)
+
+    decision = asyncio.run(
+        mp.reconcile_region_fact(guide, "memory", "Office is in Berlin.",
+                                 model="sonnet")
+    )
+    assert decision is not None
+    assert decision["action"] == "defer"
+    assert decision["reason"]
+    assert decision["competing"] == ["Office is in Zurich. [2026-01-01]"]
+
+    outcome, _promotable = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="Office is in Berlin.",
+        vault_root=tmp_path,
+        decision=decision,
+    )
+    assert outcome == "deferred"
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Office is in Zurich. [2026-01-01]"]
 
 
 # ---- Structured learnings -------------------------------------------------

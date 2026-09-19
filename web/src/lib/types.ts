@@ -1202,6 +1202,25 @@ export interface ProposalBatchSummary {
   errors: string[]
 }
 
+/** The 409 body a refused single-row accept returns.
+ *
+ * `deferred` marks the one refusal a fresh `?reconcile=1` retry can resolve on
+ * its own: the fact may supersede something the region already holds and the
+ * reconcile could not say what, so nothing was written and the row is still
+ * queued. Every other refusal (over-cap region, event-shaped text) needs a
+ * person to change something first, which is why the retry is offered on this
+ * one alone. `reason` is why it could not decide and `competing` the region
+ * entries it was weighed against, capped server-side at five.
+ */
+export interface ProposalAcceptRefusal {
+  error?: string
+  id?: string
+  region?: string
+  deferred?: boolean
+  reason?: string
+  competing?: string[]
+}
+
 export interface ProposalBatchResponse {
   ok: boolean
   action: 'accept' | 'dismiss'
