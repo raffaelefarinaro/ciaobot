@@ -1264,8 +1264,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # outlive the loop and asyncio.run wedges in its cleanup phase
         # (cancelled tasks + open subprocess transports = no exit). Bounded
         # in parallel so one stuck provider can't block the rest.
+        # Stop the idle sweep first: it awaits provider disconnects of its
+        # own, and a sweep racing this teardown would disconnect a service
+        # already being torn down here.
+        await pcm.stop_provider_reaper()
         services = list(pcm._providers.values())
         pcm._providers.clear()
+        pcm._provider_last_used.clear()
         async def _one(svc):
             try:
                 await asyncio.wait_for(svc.disconnect(), timeout=3)

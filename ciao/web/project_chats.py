@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import copy
 import os
@@ -212,6 +213,59 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
+# ── Idle provider reaping ────────────────────────────────────────────────
+# `self._providers` is keyed by chat id and, before this, was only ever
+# emptied by a lifecycle event (session reset, handover, archive, delete).
+# That is fine for Claude, whose provider is an in-process SDK client, but
+# opencode runs **one `opencode serve` process per chat** — see the module
+# docstring in ciao/providers/opencode.py for why the control plane's per-chat
+# MCP token forces that. Without a reaper, a day of touching chats leaves a
+# server process, a port, an SSE stream and a stderr reader alive for every
+# one of them until the app restarts.
+#
+# A provider is only reclaimed when the chat has been quiet for the timeout
+# AND has no work in flight (`active_chat_ids`, a between-turns drain, a retry
+# loop or a pending background wake). Reclaiming is cheap to undo: the chat's
+# `session_id` is persisted, so the next turn reconnects and resumes rather
+# than starting a new conversation — the same path a token rotation already
+# takes (ciao/providers/opencode.py::_ensure_server,
+# ciao/providers/claude.py::_ensure_connected).
+# Overridable per install with ``CIAO_PROVIDER_IDLE_TIMEOUT`` (read in
+# ``__init__``, so a test can set it before constructing a manager).
+_PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
+# How often the sweep runs. Well under the timeout so a provider is reclaimed
+# within roughly one interval of becoming eligible, and far above any per-turn
+# cadence so an idle install is not woken constantly.
+_PROVIDER_REAP_INTERVAL_SECONDS = 120.0
+
+
+def _positive_env_seconds(name: str, default: float) -> float:
+    """A finite, positive float from the environment, or the default.
+
+    A zero, negative, non-finite or unparseable override falls back rather
+    than raising: this only tunes a background sweep, and a typo in an env var
+    must not stop the app from starting. Three values in particular are worth
+    naming, because ``float()`` accepts two of them happily and each breaks
+    the sweep differently: ``0`` busy-loops it, ``nan`` makes the sleep timer
+    never come due (every comparison against it is False), and ``inf`` as the
+    idle timeout means nothing is ever old enough to reclaim.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "Ignoring non-positive or non-finite %s=%r; using %s", name, raw, default
+        )
+        return default
+    return value
+
+
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 
 
@@ -559,6 +613,19 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # Monotonic stamp of the last time each chat's provider was handed
+        # out, plus the single sweep task that reclaims the idle ones. See
+        # `_PROVIDER_IDLE_TIMEOUT_SECONDS` for why this exists; the task is
+        # started lazily on first use so a manager built in a test (or any
+        # process with no running loop) never creates one it does not need.
+        self._provider_last_used: dict[str, float] = {}
+        self._provider_reaper: asyncio.Task | None = None
+        self._provider_idle_timeout = _positive_env_seconds(
+            "CIAO_PROVIDER_IDLE_TIMEOUT", _PROVIDER_IDLE_TIMEOUT_SECONDS
+        )
+        self._provider_reap_interval = _positive_env_seconds(
+            "CIAO_PROVIDER_REAP_INTERVAL", _PROVIDER_REAP_INTERVAL_SECONDS
+        )
         # Fold turn journals left behind by a crashed process into their
         # transcripts as is_partial turns before anything reads history.
         try:
@@ -2647,7 +2714,7 @@ class ProjectChatManager:
             # No session, no images, no transcript -> nothing else to clean
             # up. Still cancel any in-flight provider just in case.
             self._cancel_between_turns_drain(cid)
-            provider = self._providers.pop(cid, None)
+            provider = self._pop_provider(cid)
             if provider:
                 asyncio.ensure_future(provider.disconnect())
             logger.info("Cleaned up empty chat %s", cid)
@@ -3057,7 +3124,7 @@ class ProjectChatManager:
         ctx = ChatContext.for_web(chat_id)
         self._state.reset_active_session(ctx)
         self._cancel_between_turns_drain(chat_id)
-        provider_service = self._providers.pop(chat_id, None)
+        provider_service = self._pop_provider(chat_id)
         if provider_service:
             asyncio.ensure_future(provider_service.disconnect())
         self._save()
@@ -3197,7 +3264,7 @@ class ProjectChatManager:
             task.cancel()
         self._cancel_between_turns_drain(chat_id)
         self._last_drain_result.pop(chat_id, None)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
@@ -3378,7 +3445,7 @@ class ProjectChatManager:
             self._clear_chat_retry(chat)
         self._cancel_pending_push(chat_id)
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         await self._disconnect_provider(chat_id, provider)
         await self._reclaim_provider_sessions_async(chat)
         self._unlink_chat_images(chat)
@@ -4372,7 +4439,7 @@ class ProjectChatManager:
         self._state.reset_active_session(ctx)
         # Disconnect old provider so a fresh one is created
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
         return chat
@@ -4390,7 +4457,169 @@ class ProjectChatManager:
                 agent_root=agent_root,
                 workspace=self._workspace_for_chat(chat_id),
             )
+        # Stamped on every hand-out, not just on creation: a long conversation
+        # reuses one ProviderService for its whole life, so creation time says
+        # nothing about whether the chat is still in use.
+        self._provider_last_used[chat_id] = time.monotonic()
+        self._ensure_provider_reaper()
         return self._providers[chat_id]
+
+    def _pop_provider(self, chat_id: str) -> ProviderService | None:
+        """Detach a chat's provider and forget its idle stamp.
+
+        Every lifecycle path that used to call ``self._providers.pop`` goes
+        through here so the stamp map cannot outlive the provider it describes
+        (a recycled chat id would otherwise inherit a stale last-used time).
+        Disconnecting is still the caller's job — some do it inline, some hand
+        it to ``_schedule_provider_cleanup``.
+        """
+        self._provider_last_used.pop(chat_id, None)
+        return self._providers.pop(chat_id, None)
+
+    # ── Idle provider reaping ────────────────────────────────────────────
+
+    def _ensure_provider_reaper(self) -> None:
+        """Start the idle sweep once, if there is a loop to run it on.
+
+        Called from ``_get_provider`` rather than ``__init__`` because managers
+        are constructed in tests and CLI paths with no running event loop, and
+        an install that never opens a chat needs no sweep at all.
+        """
+        if self._provider_reaper is not None and not self._provider_reaper.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._provider_reaper = loop.create_task(
+            self._provider_reap_loop(), name="provider-idle-reaper"
+        )
+
+    async def _provider_reap_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._provider_reap_interval)
+            try:
+                await self.reap_idle_providers()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill the loop
+                logger.exception("Idle provider sweep failed")
+
+    def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
+        """Whether a chat has work that a provider teardown would interrupt.
+
+        ``active_chat_ids`` covers live streams, running background subagents
+        and pending subagent watchers. The rest are per-chat tasks that hold a
+        provider without necessarily opening a broker stream.
+        """
+        if chat_id in active:
+            return True
+        for tasks in (
+            self._between_turn_drains,
+            self._retry_tasks,
+            self._background_wake_tasks,
+        ):
+            task = tasks.get(chat_id)
+            if task is not None and not task.done():
+                return True
+        if self._background_wake_pending.get(chat_id):
+            return True
+        # A parked question or approval card is held by the provider session
+        # (for opencode, by the server process itself), and the reply routes
+        # back through it. The stream may already be closed, so this is not
+        # covered by `active_chat_ids`: tearing the provider down here would
+        # strand the card the user is looking at.
+        #
+        # `chat.pending_queue` is deliberately NOT part of this test. It is
+        # persisted chat state, not provider state: `start_stream` re-seeds it
+        # on the next turn (see `_park_pending_for_retry`), so a teardown
+        # cannot lose it. Treating it as busy would pin the provider forever
+        # for a chat that parked messages and was never opened again — the
+        # exact leak this sweep exists to close. The cases where a parked
+        # queue really does need its provider (a paused question, an armed
+        # retry) are already covered above.
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return False
+        return bool(
+            getattr(chat, "pending_question", "")
+            or getattr(chat, "pending_permission", "")
+        )
+
+    async def reap_idle_providers(self, *, force: bool = False) -> list[str]:
+        """Disconnect providers for chats idle past the timeout.
+
+        Returns the chat ids reclaimed. ``force`` ignores the timeout (but not
+        the busy check) and exists for tests and for an explicit operator
+        sweep; it is never used by the periodic loop.
+
+        Only the provider is released. The chat row, its ``session_id`` and its
+        transcript are untouched, so the next turn reconnects and resumes — see
+        ``_PROVIDER_IDLE_TIMEOUT_SECONDS``.
+        """
+        if not self._providers:
+            return []
+        now = time.monotonic()
+        active = set(self.active_chat_ids())
+        reclaimed: list[str] = []
+        for chat_id in list(self._providers):
+            if self._provider_is_busy(chat_id, active):
+                # Refresh the stamp so a chat that was busy for the whole
+                # window is not reclaimed the instant its work finishes.
+                self._provider_last_used[chat_id] = now
+                continue
+            last_used = self._provider_last_used.get(chat_id)
+            if last_used is None:
+                # A provider with no stamp predates the reaper or was attached
+                # by another path; adopt it now rather than reclaiming a chat
+                # that may have been used a second ago.
+                self._provider_last_used[chat_id] = now
+                continue
+            if not force and now - last_used < self._provider_idle_timeout:
+                continue
+            provider = self._pop_provider(chat_id)
+            self._cancel_between_turns_drain(chat_id)
+            try:
+                await self._disconnect_provider(chat_id, provider)
+            except asyncio.CancelledError:
+                # Shutdown cancelled the sweep mid-disconnect. `disconnect()`
+                # awaits on both providers (the SDK transport, and
+                # `process.terminate()/wait()` for opencode), and
+                # `CancelledError` is a BaseException, so
+                # `_disconnect_provider`'s `except Exception` does not absorb
+                # it. The provider is already out of the map by now, so the
+                # shutdown hook's snapshot would miss it and leave exactly the
+                # half-closed transport that hook exists to prevent. Put it
+                # back — `stop_provider_reaper` is awaited before that
+                # snapshot is taken, so the hook still finishes the job.
+                self._providers[chat_id] = provider  # type: ignore[assignment]
+                self._provider_last_used[chat_id] = now
+                raise
+            reclaimed.append(chat_id)
+        if reclaimed:
+            logger.info(
+                "Reclaimed %d idle provider(s) after %.0fs: %s",
+                len(reclaimed),
+                self._provider_idle_timeout,
+                ", ".join(reclaimed),
+            )
+        return reclaimed
+
+    async def stop_provider_reaper(self) -> None:
+        """Cancel the sweep task. Called from the server's shutdown hook."""
+        task = self._provider_reaper
+        self._provider_reaper = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — teardown is fail-safe
+            # Swallowed, but not silently: a sweep that died mid-disconnect
+            # left providers behind, and that must not look like a clean stop.
+            logger.exception("Idle provider reaper did not stop cleanly")
 
     def _workspace_for_chat(self, chat_id: str) -> str:
         """The logical workspace a chat runs in, or the primary fallback.
@@ -4693,12 +4922,20 @@ class ProjectChatManager:
         in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
         does not name.
 
+        It also always carries the unconditional credential/runtime-state file
+        denies (``ciao.execution_modes.credential_path_deny_rules``), which no
+        workspace override or ``none`` opt-out clears.
+
         Two limits stated plainly. This scopes REACHABILITY, not authority: a
         shared account behind a reachable server still holds that account's full
-        authority. And ``disallowed_tools`` is only applied when the chat's
-        provider is ``claude`` (see the guard below); it does NOT constrain
-        opencode chats at all. Closing that non-Claude gap needs a
-        per-provider mechanism and is out of scope.
+        authority. And this list is only applied when the chat's provider is
+        ``claude`` (see the guard below). opencode is not left unconstrained:
+        it gets the equivalent credential denies as session permission rules
+        from its own provider
+        (``ciao.providers.opencode.mode_settings``, sharing the patterns in
+        ``ciao.execution_modes``). The part that remains Claude-only is the
+        harness denylist and the derived ``mcp__<server>`` allowlist; closing
+        that needs a per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
             return []
@@ -9957,6 +10194,6 @@ class ProjectChatManager:
             self._unlink_chat_images(chat)
         self._chats.pop(chat_id, None)
         self._cancel_between_turns_drain(chat_id)
-        provider = self._providers.pop(chat_id, None)
+        provider = self._pop_provider(chat_id)
         if provider:
             asyncio.ensure_future(provider.disconnect())
