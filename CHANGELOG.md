@@ -4,6 +4,7 @@
 
 ### Added
 - feat(review): talk about a retirement candidate before deciding (`30b86eff`)
+- feat(curation): compute the nightly worklist, then budget and serialize it (`39f15fbc`, #461)
 - feat(review): make the retirement queue precise enough to act on (`68be35aa`)
 - feat(review): retire the improve_link disposition (`63eac1be`)
 - feat(review): send an unlinked row hunting for its missing links (`c86ed809`)
@@ -43,12 +44,18 @@
 - fix(review): stop the ledger recording notes that never left (`434cfd78`)
 - fix(receipts): settle a removal by count, and check the journal before promoting (`795dd48b`)
 - fix(archive): keep job manifests private, and block the stage being resumed (`04e19aa6`)
+- fix(triage): stop re-reporting old failed job runs forever (`6d694415`, #476)
+- fix(mcp): bound the tool-call telemetry log and cache the usage aggregate (`5bc926c4`, #452)
+- fix(memory): queue uncertain reconciliation instead of appending (`168b5225`, #459)
+- fix(memory): defer when the reconcile planner itself raises (`d8e2d6ea`)
+- perf(search): make the per-search index pass and the graph scan proportional to the work (`f7b691fb`, #450)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
 - chore(deps): patch sharp and vitest for the open advisories (`debf4519`)
 - docs(pwa): drop the retired defer disposition from the review route (`0ffaebf3`)
 - docs(capabilities): qualify what keep actually stamps (`d229f0b2`)
+- docs(mcp): correct the tool count the loop retirement left stale (`362be562`)
 
 ## v0.16.1 - 2026-09-05
 
