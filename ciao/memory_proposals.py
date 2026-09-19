@@ -754,6 +754,7 @@ def accept_region_fact(
     actor: str = "operator",
     source: str = "pwa",
     workspace: str = "",
+    deferral_out: list[ReconcileDecision] | None = None,
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one approved region fact through the guarded path.
 
@@ -771,7 +772,11 @@ def accept_region_fact(
     is how a fact deferred at archive time gets resolved on a retry. A caller
     that passes none takes the plain append path.
 
-    Returns ``_promote_to_region``'s ``(outcome, promotable)``.
+    Returns ``_promote_to_region``'s ``(outcome, promotable)``. ``deferral_out``
+    is forwarded unchanged, so an interactive accept can report *why* its fact
+    stayed queued and against which entries — a review UI that can only say
+    "refused" gives the person no way to judge whether another retry is worth
+    a second model call.
     """
     proposal = MemoryProposal(target=target, text=text, source_section="review")
     return _promote_to_region(
@@ -782,6 +787,7 @@ def accept_region_fact(
         actor=actor,
         source=source,
         workspace=workspace,
+        deferral_out=deferral_out,
     )
 
 

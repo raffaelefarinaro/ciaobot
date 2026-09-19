@@ -682,6 +682,19 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 # a separate explicit step, matching the MCP resolve path.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
 
+# Accept a region row, reconciling it against that region's CURRENT entries
+# first, so a fact that supersedes one already there replaces it (undo-logged)
+# instead of being appended beside it. This is the way out of an archive-time
+# deferral. Opt-in because it is one model call per row — the plain accept above
+# is a single synchronous write, and the batch endpoint deliberately never
+# reconciles (one timeout per row). `reconcile` accepts 1/true/yes.
+#
+# When the fresh reconcile cannot decide either, nothing is written, the bullet
+# stays queued, and the 409 is marked `deferred: true` with `reason` and the
+# `competing` region entries (capped at 5) it was weighed against — the one
+# refusal here that another retry can resolve on its own.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept?reconcile=1"
+
 # Dismiss one row from the queue. No region/file is touched.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss"
 

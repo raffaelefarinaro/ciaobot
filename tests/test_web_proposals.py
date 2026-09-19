@@ -1771,3 +1771,62 @@ def test_a_retry_that_cannot_decide_keeps_the_row_queued(
     assert "Office is in Zurich." in resp.json()["error"]
     assert _memory_entries(config) == ["Office is in Zurich. [2026-01-01]"]
     assert [r["kind"] for r in client.get("/api/proposals").json()["rows"]] == ["memory"]
+
+
+def test_a_deferral_names_what_it_was_weighed_against(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The refusal is structured, not only prose.
+
+    The review UI puts the reason and the competing entries next to the retry
+    button. Taking them back out of the error sentence would make the wording
+    of that sentence part of the contract, so both are carried as fields —
+    ``deferred`` marks the one refusal another retry can resolve on its own,
+    which is why it and an over-cap region must not look alike.
+    """
+
+    async def timing_out(prompt: str, **kwargs: object) -> str:
+        raise TimeoutError("reconcile timed out")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", timing_out)
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    body = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1").json()
+
+    assert body["deferred"] is True
+    assert body["reason"], "a deferral with no reason is an ordinary refusal"
+    assert body["competing"] == ["Office is in Zurich. [2026-01-01]"]
+
+
+def test_an_unshaped_refusal_is_not_marked_deferred(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only a deferral offers a retry, because only a deferral can be retried.
+
+    An event-shaped fact is refused no matter how many times it is reconciled;
+    marking it retryable would put a button on the row that cannot do what it
+    says.
+    """
+
+    async def unused(*args: object, **kwargs: object) -> str:  # pragma: no cover
+        raise AssertionError("an unshaped fact is rejected before any model call")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unused)
+    config = _config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(
+        config,
+        "personal",
+        "# Memory Proposals\n\n## 2026-09-19 curation pass (this pass)\n\n"
+        "- [memory] User said the office moved.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1")
+
+    assert resp.status_code == 409, resp.json()
+    assert "deferred" not in resp.json()

@@ -3,8 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import type { ProposalRow } from '../lib/types'
-import { descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
+import type { ProposalAcceptRefusal, ProposalRow } from '../lib/types'
+import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
 
@@ -47,7 +47,33 @@ function reviewHelper(...proposalIds: string[]): ProposalHelper {
 }
 
 const confirmLeakId = ref('')
+/** Whether the pending leak confirm was raised by "check first", so the accept
+ * it releases keeps the reconcile it was asked for. */
+const confirmReconcile = ref(false)
 const olderThanDays = ref(30)
+
+/**
+ * Rows whose last accept was deferred: the fact may supersede something the
+ * region already holds and the reconcile could not say what, so nothing was
+ * written and the row is still queued.
+ *
+ * Held per row rather than in `store.error` because it is not an error to read
+ * and dismiss — it is a state the row is in, with its own next step. A toast
+ * would take the reason and the competing entries away the moment they became
+ * relevant, and the retry that resolves it belongs next to them.
+ */
+const deferredById = ref<Record<string, { reason: string; competing: string[] }>>({})
+
+function deferredFor(row: ProposalRow) {
+  return deferredById.value[row.id]
+}
+
+function clearDeferred(id: string) {
+  if (!(id in deferredById.value)) return
+  const next = { ...deferredById.value }
+  delete next[id]
+  deferredById.value = next
+}
 
 // Proposal → chat link: when an accept fallback or skill implement spawns a
 // chat, the row stays queued while the agent works. Remembering that chat
@@ -145,6 +171,15 @@ function pruneProposalChatLinks() {
 }
 
 watch(() => store.rows.map(r => r.id).join(','), pruneProposalChatLinks)
+// A deferral describes a row; a row that left the queue (resolved elsewhere, or
+// dismissed here) has no state left to describe, and leaving the notice behind
+// would attach it to whatever row the id is next reused for.
+watch(() => store.rows.map(r => r.id).join(','), () => {
+  const live = new Set(store.rows.map(r => r.id))
+  for (const id of Object.keys(deferredById.value)) {
+    if (!live.has(id)) clearDeferred(id)
+  }
+})
 watch(() => projectStore.chats.map(c => `${c.chat_id}:${c.archived}`).join(','), pruneProposalChatLinks)
 
 // Filter and selection live in the store: the sidebar renders the controls, the
@@ -380,22 +415,50 @@ function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
 }
 
-async function confirmAccept(row: ProposalRow) {
+async function confirmAccept(row: ProposalRow, reconcile = false) {
   // A region-kind row with a leak warning must be confirmed before the accept
   // is sent: accepting writes a region visible in every workspace.
   if (row.leak_warning) {
     confirmLeakId.value = row.id
+    confirmReconcile.value = reconcile
     return
   }
-  await acceptWithFallback(row)
+  await acceptWithFallback(row, '', reconcile)
 }
 
 async function doAccept(row: ProposalRow, workspace = '') {
+  const reconcile = confirmReconcile.value
   confirmLeakId.value = ''
-  await acceptWithFallback(row, workspace)
+  confirmReconcile.value = false
+  await acceptWithFallback(row, workspace, reconcile)
 }
 
-async function acceptWithFallback(row: ProposalRow, workspace = '') {
+/** Retry a deferred accept, reconciling against the region as it stands now.
+ *
+ * No leak confirm: this is only reachable from a row that already refused an
+ * accept the operator confirmed, so the consent it would ask for has been
+ * given for this exact write.
+ */
+async function retryReconcile(row: ProposalRow) {
+  await acceptWithFallback(row, '', true)
+}
+
+/** The deferral behind a 409, or null when the refusal was some other kind.
+ *
+ * Read off the error's payload rather than matched against its message: the
+ * message is prose meant for a person, and a UI that switches behaviour on it
+ * changes meaning the next time the sentence is reworded.
+ */
+function deferralFrom(e: unknown): { reason: string; competing: string[] } | null {
+  const payload = (e as { payload?: ProposalAcceptRefusal } | null)?.payload
+  if (!payload || typeof payload !== 'object' || !payload.deferred) return null
+  return {
+    reason: payload.reason || 'the reconcile could not decide',
+    competing: Array.isArray(payload.competing) ? payload.competing.map(String) : [],
+  }
+}
+
+async function acceptWithFallback(row: ProposalRow, workspace = '', reconcile = false) {
   // Direct accept is best-effort by design – create-only for people
   // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
   // fold-guard for projects (`ciao/web/routes_api.py:7602`), cap/region
@@ -406,8 +469,14 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
   const { api } = await import('../lib/api')
   store.setBusy(row.id, true)
   try {
-    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
-    await api.post(`/api/proposals/${row.id}/accept${query}`)
+    const params = new URLSearchParams()
+    if (workspace) params.set('workspace', workspace)
+    // Opt-in per click: the server spends one model call on it, so the plain
+    // accept stays instant and only a row that needs judgment asks for it.
+    if (reconcile) params.set('reconcile', '1')
+    const query = params.toString()
+    await api.post(`/api/proposals/${row.id}/accept${query ? `?${query}` : ''}`)
+    clearDeferred(row.id)
     await store.fetch()
     // `store.fetch` deliberately leaves history alone, so this direct post -
     // the only mutation that does not go through `store.act` - has to say so
@@ -417,6 +486,15 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    const deferral = deferralFrom(e)
+    if (deferral) {
+      // Checked before the merge chat, which every region kind falls back to on
+      // any refusal. A deferral already has a cheaper remedy — one more retry,
+      // against the entries the row now names — so spawning an agent to merge
+      // by hand would skip past the fix and leave a chat to clean up.
+      deferredById.value = { ...deferredById.value, [row.id]: deferral }
+      return
+    }
     const fallback = descriptorFor(row).fallback
     if (fallback && fallback.when(msg)) {
       await mergeViaChat(row, msg, fallback)
@@ -474,6 +552,7 @@ function moveTargets(row: ProposalRow): string[] {
 
 function cancelLeakConfirm() {
   confirmLeakId.value = ''
+  confirmReconcile.value = false
 }
 
 function doDismiss(row: ProposalRow) {
@@ -887,6 +966,30 @@ watch(
             <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
           </div>
 
+          <!-- Deferred: the last accept reconciled this fact against the region
+               and could not tell whether it supersedes something already there,
+               so nothing was written and the row is still queued. Shown in place
+               of the actions, like the leak confirm, because the next step is
+               not "accept or dismiss" but "decide about these entries": the
+               reason, what it was weighed against, and one more attempt against
+               the region as it stands now. -->
+          <div v-else-if="deferredFor(row)" class="pr-actions pr-actions--deferred">
+            <p class="pr-deferred-reason">Nothing was written: {{ deferredFor(row)!.reason }}</p>
+            <template v-if="deferredFor(row)!.competing.length">
+              <p class="pr-deferred-label">Weighed against</p>
+              <ul class="pr-deferred-competing">
+                <li v-for="entry in deferredFor(row)!.competing" :key="entry">{{ entry }}</li>
+              </ul>
+            </template>
+            <button
+              type="button"
+              class="btn-small btn-primary"
+              :disabled="store.isBusy(row.id)"
+              @click="retryReconcile(row)"
+            >{{ store.isBusy(row.id) ? 'checking…' : 'try again' }}</button>
+            <button type="button" class="btn-small btn-chip" @click="clearDeferred(row.id)">leave it queued</button>
+          </div>
+
           <!-- Linked: this proposal already spawned a merge/implement chat that
                is still active. The row stays queued while the agent works, so
                replace the accept/dismiss buttons with a link to that chat.
@@ -944,6 +1047,19 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="confirmAccept(row)"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'accept') }}</button>
+            <!-- The same write, with one check in front of it: a fact that
+                 replaces something already remembered is merged over it instead
+                 of added beside it. Neutral, not a second pink bar — plain
+                 accept remains the routine action, and this one costs a model
+                 call, which is why it is asked for rather than always done. -->
+            <button
+              v-if="canAccept(row) && canReconcile(row)"
+              type="button"
+              class="btn-small btn-chip"
+              title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
+              :disabled="store.isBusy(row.id)"
+              @click="confirmAccept(row, true)"
+            >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
@@ -1109,6 +1225,39 @@ watch(
 
 .pr-actions--confirm {
   min-width: 12rem;
+}
+
+/* Wider than the other action columns because it carries prose and a list of
+   region entries, not just buttons. It still collapses to the full row width
+   under 640px, where `.pr-actions` spans the grid. */
+.pr-actions--deferred {
+  min-width: 16rem;
+  max-width: 22rem;
+}
+
+.pr-deferred-reason {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--warning);
+  overflow-wrap: anywhere;
+}
+
+.pr-deferred-label {
+  margin: var(--space-1) 0 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.pr-deferred-competing {
+  margin: 0;
+  padding-left: var(--space-3);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
 }
 
 .pr-group-label {

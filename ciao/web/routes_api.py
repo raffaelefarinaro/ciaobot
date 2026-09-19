@@ -8312,14 +8312,22 @@ async def proposal_action(request: Request) -> JSONResponse:
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
                     # retry. Losing it silently is the one outcome to avoid.
-                    return JSONResponse(
-                        {
-                            "error": promoted.get("error", "could not write the region"),
-                            "id": pid,
-                            "region": promoted.get("region", ""),
-                        },
-                        status_code=409,
-                    )
+                    refusal: dict[str, Any] = {
+                        "error": promoted.get("error", "could not write the region"),
+                        "id": pid,
+                        "region": promoted.get("region", ""),
+                    }
+                    if promoted.get("deferred"):
+                        # The one refusal another `?reconcile=1` can resolve, so
+                        # it is marked as such and carries what it was weighed
+                        # against. Every other refusal here needs a human to
+                        # change something first (an over-cap region, event-shaped
+                        # text), and offering a retry for those would be a button
+                        # that cannot do what it says.
+                        refusal["deferred"] = True
+                        refusal["reason"] = promoted.get("reason", "")
+                        refusal["competing"] = promoted.get("competing", [])
+                    return JSONResponse(refusal, status_code=409)
             elif accept.action == "fold_doc":
                 promoted = await proposal_service._accept_project_row(config, row)
                 if not promoted.get("ok"):

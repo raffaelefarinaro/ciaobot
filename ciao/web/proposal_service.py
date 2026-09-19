@@ -706,7 +706,7 @@ def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None,
 
 async def _plan_accept_reconcile(
     config, row: dict[str, Any], region: str, guide: Path
-) -> tuple[ReconcileDecision | None, str | None]:
+) -> tuple[ReconcileDecision | None, ReconcileDecision | None]:
     """Reconcile one queued fact against the region as it stands right now.
 
     The retry half of the archive-time deferral. A fact queued because the
@@ -719,10 +719,14 @@ async def _plan_accept_reconcile(
     model call on a click: the default accept stays synchronous and instant,
     and a row that needs judgment asks for it explicitly.
 
-    Returns ``(decision, error)``. ``decision`` is None when no call was needed
-    — an empty region or an exact duplicate is decided deterministically — and
-    ``error`` is set when the retry came back unable to decide again, in which
-    case the row stays queued rather than being appended on a failed retry.
+    Returns ``(decision, deferral)``. ``decision`` is None when no call was
+    needed — an empty region or an exact duplicate is decided deterministically
+    — and ``deferral`` is the defer row when the retry came back unable to
+    decide again, in which case the row stays queued rather than being appended
+    on a failed retry. The defer row, not a sentence about it: its ``reason``
+    and ``competing`` entries are what the review UI puts in front of the
+    person deciding whether to retry again, and a formatted string cannot be
+    taken apart into them.
     """
     from ciao.insights import _resolve_insights_call
     from ciao.memory_proposals import reconcile_region_fact
@@ -740,16 +744,39 @@ async def _plan_accept_reconcile(
             provider=provider,
         )
     except Exception as exc:  # noqa: BLE001 — a failed retry must not write
-        return None, f"could not reconcile against ciao:{region}: {exc}"
+        return None, {
+            "action": "defer",
+            "reason": f"the reconcile call against ciao:{region} failed: {exc}",
+        }
     if decision is not None and decision.get("action") == "defer":
-        competing = decision.get("competing") or []
-        detail = f" It competes with: {'; '.join(competing)}." if competing else ""
-        return None, (
-            f"reconciling against ciao:{region} could not decide "
-            f"({decision.get('reason') or 'uncertain'}), so nothing was "
-            f"written and this stays queued.{detail}"
-        )
+        return None, decision
     return decision, None
+
+
+def _deferred_response(region: str, deferral: ReconcileDecision) -> dict[str, Any]:
+    """The refusal body for a fact no reconcile could place.
+
+    One shape for both ways a reconcile-backed accept defers — the retry that
+    could not decide, and the update whose entry moved under it — because the
+    review UI shows one thing for both: what stopped the write, the entries it
+    was weighed against, and a retry button. ``reason`` and ``competing`` are
+    carried as fields *and* folded into ``error``, since the plain message is
+    all a curl caller or an older client ever sees.
+    """
+    reason = str(deferral.get("reason") or "the reconcile could not decide")
+    competing = [str(entry) for entry in (deferral.get("competing") or [])]
+    detail = f" It competes with: {'; '.join(competing)}." if competing else ""
+    return {
+        "ok": False,
+        "region": region,
+        "deferred": True,
+        "reason": reason,
+        "competing": competing,
+        "error": (
+            f"reconciling against ciao:{region} could not decide ({reason}), so "
+            f"nothing was written and this stays queued.{detail}"
+        ),
+    }
 
 
 async def _promote_region_row(
@@ -808,15 +835,18 @@ async def _promote_region_row(
 
     decision: ReconcileDecision | None = None
     if reconcile:
-        decision, reconcile_error = await _plan_accept_reconcile(
-            config, row, region, guide
-        )
-        if reconcile_error:
+        decision, deferral = await _plan_accept_reconcile(config, row, region, guide)
+        if deferral is not None:
             # The retry is the way out of a deferral, so a retry that cannot
             # decide either leaves the row exactly where it was — queued, with
             # the reason and the entries it competes with on the response.
-            return {"ok": False, "region": region, "error": reconcile_error}
+            return _deferred_response(region, deferral)
 
+    # Filled only on a ``deferred`` outcome, with the defer row `_promote_to_region`
+    # built for an update it could not safely apply. Without it the response could
+    # say a write was refused but not against what, which is the whole of what
+    # someone deciding whether to retry needs.
+    deferrals: list[ReconcileDecision] = []
     try:
         outcome, promotable = accept_region_fact(
             guide_path=guide,
@@ -827,6 +857,7 @@ async def _promote_region_row(
             actor="operator",
             source="pwa",
             workspace=str(row.get("workspace") or ""),
+            deferral_out=deferrals,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc), "region": region}
@@ -882,16 +913,18 @@ async def _promote_region_row(
         # The reconcile decision named an entry that could not be safely
         # replaced. Appending instead is the defect this path exists to avoid,
         # so the row survives and says what to do about it.
-        return {
-            "ok": False,
-            "region": region,
-            "deferred": True,
-            "error": (
-                f"this fact may supersede an entry already in ciao:{region}, and "
-                "the reconcile could not say which. Nothing was written; retry "
-                "to reconcile it against the current entries."
-            ),
-        }
+        return _deferred_response(
+            region,
+            deferrals[0]
+            if deferrals
+            else {
+                "action": "defer",
+                "reason": (
+                    f"this fact may supersede an entry already in ciao:{region}, "
+                    "and the reconcile could not say which"
+                ),
+            },
+        )
     return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
 
 
