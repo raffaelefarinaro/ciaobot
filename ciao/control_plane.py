@@ -23,6 +23,8 @@ from ciao import vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
+    EXPAND_MAX_WINDOWS,
+    expand_note,
     get_db_path,
     index_vault,
     init_db,
@@ -708,6 +710,76 @@ class CiaoControlPlane:
         key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
         rows = await run_read(key, _search)
         return _ok(rows)
+
+    async def vault_expand(
+        self,
+        principal: McpPrincipal,
+        path: str,
+        query: str = "",
+        windows: int = EXPAND_MAX_WINDOWS,
+    ) -> dict[str, Any]:
+        """Bounded extra context from ONE note ``vault_search`` already matched.
+
+        The scoped drill-down for the case the snippet rule cannot serve: a
+        32-token snippet that cut away the qualification, the negation, or the
+        paragraph naming the current value, leaving recall to answer from a
+        fragment that reverses the meaning of the note.
+
+        It refines that rule rather than replacing it, and the scope is the
+        same one ``vault_search`` answers under. ``path`` must be a key the FTS
+        index currently holds beneath this workspace's prefix, so it can only
+        ever name a note this principal's own search could have returned;
+        anything else — another workspace's note, a transcript, an opted-out
+        note, a traversal, an absolute path — is ``note_not_matched``, not a
+        smaller answer. What comes back is the markdown section around each
+        matched line, capped in windows, lines and characters, never the note.
+
+        There is no expiring result handle to go stale: the index pass and the
+        file read both happen here, so an edited note is answered at its
+        current revision and a removed one is refused.
+        """
+        root = self._vault_root(principal)
+        base = self._search_key_base()
+        bounded_windows = max(1, min(EXPAND_MAX_WINDOWS, int(windows)))
+        target = str(path or "").strip()
+        if not target:
+            raise ControlPlaneError(
+                "invalid_request",
+                "Pass the 'path' of a vault_search result to expand.",
+            )
+
+        def _expand() -> dict[str, Any] | None:
+            db_path = get_db_path(self._search_runtime_dir())
+            conn = sqlite3.connect(db_path)
+            try:
+                # Same write lock and incremental pass as vault_search: the
+                # expansion is validated against a current index, so a note
+                # edited or removed since the search is refreshed or refused
+                # rather than answered from a stale row.
+                with keyed_lock(f"fts-index:{db_path}"):
+                    init_db(conn)
+                    index_vault(conn, root, path_base=base)
+                return expand_note(
+                    conn,
+                    base,
+                    root,
+                    target,
+                    query,
+                    path_prefix=vault_key_prefix(root, base),
+                    max_windows=bounded_windows,
+                )
+            finally:
+                conn.close()
+
+        key = f"vault_expand:{root}:{base}:{target}:{query}:{bounded_windows}"
+        result = await run_read(key, _expand)
+        if result is None:
+            raise ControlPlaneError(
+                "note_not_matched",
+                "That path is not a current vault_search result in this "
+                "workspace. Run vault_search and expand a path it returned.",
+            )
+        return _ok(result)
 
     async def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.

@@ -28,6 +28,31 @@ shipped scenario against the real guards:
 - **Injection** — every injection fixture carries a canary and an
   `instruction_following` forbid, and every asserted fact is source-backed by
   the fixture's own regions or retrieved snippets.
+- **Recall drill-down** — the 32-token snippet for a synthetic note really
+  does drop the clause that supersedes the value it keeps; `fts_search.expand_note`
+  returns that clause; and the expansion contains nothing from the note's
+  sibling block and refuses a path belonging to another workspace. The last two
+  are zero-tolerance: a drill-down that leaks is worse than no drill-down. This
+  is the model-free half of the evaluation issue #460 asked for before the
+  prompt started recommending `vault_expand`.
+
+The model-backed half was run once for that change, as two arms of the same
+scenario (`recall-truncated-snippet-expansion`) on `claude`/`sonnet`,
+`repeats=3`: the baseline arm saw only the truncated snippet, the candidate arm
+also saw the bounded `vault_expand` result for the same note. Nothing else
+differed.
+
+| Dimension | Snippet only | + bounded drill-down |
+| --- | --- | --- |
+| `supported_fact_recall` | 0.000 (n=3) | 1.000 (n=3) |
+| `current_fact` | 0.000 (n=3) | 1.000 (n=3) |
+| `routing_accuracy` | 0.667 (n=3) | 1.000 (n=3) |
+| `supported_fact_precision` | 1.000 (n=3) | 1.000 (n=3) |
+
+Snippet-only billed at the superseded rate in all three runs while noting that
+the snippet was truncated — the failure the drill-down exists to fix. Three
+samples on one model are not a reliability claim; the deterministic checks
+above are what CI enforces.
 
 These checks are model-free and run in CI. A guard regression fails the suite
 even though no model is invoked. The scenario catalog is validated at load:

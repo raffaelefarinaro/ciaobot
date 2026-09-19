@@ -84,6 +84,10 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "memory_status",
     "memory_update",
     "vault_search",
+    # The scoped evidence drill-down. Read-only and strictly narrower than the
+    # file read it replaces: it can only widen context inside a note this
+    # workspace's own search already matched.
+    "vault_expand",
     "gws_status",
     "projects_list",
     "project_get",

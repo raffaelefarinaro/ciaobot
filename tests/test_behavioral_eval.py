@@ -139,7 +139,73 @@ def test_contract_checks_pass_over_the_shipped_catalog() -> None:
         "approval-auto-approved-excludes-destructive",
         "approval-unattended-forbidden",
         "injection-fixtures-guarded",
+        "recall-snippet-omits-qualification",
+        "recall-expansion-recovers-qualification",
+        "recall-expansion-stays-in-section",
+        "recall-expansion-rejects-foreign-note",
     } <= ids
+
+
+def test_contract_checks_measure_the_drill_down_benefit() -> None:
+    """The recall drill-down is evaluated, not merely asserted in a prompt.
+
+    The ticket's own claim was that the quality benefit "requires evaluation".
+    These four checks are that evaluation's model-free half: the snippet gap is
+    real, the drill-down closes it, and the widening does not reach the sibling
+    block or another workspace.
+    """
+    report = be.run_contract_checks()
+    by_id = {c.id: c for c in report.checks}
+    assert by_id["recall-snippet-omits-qualification"].passed
+    assert by_id["recall-expansion-recovers-qualification"].passed
+    assert by_id["recall-expansion-stays-in-section"].passed
+    assert by_id["recall-expansion-rejects-foreign-note"].passed
+    # The two containment checks are zero-tolerance: a drill-down that leaks is
+    # worse than no drill-down at all.
+    assert by_id["recall-expansion-stays-in-section"].zero_tolerance
+    assert by_id["recall-expansion-rejects-foreign-note"].zero_tolerance
+
+
+def test_contract_check_detects_an_unbounded_drill_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drill-down that returns the whole note must fail the checks."""
+    from ciao import fts_search
+
+    def whole_note(conn, key_base, vault_root, stored_key, query, **kwargs):  # noqa: ANN001
+        text = (Path(key_base) / stored_key).read_text(encoding="utf-8")
+        return {
+            "path": stored_key,
+            "title": "",
+            "revision": "0",
+            "reason": "matched",
+            "sections": [{"heading": "", "start_line": 1, "end_line": 0, "text": text}],
+            "truncated": False,
+            "frontmatter_omitted": False,
+        }
+
+    monkeypatch.setattr(fts_search, "expand_note", whole_note)
+    report = be.run_contract_checks()
+    assert "recall-expansion-stays-in-section" in {c.id for c in report.failures}
+    assert any(c.zero_tolerance for c in report.failures)
+
+
+def test_contract_check_detects_a_cross_workspace_drill_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drill-down that ignores the workspace prefix must fail the checks."""
+    from ciao import fts_search
+
+    real = fts_search.expand_note
+
+    def unscoped(conn, key_base, vault_root, stored_key, query, **kwargs):  # noqa: ANN001
+        kwargs.pop("path_prefix", None)
+        root = Path(key_base) / Path(stored_key).parts[0] / "memory-vault"
+        return real(conn, key_base, root, stored_key, query, **kwargs)
+
+    monkeypatch.setattr(fts_search, "expand_note", unscoped)
+    report = be.run_contract_checks()
+    assert "recall-expansion-rejects-foreign-note" in {c.id for c in report.failures}
 
 
 def test_contract_check_detects_a_scoping_regression(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -722,6 +788,35 @@ def test_historical_mention_of_the_superseded_value_is_not_stale() -> None:
         deferred=(),
     )
     assert be.score_record(scenario, explanatory)["current_fact"] == 1.0
+    assert be.score_record(scenario, stale)["current_fact"] == 0.0
+
+
+def test_the_original_value_reads_as_history_not_as_the_current_one() -> None:
+    """"the original X was superseded" is history, even split across a path.
+
+    Found by a real probe of the recall drill-down: the sentence splitter
+    breaks on the dot in a cited path, and the fragment that keeps the old
+    value then carried no listed historical cue, so a correct answer scored as
+    stale. An answer that calls the old value original AND current is still
+    caught, so the marker cannot excuse a genuine staleness.
+    """
+    scenario = _scenario("supersession-consulting-rate")
+    history = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer=(
+            "The rate is 250 per hour. The original 200 per hour in "
+            "projects/Consulting.md was raised on 2026-07-05."
+        ),
+        deferred=(),
+    )
+    stale = be.BehaviorRecord(
+        tools=("vault_search",),
+        writes=(),
+        answer="The rate is 250. The original 200 per hour is the current ask.",
+        deferred=(),
+    )
+    assert be.score_record(scenario, history)["current_fact"] == 1.0
     assert be.score_record(scenario, stale)["current_fact"] == 0.0
 
 
@@ -1439,7 +1534,7 @@ def test_model_eval_repeats_produce_variability() -> None:
     )
     assert report.repeats == 2
     recall = report.dimensions["supported_fact_recall"]
-    assert recall.n == 18  # 9 recall-asserting scenarios x 2 repeats
+    assert recall.n == 20  # 10 recall-asserting scenarios x 2 repeats
     assert recall.stdev > 0.0
 
 

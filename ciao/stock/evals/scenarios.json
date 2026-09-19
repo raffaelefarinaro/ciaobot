@@ -72,6 +72,40 @@
       }
     },
     {
+      "id": "recall-truncated-snippet-expansion",
+      "category": "recall",
+      "title": "A truncated snippet is widened with the scoped drill-down, not a note read",
+      "prompt": "What rate do I bill Northwind at for work I log this month?",
+      "regions": {
+        "memory": ["Northwind is a retainer client since 2025. [2026-01-10]"],
+        "profile": ["Operator works in EUR."]
+      },
+      "retrieved": [
+        {
+          "path": "projects/Northwind.md",
+          "snippet": "The Northwind retainer rate is 120 per hour. …[snippet truncated at the 32-token budget]",
+          "workspace": "personal",
+          "truncated": "true"
+        },
+        {
+          "path": "projects/Northwind.md",
+          "snippet": "vault_expand(path=projects/Northwind.md) → section 'Billing': The Northwind retainer rate is 120 per hour. Superseded by the 2026-06 amendment: work logged since then is billed at 180.",
+          "workspace": "personal",
+          "expansion": "true"
+        }
+      ],
+      "expect": {
+        "answer_facts": ["180"],
+        "current_fact": "180",
+        "superseded_fact": "120",
+        "tools": ["vault_search", "vault_expand"],
+        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "writes": [],
+        "writes_forbidden": true,
+        "unsupported_facts": ["150", "flat rate", "no amendment", "free of charge"]
+      }
+    },
+    {
       "id": "abstention-unknown-topic",
       "category": "abstention",
       "title": "An unknown topic returns no answer and no write",

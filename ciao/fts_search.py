@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 import yaml
 
 from ciao import vault_index
@@ -815,6 +817,272 @@ def search_logs(
     what a not-yet-migrated root and every per-root ``index_file`` write produce.
     """
     return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+
+
+# ── Scoped evidence drill-down ─────────────────────────────────────────────
+#
+# `search` answers with `_public_snippet`: the FTS-highlighted lines only,
+# inside SQLite's 32-token budget. That narrowness is a privacy property, not
+# an accident — it is what keeps an unrelated private line out of a recall
+# answer. It is also narrow enough to cut away the half of a sentence that
+# decides the answer: a qualification ("…only for work logged before the
+# amendment"), a negation, or the paragraph naming the current value. Recall is
+# then told to answer from snippets alone, so it answers confidently from a
+# fragment whose meaning is the opposite of the note's.
+#
+# `expand_note` is the bounded repair. It is deliberately NOT a note reader:
+#
+# * Scoped — the only admissible argument is a stored key the index currently
+#   holds *in `vault_fts`* and under the caller's own `path_prefix`. Another
+#   workspace's note, a transcript, a `search: false` note, reserved
+#   bookkeeping, a traversal, an absolute path, and a file that is not an
+#   indexed note all have no row, and are refused before anything is read from
+#   disk. The filesystem read is then re-checked for containment under the
+#   vault root, so a symlink inside the vault cannot point out of it.
+# * Bounded — the answer is the markdown section around each matched line,
+#   capped at `EXPAND_MAX_WINDOWS` windows, `EXPAND_MAX_LINES` lines per window
+#   and `EXPAND_MAX_CHARS` characters overall. A secret sitting in a *different*
+#   section of the same note is still not returned, which is exactly the
+#   property `_public_snippet` was protecting; credential-shaped assignments
+#   that do land inside a window have their value redacted as well.
+# * Explicit — nothing calls this automatically. Recall asks for it, by the
+#   path a search already returned, when the snippet cannot support the answer.
+#
+# There is no opaque, expiring result token: the stored key IS the reference,
+# and it is re-validated against the live index and re-read from disk on every
+# call. A note that has since been edited, renamed, opted out, or trashed is
+# therefore refreshed or refused rather than answered from a stale handle.
+
+EXPAND_MAX_WINDOWS = 3
+EXPAND_MAX_LINES = 40
+EXPAND_MAX_CHARS = 1800
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+# Credential-shaped assignments whose VALUE is dropped from an expanded window.
+# Defence in depth behind the section bound, not the primary guarantee: the
+# primary guarantee is that a window never leaves the matched section.
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b((?:api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token"
+    r"|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase"
+    r"|private[_-]?key|bearer)\s*[:=]\s*)(\S.*)"
+)
+
+# A bare, long, space-free base64 run: a PEM body or a raw token carries no
+# keyword of its own, so the assignment rule above would not see it.
+_OPAQUE_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
+
+
+def _redact_secrets(line: str) -> str:
+    """Drop the value of a credential-shaped line, keeping its label."""
+    if _OPAQUE_BLOB_RE.match(line.strip()):
+        return "[redacted]"
+    return _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[redacted]", line)
+
+
+def _expand_terms(query: str) -> list[str]:
+    """Lexical stems used to locate the lines worth expanding around.
+
+    A light singular stem, not the Porter stemmer FTS5 indexes with: this only
+    has to find the line the snippet came from inside one already-matched note,
+    and a lenient match costs at most one extra bounded window.
+    """
+    terms: list[str] = []
+    for word in re.findall(r"\w+", query.casefold()):
+        if len(word) < 3 and not word.isdigit():
+            continue
+        stem = word[:-1] if len(word) >= 5 and word.endswith("s") else word
+        if stem not in terms:
+            terms.append(stem)
+    return terms
+
+
+def _strip_frontmatter(text: str) -> tuple[str, int]:
+    """Body text and the number of leading lines the frontmatter occupied.
+
+    Frontmatter is never expanded. It is note bookkeeping — ids, tags, aliases,
+    source paths — and none of it is the qualification an answer was missing,
+    so returning it would only widen the blast radius for no recall benefit.
+    """
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return text, 0
+    head = text[: match.end()]
+    return text[match.end():], head.count("\n")
+
+
+def _section_bounds(lines: list[str], index: int) -> tuple[int, int]:
+    """The markdown block containing ``index`` as ``(start, end_exclusive)``.
+
+    Every heading is a boundary, whatever its level. A section that swallowed
+    its own subsections would make the note's title heading enclose the entire
+    file — and a note's title is exactly what a recall query matches — so the
+    first drill-down would have returned the whole note, which is the rule this
+    is meant to refine, not repeal. Ending at the next heading of any level
+    keeps a window to one block, so a sibling block holding an unrelated
+    secret or an unrelated person's details is never part of the answer. A
+    deeper subsection is reachable only by matching a line inside it, which
+    costs one of the (bounded) windows.
+    """
+    start = 0
+    for i in range(index, -1, -1):
+        if _HEADING_RE.match(lines[i]):
+            start = i
+            break
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if _HEADING_RE.match(lines[i]):
+            end = i
+            break
+    return start, end
+
+
+def _clip_window(
+    start: int, end: int, focus: int, max_lines: int
+) -> tuple[int, int]:
+    """Narrow a section to ``max_lines`` centred on the matched line."""
+    if end - start <= max_lines:
+        return start, end
+    low = max(start, focus - max_lines // 2)
+    high = min(end, low + max_lines)
+    low = max(start, high - max_lines)
+    return low, high
+
+
+def _heading_for(lines: list[str], start: int) -> str:
+    match = _HEADING_RE.match(lines[start]) if start < len(lines) else None
+    return match.group(2).strip() if match else ""
+
+
+def expand_note(
+    conn: sqlite3.Connection,
+    key_base: Path,
+    vault_root: Path,
+    stored_key: str,
+    query: str,
+    *,
+    path_prefix: str = "",
+    max_windows: int = EXPAND_MAX_WINDOWS,
+    max_lines: int = EXPAND_MAX_LINES,
+    max_chars: int = EXPAND_MAX_CHARS,
+) -> dict[str, Any] | None:
+    """Bounded extra context from ONE note a search already matched.
+
+    ``stored_key`` is the ``path`` a :func:`search_vault` row carried, relative
+    to ``key_base``. Returns ``None`` — never a partial or an approximate
+    answer — when the key is not an indexed, in-scope note of ``vault_root``,
+    which is what makes this a refinement of the snippet rule rather than a way
+    around it.
+    """
+    key = str(stored_key).strip().replace("/", os.sep)
+    if not key or "\x00" in key or Path(key).is_absolute():
+        return None
+    # Scope first, so an out-of-scope key is never even looked up. A caller
+    # holding the fail-closed NO_MATCH_KEY_PREFIX sentinel matches nothing,
+    # because no stored key starts with a separator.
+    if path_prefix and not key.startswith(path_prefix):
+        return None
+    row = conn.execute(
+        "SELECT title FROM vault_fts WHERE path = ?", (key,)
+    ).fetchone()
+    if row is None:
+        return None
+
+    root = Path(vault_root).resolve()
+    try:
+        resolved = (Path(key_base) / key).resolve()
+    except OSError:
+        return None
+    # Re-checked on the filesystem even though the index vouched for the key:
+    # the row proves a note by that name was indexed, not that the path still
+    # resolves inside the vault. A symlink planted under the vault resolves
+    # out of it here and is refused.
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        return None
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    revision = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    body, offset = _strip_frontmatter(text)
+    lines = body.splitlines()
+    terms = _expand_terms(query)
+    # Headings are not evidence, and anchoring on one wastes a window on a
+    # block that only names the topic. The qualification the snippet cut is on
+    # a body line; that line's block is what has to come back.
+    matched = [
+        i
+        for i, line in enumerate(lines)
+        if not _HEADING_RE.match(line)
+        and any(term in line.casefold() for term in terms)
+    ]
+    reason = "matched"
+    if not matched:
+        # The note matched on its title, or on a term the Porter stemmer
+        # conflated. Fall back to the first block with body text: still one
+        # bounded window of the same note, never the whole file.
+        reason = "no_line_match"
+        first = next(
+            (
+                i
+                for i, line in enumerate(lines)
+                if line.strip() and not _HEADING_RE.match(line)
+            ),
+            -1,
+        )
+        matched = [first] if first >= 0 else []
+
+    windows: list[tuple[int, int, int]] = []
+    truncated = False
+    for index in matched:
+        start, end = _section_bounds(lines, index)
+        low, high = _clip_window(start, end, index, max_lines)
+        if any(low >= w_low and high <= w_high for w_low, w_high, _ in windows):
+            # Another matched line in the same section already covers this one:
+            # nothing is omitted, so this is not truncation.
+            continue
+        if len(windows) >= max_windows:
+            truncated = True
+            break
+        if (low, high) != (start, end):
+            truncated = True
+        windows.append((low, high, start))
+
+    sections: list[dict[str, Any]] = []
+    used = 0
+    for low, high, start in windows:
+        rendered = "\n".join(_redact_secrets(line) for line in lines[low:high]).strip()
+        if not rendered:
+            continue
+        if used + len(rendered) > max_chars:
+            rendered = rendered[: max(0, max_chars - used)].rstrip()
+            truncated = True
+        if not rendered:
+            truncated = True
+            break
+        used += len(rendered)
+        sections.append(
+            {
+                "heading": _heading_for(lines, start),
+                "start_line": offset + low + 1,
+                "end_line": offset + high,
+                "text": rendered,
+            }
+        )
+        if used >= max_chars:
+            truncated = True
+            break
+
+    return {
+        "path": key,
+        "title": str(row[0] or ""),
+        "revision": revision,
+        "reason": reason,
+        "sections": sections,
+        "truncated": truncated,
+        "frontmatter_omitted": offset > 0,
+    }
 
 
 # ── Retrieval telemetry (decay-by-disuse signal) ───────────────────────────

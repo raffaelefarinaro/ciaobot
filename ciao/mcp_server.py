@@ -1093,6 +1093,30 @@ class CiaoMcpService:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
+        @tool(name="vault_expand", annotations=_READ, structured_output=True)
+        async def vault_expand(
+            path: str, query: str = "", windows: int = 3
+        ) -> dict[str, Any]:
+            """Return bounded extra context from ONE note ``vault_search``
+            already matched.
+
+            Use it when a snippet is cut short and the answer depends on what
+            it omits — a qualification, a negation, or which value is current.
+            ``path`` must be a path a ``vault_search`` result carried; ``query``
+            is the same query, and decides which lines are expanded around.
+
+            The reply is the markdown section around each matched line, capped
+            in windows, lines and characters — not the note. It cannot reach a
+            different note, another workspace, or a transcript: anything that
+            is not a current search result of this workspace is refused. It is
+            not a substitute for a file read, and it is the only permitted way
+            to widen the evidence for a pure recall question.
+            """
+            return await self._invoke(
+                "vault_expand",
+                lambda cp, p: cp.vault_expand(p, path, query, windows),
+            )
+
         @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
         async def vault_review(
             action: str = "list", path: str = "", candidate_id: str = "",
