@@ -1007,6 +1007,90 @@ def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
     return rows
 
 
+def _reconcile_candidates(
+    archive_path: Path,
+    guide_path: Path,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """The region-bound facts a reconcile call would compare, and its entries.
+
+    Returns ``(candidates_by_region, entries_by_region)``. A candidate is a
+    state-shaped fact that is not already an exact duplicate and whose region
+    is non-empty — the two cases a model call cannot improve on. Shared with
+    :func:`defer_region_facts` so the fallback defers exactly the facts the
+    planner would have reconciled, no more.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_tool import read_region, resolve_region
+
+    by_region: dict[str, list[str]] = {}
+    entries_by_region: dict[str, list[str]] = {}
+    try:
+        text = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        return by_region, entries_by_region
+    body = _extract_insights_section(text)
+    if not body:
+        return by_region, entries_by_region
+
+    for proposal in propose_from_insights(body):
+        if proposal.target not in ("memory", "profile"):
+            continue
+        promotable = _promotable_text(proposal.text)
+        if promotable is None:
+            continue
+        try:
+            region = resolve_region(proposal.target)
+            if region not in entries_by_region:
+                entries, diags = read_region(guide_path, region)
+                if diags:
+                    continue
+                entries_by_region[region] = entries
+        except Exception:  # noqa: BLE001 — reconcile is best-effort
+            continue
+        stripped = {
+            strip_learned_stamp(entry) for entry in entries_by_region[region]
+        }
+        if promotable in stripped:
+            continue
+        # An empty region has nothing to reconcile against.
+        if not entries_by_region[region]:
+            continue
+        by_region.setdefault(region, []).append(promotable)
+    return by_region, entries_by_region
+
+
+def defer_region_facts(
+    archive_path: Path,
+    guide_path: Path,
+    *,
+    reason: str,
+) -> dict[str, dict[str, Any]] | None:
+    """Defer every fact :func:`plan_region_reconcile` would have compared.
+
+    The planner swallows its own failures, but a raise that escapes it — or any
+    other reason a caller cannot run it — leaves ``region_decisions`` at
+    ``None``, and ``None`` is the plain append path: the obsolete fact and its
+    replacement both land in the always-loaded region. Callers use this instead
+    of ``None`` so an un-run reconcile is as conservative as a failed one.
+
+    Never raises: it is a fallback, and a fallback that throws would put the
+    caller back on the append path it is here to avoid.
+    """
+    try:
+        by_region, _entries = _reconcile_candidates(archive_path, guide_path)
+    except Exception:  # noqa: BLE001 — a failed fallback must not resurface
+        logger.info("memory reconcile: could not build deferral rows")
+        return None
+    decisions: dict[str, dict[str, Any]] = {}
+    for region_name, candidates in by_region.items():
+        for fact in candidates:
+            decisions[_decision_key(region_name, fact)] = {
+                "action": "defer",
+                "reason": reason,
+            }
+    return decisions or None
+
+
 async def plan_region_reconcile(
     archive_path: Path,
     guide_path: Path,
@@ -1032,47 +1116,9 @@ async def plan_region_reconcile(
     the region every session loads. Deferred facts stay in the proposals queue,
     so nothing is lost and a human resolves them against the current region.
     """
-    from ciao.memory_tool import read_region, resolve_region
-
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    body = _extract_insights_section(text)
-    if not body:
-        return None
-
-    from ciao.memory_audit import strip_learned_stamp
-
     # Candidates per region: state-shaped facts that are not already exact
     # duplicates (those need no model call to drop).
-    by_region: dict[str, list[str]] = {}
-    entries_by_region: dict[str, list[str]] = {}
-    for proposal in propose_from_insights(body):
-        if proposal.target not in ("memory", "profile"):
-            continue
-        promotable = _promotable_text(proposal.text)
-        if promotable is None:
-            continue
-        try:
-            region = resolve_region(proposal.target)
-            if region not in entries_by_region:
-                entries, diags = read_region(guide_path, region)
-                if diags:
-                    continue
-                entries_by_region[region] = entries
-        except Exception:  # noqa: BLE001 — reconcile is best-effort
-            continue
-        stripped = {
-            strip_learned_stamp(entry) for entry in entries_by_region[region]
-        }
-        if promotable in stripped:
-            continue
-        # An empty region has nothing to reconcile against.
-        if not entries_by_region[region]:
-            continue
-        by_region.setdefault(region, []).append(promotable)
-
+    by_region, entries_by_region = _reconcile_candidates(archive_path, guide_path)
     if not by_region:
         return None
 

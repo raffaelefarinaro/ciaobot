@@ -1609,6 +1609,54 @@ def test_plan_region_reconcile_defers_an_out_of_range_update(
     assert row["action"] == "defer"
 
 
+def test_defer_region_facts_covers_exactly_the_reconcile_candidates(
+    tmp_path: Path,
+) -> None:
+    """The un-run-reconcile fallback defers what the planner would compare.
+
+    No more: an exact duplicate and an empty region are decided without a model
+    call, so deferring them would queue facts nothing is uncertain about.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Deploys run on Tuesdays."],
+        profile_entries=[],
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: Deploys run on Thursdays. [idx=1] [memory]\n"
+        "- Durable rule: Deploys run on Tuesdays. [idx=2] [memory]\n",
+        encoding="utf-8",
+    )
+
+    decisions = mp.defer_region_facts(archive, guide, reason="planner raised")
+
+    assert decisions is not None
+    assert list(decisions) == [mp._decision_key("memory", "Deploys run on Thursdays.")]
+    assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")] == {
+        "action": "defer",
+        "reason": "planner raised",
+    }
+
+
+def test_defer_region_facts_returns_none_when_there_is_nothing_to_reconcile(
+    tmp_path: Path,
+) -> None:
+    """An empty region needs no model call, so it needs no deferral either."""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: Deploys run on Thursdays. [idx=1] [memory]\n",
+        encoding="utf-8",
+    )
+
+    assert mp.defer_region_facts(archive, guide, reason="planner raised") is None
+
+
 def test_reconcile_timeout_leaves_the_region_unchanged(
     tmp_path: Path, monkeypatch
 ) -> None:

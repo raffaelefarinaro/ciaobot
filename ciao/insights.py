@@ -1141,14 +1141,14 @@ async def run_archive_pipeline(
 
             if name == "memory_proposals":
                 from ciao.memory_proposals import (
+                    defer_region_facts,
                     plan_region_reconcile,
                     proposals_from_archive,
                 )
 
                 # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
-                # model call per region. Best-effort — a failure degrades to
-                # the plain append path and is never recorded as a stage
-                # failure on its own.
+                # model call per region. Best-effort — a failure never records
+                # a stage failure on its own.
                 region_decisions = None
                 if guide_path is not None:
                     try:
@@ -1162,6 +1162,16 @@ async def run_archive_pipeline(
                     except Exception:  # noqa: BLE001 — reconcile is optional
                         logger.exception(
                             "Region reconcile failed for %s", archive_path
+                        )
+                        # Leaving this None would read downstream as "no
+                        # reconcile was needed", which is the plain append
+                        # path — the same obsolete-fact-beside-its-replacement
+                        # the planner's own defer rows exist to prevent. Defer
+                        # the facts it would have compared instead.
+                        region_decisions = defer_region_facts(
+                            archive_path,
+                            guide_path,
+                            reason="region reconcile raised",
                         )
 
                 # The reconcile above awaits a model: re-check before writing
@@ -1190,6 +1200,12 @@ async def run_archive_pipeline(
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
                     run.extra["promoted"] = proposal_stats.get("promoted", 0)
+                    # Queued *because* reconcile could not be trusted, not
+                    # because the fact was unsure. Without its own count this
+                    # is indistinguishable from an ordinary review row, and a
+                    # reconcile backend that is quietly down looks like a
+                    # sudden taste for review.
+                    run.extra["deferred"] = proposal_stats.get("deferred", 0)
                     if proposal_errors:
                         run.status = "error"
                         run.error = proposal_errors[-1]
