@@ -34,7 +34,10 @@ queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
 Shape is not evidence. The guards above ask whether a fact *looks* like
 durable state; :func:`unsupported_region_facts` asks the separate question of
 whether any turn the user actually typed says so, which a fluent model
-satisfies on formatting alone otherwise.
+satisfies on formatting alone otherwise. The structured form of that question
+— the fact candidate v1 record, the normalized transcript it is checked
+against, and the verdict codes — lives in :mod:`ciao.fact_candidates`; this
+module owns the routing decision that follows from it.
 """
 
 from __future__ import annotations
@@ -344,6 +347,32 @@ def _promotable_text(text: str) -> str | None:
     return text
 
 
+def _provenance_row(proposal: MemoryProposal) -> dict[str, Any]:
+    """The evidence chain stamped onto a region write's receipt.
+
+    Records where the fact came from and under which rules it was admitted:
+    the transcript turns it cited, the insights section it was extracted
+    from, its temporal bounds, and the extraction/policy versions in force.
+    A bullet that cited nothing is recorded as ``provenance: "unknown"``
+    rather than being given a plausible id — the receipt has to be able to say
+    "this archive never said where this came from", which is a different fact
+    from "it came from turn 3".
+    """
+    from ciao.fact_candidates import candidate_from_proposal
+
+    candidate = candidate_from_proposal(proposal)
+    return {
+        "schema": candidate.schema,
+        "source_message_ids": list(candidate.source_message_ids),
+        "provenance": candidate.provenance,
+        "section": candidate.section,
+        "as_of": candidate.as_of,
+        "expires": candidate.expires,
+        "extraction_version": candidate.extraction_version,
+        "policy_version": candidate.policy_version,
+    }
+
+
 def _log_consolidation(
     vault_root: Path, region: str, old_entry: str, *, label: str = "auto-reconcile"
 ) -> None:
@@ -571,6 +600,7 @@ def _promote_to_region(
                     destination=f"ciao:{region}",
                     removed_texts=[old],
                     kind="region_update",
+                    provenance=_provenance_row(proposal),
                 )
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
@@ -609,6 +639,7 @@ def _promote_to_region(
             fact_text=promotable,
             destination=f"ciao:{region}",
             kind="region_apply",
+            provenance=_provenance_row(proposal),
         )
         return "written", promotable
     except RevisionConflict as exc:
@@ -1104,43 +1135,28 @@ def transcript_evidence(filtered_jsonl: str) -> TranscriptEvidence | None:
     and forbids ``[idx=N]``, and a legacy archive re-processed without its
     session blob has no indices either. Gating those on indices that were
     never meant to exist would queue every fact in them for no evidence gain.
+
+    The id/role view of the same normalization
+    :func:`ciao.fact_candidates.normalize_transcript` builds, kept as its own
+    narrow type because most callers only need "does this turn exist, and did
+    the user type it" and should not have to carry the turn bodies to ask.
     """
-    known: set[int] = set()
-    attended: set[int] = set()
-    for line in filtered_jsonl.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        idx = record.get("idx")
-        # `isinstance(True, int)` is True, so a bool `idx` would index turn 1.
-        if isinstance(idx, bool) or not isinstance(idx, int):
-            continue
-        known.add(idx)
-        # `unattended` marks a turn a schedule or routine fired. Both
-        # extraction prompts forbid extracting facts from one; this is where
-        # that instruction stops being advisory.
-        if record.get("type") == "user" and not record.get("unattended"):
-            attended.add(idx)
-    if not known:
+    from ciao.fact_candidates import normalize_transcript
+
+    transcript = normalize_transcript(filtered_jsonl)
+    if transcript is None:
         return None
-    return TranscriptEvidence(frozenset(known), frozenset(attended))
+    return TranscriptEvidence(transcript.known, transcript.attended_user)
 
 
 def _evidence_gap(citations: tuple[int, ...], evidence: TranscriptEvidence) -> str:
     """Why a bullet's citation fails to support it, or "" when it holds.
 
-    Three machine-checkable failures, each one an acceptance criterion of the
-    unverified-fact report: nothing cited at all, a citation naming a turn the
-    transcript does not contain (a fabricated id, or the ``[idx=0]`` the
-    prompt forbids), and a citation that lands only on assistant output or on
-    automation turns — the assistant's own suggestion quoted back as if the
-    user had stated it.
+    The id-only subset of :func:`ciao.fact_candidates.validate_candidate`,
+    kept for callers that hold citations without the fact they support:
+    nothing cited at all, a citation naming a turn the transcript does not
+    contain (a fabricated id, or the ``[idx=0]`` the prompt forbids), and a
+    citation that lands only on assistant output or on automation turns.
     """
     if not citations:
         return "bullet cites no source turn"
@@ -1161,11 +1177,19 @@ def unsupported_region_facts(
 
     Region promotion checked a fact's *shape* — durable-rule clause, not
     event-shaped — which a fluent model satisfies whether or not any turn said
-    the thing. This adds the missing half: the bullet must also cite a turn
-    that exists and that the user typed. Facts that fail take the ``"defer"``
-    route, so an unverifiable fact is handled exactly like an uncertain
-    reconcile — queued in ``Workspace/Memory-Proposals.md`` for a human, never
-    dropped and never written to always-loaded context on the model's word.
+    the thing. This adds the missing half, through the fact-candidate v1
+    evidence policy (:mod:`ciao.fact_candidates`): the bullet must cite a turn
+    that exists, that the user typed, that contains the claim in their own
+    words rather than in pasted or tool material, that asserts it rather than
+    negating it or offering it as an example, and that no later turn corrects.
+    Its destination must also be one this workspace actually routes to.
+
+    Facts that fail take the ``"defer"`` route, so an unverifiable fact is
+    handled exactly like an uncertain reconcile — queued in
+    ``Workspace/Memory-Proposals.md`` for a human, never dropped and never
+    written to always-loaded context on the model's word. Each row carries the
+    verdict code, the cited ids and the policy version, so the queue can say
+    *which* check refused the fact rather than only that something did.
 
     Keyed like :func:`plan_region_reconcile`'s rows so the caller can overlay
     these on top of a reconcile plan; an evidence failure must win over an
@@ -1177,10 +1201,15 @@ def unsupported_region_facts(
     written into an empty always-loaded region is the one nothing later
     contradicts.
     """
+    from ciao.fact_candidates import (
+        candidate_from_proposal,
+        normalize_transcript,
+        validate_candidate,
+    )
     from ciao.memory_tool import resolve_region
 
-    evidence = transcript_evidence(filtered_jsonl)
-    if evidence is None:
+    transcript = normalize_transcript(filtered_jsonl)
+    if transcript is None:
         return {}
     try:
         text = archive_path.read_text(encoding="utf-8")
@@ -1199,21 +1228,29 @@ def unsupported_region_facts(
             # Already headed for the queue on shape grounds; a second reason
             # to queue it would change nothing.
             continue
-        gap = _evidence_gap(proposal.citations, evidence)
-        if not gap:
+        # The evidence is weighed against the text that would actually be
+        # written — the `Durable rule:` clause — not the narration around it.
+        verdict = validate_candidate(
+            candidate_from_proposal(proposal),
+            transcript,
+            claim_text=promotable,
+        )
+        if verdict.ok:
             continue
         try:
             region = resolve_region(proposal.target)
         except ValueError:
             continue
         logger.info(
-            "memory evidence: %r is unverified (%s); queuing for review",
+            "memory evidence: %r is unverified (%s: %s); queuing for review",
             promotable[:80],
-            gap,
+            verdict.code,
+            verdict.reason,
         )
         rows[_decision_key(region, promotable)] = {
             "action": "defer",
-            "reason": f"unverified: {gap}",
+            "reason": f"unverified: {verdict.reason}",
+            "evidence": verdict.as_row(),
         }
     return rows
 
