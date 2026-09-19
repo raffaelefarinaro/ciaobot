@@ -551,8 +551,17 @@ def commit_region_change(
     destination: str = "",
     removed_texts: list[str] | None = None,
     kind: str = "region_apply",
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Replace one region's body through the receipt protocol.
+
+    ``provenance``, when given, is the fact's evidence chain as
+    :mod:`ciao.fact_candidates` records it — the transcript message ids it was
+    extracted from, plus the extraction and policy versions that admitted it.
+    Stored verbatim on the receipt so a saved fact can be traced back to the
+    turn that established it and to the rules in force when it was written;
+    an explicit user correction is only auditable if the entry it replaced and
+    the entry that replaced it each name their own source turn.
 
     The caller normally already holds the guide lock (``lock``), because it had
     to read the region to compute the merge. When ``lock`` is None this function
@@ -632,6 +641,7 @@ def commit_region_change(
             "fact_text": fact_text,
             "destination": destination,
             "removed_texts": list(removed_texts or []),
+            "provenance": dict(provenance or {}),
         }
         if before_text == after_text:
             # Nothing to write: a no-op still gets a receipt so a caller can

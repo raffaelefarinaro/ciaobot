@@ -46,10 +46,27 @@ _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 TELEMETRY_MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
 TELEMETRY_KEEP_LINES = 2000            # detailed records retained after a trim
 
-# Aggregate shape shared by the rollup sidecar and the live log scan:
-# ``{tool: {calls, errors, total_ms, providers, last_used}}`` plus the derived
-# call and error totals.
-_UsageTotals = tuple[dict[str, dict[str, Any]], int, int]
+
+@dataclass(frozen=True)
+class _UsageAggregate:
+    """What one pass over the telemetry state yields.
+
+    ``tools`` is the per-tool aggregate
+    (``{tool: {calls, errors, total_ms, providers, last_used}}``) folded from
+    the rollup sidecar and then the retained log, so its counters are
+    lifetime. The rest describes *where those counters came from*, which is
+    what lets :meth:`CiaoMcpService.usage` label its window: retention drops
+    detailed records, and a summary that cannot say so invites the reader to
+    treat a trimmed log as the whole history.
+    """
+
+    tools: dict[str, dict[str, Any]]
+    total_calls: int
+    total_errors: int
+    retained_records: int
+    retained_since: str
+    rolled_up_calls: int
+    rotated_at: str
 
 
 def _usage_entry() -> dict[str, Any]:
@@ -63,8 +80,13 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> None:
+def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> str | None:
     """Add one telemetry line to the per-tool aggregate.
+
+    Returns the folded record's timestamp (``""`` when the record carries
+    none) or ``None`` when the line was skipped, so callers can count
+    retained records and find the start of the retained window without a
+    second parse.
 
     Blank, malformed, and non-object lines are skipped: the log is appended
     to live, so a reader can meet a half-written final record and must not
@@ -72,16 +94,16 @@ def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> None:
     """
     line = line.strip()
     if not line:
-        return
+        return None
     try:
         record = json.loads(line)
     except (ValueError, TypeError):
-        return
+        return None
     if not isinstance(record, dict):
-        return
+        return None
     name = str(record.get("tool") or "")
     if not name:
-        return
+        return None
     entry = tools.setdefault(name, _usage_entry())
     entry["calls"] += 1
     if record.get("status") != "ok":
@@ -93,6 +115,7 @@ def _fold_telemetry_line(tools: dict[str, dict[str, Any]], line: str) -> None:
     timestamp = str(record.get("timestamp") or "")
     if timestamp > entry["last_used"]:
         entry["last_used"] = timestamp
+    return timestamp
 
 
 def _workspace_env_path(workspace_root: Path) -> Path:
@@ -326,7 +349,7 @@ class CiaoMcpService:
         # lifetime totals the Settings usage table reports.
         self._telemetry_totals_path = Path(config.state_path).parent / "mcp_tool_calls_totals.json"
         self._usage_lock = threading.Lock()
-        self._usage_cache: tuple[tuple[Any, ...], _UsageTotals] | None = None
+        self._usage_cache: tuple[tuple[Any, ...], _UsageAggregate] | None = None
         issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
         self.server = FastMCP(
             "ciaobot",
@@ -781,9 +804,12 @@ class CiaoMcpService:
         (written by :meth:`_record_tool_call`) is folded on top of the
         counters the size guard already rolled into the totals sidecar, so
         rotation does not change what a total means. The detailed records
-        themselves only cover the retained window.
+        themselves only cover the retained window, and the ``window`` key
+        says so explicitly rather than leaving a reader to assume the log
+        still holds every call.
         """
-        tools, total, total_errors = self._usage_totals()
+        aggregate = self._usage_totals()
+        tools = aggregate.tools
         rows: list[dict[str, Any]] = []
         for name, entry in tools.items():
             calls = entry["calls"]
@@ -808,10 +834,46 @@ class CiaoMcpService:
         if limit is not None:
             rows = rows[:limit]
         return {
-            "total_calls": total,
-            "total_errors": total_errors,
+            "total_calls": aggregate.total_calls,
+            "total_errors": aggregate.total_errors,
             "tool_count": len(self._tool_names),
+            "window": self._usage_window(aggregate),
             "tools": rows,
+        }
+
+    @staticmethod
+    def _usage_window(aggregate: _UsageAggregate) -> dict[str, Any]:
+        """Describe what the counts above cover.
+
+        Retention means the log no longer holds every call, so the summary
+        has to say which part of it is still backed by detailed records and
+        which part survives only as a rolled-up counter. ``scope`` stays
+        ``"lifetime"`` because the sidecar preserves the dropped records'
+        counters; without that rollup these numbers would silently become
+        "since the last trim".
+        """
+        retained = aggregate.retained_records
+        rolled_up = aggregate.rolled_up_calls
+        if rolled_up:
+            since = aggregate.retained_since or "the last trim"
+            label = (
+                f"Lifetime totals. Detailed records cover the newest {retained} "
+                f"calls (since {since}); {rolled_up} older calls are counted from "
+                "the rolled-up totals only."
+            )
+        else:
+            label = (
+                f"Lifetime totals. All {retained} recorded calls are still "
+                "retained as detailed records."
+            )
+        return {
+            "scope": "lifetime",
+            "label": label,
+            "retained_records": retained,
+            "retained_since": aggregate.retained_since,
+            "rolled_up_calls": rolled_up,
+            "max_records": TELEMETRY_KEEP_LINES,
+            "rotated_at": aggregate.rotated_at,
         }
 
     def _telemetry_fingerprint(self) -> tuple[Any, ...]:
@@ -831,35 +893,55 @@ class CiaoMcpService:
                 marks.append((info.st_mtime_ns, info.st_size))
         return tuple(marks)
 
-    def _usage_totals(self) -> _UsageTotals:
+    def _usage_totals(self) -> _UsageAggregate:
         fingerprint = self._telemetry_fingerprint()
         with self._usage_lock:
             cached = self._usage_cache
             if cached is not None and cached[0] == fingerprint:
                 return cached[1]
-        tools = self._load_telemetry_totals()
+        tools, rotated_at = self._load_telemetry_totals()
+        rolled_up_calls = sum(_as_int(entry["calls"]) for entry in tools.values())
+        retained_records = 0
+        retained_since = ""
         try:
             with self._telemetry_path.open("r", encoding="utf-8") as handle:
                 for line in handle:
-                    _fold_telemetry_line(tools, line)
+                    timestamp = _fold_telemetry_line(tools, line)
+                    if timestamp is None:
+                        continue
+                    retained_records += 1
+                    if timestamp and (not retained_since or timestamp < retained_since):
+                        retained_since = timestamp
         except OSError:
             pass
-        total = sum(_as_int(entry["calls"]) for entry in tools.values())
-        total_errors = sum(_as_int(entry["errors"]) for entry in tools.values())
-        result: _UsageTotals = (tools, total, total_errors)
+        result = _UsageAggregate(
+            tools=tools,
+            total_calls=sum(_as_int(entry["calls"]) for entry in tools.values()),
+            total_errors=sum(_as_int(entry["errors"]) for entry in tools.values()),
+            retained_records=retained_records,
+            retained_since=retained_since,
+            rolled_up_calls=rolled_up_calls,
+            rotated_at=rotated_at,
+        )
         with self._usage_lock:
             self._usage_cache = (fingerprint, result)
         return result
 
-    def _load_telemetry_totals(self) -> dict[str, dict[str, Any]]:
-        """Read the counters for records the size guard already dropped."""
+    def _load_telemetry_totals(self) -> tuple[dict[str, dict[str, Any]], str]:
+        """Read the counters for records the size guard already dropped.
+
+        Returns them with the timestamp of the trim that wrote them, which
+        the usage window reports so a reader can tell a never-trimmed log
+        from one whose detail starts at a rotation.
+        """
         try:
             raw = json.loads(self._telemetry_totals_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {}
+            return {}, ""
         stored = raw.get("tools") if isinstance(raw, dict) else None
+        rotated_at = str(raw.get("rotated_at") or "") if isinstance(raw, dict) else ""
         if not isinstance(stored, dict):
-            return {}
+            return {}, rotated_at
         tools: dict[str, dict[str, Any]] = {}
         for name, entry in stored.items():
             if not isinstance(entry, dict):
@@ -872,7 +954,7 @@ class CiaoMcpService:
                 "providers": {str(item) for item in providers if item} if isinstance(providers, list) else set(),
                 "last_used": str(entry.get("last_used") or ""),
             }
-        return tools
+        return tools, rotated_at
 
     def _trim_telemetry_if_large(self) -> None:
         """Roll the oldest records into the totals sidecar and drop them."""
@@ -888,10 +970,11 @@ class CiaoMcpService:
                 return
             dropped = lines[:-TELEMETRY_KEEP_LINES]
             kept = lines[-TELEMETRY_KEEP_LINES:]
-            totals = self._load_telemetry_totals()
+            totals, _previous_rotation = self._load_telemetry_totals()
             for line in dropped:
                 _fold_telemetry_line(totals, line)
             payload = {
+                "rotated_at": datetime.now(UTC).isoformat(),
                 "tools": {
                     name: {
                         "calls": entry["calls"],
@@ -1017,13 +1100,16 @@ class CiaoMcpService:
                 ]
                 record["result_count"] = len(paths)
                 record["result_paths"] = paths[:50]
+        # Telemetry is strictly best-effort: a full disk, a read-only
+        # runtime directory, or a value that will not serialise must not
+        # turn a successful tool call into a failed one.
         try:
             self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             self._trim_telemetry_if_large()
             with self._telemetry_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
-        except OSError:
-            pass
+        except (OSError, TypeError, ValueError):
+            logger.debug("Failed to record MCP tool telemetry", exc_info=True)
 
     def _tool(self, *args: Any, **kwargs: Any):
         name = str(kwargs.get("name") or (args[0] if args else ""))
@@ -1111,6 +1197,12 @@ class CiaoMcpService:
             is not a current search result of this workspace is refused. It is
             not a substitute for a file read, and it is the only permitted way
             to widen the evidence for a pure recall question.
+
+            ``reason`` says whether the reply is evidence. ``matched`` means the
+            sections are the blocks around the lines your query matched;
+            ``no_line_match`` means the note holds no such line, and the single
+            block returned is context rather than evidence — abstain instead of
+            answering from it. ``truncated`` marks a reply the bounds cut short.
             """
             return await self._invoke(
                 "vault_expand",

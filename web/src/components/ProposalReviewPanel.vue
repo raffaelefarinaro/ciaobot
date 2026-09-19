@@ -3,7 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import type { ProposalAcceptRefusal, ProposalRow } from '../lib/types'
+import type { ProposalAcceptRefusal, ProposalPreview, ProposalRow } from '../lib/types'
+import { lineChanges, type LineChange } from '../lib/textDiff'
 import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
@@ -46,10 +47,6 @@ function reviewHelper(...proposalIds: string[]): ProposalHelper {
   }
 }
 
-const confirmLeakId = ref('')
-/** Whether the pending leak confirm was raised by "check first", so the accept
- * it releases keeps the reconcile it was asked for. */
-const confirmReconcile = ref(false)
 const olderThanDays = ref(30)
 
 /**
@@ -73,6 +70,121 @@ function clearDeferred(id: string) {
   const next = { ...deferredById.value }
   delete next[id]
   deferredById.value = next
+}
+
+// -- Decision card ----------------------------------------------------------
+//
+// Accept used to write straight from the row, which meant the only description
+// of the change was the bullet's own text — and that is not the change: the
+// promotion reconciles against whatever the destination holds now, stamps a
+// learned-at date, recognises a duplicate and writes nothing, or bumps a
+// learning's recurrence count instead of appending a second copy.
+//
+// So the primary action opens a card instead: destination, source, the Add /
+// Update operation, and the exact replacement the SERVER computed. One primary
+// action confirms it; edit, discuss and dismiss are the secondaries. The card
+// replaces the row's actions in place, the same shape the leak confirmation
+// already used (which now folds into the card rather than stacking a second
+// confirmation on top of it).
+const previewId = ref('')
+const editingPreview = ref(false)
+const editBuffer = ref('')
+
+const openPreview = computed(() => (previewId.value ? store.previews[previewId.value] : undefined))
+
+/** Which row, if any, is showing its decision card. */
+function isPreviewOpen(row: ProposalRow): boolean {
+  return previewId.value === row.id
+}
+
+async function reviewAccept(row: ProposalRow) {
+  previewId.value = row.id
+  editingPreview.value = false
+  editBuffer.value = row.text
+  await store.loadPreview(row.id)
+}
+
+function closePreview() {
+  const id = previewId.value
+  previewId.value = ''
+  editingPreview.value = false
+  editBuffer.value = ''
+  // The revision is only a promise about a card the operator is looking at.
+  // Leaving it behind would hand a stale one to the next batch accept.
+  if (id) store.dropPreview(id)
+}
+
+function startEditingPreview() {
+  editingPreview.value = true
+  editBuffer.value = openPreview.value?.text || editBuffer.value
+}
+
+/** Re-preview the edited wording against the same current destination, so the
+ * replacement on screen is always the one the accept would make. */
+async function applyPreviewEdit() {
+  const id = previewId.value
+  if (!id) return
+  const text = editBuffer.value.trim()
+  if (!text) return
+  await store.loadPreview(id, text)
+  editingPreview.value = false
+}
+
+function cancelPreviewEdit() {
+  editingPreview.value = false
+  editBuffer.value = openPreview.value?.text || ''
+}
+
+/** The words on the one primary action. Naming the destination is the point:
+ * "accept" does not say that a fact is about to enter always-loaded memory. */
+function previewPrimaryLabel(row: ProposalRow): string {
+  const preview = store.previews[row.id]
+  if (!preview) return 'save'
+  if (preview.operation === 'none') return 'clear this row'
+  if (preview.operation === 'move') return `move to ${preview.destination || 'destination'}`
+  return `save to ${preview.destination || 'memory'}`
+}
+
+const OPERATION_LABELS: Record<string, string> = {
+  add: 'Add',
+  update: 'Update',
+  move: 'Move',
+  none: 'No change',
+}
+
+function operationLabel(operation: string): string {
+  return OPERATION_LABELS[operation] ?? 'Change'
+}
+
+/** The exact lines the accept would add or remove, from the server's bodies. */
+function previewChanges(preview: ProposalPreview): LineChange[] {
+  return lineChanges(preview.before, preview.after, preview.separator || '\n')
+}
+
+/** Confirm the change the card is showing, pinned to the revision it was
+ * computed against. A destination that moved since then comes back as a
+ * conflict with a refreshed preview, and the card stays open on it. */
+async function confirmPreview(row: ProposalRow, workspace = '', reconcile = false) {
+  const preview = store.previews[row.id]
+  if (!preview) return
+  const edited = preview.text !== row.text ? preview.text : ''
+  const result = await store.act(row.id, 'accept', workspace, {
+    expectedRevision: preview.revision,
+    text: edited,
+    reconcile,
+  })
+  if (result.conflict) return
+  if (result.ok) {
+    previewId.value = ''
+    editingPreview.value = false
+    store.dropPreview(row.id)
+    clearDeferred(row.id)
+    return
+  }
+  // A refusal that is not a conflict (an over-cap guard, a people note that
+  // needs a manual merge) still has the kind's merge-chat fallback behind it.
+  closePreview()
+  await handleAcceptRefusal(row, result.error || '', result.payload)
 }
 
 // Proposal → chat link: when an accept fallback or skill implement spawns a
@@ -415,32 +527,38 @@ function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
 }
 
-async function confirmAccept(row: ProposalRow, reconcile = false) {
-  // A region-kind row with a leak warning must be confirmed before the accept
-  // is sent: accepting writes a region visible in every workspace.
-  if (row.leak_warning) {
-    confirmLeakId.value = row.id
-    confirmReconcile.value = reconcile
-    return
-  }
-  await acceptWithFallback(row, '', reconcile)
+async function doAccept(row: ProposalRow, workspace = '') {
+  await acceptWithFallback(row, workspace)
 }
 
-async function doAccept(row: ProposalRow, workspace = '') {
-  const reconcile = confirmReconcile.value
-  confirmLeakId.value = ''
-  confirmReconcile.value = false
-  await acceptWithFallback(row, workspace, reconcile)
+/** Confirm the card's change, but reconcile it against the destination first.
+
+ * Same write as the primary action, with one check in front of it: a fact that
+ * supersedes an entry already in the region is merged over it instead of added
+ * beside it. Opt-in per click because the server spends a model call on it, and
+ * because the plain save is the routine decision.
+ *
+ * The leak warning needs no separate confirmation: it rides on the card, so the
+ * click that releases this write is already the consent for it.
+ */
+async function reconcileFirst(row: ProposalRow) {
+  await confirmPreview(row, '', true)
 }
 
 /** Retry a deferred accept, reconciling against the region as it stands now.
  *
- * No leak confirm: this is only reachable from a row that already refused an
- * accept the operator confirmed, so the consent it would ask for has been
- * given for this exact write.
+ * No further confirmation: this is only reachable from a row that already
+ * refused an accept the operator confirmed on the card, so the consent it would
+ * ask for has been given for this exact write.
  */
 async function retryReconcile(row: ProposalRow) {
-  await acceptWithFallback(row, '', true)
+  const result = await store.act(row.id, 'accept', '', { reconcile: true })
+  if (result.ok) {
+    clearDeferred(row.id)
+    return
+  }
+  if (result.conflict) return
+  await handleAcceptRefusal(row, result.error || '', result.payload)
 }
 
 /** The deferral behind a 409, or null when the refusal was some other kind.
@@ -449,16 +567,16 @@ async function retryReconcile(row: ProposalRow) {
  * message is prose meant for a person, and a UI that switches behaviour on it
  * changes meaning the next time the sentence is reworded.
  */
-function deferralFrom(e: unknown): { reason: string; competing: string[] } | null {
-  const payload = (e as { payload?: ProposalAcceptRefusal } | null)?.payload
-  if (!payload || typeof payload !== 'object' || !payload.deferred) return null
+function deferralFrom(payload: unknown): { reason: string; competing: string[] } | null {
+  const refusal = payload as ProposalAcceptRefusal | null | undefined
+  if (!refusal || typeof refusal !== 'object' || !refusal.deferred) return null
   return {
-    reason: payload.reason || 'the reconcile could not decide',
-    competing: Array.isArray(payload.competing) ? payload.competing.map(String) : [],
+    reason: refusal.reason || 'the reconcile could not decide',
+    competing: Array.isArray(refusal.competing) ? refusal.competing.map(String) : [],
   }
 }
 
-async function acceptWithFallback(row: ProposalRow, workspace = '', reconcile = false) {
+async function acceptWithFallback(row: ProposalRow, workspace = '') {
   // Direct accept is best-effort by design – create-only for people
   // (`ciao/memory_proposals.py:348` + `ciao/web/routes_api.py:7559`),
   // fold-guard for projects (`ciao/web/routes_api.py:7602`), cap/region
@@ -469,13 +587,8 @@ async function acceptWithFallback(row: ProposalRow, workspace = '', reconcile = 
   const { api } = await import('../lib/api')
   store.setBusy(row.id, true)
   try {
-    const params = new URLSearchParams()
-    if (workspace) params.set('workspace', workspace)
-    // Opt-in per click: the server spends one model call on it, so the plain
-    // accept stays instant and only a row that needs judgment asks for it.
-    if (reconcile) params.set('reconcile', '1')
-    const query = params.toString()
-    await api.post(`/api/proposals/${row.id}/accept${query ? `?${query}` : ''}`)
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+    await api.post(`/api/proposals/${row.id}/accept${query}`)
     clearDeferred(row.id)
     await store.fetch()
     // `store.fetch` deliberately leaves history alone, so this direct post -
@@ -486,25 +599,41 @@ async function acceptWithFallback(row: ProposalRow, workspace = '', reconcile = 
     return
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    const deferral = deferralFrom(e)
-    if (deferral) {
-      // Checked before the merge chat, which every region kind falls back to on
-      // any refusal. A deferral already has a cheaper remedy — one more retry,
-      // against the entries the row now names — so spawning an agent to merge
-      // by hand would skip past the fix and leave a chat to clean up.
-      deferredById.value = { ...deferredById.value, [row.id]: deferral }
-      return
-    }
-    const fallback = descriptorFor(row).fallback
-    if (fallback && fallback.when(msg)) {
-      await mergeViaChat(row, msg, fallback)
-      return
-    }
-    store.error = msg
+    await handleAcceptRefusal(row, msg, (e as { payload?: ProposalAcceptRefusal })?.payload)
     return
   } finally {
     store.setBusy(row.id, false)
   }
+}
+
+/** What to do with an accept the server refused.
+ *
+ * Shared with the decision card's confirm, so a refusal reached through the
+ * preview gets the same merge-chat fallback a direct accept always got —
+ * otherwise adding the card would have quietly removed the recovery path for
+ * a people note that needs a manual merge or a fold the guard rejected.
+ *
+ * A deferral is read off the refusal's payload and handled first, before the
+ * merge-chat fallback every region kind has: it is the one refusal another
+ * check can resolve on its own, so it becomes a state on the row rather than
+ * an agent spawned to merge the fact by hand.
+ */
+async function handleAcceptRefusal(row: ProposalRow, msg: string, payload?: unknown) {
+  const deferral = deferralFrom(payload)
+  if (deferral) {
+    // Checked before the merge chat, which every region kind falls back to on
+    // any refusal. A deferral already has a cheaper remedy — one more retry,
+    // against the entries the row now names — so spawning an agent to merge by
+    // hand would skip past the fix and leave a chat to clean up.
+    deferredById.value = { ...deferredById.value, [row.id]: deferral }
+    return
+  }
+  const fallback = descriptorFor(row).fallback
+  if (fallback && fallback.when(msg)) {
+    await mergeViaChat(row, msg, fallback)
+    return
+  }
+  store.error = msg
 }
 
 /** Hand a refused accept to a background chat that can merge it by hand.
@@ -548,11 +677,6 @@ function moveTargets(row: ProposalRow): string[] {
   const all = projectStore.workspaceOptions.map(w => w.name)
   const ordered = [...named.filter(n => n !== own), ...all.filter(n => n !== own && !named.includes(n))]
   return [...new Set(ordered)]
-}
-
-function cancelLeakConfirm() {
-  confirmLeakId.value = ''
-  confirmReconcile.value = false
 }
 
 function doDismiss(row: ProposalRow) {
@@ -858,6 +982,27 @@ watch(
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
     </div>
 
+    <!-- What the last bulk action did, per destination. Fifty per-row lines
+         repeat the queue the operator was just looking at and never answer the
+         question a bulk accept raises, which is what changed and where. The
+         per-row failures are not averaged away: each group counts them and
+         the rows that failed are still queued below. -->
+    <div v-if="store.lastBatchSummary.length" class="pr-summary-block" role="status" aria-live="polite">
+      <div class="pr-summary-head">
+        <span class="pr-summary-title">Last {{ store.lastBatchSummary[0].action }}</span>
+        <button type="button" class="btn-small btn-chip" @click="store.lastBatchSummary = []">dismiss</button>
+      </div>
+      <ul class="pr-summary-rows">
+        <li v-for="group in store.lastBatchSummary" :key="group.destination || 'none'" class="pr-summary-row">
+          <span class="pr-summary-dest">{{ group.destination || 'no destination' }}</span>
+          <span class="pr-summary-counts">
+            {{ group.ok }} of {{ group.total }} applied<template v-if="group.duplicates">, {{ group.duplicates }} already known</template><template v-if="group.conflicts">, {{ group.conflicts }} changed underneath</template><template v-if="group.failed">, {{ group.failed }} still queued</template>
+          </span>
+          <span v-if="group.errors.length" class="pr-summary-error">{{ group.errors[0] }}</span>
+        </li>
+      </ul>
+    </div>
+
     <!-- The queue's four load states, kept apart so none of them can borrow the
          others' words. The old single "Nothing queued here." rendered under a
          slow or failed first GET and read as a confirmed-empty queue. -->
@@ -959,18 +1104,126 @@ watch(
             </details>
           </div>
 
-          <!-- Leak confirm replaces the actions until answered. -->
-          <div v-if="confirmLeakId === row.id" class="pr-actions pr-actions--confirm">
-            <span class="pr-confirm-text">Writes into a guide every workspace loads. Sure?</span>
-            <button type="button" class="btn-small btn-primary" :disabled="store.isBusy(row.id)" @click="doAccept(row)">{{ store.isBusy(row.id) ? 'working…' : 'confirm' }}</button>
-            <button type="button" class="btn-small btn-chip" @click="cancelLeakConfirm">cancel</button>
+          <!-- The decision card. It replaces the row's actions until answered,
+               and it is the ONLY place an accept is confirmed from: the bullet's
+               text is not the change, so a card that names the destination and
+               shows the server's exact replacement is what makes the accept a
+               decision rather than a guess. One primary action; edit, discuss
+               and dismiss are secondary. The leak warning lives here now too,
+               rather than as a second confirmation stacked on top of this one. -->
+          <div v-if="isPreviewOpen(row)" class="pr-card" role="group" :aria-label="`Review ${rowTitle(row)}`">
+            <p v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-note" role="status">Reading the destination…</p>
+            <p v-else-if="store.previewErrors[row.id]" class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
+
+            <template v-else-if="store.previews[row.id]">
+              <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
+                The destination changed since this preview, so nothing was written.
+                This is what it would do now.
+              </p>
+
+              <div class="pr-card-head">
+                <span class="pr-card-op" :class="`pr-card-op--${store.previews[row.id].operation || 'none'}`">
+                  {{ operationLabel(store.previews[row.id].operation) }}
+                </span>
+                <span class="pr-card-dest" :title="store.previews[row.id].destination_path">
+                  {{ store.previews[row.id].destination || 'no destination' }}
+                </span>
+              </div>
+
+              <p class="pr-card-meta">
+                <span v-if="row.source">from <span class="pr-card-source">{{ row.source }}</span></span>
+                <span v-else>no recorded source</span>
+                <span v-if="store.previews[row.id].leak_warning" class="pr-badge --warn">visible in every workspace</span>
+              </p>
+
+              <!-- Edit suggestion: a secondary action, and the edited wording is
+                   re-previewed against the same destination so what is on screen
+                   is always what the accept would write. -->
+              <div v-if="editingPreview" class="pr-card-edit">
+                <label class="pr-card-edit-label" :for="`pr-edit-${row.id}`">Edit the wording</label>
+                <textarea
+                  :id="`pr-edit-${row.id}`"
+                  v-model="editBuffer"
+                  class="pr-card-edit-input"
+                  rows="3"
+                ></textarea>
+                <div class="pr-card-edit-actions">
+                  <button type="button" class="btn-small btn-primary" :disabled="!editBuffer.trim() || store.isPreviewLoading(row.id)" @click="applyPreviewEdit">preview change</button>
+                  <button type="button" class="btn-small btn-chip" @click="cancelPreviewEdit">cancel edit</button>
+                </div>
+              </div>
+              <p v-else class="pr-card-text">{{ store.previews[row.id].text }}</p>
+
+              <!-- The exact replacement, as lines rather than two full bodies:
+                   the region is reprinted in full otherwise and the one line that
+                   changes is lost in it. -->
+              <div v-if="store.previews[row.id].exact && previewChanges(store.previews[row.id]).length" class="pr-card-diff">
+                <p class="pr-card-diff-label">What changes in {{ store.previews[row.id].destination }}</p>
+                <ul class="pr-card-diff-lines">
+                  <li
+                    v-for="(change, index) in previewChanges(store.previews[row.id])"
+                    :key="`${change.op}-${index}`"
+                    class="pr-card-diff-line"
+                    :class="`pr-card-diff-line--${change.op}`"
+                  >
+                    <span class="pr-card-diff-sign" aria-hidden="true">{{ change.op === 'added' ? '+' : '−' }}</span>
+                    <span class="pr-card-diff-text">{{ change.text }}</span>
+                    <span class="pr-sr-only">{{ change.op }}</span>
+                  </li>
+                </ul>
+                <p v-if="store.previews[row.id].truncated" class="pr-card-note">The destination is too large to show in full.</p>
+              </div>
+              <p v-else-if="!store.previews[row.id].exact" class="pr-card-note">
+                The exact wording is decided when you accept, so it cannot be shown here.
+              </p>
+              <p v-else class="pr-card-note">Nothing in {{ store.previews[row.id].destination }} changes.</p>
+
+              <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
+              <!-- No edited-wording caveat here any more. The ledger still
+                   records the ORIGINAL bullet (that is what the nightly curator
+                   compares a re-extracted fact against), but the decision row
+                   now also carries the id of the receipt that performed the
+                   write, so an edited accept reaches History with its real
+                   before/after and a working Undo like any other. -->
+
+              <div class="pr-actions pr-actions--card">
+                <button
+                  v-if="store.previews[row.id].can_accept"
+                  type="button"
+                  class="btn-small btn-primary"
+                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+                  @click="confirmPreview(row)"
+                >{{ store.isBusy(row.id) ? 'working…' : previewPrimaryLabel(row) }}</button>
+                <!-- The same write, with one check in front of it: a fact that
+                     replaces something already remembered is merged over it
+                     instead of added beside it. A chip, not a second primary —
+                     the plain save remains the routine decision, and this one
+                     costs a model call, which is why it is asked for rather
+                     than always done. The card's replacement is what a plain
+                     save would write; a check can land on a different line,
+                     which is what the title says. -->
+                <button
+                  v-if="store.previews[row.id].can_accept && canReconcile(row)"
+                  type="button"
+                  class="btn-small btn-chip"
+                  title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
+                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+                  @click="reconcileFirst(row)"
+                >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
+                <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">edit suggestion</button>
+                <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+                <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
+                <button type="button" class="btn-small btn-chip" @click="closePreview">cancel</button>
+              </div>
+            </template>
           </div>
 
           <!-- Deferred: the last accept reconciled this fact against the region
                and could not tell whether it supersedes something already there,
                so nothing was written and the row is still queued. Shown in place
-               of the actions, like the leak confirm, because the next step is
-               not "accept or dismiss" but "decide about these entries": the
+               of the row's actions, and of the decision card that raised it,
+               because the next step is not "save or dismiss" but "decide about
+               these entries": the
                reason, what it was weighed against, and one more attempt against
                the region as it stands now. -->
           <div v-else-if="deferredFor(row)" class="pr-actions pr-actions--deferred">
@@ -1045,21 +1298,8 @@ watch(
               type="button"
               class="btn-small btn-primary"
               :disabled="store.isBusy(row.id)"
-              @click="confirmAccept(row)"
-            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'accept') }}</button>
-            <!-- The same write, with one check in front of it: a fact that
-                 replaces something already remembered is merged over it instead
-                 of added beside it. Neutral, not a second pink bar — plain
-                 accept remains the routine action, and this one costs a model
-                 call, which is why it is asked for rather than always done. -->
-            <button
-              v-if="canAccept(row) && canReconcile(row)"
-              type="button"
-              class="btn-small btn-chip"
-              title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
-              :disabled="store.isBusy(row.id)"
-              @click="confirmAccept(row, true)"
-            >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
+              @click="reviewAccept(row)"
+            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'review') }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
@@ -1260,6 +1500,269 @@ watch(
   overflow-wrap: anywhere;
 }
 
+/* ── Decision card ────────────────────────────────────────────────────────
+   The row is a three-column grid (checkbox | body | actions). The card is a
+   decision, not an action strip, so it takes a full-width row of its own
+   underneath rather than being squeezed into the action column — a diff line
+   wrapped to one word per line in 8.5rem. */
+.pr-card {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--bg3, var(--bg2));
+}
+
+.pr-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Shape and text, never colour alone: the operation has to read the same in a
+   monochrome or high-contrast rendering. */
+.pr-card-op {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 4px;
+  color: var(--fg);
+}
+
+.pr-card-op--add {
+  border-color: var(--success);
+}
+
+.pr-card-op--update,
+.pr-card-op--move {
+  border-color: var(--accent);
+}
+
+.pr-card-op--none {
+  color: var(--fg2);
+}
+
+.pr-card-dest {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.pr-card-meta {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--fg2);
+  font-size: 0.78rem;
+}
+
+.pr-card-source {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+.pr-card-text {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.pr-card-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pr-card-edit-label {
+  font-size: 0.78rem;
+  color: var(--fg2);
+}
+
+.pr-card-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  /* 16px: anything smaller makes iOS Safari zoom the whole page on focus. */
+  font-size: 1rem;
+  font-family: inherit;
+  line-height: 1.5;
+  padding: var(--space-2);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.pr-card-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.pr-card-diff {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.pr-card-diff-label {
+  margin: 0;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg2);
+}
+
+.pr-card-diff-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pr-card-diff-line {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0.2rem var(--space-2);
+  border-left: 3px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.pr-card-diff-line--added {
+  border-left-color: var(--success);
+}
+
+.pr-card-diff-line--removed {
+  border-left-color: var(--error);
+  text-decoration: line-through;
+  color: var(--fg2);
+}
+
+.pr-card-diff-sign {
+  flex: none;
+  opacity: 0.8;
+}
+
+.pr-card-diff-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pr-card-note,
+.pr-card-reason {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+
+.pr-card-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.82rem;
+}
+
+.pr-card-conflict {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-size: 0.82rem;
+}
+
+/* The card's actions run across, not down: the column layout above exists to
+   leave the text room, and here the card already owns the full width. */
+.pr-actions--card {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+}
+
+.pr-summary-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+
+.pr-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pr-summary-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg2);
+}
+
+.pr-summary-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pr-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.82rem;
+}
+
+.pr-summary-dest {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+.pr-summary-counts {
+  color: var(--fg2);
+}
+
+.pr-summary-error {
+  width: 100%;
+  color: var(--error);
+  font-size: 0.78rem;
+}
+
+.pr-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .pr-group-label {
   display: flex;
   align-items: baseline;
@@ -1320,6 +1823,13 @@ watch(
     padding: var(--pr-clear-pad);
     margin: calc(-1 * var(--pr-clear-pad));
     margin-left: calc(var(--space-2) - var(--pr-clear-pad));
+  }
+
+  /* The card is where the decision is made, so its controls get the full touch
+     target rather than the panel's compact chip height. */
+  .pr-actions--card .btn-small,
+  .pr-card-edit-actions .btn-small {
+    min-height: var(--touch, 44px);
   }
 }
 

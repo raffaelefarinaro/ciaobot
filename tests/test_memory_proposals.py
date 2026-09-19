@@ -9,6 +9,7 @@ import re
 import unittest.mock
 from pathlib import Path
 
+from ciao import fact_candidates as fc
 from ciao import memory_proposals as mp
 from ciao import memory_tool as mt
 from ciao import proposal_tracking
@@ -2636,10 +2637,13 @@ def test_uncited_fact_is_queued_not_saved(tmp_path: Path) -> None:
     decisions = mp.unsupported_region_facts(
         archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
     )
-    assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")] == {
-        "action": "defer",
-        "reason": "unverified: bullet cites no source turn",
-    }
+    row = decisions[mp._decision_key("memory", "Deploys run on Thursdays.")]
+    assert row["action"] == "defer"
+    assert row["reason"] == "unverified: bullet cites no source turn"
+    # The row names which check refused the fact, and under which policy, so
+    # the queue can distinguish a fabricated id from an uncited bullet.
+    assert row["evidence"]["code"] == fc.NO_CITATION
+    assert row["evidence"]["policy_version"] == fc.POLICY_VERSION
 
     stats: dict[str, int] = {}
     written = mp.proposals_from_archive(
