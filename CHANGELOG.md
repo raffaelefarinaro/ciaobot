@@ -5,6 +5,8 @@
 ### Added
 - feat(review): talk about a retirement candidate before deciding (`30b86eff`)
 - feat(curation): compute the nightly worklist, then budget and serialize it (`39f15fbc`, #461)
+- feat(recall): add a scoped evidence drill-down for truncated snippets (`8d93ef22`, #460)
+- feat(memory): flatten Review to one navigation level and lead with the decision (`3246108b`, #447)
 - feat(review): make the retirement queue precise enough to act on (`68be35aa`)
 - feat(review): retire the improve_link disposition (`63eac1be`)
 - feat(review): send an unlinked row hunting for its missing links (`c86ed809`)
@@ -49,6 +51,9 @@
 - fix(memory): queue uncertain reconciliation instead of appending (`168b5225`, #459)
 - fix(memory): defer when the reconcile planner itself raises (`d8e2d6ea`)
 - perf(search): make the per-search index pass and the graph scan proportional to the work (`f7b691fb`, #450)
+- fix(chat): stop dropping a message queued as the turn ends (`c63539bb`)
+- fix(memory): require source evidence before auto-saving a region fact (`59fc2365`, #456)
+- fix(review): rename the section computed off the prop's name (`fe95bb93`)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
@@ -56,6 +61,8 @@
 - docs(pwa): drop the retired defer disposition from the review route (`0ffaebf3`)
 - docs(capabilities): qualify what keep actually stamps (`d229f0b2`)
 - docs(mcp): correct the tool count the loop retirement left stale (`362be562`)
+- refactor(web): extract the chat workflow's domain rules from project_chats (`c75ba217`, #453)
+- test(web): add a small real-browser regression suite (`57c83de5`, #448)
 
 ## v0.16.1 - 2026-09-05
 
