@@ -208,7 +208,12 @@ note is answered at its current revision and a removed one is refused. Its
 `path` must be a key the index currently holds under this workspace's prefix,
 so it can only widen a note this principal's own search could have returned,
 and what comes back is the markdown block around each matched line — capped in
-windows, lines and characters — never the note.
+windows, lines and characters — never the note. `reason` says whether that
+reply is evidence: `matched` for the blocks around the lines the query matched,
+`no_line_match` when the note holds no such line and the single block returned
+is context only, which the recall rule reads as an instruction to abstain.
+Function words are excluded from the line match, so a query phrased as a
+sentence cannot anchor a window on whatever block happens to contain "for".
 Identical concurrent searches coalesce into one scan, and each worker owns its
 SQLite connection for its whole lifetime.
 
