@@ -229,9 +229,15 @@ watch(
   { immediate: true },
 )
 
-/** Which section to render. Follows the prop, but falls back to the store so a
- * standalone mount (and anything that still flips `store.view`) behaves. */
-const section = computed(() => store.view)
+/** Which section to render. Reads the store, which the watcher above keeps in
+ * step with the prop, so a standalone mount (and anything that still flips
+ * `store.view` directly) behaves.
+ *
+ * Deliberately NOT named `section`: a prop and a computed of the same name
+ * both land on the instance, so `section` in the template resolved to
+ * whichever won rather than to the one meant here. `vue/no-dupe-keys` is an
+ * error for exactly that reason. */
+const activeSection = computed(() => store.view)
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -683,7 +689,7 @@ watch(
 
 <template>
   <div class="proposal-review">
-    <header v-if="section === 'queue' && !queueLoading && !queueFailed" class="pr-head">
+    <header v-if="activeSection === 'queue' && !queueLoading && !queueFailed" class="pr-head">
       <p class="pr-summary">
         <strong>{{ filtered.length }}</strong> to decide in {{ projectStore.activeWorkspace }}
         <button
@@ -695,7 +701,7 @@ watch(
       </p>
     </header>
 
-    <ProposalHistoryList v-if="section === 'history'" />
+    <ProposalHistoryList v-if="activeSection === 'history'" />
 
     <div v-else>
     <!-- One sentence naming the decision, and the mechanism behind it folded
