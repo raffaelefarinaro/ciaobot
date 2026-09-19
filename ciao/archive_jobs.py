@@ -670,6 +670,17 @@ def _write_raw(path: Path, payload: dict[str, Any]) -> bool:
         try:
             # Explicit: O_CREAT leaves the mode alone on a temp file left
             # behind by an older build.
+            #
+            # `fchmod` over `os.chmod(tmp, ...)` on purpose: it retightens the
+            # descriptor already open, so nothing can swap `tmp` for another
+            # path between the open and the chmod. It is Unix-only, and that is
+            # fine here — Ciaobot's supported platform is macOS (see README),
+            # and the file locking the rest of the runtime is built on
+            # (`instance_lock`, `memory_tool`, `memory_receipts`) is `fcntl`
+            # all the way down. An `AttributeError` on a hypothetical non-Unix
+            # host would escape the `except OSError` below rather than
+            # returning False, so revisit this together with those locks if
+            # that platform ever becomes real.
             os.fchmod(descriptor, 0o600)
             handle = os.fdopen(descriptor, "w", encoding="utf-8")
         except BaseException:
