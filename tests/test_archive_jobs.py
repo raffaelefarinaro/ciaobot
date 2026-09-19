@@ -603,6 +603,59 @@ def test_proposals_write_failure_is_retryable(tmp_path: Path, monkeypatch) -> No
     assert "memory_proposals" in job.resumable()
 
 
+def test_reconcile_raising_defers_instead_of_appending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A planner that raises must not fall back to the plain append path.
+
+    ``plan_region_reconcile`` swallows its own failures, but anything escaping
+    it left ``region_decisions`` at ``None`` — indistinguishable downstream from
+    "no reconcile was needed". The superseding fact then landed beside the entry
+    it supersedes, and every later session loaded both.
+    """
+    archive = _stamped_archive(
+        tmp_path,
+        "## User corrections\n"
+        "- User corrected the rate. Durable rule: Contractor day rate is "
+        "950 EUR. [memory]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    from ciao import memory_tool as mt
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    mt.write_region(guide, "memory", ["Contractor day rate is 800 EUR. [2026-01-01]"])
+
+    async def exploding_plan(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("reconcile exploded")
+
+    monkeypatch.setattr(
+        "ciao.memory_proposals.plan_region_reconcile", exploding_plan
+    )
+
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        guide_path=guide,
+        memory_proposals_enabled=True,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Contractor day rate is 800 EUR. [2026-01-01]"]
+    # Preserved, not dropped: the fact waits in the queue for a human.
+    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    assert "950 EUR" in queue
+    # A reconcile backend that is quietly down must not read as ordinary review.
+    assert job.status_of("memory_proposals") == aj.SUCCEEDED
+
+
 def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
     """Nothing to queue is a legitimate no-op, not a failure."""
     archive = _stamped_archive(tmp_path, "## Errors\n- just a one-off. [idx=1]\n")

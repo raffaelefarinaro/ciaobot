@@ -342,6 +342,119 @@ def test_usage_endpoint_returns_empty_when_no_telemetry(tmp_path: Path) -> None:
     assert all(row["calls"] == 0 for row in usage["tools"])
 
 
+def _bound_telemetry(monkeypatch: pytest.MonkeyPatch, *, keep: int = 5) -> None:
+    """Shrink the size guard so a handful of records triggers a trim."""
+    monkeypatch.setattr(mcp_server, "TELEMETRY_MAX_BYTES", 512)
+    monkeypatch.setattr(mcp_server, "TELEMETRY_KEEP_LINES", keep)
+
+
+def _emit(service: CiaoMcpService, count: int, *, tool: str = "memory_read", status: str = "ok") -> None:
+    principal = _chat_create_principal()
+    for _ in range(count):
+        service._record_tool_call(
+            name=tool,
+            principal=principal,
+            status=status,
+            error_code="" if status == "ok" else "invalid_request",
+            duration_ms=10,
+        )
+
+
+def test_telemetry_log_is_trimmed_once_it_passes_the_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+
+    _emit(service, 60)
+    after_60 = service._telemetry_path.stat().st_size
+    _emit(service, 500)
+    after_560 = service._telemetry_path.stat().st_size
+
+    lines = service._telemetry_path.read_text(encoding="utf-8").splitlines()
+    # The trim runs before the append, so the bound is the retained window
+    # plus the one in-flight record that triggered it.
+    assert len(lines) <= 6
+    # Ten times the calls, no growth: that is the point of the guard.
+    assert after_560 <= after_60
+    assert service._telemetry_totals_path.is_file()
+
+
+def test_usage_totals_survive_a_telemetry_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+
+    _emit(service, 40)
+    _emit(service, 10, status="error")
+    assert len(service._telemetry_path.read_text(encoding="utf-8").splitlines()) <= 6
+
+    usage = service.usage()
+
+    assert usage["total_calls"] == 50
+    assert usage["total_errors"] == 10
+    row = next(item for item in usage["tools"] if item["tool"] == "memory_read")
+    assert row["calls"] == 50
+    assert row["errors"] == 10
+    assert row["avg_ms"] == 10
+    assert row["providers"] == ["opencode"]
+    assert row["last_used"]
+
+
+def test_usage_totals_survive_a_restart_after_a_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+    _emit(service, 40)
+    assert len(service._telemetry_path.read_text(encoding="utf-8").splitlines()) <= 6
+
+    # A fresh service over the same runtime directory is what a restart looks
+    # like; the rolled-up counters must come back with it.
+    restarted, _plane = _service(tmp_path)
+
+    assert restarted.usage()["total_calls"] == 40
+
+
+def test_usage_reuses_its_aggregate_until_the_log_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _emit(service, 4)
+    folded: list[str] = []
+    real_fold = mcp_server._fold_telemetry_line
+
+    def counting_fold(tools, line):
+        folded.append(line)
+        real_fold(tools, line)
+
+    monkeypatch.setattr(mcp_server, "_fold_telemetry_line", counting_fold)
+
+    assert service.usage()["total_calls"] == 4
+    assert len(folded) == 4
+    assert service.usage()["total_calls"] == 4
+    assert len(folded) == 4  # second read served from the cached aggregate
+
+    _emit(service, 1)
+
+    assert service.usage()["total_calls"] == 5
+    assert len(folded) == 9  # a new record invalidates the cache
+
+
+def test_usage_ignores_telemetry_lines_that_are_not_objects(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    service._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    service._telemetry_path.write_text(
+        '123\n"text"\n[1, 2]\n{"tool": "memory_read", "status": "ok", "duration_ms": 4}\n',
+        encoding="utf-8",
+    )
+
+    usage = service.usage()
+
+    assert usage["total_calls"] == 1
+
+
 def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path)
     token, _ = service.registry.issue(

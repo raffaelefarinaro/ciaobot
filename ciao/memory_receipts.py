@@ -201,14 +201,18 @@ and long enough that ordinary concurrency never trips it.
 _QUEUE_LOCK_DIR_ENV = "CIAO_QUEUE_LOCK_DIR"
 
 
-def _queue_lock_path(resolved_key: str) -> Path:
-    """A lock file for a queue path, outside the vault it guards.
+def lock_path_for(resolved_key: str) -> Path:
+    """A lock file for a vault path, outside the vault it guards.
 
     Uses ``CIAO_QUEUE_LOCK_DIR`` when set (tests pin it), else a per-user
-    directory under the system temp root. Deterministic in the resolved queue
-    path so every process and thread guarding the same queue picks the same
-    lock. The uid component keeps two local accounts from colliding on a shared
-    ``/tmp``.
+    directory under the system temp root. Deterministic in the resolved
+    guarded path so every process and thread guarding the same file picks the
+    same lock. The uid component keeps two local accounts from colliding on a
+    shared ``/tmp``.
+
+    Public because the curation lease (``ciao/curation_run.py``) guards a
+    different vault file and must not reinvent — or diverge from — where this
+    install puts its lock files.
     """
     base = os.environ.get(_QUEUE_LOCK_DIR_ENV, "").strip()
     if base:
@@ -221,6 +225,11 @@ def _queue_lock_path(resolved_key: str) -> Path:
         root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{uid}"
     digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()[:32]
     return root / f"{digest}.lock"
+
+
+# Kept so the existing queue-lock call sites and their tests keep reading as
+# "the queue's lock", now that the helper serves more than the queue.
+_queue_lock_path = lock_path_for
 
 
 def write_queue_atomically(path: Path, text: str) -> None:

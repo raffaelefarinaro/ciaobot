@@ -5,7 +5,7 @@ description: Nightly Workspace care — process memory proposals and learnings e
 
 # Memory curation
 
-Care for this workspace's durable memory and vault. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use one memory agent for vault writes, and run every mutating pass sequentially. Work through the passes below in order; skip any pass with nothing to do.
+Care for this workspace's durable memory and vault. The `<ciao-context>` block names the vault as `vault=<path>` — write under that path and nowhere else. Use one memory agent for vault writes, and run every mutating pass sequentially. Pass 0 computes which of the passes below actually have work; run those in order and skip the rest without checking them yourself.
 
 ## Ground rules
 
@@ -16,9 +16,37 @@ Care for this workspace's durable memory and vault. The `<ciao-context>` block n
 - **Queue and log stay separate.** `Workspace/Memory-Proposals.md` holds pending proposal bullets and nothing else — never append pass reports, notes, or prose there. Pass reports go to `Workspace/Curation-Log.md` only.
 - Report only what was processed. If nothing needs processing, reply with a one-line no-op and stop.
 
+## 0. Start the run
+
+**Do this before reading anything else in the vault.** Run:
+
+```
+ciao curation-begin --json
+```
+
+It does three jobs, and each replaces work you would otherwise do by hand:
+
+1. **It serializes the run.** One curation run per vault at a time, and archive-time auto-apply stands down while the lease is held — so a chat being archived cannot append to a region you are halfway through rewriting. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
+2. **It computes the worklist.** Pending proposals, region usage, aging entries, learnings, the weekly marker, log sizes and skill proposals are all mechanical checks; code has already run them. **`"empty": true` means there is genuinely nothing to do — reply with the one-line no-op and stop.** The lease is already released in that case. Do not open a single file to double-check.
+3. **It applies the run budget.** Work only the passes under `planned`, and only the `keys` listed there. Anything under `deferred` is next run's work, not yours — it is already recorded and will not be lost.
+
+As you finish items, record them so a short run resumes rather than restarts:
+
+```
+ciao curation-progress --key <key> --key <key>
+```
+
+Close every run, including a failed one:
+
+```
+ciao curation-end --status ok|failed --planned <n> --completed <n>
+```
+
+`curation-end` releases the lease, records planned/completed/deferred counts so a quiet night is distinguishable from skipped or failed work, and stamps `last_full_pass` itself — but only when both weekly checks (pass 6) were recorded done and the status is `ok`. You never write that marker by hand.
+
 ## Choose the pass
 
-`Workspace/Curation-Log.md` carries `last_full_pass: YYYY-MM-DD` in its YAML frontmatter. Create the file/frontmatter if needed without discarding an existing body. Run the daily passes every night. Also run every pass marked **weekly** when the marker is absent or more than seven days old; this overdue rule matters more than the weekday, because a powered-off server must not permanently miss its weekly care. Update `last_full_pass` only after both the index refresh and final audit complete reliably. A failed or unreliable full pass remains due for the next run.
+`Workspace/Curation-Log.md` carries `last_full_pass: YYYY-MM-DD` in its YAML frontmatter. Create the file/frontmatter if needed without discarding an existing body. Run the daily passes every night. Also run every pass marked **weekly** when the marker is absent or more than seven days old; this overdue rule matters more than the weekday, because a powered-off server must not permanently miss its weekly care. `curation-begin` has already evaluated this rule and reports it as `weekly_due`; trust it rather than re-reading the date. Update `last_full_pass` only after both the index refresh and final audit complete reliably — `curation-end` enforces that. A failed or unreliable full pass remains due for the next run.
 
 ## 1. Process the proposals queue
 
@@ -79,10 +107,12 @@ When you create or update People and project notes, add an `aliases:` frontmatte
 
 On a full pass:
 
-1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health or update `last_full_pass`.
+1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health. On success record it: `ciao curation-progress --key hygiene:vault-index`.
 2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is safe to continue; exit 2 means unreliable evidence, so report scan errors, make no audit-derived repair, and leave the full pass due.
 3. When reliable, apply only low-risk unambiguous repairs: dead links, obvious MEMORY.md path drift, and a non-canonical `type:` whose exact canonical target is already named by VOCABULARY.md. Do not rewrite instruction conflicts, skills, orphaned or duplicate notes, expiration tags, schedules, or vocabulary proposals.
-4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. Update `last_full_pass` only when this verification is reliable.
+4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. When that verification is reliable, record it: `ciao curation-progress --key hygiene:os-audit`.
+
+Those two keys are what lets `curation-end` stamp `last_full_pass`. Record neither and the weekly pass stays due, which is the correct outcome for a run whose evidence was unreliable — do not write the marker by hand to make the page look green.
 
 Install-wide runtime failures remain visible through startup triage and Settings → Automation; pending upgrade work appears in housekeeping. Do not duplicate those global checks in every workspace.
 

@@ -48,6 +48,11 @@ flowchart LR
 - Tool telemetry is appended to `.runtime/mcp_tool_calls.jsonl`; provider tool
   selection is appended to `.runtime/agent_tool_calls.jsonl`. Neither file
   records tool arguments.
+- `mcp_tool_calls.jsonl` is size-capped like the job-run log: past ~2 MB it is
+  trimmed to the newest 2000 records. Detailed records therefore cover only
+  that retained window, but the per-tool counters of everything dropped are
+  rolled into `.runtime/mcp_tool_calls_totals.json` first, so the Settings
+  usage table keeps reporting lifetime call, error, and duration totals.
 
 ## Managed Claude Code configuration
 
@@ -99,7 +104,7 @@ self-actions, and telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 34 explicit tools. The MCP `tools/list` response is the
+The catalog contains 31 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/opencode session can do

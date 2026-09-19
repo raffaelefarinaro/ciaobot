@@ -4801,13 +4801,26 @@ async def vault_graph(request: Request) -> JSONResponse:
     # Every vault in the install, which is ONE shared vault before the
     # re-rooting and one per agent root after it. Scanning `config.vault_root`
     # returned zero notes on a migrated install, so the whole map went blank.
+    targets = config.vault_scan_targets()
+    # After the re-rooting each target IS one workspace, so a `?workspace=`
+    # request can drop the other roots before the scan instead of reading and
+    # parsing every note in the install only to filter them out below — the
+    # scan is the whole cost of this route. Before the re-rooting the single
+    # shared target holds every workspace and no target can be dropped, which
+    # is why the `filter_entries` scoping stays where it is either way.
+    in_scope = [t for t in targets if workspace and t[1] == workspace]
+    scan_list = in_scope or targets
     # Reads and parses every markdown file, so run it off the event loop or a
     # large vault stalls other requests, including the 5s chat-socket keepalives
     # (see chat_messages above for the same fix).
-    entries, absolute = await asyncio.to_thread(
-        scan_targets, config.vault_scan_targets()
-    )
-    workspaces = sorted({e.workspace for e in entries if e.workspace})
+    entries, absolute = await asyncio.to_thread(scan_targets, scan_list)
+    if in_scope:
+        # The picker lists every workspace, and this scan only saw one. Taken
+        # from the targets whose vault exists, which is the same set the full
+        # scan would have produced entries for.
+        workspaces = sorted(ws for root, ws, _ in targets if ws and Path(root).is_dir())
+    else:
+        workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
     by_path = {str(e.path) for e in scoped}

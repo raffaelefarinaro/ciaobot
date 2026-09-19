@@ -3122,6 +3122,206 @@ def _eval_command(args: argparse.Namespace) -> int:
     return 2
 
 
+# A busy lease is not an error the caller should retry immediately, and it is
+# not success either. 75 is EX_TEMPFAIL, which is what a scheduled run that
+# found the vault already being curated actually means.
+CURATION_BUSY_EXIT = 75
+
+
+def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
+    """Workspace/vault/guide resolution and budget flags, shared by the four."""
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    parser.add_argument(
+        "--guide",
+        type=Path,
+        default=None,
+        help="Workspace CLAUDE.md holding the bounded regions. Defaults to <workspace>/CLAUDE.md.",
+    )
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=None,
+        help="Most worklist items one run may take. Defaults to the built-in budget.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Longest one run may hold the lease. Doubles as the lease TTL.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+
+
+def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any]:
+    from ciao.curation_run import RunBudget
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    guide = Path(args.guide).expanduser().resolve() if args.guide else workspace / "CLAUDE.md"
+    defaults = RunBudget()
+    budget = RunBudget(
+        max_items=args.max_items if args.max_items is not None else defaults.max_items,
+        max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
+    )
+    return workspace, vault, guide, budget
+
+
+def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+    from ciao.curation_run import build_worklist, load_state, plan_run
+
+    workspace, vault, guide, budget = _curation_context(args)
+    state = load_state(vault)
+    worklist = build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        workspace_dir=workspace,
+        done_keys=frozenset(state.done_keys),
+    )
+    plan = plan_run(worklist, budget)
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "vault_root": str(vault),
+        **worklist.as_dict(),
+        **plan.as_dict(),
+        "last_run": state.last_run,
+    }
+    return payload, worklist
+
+
+def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return
+    if payload.get("empty"):
+        print("Nothing to curate: every mechanical check is clear.")
+        return
+    print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
+    for item in payload.get("planned", []):
+        print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
+        for key in item["keys"]:
+            print(f"    {key}")
+    for item in payload.get("deferred", []):
+        print(f"- deferred [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
+
+
+def _curation_plan_command(args: argparse.Namespace) -> int:
+    """Print the deterministic worklist without starting a run.
+
+    Read-only on purpose: the plan is also how a human (or a test) checks what
+    the nightly run would do without taking the lease away from it.
+    """
+    payload, _ = _curation_plan(args)
+    _print_curation(payload, as_json=args.json)
+    return 0
+
+
+def _curation_begin_command(args: argparse.Namespace) -> int:
+    """Take the lease and print this run's plan.
+
+    An empty worklist releases the lease again before returning: a quiet night
+    must not leave archive-time auto-apply standing down until the TTL expires.
+    """
+    from ciao.curation_run import CurationBusy, begin_run, end_run
+
+    _workspace, vault, _guide, budget = _curation_context(args)
+    try:
+        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+    except CurationBusy as exc:
+        print(f"curation is already running: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+
+    payload, _worklist = _curation_plan(args)
+    payload["lease"] = lease.as_dict()
+    if payload.get("empty"):
+        end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        payload["lease"] = {}
+    _print_curation(payload, as_json=args.json)
+    return 0
+
+
+def _curation_progress_command(args: argparse.Namespace) -> int:
+    """Record finished worklist keys and renew the lease."""
+    from ciao.curation_run import CurationBusy, record_done, renew_run
+
+    _workspace, vault, _guide, budget = _curation_context(args)
+    keys = [key.strip() for key in (args.key or []) if key.strip()]
+    if not keys:
+        print("pass at least one --key from `curation-begin`", file=sys.stderr)
+        return 2
+    try:
+        added = record_done(vault, keys, holder=args.holder)
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    if args.holder:
+        renew_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+    payload = {"recorded": len(keys), "newly_done": added}
+    if args.json:
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"recorded {len(keys)} item(s), {added} newly done")
+    return 0
+
+
+def _curation_end_command(args: argparse.Namespace) -> int:
+    """Release the lease, record the counts, and stamp the weekly marker.
+
+    The marker is stamped here rather than by the agent because the rule — both
+    weekly checks reliably done — is mechanical, and an agent that stamped it
+    after a failed audit made the weekly pass skip a week with nothing to show
+    for it.
+    """
+    from ciao.curation_run import CurationBusy, advance_full_pass, end_run
+
+    _workspace, vault, _guide, _budget = _curation_context(args)
+    # Stamp the marker before rebuilding the worklist, so the rebuild sees the
+    # weekly pass as no longer due and stops listing its two checks. Their done
+    # keys are then outside `live_keys` and the prune below drops them —
+    # without which next week's hygiene pass would be filtered out as already
+    # finished and never run again.
+    advanced = advance_full_pass(vault) if args.status == "ok" else False
+    payload, worklist = _curation_plan(args)
+    live_keys = frozenset(key for item in worklist.items for key in item.keys)
+    deferred = int(payload.get("deferred_count", 0))
+    try:
+        summary = end_run(
+            vault,
+            holder=args.holder,
+            status=args.status,
+            planned=args.planned,
+            completed=args.completed,
+            deferred=deferred,
+            reasons=args.reason or [],
+            live_keys=live_keys,
+        )
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    summary["full_pass_advanced"] = advanced
+    if args.json:
+        json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(
+            f"run {summary['status']}: planned {summary['planned']}, "
+            f"completed {summary['completed']}, deferred {summary['deferred']}; "
+            f"weekly marker {'advanced' if advanced else 'left due'}"
+        )
+    return 0
+
+
 def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     """Delete a resolved skill proposal from a workspace's review queue.
 
@@ -4342,6 +4542,101 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runtime root for the outcome log. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
+
+    curation_plan_parser = subparsers.add_parser(
+        "curation-plan",
+        help="Show what tonight's Workspace care would do, without starting it.",
+        description=(
+            "Computes the nightly curation worklist from files alone — pending "
+            "proposals, region usage, aging entries, learnings, the weekly "
+            "marker, log sizes, skill proposals — and prints it with the run "
+            "budget applied. Read-only: takes no lease and changes nothing. "
+            "Exit 0 always; read `empty` to tell a quiet night from a busy one."
+        ),
+    )
+    _add_curation_arguments(curation_plan_parser)
+    curation_plan_parser.set_defaults(func=_curation_plan_command)
+
+    curation_begin_parser = subparsers.add_parser(
+        "curation-begin",
+        help="Take the curation lease and print this run's planned worklist.",
+        description=(
+            "Serializes the nightly run: one curation run per vault at a time, "
+            "and archive-time memory auto-apply stands down while the lease is "
+            "held. Prints the same plan as `curation-plan`. Exit 0 when the "
+            "lease was taken, 75 when another run holds it (do not curate), "
+            "and 0 with `\"empty\": true` when there is nothing to do — the "
+            "lease is released again in that case."
+        ),
+    )
+    _add_curation_arguments(curation_begin_parser)
+    curation_begin_parser.add_argument(
+        "--holder",
+        default="",
+        help="Label recorded as the lease owner. Defaults to host:pid.",
+    )
+    curation_begin_parser.set_defaults(func=_curation_begin_command)
+
+    curation_progress_parser = subparsers.add_parser(
+        "curation-progress",
+        help="Record finished curation items so the next run does not redo them.",
+        description=(
+            "Marks worklist keys done and renews the lease. Keys come from "
+            "`curation-begin`'s output. A budget-limited run records what it "
+            "finished, so the next run resumes at the remainder instead of "
+            "starting again at the top of pass 1."
+        ),
+    )
+    _add_curation_arguments(curation_progress_parser)
+    curation_progress_parser.add_argument(
+        "--key",
+        action="append",
+        default=[],
+        help="A worklist key from `curation-begin`. Repeatable.",
+    )
+    curation_progress_parser.add_argument(
+        "--holder",
+        default="",
+        help="The lease holder recording this progress. Checked when given.",
+    )
+    curation_progress_parser.set_defaults(func=_curation_progress_command)
+
+    curation_end_parser = subparsers.add_parser(
+        "curation-end",
+        help="Release the curation lease and record the run's counts.",
+        description=(
+            "Releases the lease, records planned/completed/deferred counts and "
+            "reasons so a no-op run is distinguishable from skipped or failed "
+            "work, and — only when both weekly checks are recorded done and "
+            "the status is ok — stamps `last_full_pass`. An unreliable weekly "
+            "pass stays due."
+        ),
+    )
+    _add_curation_arguments(curation_end_parser)
+    curation_end_parser.add_argument(
+        "--status",
+        choices=["ok", "failed"],
+        default="ok",
+        help="Whether the run completed its planned work reliably.",
+    )
+    curation_end_parser.add_argument(
+        "--planned", type=int, default=0, help="Items this run planned to do."
+    )
+    curation_end_parser.add_argument(
+        "--completed", type=int, default=0, help="Items this run actually finished."
+    )
+    curation_end_parser.add_argument(
+        "--reason",
+        action="append",
+        default=[],
+        help="Why work was deferred or failed. Repeatable.",
+    )
+    curation_end_parser.add_argument(
+        "--holder",
+        default="",
+        help="The lease holder ending the run. Checked when given.",
+    )
+    curation_end_parser.set_defaults(func=_curation_end_command)
 
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",

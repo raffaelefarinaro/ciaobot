@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import ciao.startup_triage as startup_triage
+from ciao import job_runs
 from ciao.startup_triage import (
     TRIAGE_COOLDOWN_S,
     TRIAGE_MARKER_NAME,
@@ -132,6 +133,50 @@ async def test_cooldown_blocks_repeat_triage(tmp_path: Path, monkeypatch) -> Non
     )
     assert await run_startup_triage(pcm, config, _resolve) is True
     assert len(pcm.dispatched) == 2
+
+
+def _write_marker(config: SimpleNamespace, when: datetime) -> None:
+    (config.state_path.parent / TRIAGE_MARKER_NAME).write_text(
+        json.dumps({"last_dispatched_at": when.isoformat()}), encoding="utf-8"
+    )
+
+
+def _record_failure(ended: datetime) -> None:
+    job_runs.record_run(job_runs.JobRun(
+        job="background_run", label="Background command run",
+        started_at=ended.isoformat(), ended_at=ended.isoformat(),
+        status="error", error="one-off boom",
+    ))
+
+
+@pytest.mark.asyncio
+async def test_failure_older_than_last_triage_is_not_retriaged(
+    tmp_path: Path,
+) -> None:
+    """The run log is append-only, so before the acknowledgement floor a
+    single old failure re-opened a triage chat on every boot past the
+    cooldown, forever."""
+    config = _config(tmp_path)
+    now = datetime.now(UTC)
+    _write_marker(config, now - timedelta(seconds=TRIAGE_COOLDOWN_S + 3600))
+    _record_failure(now - timedelta(hours=20))
+    pcm = FakePCM()
+
+    assert await run_startup_triage(pcm, config, _resolve) is False
+    assert pcm.dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_failure_after_last_triage_still_dispatches(tmp_path: Path) -> None:
+    """The floor must not swallow a genuinely new failure."""
+    config = _config(tmp_path)
+    now = datetime.now(UTC)
+    _write_marker(config, now - timedelta(seconds=TRIAGE_COOLDOWN_S + 3600))
+    _record_failure(now - timedelta(minutes=5))
+    pcm = FakePCM()
+
+    assert await run_startup_triage(pcm, config, _resolve) is True
+    assert len(pcm.dispatched) == 1
 
 
 def test_build_triage_entry_is_one_off_and_system_scoped() -> None:
