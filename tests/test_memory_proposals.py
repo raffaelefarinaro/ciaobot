@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import unittest.mock
@@ -2234,3 +2235,237 @@ def test_the_learned_date_still_reads_the_most_recent_stamp() -> None:
     match = ma._LEARNED_STAMP_RE.search("fact [2026-01-01] [2026-09-02]")
     assert match is not None
     assert match.group(1) == "2026-09-02"
+
+
+# ---- Source-evidence gate -------------------------------------------------
+#
+# Region promotion used to check a fact's *shape* only. These cover the second
+# question: does any turn the user actually typed support it? Unsupported means
+# queued for review — never written to always-loaded context, never dropped.
+
+
+_EVIDENCE_TRANSCRIPT = "\n".join([
+    json.dumps({
+        "idx": 1, "type": "user",
+        "content": [{"type": "text", "text": "always deploy on Thursdays"}],
+    }),
+    json.dumps({
+        "idx": 2, "type": "assistant",
+        "content": [{"type": "text", "text": "You could deploy on Thursdays."}],
+    }),
+    json.dumps({
+        "idx": 3, "type": "user", "unattended": True,
+        "content": [{"type": "text", "text": "[scheduled] run the nightly audit"}],
+    }),
+])
+
+
+def _evidence_archive(tmp_path: Path, bullet: str, name: str = "chat-ev.md") -> Path:
+    archive = tmp_path / name
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n## User corrections\n" + bullet,
+        encoding="utf-8",
+    )
+    return archive
+
+
+def test_citations_reach_the_proposal_in_either_tag_order() -> None:
+    """The ``[idx=N]`` tag has to survive parsing to be checkable at all.
+
+    It used to be stripped in `_split_sections` and thrown away in
+    `_peel_trailing_metadata`, which left promotion with no evidence to weigh.
+    """
+    proposals = mp.propose_from_insights(
+        "## User corrections\n"
+        "- Durable rule: Deploys run on Thursdays. [idx=12,14] [memory]\n"
+        "- Durable rule: Prefers spaces over tabs. [memory] [idx=7]\n"
+    )
+    assert [p.citations for p in proposals] == [(12, 14), (7,)]
+    # The citation must not leak into the fact itself.
+    assert all("idx" not in p.text for p in proposals)
+
+
+def test_fabricated_citation_is_queued_not_saved(tmp_path: Path) -> None:
+    """A citation naming a turn that does not exist is the fabrication case."""
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs over spaces."]
+    )
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [idx=99] [memory]\n"
+    )
+
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    row = decisions[mp._decision_key("memory", "Deploys run on Thursdays.")]
+    assert row["action"] == "defer"
+    assert "idx=99" in row["reason"]
+
+    stats: dict[str, int] = {}
+    written = mp.proposals_from_archive(
+        archive, vault, auto_promote_memory=True, guide_path=guide,
+        stats=stats, region_decisions=decisions,
+    )
+
+    assert stats["deferred"] == 1
+    assert stats.get("promoted", 0) == 0
+    # Preserved, not dropped.
+    assert written is not None
+    assert "Deploys run on Thursdays." in written.read_text(encoding="utf-8")
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Prefers tabs over spaces."]
+
+
+def test_uncited_fact_is_queued_not_saved(tmp_path: Path) -> None:
+    """No citation at all ties the fact to nothing; the shape guards pass it."""
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs."])
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [memory]\n"
+    )
+
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")] == {
+        "action": "defer",
+        "reason": "unverified: bullet cites no source turn",
+    }
+
+    stats: dict[str, int] = {}
+    written = mp.proposals_from_archive(
+        archive, vault, auto_promote_memory=True, guide_path=guide,
+        stats=stats, region_decisions=decisions,
+    )
+
+    assert stats["deferred"] == 1
+    assert written is not None
+    assert "Deploys run on Thursdays." in written.read_text(encoding="utf-8")
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Prefers tabs."]
+
+
+def test_assistant_only_citation_is_queued(tmp_path: Path) -> None:
+    """The assistant's own suggestion, quoted back as if the user stated it."""
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs."])
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [idx=2] [memory]\n"
+    )
+
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    row = decisions[mp._decision_key("memory", "Deploys run on Thursdays.")]
+    assert row["action"] == "defer"
+    assert "user typed" in row["reason"]
+
+    stats: dict[str, int] = {}
+    mp.proposals_from_archive(
+        archive, tmp_path / "vault", auto_promote_memory=True, guide_path=guide,
+        stats=stats, region_decisions=decisions,
+    )
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Prefers tabs."]
+
+
+def test_unattended_turn_citation_is_queued(tmp_path: Path) -> None:
+    """Both extraction prompts forbid facts from automation turns.
+
+    Until now that was advisory: a bullet citing a schedule-fired turn was
+    auto-saved like any other, so a routine's own prompt text could assert
+    itself as a user preference.
+    """
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs."])
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [idx=3] [memory]\n"
+    )
+
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")][
+        "action"
+    ] == "defer"
+
+
+def test_a_fact_the_user_actually_typed_still_auto_saves(tmp_path: Path) -> None:
+    """The gate must not defer everything: a cited attended turn passes."""
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs."])
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [idx=1] [memory]\n"
+    )
+
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    assert decisions == {}
+
+    mp.proposals_from_archive(
+        archive, vault, auto_promote_memory=True, guide_path=guide,
+        region_decisions=decisions,
+    )
+    entries, _diags = mt.read_region(guide, "memory")
+    assert any("Deploys run on Thursdays." in entry for entry in entries)
+
+
+def test_the_evidence_gate_covers_an_empty_region(tmp_path: Path) -> None:
+    """The case write-time reconcile skips entirely.
+
+    `defer_region_facts` leaves an empty region alone — nothing there can
+    conflict. But nothing to conflict with is not evidence, and the first entry
+    written into an empty always-loaded region is the one nothing contradicts.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [idx=99] [memory]\n"
+    )
+
+    assert mp.defer_region_facts(archive, guide, reason="planner raised") is None
+    decisions = mp.unsupported_region_facts(
+        archive, filtered_jsonl=_EVIDENCE_TRANSCRIPT
+    )
+    assert decisions[mp._decision_key("memory", "Deploys run on Thursdays.")][
+        "action"
+    ] == "defer"
+
+    written = mp.proposals_from_archive(
+        archive, vault, auto_promote_memory=True, guide_path=guide,
+        region_decisions=decisions,
+    )
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == []
+    assert written is not None
+    assert "Deploys run on Thursdays." in written.read_text(encoding="utf-8")
+
+
+def test_an_archive_with_no_transcript_is_not_gated(tmp_path: Path) -> None:
+    """Text mode cites by paraphrase, not index, so indices cannot be required.
+
+    The text-mode extraction prompt says "no `[idx=N]` indices in this mode";
+    gating those bullets on a citation they were told not to write would queue
+    every fact in a re-processed legacy archive for no evidence gain.
+    """
+    archive = _evidence_archive(
+        tmp_path, "- Durable rule: Deploys run on Thursdays. [memory]\n"
+    )
+
+    assert mp.transcript_evidence("") is None
+    assert mp.unsupported_region_facts(archive, filtered_jsonl="") == {}
+    assert mp.unsupported_region_facts(archive, filtered_jsonl="not json\n\n") == {}
+
+
+def test_transcript_evidence_ignores_records_without_a_usable_index() -> None:
+    """A bool ``idx`` is an ``int`` in Python and would index turn 1."""
+    evidence = mp.transcript_evidence("\n".join([
+        json.dumps({"idx": True, "type": "user", "content": []}),
+        json.dumps({"type": "user", "content": []}),
+        json.dumps({"idx": 4, "type": "user", "content": []}),
+        "[]",
+        "{",
+    ]))
+    assert evidence is not None
+    assert evidence.known == frozenset({4})
+    assert evidence.attended_user == frozenset({4})

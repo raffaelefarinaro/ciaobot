@@ -1144,6 +1144,7 @@ async def run_archive_pipeline(
                     defer_region_facts,
                     plan_region_reconcile,
                     proposals_from_archive,
+                    unsupported_region_facts,
                 )
 
                 # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
@@ -1173,6 +1174,41 @@ async def run_archive_pipeline(
                             guide_path,
                             reason="region reconcile raised",
                         )
+
+                # Evidence gate. The reconcile above only compares a fact
+                # against the region; nothing so far asks whether any turn the
+                # user typed supports it, so a fluent bullet with a fabricated
+                # `[idx=N]` — or none at all — was auto-saved into
+                # always-loaded context on formatting alone. Overlaid *after*
+                # the reconcile so an evidence failure outranks the model's
+                # add/update/covered verdict, and routed through the same
+                # "defer" outcome: an unverifiable fact is an uncertain fact,
+                # and uncertain facts are queued for review, never dropped.
+                unverified = 0
+                try:
+                    evidence_defers = unsupported_region_facts(
+                        archive_path, filtered_jsonl=filtered_jsonl
+                    )
+                except Exception:  # noqa: BLE001 — a failed check must not promote
+                    logger.exception(
+                        "Evidence check failed for %s", archive_path
+                    )
+                    # Same reasoning as the reconcile fallback above: an empty
+                    # map reads as "everything is supported", which is the one
+                    # thing a crashed check cannot claim.
+                    evidence_defers = {}
+                    if guide_path is not None:
+                        evidence_defers = defer_region_facts(
+                            archive_path,
+                            guide_path,
+                            reason="evidence check raised",
+                        ) or {}
+                if evidence_defers:
+                    unverified = len(evidence_defers)
+                    region_decisions = {
+                        **(region_decisions or {}),
+                        **evidence_defers,
+                    }
 
                 # The reconcile above awaits a model: re-check before writing
                 # proposals so a delete during it cannot file facts for a chat
@@ -1206,6 +1242,11 @@ async def run_archive_pipeline(
                     # reconcile backend that is quietly down looks like a
                     # sudden taste for review.
                     run.extra["deferred"] = proposal_stats.get("deferred", 0)
+                    # Split out of `deferred` on purpose: a reconcile that
+                    # cannot decide and a fact no user turn supports look the
+                    # same in the queue, but only the second one means the
+                    # extraction model asserted something it could not cite.
+                    run.extra["unverified"] = unverified
                     if proposal_errors:
                         run.status = "error"
                         run.error = proposal_errors[-1]

@@ -656,6 +656,119 @@ def test_reconcile_raising_defers_instead_of_appending(
     assert job.status_of("memory_proposals") == aj.SUCCEEDED
 
 
+def test_an_unsupported_fact_is_queued_even_when_reconcile_says_add(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The evidence gate has to outrank the reconcile's verdict.
+
+    Reconcile only compares a candidate against the region's current entries;
+    it never looks at the transcript, so its "add" says nothing about whether
+    any turn supports the fact. Here the only cited turn is the assistant's own
+    suggestion — exactly the confidently formatted, unsupported statement that
+    used to be written straight into always-loaded context.
+    """
+    archive = _stamped_archive(
+        tmp_path,
+        "## User corrections\n"
+        "- Durable rule: Contractor day rate is 950 EUR. [idx=2] [memory]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    from ciao import memory_proposals as mp
+    from ciao import memory_tool as mt
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+    mt.write_region(guide, "memory", ["Contractor day rate is 800 EUR. [2026-01-01]"])
+
+    async def says_add(*args: object, **kwargs: object) -> dict:
+        return {
+            mp._decision_key("memory", "Contractor day rate is 950 EUR."): {
+                "action": "add"
+            }
+        }
+
+    monkeypatch.setattr("ciao.memory_proposals.plan_region_reconcile", says_add)
+
+    transcript = "\n".join([
+        json.dumps({
+            "idx": 1, "type": "user",
+            "content": [{"type": "text", "text": "what should I charge?"}],
+        }),
+        json.dumps({
+            "idx": 2, "type": "assistant",
+            "content": [{"type": "text", "text": "Your day rate could be 950 EUR."}],
+        }),
+    ])
+
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        guide_path=guide,
+        memory_proposals_enabled=True,
+        filtered_jsonl=transcript,
+        text_mode=False,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Contractor day rate is 800 EUR. [2026-01-01]"]
+    # Queued for a human, never discarded.
+    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    assert "950 EUR" in queue
+    assert job.status_of("memory_proposals") == aj.SUCCEEDED
+
+
+def test_a_fact_a_real_user_turn_supports_still_reaches_the_region(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The same pipeline, with the citation pointing at the user's own turn."""
+    archive = _stamped_archive(
+        tmp_path,
+        "## User corrections\n"
+        "- Durable rule: Contractor day rate is 950 EUR. [idx=1] [memory]\n",
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    from ciao import memory_tool as mt
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+
+    async def no_reconcile(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("ciao.memory_proposals.plan_region_reconcile", no_reconcile)
+
+    transcript = json.dumps({
+        "idx": 1, "type": "user",
+        "content": [{"type": "text", "text": "my day rate is 950 EUR"}],
+    })
+
+    job = _job(tmp_path, archive)
+    job.mark("insights", aj.SUCCEEDED)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        proposal_vault_root=vault,
+        guide_path=guide,
+        memory_proposals_enabled=True,
+        filtered_jsonl=transcript,
+        text_mode=False,
+    )
+
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
+
+    entries, _diags = mt.read_region(guide, "memory")
+    assert any("950 EUR" in entry for entry in entries)
+
+
 def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
     """Nothing to queue is a legitimate no-op, not a failure."""
     archive = _stamped_archive(tmp_path, "## Errors\n- just a one-off. [idx=1]\n")
