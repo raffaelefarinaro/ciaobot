@@ -669,7 +669,11 @@ def index_file(
     try:
         text = file_path.read_text(encoding="utf-8")
         st = file_path.stat()
-    except OSError:
+    except (OSError, UnicodeError):
+        # Same decode guard as the bulk pass: a file that is not valid UTF-8
+        # is skipped, not fatal. `index_file` runs inline on lifecycle writes
+        # (archiving a chat, saving a note), so an escaping UnicodeDecodeError
+        # would fail the whole operation over one unreadable file.
         return False
 
     if not is_log:
@@ -1001,7 +1005,15 @@ def expand_note(
         return None
     try:
         text = resolved.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
+        # `UnicodeError` (the base of `UnicodeDecodeError`) is not an
+        # `OSError`: a note rewritten as non-UTF-8 after it was indexed keeps
+        # its FTS row — the incremental pass logs the decode failure and
+        # leaves the previous row in place — so the lookup above still reaches
+        # the file and the read is what fails. Refusing here is the documented
+        # `note_not_matched` answer (ciao/control_plane.py::vault_expand);
+        # letting it escape would turn a read-only, fail-closed tool into an
+        # internal error.
         return None
 
     revision = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
@@ -1168,7 +1180,10 @@ def read_search_hit_paths(
             for item in paths:
                 if isinstance(item, str):
                     hits.add(item)
-    except OSError:
+    except (OSError, UnicodeError):
+        # A log truncated mid-character by the size-cap rewrite is not valid
+        # UTF-8, and `UnicodeDecodeError` is not an `OSError`. No evidence is
+        # the same answer as no log.
         return None
     return hits
 

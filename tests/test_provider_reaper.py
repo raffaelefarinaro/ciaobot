@@ -306,3 +306,117 @@ def test_a_valid_env_override_is_honoured(
 
     assert manager._provider_idle_timeout == 30.0
     assert manager._provider_reap_interval == 5.0
+
+
+class _FailingProvider(_StubProvider):
+    """A provider whose teardown raises — an opencode server that won't die."""
+
+    def __init__(self, *, fail_times: int = 10_000) -> None:
+        super().__init__()
+        self.attempts = 0
+        self._fail_times = fail_times
+
+    async def disconnect(self) -> None:
+        self.attempts += 1
+        if self.attempts <= self._fail_times:
+            raise RuntimeError("provider process refused to terminate")
+        self.disconnected = True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_disconnect_keeps_the_provider_for_a_retry(
+    tmp_path: Path,
+) -> None:
+    """The sweep pops before it disconnects, so a swallowed failure loses the
+    only reference the shutdown hook could use to finish the teardown — an
+    opencode process left holding a port with nothing left to kill it."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _FailingProvider()
+    manager._providers[chat_id] = provider  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10_000
+
+    # Not reported as reclaimed: nothing was.
+    assert await manager.reap_idle_providers() == []
+    assert provider.attempts == 1
+    # Still reachable, so the shutdown hook's snapshot of `_providers` (and the
+    # next sweep) can try again.
+    assert manager._providers[chat_id] is provider
+
+
+@pytest.mark.asyncio
+async def test_a_retried_disconnect_that_succeeds_is_reclaimed(
+    tmp_path: Path,
+) -> None:
+    """The kept stamp is the stale one, so the retry is the very next sweep."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _FailingProvider(fail_times=1)
+    manager._providers[chat_id] = provider  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10_000
+
+    assert await manager.reap_idle_providers() == []
+    # No `force=True`: the second sweep only reaches it because the restored
+    # stamp still reads as idle past the timeout.
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.attempts == 2
+    assert provider.disconnected
+    assert chat_id not in manager._providers
+    assert chat_id not in manager._provider_disconnect_failures
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_never_disconnects_is_dropped_after_the_budget(
+    tmp_path: Path,
+) -> None:
+    """An unbounded retry list is its own leak: the reference goes, loudly."""
+    from ciao.web.project_chats import _PROVIDER_DISCONNECT_MAX_ATTEMPTS
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _FailingProvider()
+    manager._providers[chat_id] = provider  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10_000
+
+    for _ in range(_PROVIDER_DISCONNECT_MAX_ATTEMPTS):
+        assert await manager.reap_idle_providers() == []
+
+    assert provider.attempts == _PROVIDER_DISCONNECT_MAX_ATTEMPTS
+    assert chat_id not in manager._providers
+    assert chat_id not in manager._provider_last_used
+    assert chat_id not in manager._provider_disconnect_failures
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_serves_a_turn_again_gets_its_budget_back(
+    tmp_path: Path,
+) -> None:
+    """Failures separated by real use say nothing about the next teardown."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _FailingProvider()
+    manager._providers[chat_id] = provider  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10_000
+
+    assert await manager.reap_idle_providers() == []
+    assert manager._provider_disconnect_failures[chat_id] == 1
+
+    manager.active_chat_ids = lambda: [chat_id]  # type: ignore[method-assign]
+    await manager.reap_idle_providers()
+    assert chat_id not in manager._provider_disconnect_failures
+
+
+@pytest.mark.asyncio
+async def test_disconnect_reports_whether_the_provider_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The lifecycle paths may ignore the answer; the sweep may not."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+
+    assert await manager._disconnect_provider(chat_id, None) is True
+    ok = _StubProvider()
+    assert await manager._disconnect_provider(chat_id, ok) is True  # type: ignore[arg-type]
+    assert ok.disconnected
+    bad = _FailingProvider()
+    assert await manager._disconnect_provider(chat_id, bad) is False  # type: ignore[arg-type]
