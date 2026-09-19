@@ -1330,11 +1330,19 @@ def _tools_any_match(record_tools: tuple[str, ...], names: tuple[str, ...]) -> b
 # are deliberately specific: a bare past tense ("was ") is ordinary grammar and
 # excused a sentence that asserted the old value as current. A cue must
 # characterize the *old value*, not merely co-occur with it.
+#
+# "original" joined the list from a real probe: a correct drill-down answer
+# ("the original retainer rate of 120/hour … was superseded by the 2026-06
+# amendment") scored as stale, because the sentence splitter breaks on the dot
+# in a cited path (`projects/Northwind.md`) and the surviving fragment kept the
+# old value with no listed cue. It characterizes the old value exactly as "the
+# former" and "old value" already do, and a sentence that also asserts currency
+# is still caught by _CURRENT_ASSERTION_MARKERS below.
 _HISTORICAL_MARKERS: tuple[str, ...] = (
     "formerly", "previously", "no longer", "superseded", "retired",
     "replaced", "historically", "the former", "used to be", "has changed",
     "had changed", "old value", "previous value", "prior value",
-    "old ", "earlier ", "before ", "past ",
+    "old ", "earlier ", "before ", "past ", "original",
 )
 
 # Words that assert a value is the current one. Present in the same sentence as
@@ -1856,6 +1864,141 @@ def _check_workspace_forbidden(tmp_root: Path, scenario_set: ScenarioSet) -> Con
     )
 
 
+# The synthetic note behind the recall drill-down checks. The superseding
+# clause deliberately shares no term with the query, so the FTS snippet keeps
+# "retainer rate is 120" and drops "billed at 180" — the shape the core prompt's
+# snippet-only rule answers backwards. The credentials sit under a LATER
+# heading while the evidence sits directly under the title, which is the layout
+# that separates a block-bounded expansion from one whose sections swallow
+# their subsections: the latter would return the whole note from the first call.
+_EXPANSION_NOTE = """# Northwind retainer
+
+The Northwind retainer rate is 120 per hour.
+Superseded by the 2026-06 amendment: work logged since then is billed at 180.
+
+## Access
+
+api_key: ac-live-7e2c9a441b
+Door code for the studio is 4417.
+"""
+_EXPANSION_QUERY = "Northwind retainer rate"
+
+
+def _check_recall_expansion(tmp_root: Path) -> list[ContractCheck]:
+    """The scoped evidence drill-down closes the snippet gap without widening it.
+
+    Three facts, measured rather than asserted in prose, because the ticket's
+    own claim was that the quality benefit "requires evaluation":
+
+    1. the 32-token snippet really does drop the clause that decides the
+       answer — without this the drill-down would be solving nothing;
+    2. ``expand_note`` returns that clause;
+    3. it returns nothing from the sibling block, and refuses a note belonging
+       to another workspace, so the property the snippet rule was protecting
+       survives the widening.
+
+    Model-free and hermetic, like the rest of the CI half.
+    """
+    from ciao import fts_search
+
+    checks: list[ContractCheck] = []
+    base = tmp_root / "expand"
+    personal = base / "personal" / "memory-vault"
+    work = base / "work" / "memory-vault"
+    (personal / "projects").mkdir(parents=True, exist_ok=True)
+    (work / "projects").mkdir(parents=True, exist_ok=True)
+    (personal / "projects" / "Northwind.md").write_text(
+        _EXPANSION_NOTE, encoding="utf-8"
+    )
+    (work / "projects" / "Northwind.md").write_text(
+        _EXPANSION_NOTE, encoding="utf-8"
+    )
+    conn = sqlite_connect()
+    fts_search.init_db(conn)
+    fts_search.index_vault(conn, personal, path_base=base)
+    fts_search.index_vault(conn, work, path_base=base)
+    prefix = fts_search.vault_key_prefix(personal, base)
+
+    rows = fts_search.search_vault(
+        conn, _EXPANSION_QUERY, path_prefix=prefix
+    )
+    snippet = rows[0]["snippet"] if rows else ""
+    gap = bool(rows) and "120" in snippet and "180" not in snippet
+    checks.append(
+        ContractCheck(
+            id="recall-snippet-omits-qualification",
+            category="recall",
+            passed=gap,
+            detail=(
+                "the snippet keeps the value and drops the clause that supersedes it"
+                if gap
+                else f"snippet no longer shows the gap: {snippet!r}"
+            ),
+        )
+    )
+
+    key = rows[0]["path"] if rows else ""
+    expanded = (
+        fts_search.expand_note(
+            conn, base, personal, key, _EXPANSION_QUERY, path_prefix=prefix
+        )
+        if key
+        else None
+    )
+    body = (
+        "\n".join(str(s.get("text", "")) for s in expanded.get("sections", []))
+        if expanded
+        else ""
+    )
+    recovered = "180" in body and "amendment" in body
+    checks.append(
+        ContractCheck(
+            id="recall-expansion-recovers-qualification",
+            category="recall",
+            passed=recovered,
+            detail=(
+                "the drill-down returns the superseding clause the snippet cut"
+                if recovered
+                else f"expansion did not recover the clause: {body!r}"
+            ),
+        )
+    )
+
+    contained = bool(body) and "ac-live-7e2c9a441b" not in body and "4417" not in body
+    checks.append(
+        ContractCheck(
+            id="recall-expansion-stays-in-section",
+            category="isolation",
+            passed=contained,
+            detail=(
+                "the adjacent block's credentials are not in the expansion"
+                if contained
+                else "the expansion leaked the sibling block"
+            ),
+            zero_tolerance=True,
+        )
+    )
+
+    foreign_key = key.replace("personal", "work", 1) if key else "work"
+    leaked = fts_search.expand_note(
+        conn, base, personal, foreign_key, _EXPANSION_QUERY, path_prefix=prefix
+    )
+    checks.append(
+        ContractCheck(
+            id="recall-expansion-rejects-foreign-note",
+            category="isolation",
+            passed=leaked is None,
+            detail=(
+                "a path outside this workspace's search scope is refused"
+                if leaked is None
+                else f"the drill-down expanded a foreign note: {foreign_key}"
+            ),
+            zero_tolerance=True,
+        )
+    )
+    return checks
+
+
 def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
     """Event-shaped facts stay queued; unattended runs never promote."""
     from ciao.memory_policy import unattended_policy, unattended_deferrals
@@ -2093,6 +2236,7 @@ def run_contract_checks(
     try:
         checks: list[ContractCheck] = []
         checks.extend(_check_isolation(tmp_root, catalog))
+        checks.extend(_check_recall_expansion(tmp_root))
         checks.extend(_check_auto_memory(catalog))
         checks.extend(_check_approval(catalog, tmp_root))
         checks.extend(_check_injection(catalog))

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import TabBar, { type TabSpec } from './TabBar.vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -206,55 +205,39 @@ function retryQueue() {
   void store.fetch({ force: true })
 }
 
-// -- Queue / History tabs ---------------------------------------------------
+// -- Queue / History sections -----------------------------------------------
 //
 // The two sub-views share this panel (and its workspace/kind/search filter
 // state in the store) rather than living on separate routes: switching is a
 // glance, not a navigation, and the sidebar's scope picker must not reset.
-const REVIEW_TABS = [
-  { key: 'queue' as const, label: 'Queue' },
-  { key: 'history' as const, label: 'History' },
-]
-// Must match TabBar's `id-prefix="pr"` scheme: the tabs live in that component
-// and point at these panels via aria-controls.
-function tabId(key: string): string {
-  return `pr-tab-${key}`
-}
+//
+// The tab bar that used to pick between them is gone from here. Review had
+// three stacked tab rows — Proposals/Retirements, then this one, then To
+// review/Trash — so the parent now renders one bar for all four sections and
+// drives this panel through `section`. The store still holds the choice, so
+// anything that sets `store.view` directly keeps working.
+const props = withDefaults(defineProps<{ section?: 'queue' | 'history' }>(), {
+  section: 'queue',
+})
 
-function panelId(key: string): string {
-  return `pr-panel-${key}`
-}
-
-const reviewTabs = computed<TabSpec<'queue' | 'history'>[]>(() =>
-  REVIEW_TABS.map(tab => ({
-    ...tab,
-    // Only History carries a count, and it stays hidden while the ledger loads
-    // — a badge rendered before the fetch read "History 0" on a full ledger.
-    count: tab.key === 'history' ? historyCount.value : undefined,
-  })),
+watch(
+  () => props.section,
+  (section) => {
+    store.view = section
+    if (section === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
+  },
+  { immediate: true },
 )
 
-function switchTab(key: 'queue' | 'history') {
-  store.view = key
-  if (key === 'history') void store.ensureHistoryLoaded(projectStore.activeWorkspace)
-}
-
-// Null until the ledger has loaded, and the badge is hidden while it is: a
-// count rendered before the fetch read "History 0" on a ledger with hundreds
-// of rows - the opposite of what a badge is for. `onMounted` prefetches, so
-// the wait is the first request, not the first tab switch.
-//
-// Unfiltered it reports the server's scoped total rather than the rows we
-// happen to hold: the page is capped, so a workspace with more decisions than
-// the limit showed the limit itself (200) as though that were the whole
-// ledger. Under a filter the visible count is the honest number.
-const historyCount = computed(() => {
-  if (!store.historyLoaded) return null
-  if (store.historyFiltersActive) {
-    return store.visibleHistory(projectStore.activeWorkspace).length
-  }
-  return store.historyTotal
-})
+/** Which section to render. Reads the store, which the watcher above keeps in
+ * step with the prop, so a standalone mount (and anything that still flips
+ * `store.view` directly) behaves.
+ *
+ * Deliberately NOT named `section`: a prop and a computed of the same name
+ * both land on the instance, so `section` in the template resolved to
+ * whichever won rather than to the one meant here. `vue/no-dupe-keys` is an
+ * error for exactly that reason. */
+const activeSection = computed(() => store.view)
 
 /** A skill proposal's name without its legacy date prefix. New Skill reflection
  * runs upsert one canonical file; grouping keeps older queues understandable
@@ -311,13 +294,20 @@ function rowTitle(row: ProposalRow): string {
   return row.text
 }
 
-/** The line under the title: where an accept would write.
+/** Where an accept would write, as a path. Now the tooltip and the details
+ * line rather than the row's own subtitle.
  *
  * Every kind's answer lives in its descriptor, including the re-home row's
  * `from → to · why` form and the skill row's path.
  */
 function rowSubtitle(row: ProposalRow): string {
   return descriptorFor(row).destination(row)
+}
+
+/** The line under the title: what keeping this row would do, named without a
+ * path. Same registry, so a new kind still answers both in one place. */
+function rowConsequence(row: ProposalRow): string {
+  return descriptorFor(row).consequence(row)
 }
 
 /** The verbose original, kept behind a disclosure rather than on the surface. */
@@ -699,18 +689,9 @@ watch(
 
 <template>
   <div class="proposal-review">
-    <header class="pr-head">
-      <!-- A tablist, not a nav landmark: this switches sub-views in place. -->
-      <TabBar
-        :model-value="store.view"
-        :tabs="reviewTabs"
-        label="Proposal review"
-        id-prefix="pr"
-        class="pr-tabs"
-        @update:model-value="switchTab"
-      />
-      <p v-if="store.view === 'queue' && !queueLoading && !queueFailed" class="pr-summary">
-        <strong>{{ filtered.length }}</strong> to review in {{ projectStore.activeWorkspace }}
+    <header v-if="activeSection === 'queue' && !queueLoading && !queueFailed" class="pr-head">
+      <p class="pr-summary">
+        <strong>{{ filtered.length }}</strong> to decide in {{ projectStore.activeWorkspace }}
         <button
           v-if="store.kindFilter !== 'all' || store.search"
           type="button"
@@ -720,25 +701,37 @@ watch(
       </p>
     </header>
 
-    <ProposalHistoryList
-      v-if="store.view === 'history'"
-      :id="panelId('history')"
-      role="tabpanel"
-      :aria-labelledby="tabId('history')"
-    />
+    <ProposalHistoryList v-if="activeSection === 'history'" />
 
-    <div v-else :id="panelId('queue')" role="tabpanel" :aria-labelledby="tabId('queue')">
-    <p class="pr-hint">
-      This is a fallback queue, not a list of every new fact: confident facts are
-      applied when a chat is archived. Daily Memory curation retries addressable
-      queued items and re-checks aging notes, so rows can disappear when either
-      you or that run resolves them. Accepting a memory row writes it into that
-      workspace’s bounded guide region; project rows fold into the named doc,
-      people rows create a stub note, and learnings append to
-      Workspace/Learnings.md. Re-home rows are not moved here. Skill rows are
-      files — dismiss removes them, and implement builds the skill in a chat.
-      Review rows have no destination yet and still need your decision.
+    <div v-else>
+    <!-- One sentence naming the decision, and the mechanism behind it folded
+         away. The paragraph this replaces ran nine lines — internal routing,
+         bounded regions, stub notes, file removal — and at a 390px viewport it
+         took about 230px of screen before the first thing to decide. Where a
+         row would actually go is now on the row itself. -->
+    <p class="pr-lede">
+      Things Ciaobot thought worth remembering but was not sure enough to save on
+      its own. Keep the ones you want; dismiss the rest.
     </p>
+    <details class="pr-how">
+      <summary class="pr-how-summary">How memory works</summary>
+      <div class="pr-how-body">
+        <p>
+          When you archive a chat, Ciaobot saves what it is confident about by
+          itself. Anything it is unsure about waits here instead, so nothing it
+          guessed at lands in your notes without you seeing it.
+        </p>
+        <p>
+          Each row says what keeping it would do. A nightly pass looks again at
+          this list and at your older notes, so a row can also clear itself once
+          that pass can settle it.
+        </p>
+        <p>
+          Notes that are already saved but may have gone out of date are under
+          <strong>Notes to revisit</strong>, not here.
+        </p>
+      </div>
+    </details>
 
 
     <!-- Counted and gated on the VISIBLE selection, so the bar can never
@@ -854,10 +847,15 @@ watch(
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <span class="pr-row-title">{{ rowTitle(row) }}</span>
             </div>
-            <!-- For a skill row the subtitle IS the file, so it opens it. A
-                 separate "view" button spent a slot saying what the path already
-                 said. Only the leaf: every row in a group shares the folder. -->
-            <p class="pr-row-sub">
+            <!-- What accepting this row would do, in words rather than a path:
+                 `ciao:memory` and `Workspace/Learnings.md` are the same shape of
+                 string and say nothing about the difference between them. The
+                 path is still one disclosure away, and still the title text.
+
+                 For a skill row the file IS the row, so its leaf stays a button
+                 that opens it — a separate "view" button spent a slot saying
+                 what the path already said. -->
+            <p class="pr-row-sub" :title="rowSubtitle(row)">
               <button
                 v-if="isSkill(row) && row.path"
                 type="button"
@@ -865,13 +863,14 @@ watch(
                 :title="row.path"
                 @click="view(row)"
               >{{ pathLeaf(row.path) }}</button>
-              <template v-else>{{ rowSubtitle(row) }}</template>
+              <template v-else>{{ rowConsequence(row) }}</template>
               <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
-            <details v-if="rowDetail(row)" class="pr-row-detail">
+            <details class="pr-row-detail">
               <summary>details</summary>
-              <p class="pr-row-prose">{{ rowDetail(row) }}</p>
-              <p class="pr-row-source">{{ row.path }}</p>
+              <p v-if="rowDetail(row)" class="pr-row-prose">{{ rowDetail(row) }}</p>
+              <p class="pr-row-source">Goes to {{ rowSubtitle(row) }}</p>
+              <p v-if="row.path" class="pr-row-source">{{ row.path }}</p>
             </details>
           </div>
 
@@ -996,13 +995,46 @@ watch(
   font-size: 0.8rem;
 }
 
-.pr-hint {
+/* The one sentence that says what this list is. Full-contrast and at body
+   size, because it is the first thing read — the nine-line muted paragraph it
+   replaces was both harder to read and longer than the screen it opened on. */
+.pr-lede {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* The mechanism, folded away. Closed it costs one line; the summary is a real
+   disclosure control, so it is keyboard-reachable and states its own state. */
+.pr-how {
   margin: 0;
   color: var(--fg2);
-  font-size: 0.8rem;
-  line-height: 1.5;
-  max-width: none;
+  font-size: var(--text-xs);
 }
+
+.pr-how-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.pr-how-summary:hover { color: var(--fg); }
+.pr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.pr-how-body {
+  max-width: 62ch;
+  line-height: 1.5;
+}
+
+.pr-how-body p {
+  margin: 0 0 var(--space-2);
+}
+
+.pr-how-body p:last-child { margin-bottom: 0; }
 
 .pr-error {
   color: var(--error);
@@ -1038,13 +1070,6 @@ watch(
   flex-wrap: wrap;
   color: var(--warning);
   font-size: 0.85rem;
-}
-
-/* Queue / History tablist, matching ProjectView's project-tabs underline
-   style so switching sub-views reads the same way across the app. */
-/* Layout only — the tab styling lives in TabBar. */
-.pr-tabs {
-  margin-bottom: var(--space-2);
 }
 
 /* The batch bar appears only with a selection, so it never occupies space while

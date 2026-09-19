@@ -94,11 +94,7 @@ from ciao.vault_index import (
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
-from ciao.web.project_chats import (
-    _ALLOWED_IMAGE_EXTENSIONS,
-    _PROJECT_UPLOAD_MAX_BYTES,
-    _normalize_handover_messages,
-)
+from ciao.web.project_chats import _ALLOWED_IMAGE_EXTENSIONS
 from ciao.web.routes_helpers import (
     _allowed_roots,
     _commit_and_push,
@@ -110,6 +106,10 @@ from ciao.web.routes_helpers import (
 # Imported as a module, not by name, so a test can patch one helper and have the
 # handlers see the patch.
 from ciao.web import proposal_service
+# Same arrangement for the chat workflow's domain rules (upload policy, handover
+# trimming, title derivation, scheduled-run grading), which ProjectChatManager
+# and these handlers share.
+from ciao.web import chat_service
 
 logger = logging.getLogger(__name__)
 
@@ -2152,7 +2152,7 @@ async def project_files_upload(request: Request) -> JSONResponse:
             continue
         filename = getattr(upload, "filename", "") or ""
         try:
-            data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
+            data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
             entry = pcm.save_project_file_upload(project_id, data, filename)
             saved.append(entry)
         except LookupError as exc:
@@ -2176,7 +2176,7 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
             continue
         filename = getattr(upload, "filename", "") or ""
         try:
-            data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
+            data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
             saved.append(
                 await asyncio.to_thread(
                     pcm.save_chat_attachment_upload, chat.project_id, data, filename
@@ -2524,7 +2524,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     )
                     continue
                 try:
-                    if path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                    if path.stat().st_size > chat_service._PROJECT_UPLOAD_MAX_BYTES:
                         errors.append({"filename": path.name, "error": "file too large"})
                         continue
                     data = path.read_bytes()
@@ -3226,7 +3226,7 @@ def _messages_from_archived_transcript(
         )
         return None
     parsed = pcm._parse_transcript_messages(text)
-    parsed = _normalize_handover_messages(parsed)
+    parsed = chat_service._normalize_handover_messages(parsed)
     # Map transcript timestamp field to the frontend's sent_at key.
     for parsed_entry in parsed:
         if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:

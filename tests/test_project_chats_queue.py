@@ -720,3 +720,110 @@ async def test_queue_edit_updates_flushed_text(tmp_path: Path) -> None:
     await asyncio.wait_for(consumer, timeout=5.0)
 
     assert turn_calls == ["initial", "edited"]
+
+
+# ── the close-the-queue race ────────────────────────────────────────────────
+
+
+def test_a_finished_stream_stops_accepting_queued_messages() -> None:
+    """Once the drive loop is done, queueing is a message with no reader.
+
+    `drain_one()` and the stream teardown are not one atomic step. A send
+    landing in that window was accepted into `_pending` that nothing would
+    ever read — the loop had already looked — so the user kept a QUEUED chip
+    for a message that was never going to be sent, and `queue_message`
+    returning True stopped the caller starting a real turn for it.
+    """
+    stream = ChatStream("chat-1")
+    assert stream.accepting_queue is True
+
+    stream.accepting_queue = False
+
+    # The stream itself still holds whatever was queued before it closed —
+    # refusing new work must not discard the old.
+    stream.accepting_queue = True
+    stream.enqueue("earlier", [])
+    stream.accepting_queue = False
+    assert [entry["text"] for entry in stream.pending] == ["earlier"]
+
+
+@pytest.mark.asyncio
+async def test_queue_message_refuses_a_closed_stream(tmp_path: Path) -> None:
+    """`queue_message` must report False so the caller starts a real turn.
+
+    Returning True for a stream whose loop has finished is what turned this
+    from a dropped message into a silent one: the caller trusted the queue
+    and never fell through to `start_stream`.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("queue-close", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="queue-close-test")
+
+    stream = ChatStream(chat.chat_id)
+    pcm._broker.register(chat.chat_id, stream)
+    assert pcm.queue_message(chat.chat_id, "while running") is True
+
+    stream.accepting_queue = False
+    assert pcm.queue_message(chat.chat_id, "after the loop gave up") is False
+
+    # Refusing new work must not discard what was queued before the close.
+    assert [entry["text"] for entry in stream.pending] == ["while running"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_queued_as_the_turn_ends_is_parked_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clean-completion path parked nothing, so a late send vanished.
+
+    Every other exit — error, question-pause, the defensive branch — parked the
+    queue onto `chat.pending_queue`. The common path, a turn that finished with
+    an empty-looking queue, broke straight out and let `finally` tear the
+    stream down with the message still in it.
+
+    The race is simulated at exactly its real boundary: `drain_one` reports an
+    empty queue, and a send lands immediately afterwards.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("queue-race", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="queue-race-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result", result="done", session_id="sess-race", is_error=False,
+            effective_model=chat.model, usage={}, quota={}, cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+
+    # `ChatStream` uses __slots__, so the hook goes on the class. Patching at
+    # exactly `drain_one` puts the simulated send at the real boundary: the
+    # loop has just looked and found nothing.
+    raced: list[str] = []
+    real_drain_one = ChatStream.drain_one
+
+    def drain_one_then_race(self):
+        entry = real_drain_one(self)
+        if entry is None and not raced:
+            raced.append("sent")
+            self.enqueue("landed in the race window", [], entry_id="q-race")
+        return entry
+
+    monkeypatch.setattr(ChatStream, "drain_one", drain_one_then_race)
+
+    captured: list[dict] = []
+
+    async def consume(s) -> None:
+        async for ev in s.subscribe():
+            captured.append(ev)
+
+    consumer = asyncio.create_task(consume(stream))
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert raced, "fixture must queue inside the race window"
+    parked = [entry["text"] for entry in pcm._chats[chat.chat_id].pending_queue]
+    assert parked == ["landed in the race window"], (
+        "a message queued as the turn ended must survive to the next turn"
+    )

@@ -125,7 +125,7 @@ _TURN_INTERRUPTED_MESSAGE = (
 # normal (non-error) terminal result, so nothing downstream would treat it as a
 # failure. We detect the banner and re-flag the result as an error the
 # orchestration layer can auto-resume. Keep these markers in sync with
-# ``_is_retryable_connection_error`` in ``ciao/web/project_chats.py``.
+# ``_is_retryable_connection_error`` in ``ciao/web/chat_service.py``.
 _CONNECTION_DROP_MARKERS = (
     "connection closed mid-response",
     "response above may be incomplete",

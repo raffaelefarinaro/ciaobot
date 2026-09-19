@@ -337,7 +337,7 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
 
 def test_connection_drop_banner_classified_as_connection_error() -> None:
     """The CLI mid-response drop banner must be a retryable connection error."""
-    from ciao.web.project_chats import (
+    from ciao.web.chat_service import (
         _is_retryable_connection_error,
         _is_retryable_provider_startup_error,
         _is_retryable_quota_error,
@@ -724,7 +724,7 @@ def test_a_plainly_stated_usage_limit_arms_the_hourly_retry() -> None:
     through to unknown: no hourly retry armed, and the user had to sit on the
     chat and press Retry by hand.
     """
-    from ciao.web.project_chats import _is_retryable_quota_error
+    from ciao.web.chat_service import _is_retryable_quota_error
 
     assert _is_retryable_quota_error("The usage limit has been reached") is True
     assert _is_retryable_quota_error("Usage limit reached") is True
@@ -738,7 +738,7 @@ def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
     Only pairing the noun with an exhaustion verb bypasses it; the bare noun
     must still carry the 429 / too-many-requests marker.
     """
-    from ciao.web.project_chats import _is_retryable_quota_error
+    from ciao.web.chat_service import _is_retryable_quota_error
 
     assert _is_retryable_quota_error("I checked the quota settings for you") is False
     assert _is_retryable_quota_error("the session was restored") is False

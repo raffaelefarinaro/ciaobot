@@ -293,7 +293,7 @@ function clearedDate(note: VaultClearedNote): string {
           <strong>{{ store.trashed.length }}</strong> retired {{ store.trashed.length === 1 ? 'note' : 'notes' }} in {{ workspace }}
         </template>
         <template v-else>
-          <strong>{{ store.candidates.length }}</strong> to review in {{ workspace }}
+          <strong>{{ store.candidates.length }}</strong> to revisit in {{ workspace }}
         </template>
       </p>
       <button
@@ -305,21 +305,39 @@ function clearedDate(note: VaultClearedNote): string {
     </header>
 
     <template v-if="props.section !== 'trash'">
-      <p class="vr-hint">
-        Stale notes the nightly curation flagged. <strong>Still true</strong> clears the
-        row and stamps the note as verified today (a note with no frontmatter has
-        nothing to stamp, and says so); <strong>Retire</strong> moves it to the
-        Trash tab, where one click brings it back. <strong>Talk about it</strong>
-        opens a chat with the note pinned and decides nothing — on a note nothing links
-        to, it goes looking for the notes that should link to it, which is what actually
-        clears that flag. Leaving a row alone keeps it here. Nothing here deletes
-        permanently except the trash's own delete control, which asks first.
+      <!-- One sentence, then the mechanism folded away. The paragraph this
+           replaces spent eight lines on what each button does before the first
+           note appeared; the buttons are on every row and say so themselves. -->
+      <p class="vr-lede">
+        Notes you already saved that may have gone out of date. Say whether each one
+        still holds.
       </p>
+      <details class="vr-how">
+        <summary class="vr-how-summary">What each choice does</summary>
+        <div class="vr-how-body">
+          <p>
+            <strong>Still true</strong> takes the note off this list and marks it
+            checked today — though a note with no frontmatter has nowhere to record
+            that, and Ciaobot will say so when that happens.
+          </p>
+          <p>
+            <strong>Retire</strong> moves the note to <strong>Retired</strong>, where
+            one click brings it back. Nothing is deleted for good except through the
+            delete control there, which asks first.
+          </p>
+          <p>
+            <strong>Talk about it</strong> opens a chat with the note pinned and
+            decides nothing. When nothing links to a note, that chat goes looking for
+            the notes that should link to it — which is what actually clears the flag.
+          </p>
+          <p>Leaving a row alone keeps it here.</p>
+        </div>
+      </details>
 
       <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
       <p v-else-if="!store.candidates.length" class="vr-empty">
-        Nothing flagged here. Notes land here when curation finds them unlinked,
-        duplicated, superseded, or unverified — and leave when you or that run resolves them.
+        Nothing to revisit. A note turns up here when it has gone a long time
+        unchecked, nothing links to it, or it looks like a duplicate of another note.
       </p>
 
       <ul v-else class="vr-rows">
@@ -430,10 +448,13 @@ function clearedDate(note: VaultClearedNote): string {
     </template>
 
     <section v-else class="vr-trash" aria-label="Trash">
-      <p class="vr-hint">Retired notes stay here until you delete them — nothing is purged on a timer. Restore is one click; permanent deletion asks first.</p>
+      <p class="vr-lede">
+        Notes you retired. They stay here until you say otherwise — nothing is removed
+        on a timer. Restore is one click; deleting for good asks first.
+      </p>
       <p v-if="!store.trashed.length" class="vr-empty">
-        Nothing retired yet. A note you retire from the To review tab waits here until
-        you restore it or delete it for good.
+        Nothing retired yet. A note you retire from <strong>Notes to revisit</strong>
+        waits here until you restore it or delete it for good.
       </p>
       <ul v-else class="vr-rows">
         <li
@@ -501,6 +522,46 @@ function clearedDate(note: VaultClearedNote): string {
   font-size: 0.8rem;
   line-height: 1.5;
 }
+
+/* The one sentence that says what this list is — full contrast, body size,
+   because it is the first thing read. */
+.vr-lede {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* The per-button detail, folded away: closed it costs one line, and the
+   summary is a real disclosure control, so it is keyboard-reachable. */
+.vr-how {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+
+.vr-how-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.vr-how-summary:hover { color: var(--fg); }
+.vr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.vr-how-body {
+  max-width: 62ch;
+  line-height: 1.5;
+}
+
+.vr-how-body p {
+  margin: 0 0 var(--space-2);
+}
+
+.vr-how-body p:last-child { margin-bottom: 0; }
 
 .vr-empty {
   color: var(--fg2);

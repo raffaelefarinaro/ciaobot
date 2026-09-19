@@ -471,3 +471,162 @@ describe('MemoryMapView list sorting', () => {
     expect(titles(wrapper).at(-1)).toBe('Ancient note')
   })
 })
+
+/**
+ * Review navigation: one tab bar, four sections.
+ *
+ * Review used to nest three tab rows — Proposals/Retirements here, then
+ * Queue/History inside the proposal panel and To review/Trash inside the
+ * retirement one — so the trash was a tab inside a tab inside a sidebar
+ * button. These pin the flat bar, the labels that name the decision rather
+ * than the pipeline, and the entry points that still have to land where they
+ * always did.
+ */
+describe('MemoryMapView review navigation', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    apiGet.mockReset()
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      if (url.startsWith('/api/proposals/history')) {
+        return Promise.resolve({
+          rows: [{
+            id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
+            kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
+            destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
+          }],
+          total: 500,
+          truncated: true,
+          limit: 200,
+        })
+      }
+      if (url.startsWith('/api/proposals')) {
+        return Promise.resolve({
+          rows: [{
+            id: 'p1', kind: 'memory', text: 'A queued fact', source: '', path: '',
+            workspace: 'personal', region: 'memory', target: '', ts: '2026-09-01',
+          }],
+        })
+      }
+      if (url.startsWith('/api/vault/review')) {
+        return Promise.resolve({
+          candidates: [{
+            candidate_id: 'c1', workspace: 'personal', path: 'memory-vault/People/Mo.md',
+            content_hash: 'deadbeef', signals: ['unlinked'], priority: 1,
+            evidence: {
+              backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
+              last_update: '', type: 'note', age_days: null,
+            },
+            status: 'candidate', disposition: '', deferred_until: '',
+          }],
+          trashed: [{
+            candidate_id: 't1', workspace: 'personal',
+            original_path: 'memory-vault/People/Old.md', content_hash: 'cafef00d',
+            trashed_at: '2026-09-01T00:00:00Z',
+          }],
+          cleared: [],
+        })
+      }
+      return Promise.resolve({})
+    })
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.activeWorkspace = 'personal'
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  async function mountReview() {
+    const wrapper = await mountView()
+    const mm = useMemoryMapStore()
+    mm.view = 'review'
+    await flushPromises()
+    await nextTick()
+    await flushPromises()
+    return { wrapper, mm }
+  }
+
+  function tabs(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll('[role="tab"]')
+  }
+
+  it('renders exactly one tab bar, holding all four sections', async () => {
+    const { wrapper } = await mountReview()
+
+    expect(wrapper.findAll('[role="tablist"]')).toHaveLength(1)
+    expect(tabs(wrapper).map(t => t.text().replace(/\d+$/, '').trim())).toEqual([
+      'Suggested memories', 'Notes to revisit', 'Retired', 'History',
+    ])
+    wrapper.unmount()
+  })
+
+  it('reaches the retired notes in one click, not a tab inside a tab', async () => {
+    const { wrapper, mm } = await mountReview()
+
+    await tabs(wrapper)[2]!.trigger('click')
+    await flushPromises()
+
+    expect(mm.reviewTab).toBe('retirement')
+    expect(mm.retirementTab).toBe('trash')
+    expect(wrapper.text()).toContain('Old')
+    wrapper.unmount()
+  })
+
+  it('shows the decision ledger from the same bar', async () => {
+    const { wrapper } = await mountReview()
+
+    await tabs(wrapper)[3]!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Remember the thing')
+    wrapper.unmount()
+  })
+
+  it('selects the notes-to-revisit tab when a stale note asks for it', async () => {
+    // The stale note's detail panel and the sidebar's "Needs review" list both
+    // set the old two-part state; flattening the bar may not break them.
+    const { wrapper, mm } = await mountReview()
+    mm.reviewTab = 'retirement'
+    mm.retirementTab = 'candidates'
+    await nextTick()
+
+    expect(tabs(wrapper)[1]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.text()).toContain('Mo')
+    wrapper.unmount()
+  })
+
+  it('counts each queue on its own tab, scoped to the workspace', async () => {
+    const { wrapper } = await mountReview()
+
+    const counts = tabs(wrapper).map(t => (
+      t.find('.tab-bar-count').exists() ? t.find('.tab-bar-count').text() : null
+    ))
+    // One queued proposal, one candidate, one retired note, and the ledger's
+    // server-side total rather than the page size.
+    expect(counts).toEqual(['1', '1', '1', '500'])
+    wrapper.unmount()
+  })
+
+  it('renders no History count while the ledger is still unloaded', async () => {
+    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
+    // opposite of what a badge is for.
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      if (url.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
+      if (url.startsWith('/api/proposals')) return Promise.resolve({ rows: [] })
+      return Promise.resolve({ candidates: [], trashed: [], cleared: [] })
+    })
+    const { wrapper } = await mountReview()
+
+    expect(tabs(wrapper)[3]!.find('.tab-bar-count').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})

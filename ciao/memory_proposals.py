@@ -27,8 +27,14 @@ state-shaped fact is written straight to its destination at archive time —
 regions through the :mod:`ciao.memory_audit` event-shape guard, people notes
 as stubs when absent, learnings as dated bullets. Anything the guards reject,
 any destination whose write fails, every region fact whose write-time
-reconcile came back unusable, and every ``[review]`` bullet land in the queue
-file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
+reconcile came back unusable, every region fact whose ``[idx=N]`` citation
+the transcript does not support, and every ``[review]`` bullet land in the
+queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
+
+Shape is not evidence. The guards above ask whether a fact *looks* like
+durable state; :func:`unsupported_region_facts` asks the separate question of
+whether any turn the user actually typed says so, which a fluent model
+satisfies on formatting alone otherwise.
 """
 
 from __future__ import annotations
@@ -74,7 +80,7 @@ _DESTINATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-_IDX_TAG_RE = re.compile(r"\s*\[idx\s*=\s*[\d,\s]+\]\s*$")
+_IDX_TAG_RE = re.compile(r"\s*\[idx\s*=\s*([\d,\s]+)\]\s*$")
 
 
 def _one_line(value: str) -> str:
@@ -89,17 +95,25 @@ def _one_line(value: str) -> str:
     return " ".join(value.split())
 
 
-def _peel_trailing_metadata(text: str) -> tuple[str, str, str]:
+def _peel_trailing_metadata(text: str) -> tuple[str, str, tuple[int, ...], str]:
     """Split trailing citation and destination metadata off a bullet.
 
-    Returns ``(kind, payload, remaining_text)``. Models write the tag after
-    the citation per the prompt, but either order is accepted: trailing
-    bracketed groups are peeled from the end, and each must be an ``[idx=…]``
-    citation or a destination tag — anything else stops the peel and stays in
-    the text rather than being guessed at. When several tags somehow stack up,
-    the one closest to the end of the line wins.
+    Returns ``(kind, payload, citations, remaining_text)``. Models write the
+    tag after the citation per the prompt, but either order is accepted:
+    trailing bracketed groups are peeled from the end, and each must be an
+    ``[idx=…]`` citation or a destination tag — anything else stops the peel
+    and stays in the text rather than being guessed at. When several tags
+    somehow stack up, the one closest to the end of the line wins.
+
+    ``citations`` are the transcript message indices the bullet cites. They
+    used to be thrown away here, which left region promotion with no way to
+    ask whether a fact was tied to any real turn: a confidently formatted
+    bullet carrying a fabricated ``[idx=99]`` — or no citation at all — read
+    exactly like a grounded one and was auto-saved into always-loaded context.
+    :func:`unsupported_region_facts` is the consumer.
     """
     kind, payload = "", ""
+    cited: list[int] = []
     while True:
         match = _DESTINATION_RE.search(text)
         if match is not None:
@@ -110,9 +124,10 @@ def _peel_trailing_metadata(text: str) -> tuple[str, str, str]:
             continue
         match = _IDX_TAG_RE.search(text)
         if match is not None:
+            cited.extend(int(part) for part in re.findall(r"\d+", match.group(1)))
             text = text[: match.start()].rstrip()
             continue
-        return kind, payload, text
+        return kind, payload, tuple(sorted(set(cited))), text
 
 
 @dataclass(slots=True, frozen=True)
@@ -123,6 +138,10 @@ class MemoryProposal:
     text: str
     source_section: str
     payload: str = ""  # e.g. the person name for [people], doc path for [project]
+    # Transcript message indices the bullet cited, as peeled from its
+    # ``[idx=N]`` tag. Empty means the model cited nothing — which for a
+    # region-bound fact is itself a reason to queue rather than auto-save.
+    citations: tuple[int, ...] = ()
 
     def as_bullet(self) -> str:
         # Deliberately total: an unknown target is written through rather than
@@ -145,11 +164,13 @@ class MemoryProposal:
 def _split_sections(insights_md: str) -> dict[str, list[str]]:
     """Group bullet lines by their ``## Heading``.
 
-    Strips bullet markers and citation tags — ``[idx=12]`` and the
-    multi-index ``[idx=12,34]`` shape models improvise — so the proposal is
-    one clean sentence. Destination tags survive here; they are split later,
-    per bullet, where the routing decision happens. Empty sections are
-    dropped.
+    Strips bullet markers only. Citation tags — ``[idx=12]`` and the
+    multi-index ``[idx=12,34]`` shape models improvise — and destination tags
+    both survive here; they are split later, per bullet, by
+    :func:`_peel_trailing_metadata`, where the routing decision happens.
+    Stripping the citation at this stage destroyed the one piece of evidence
+    that ties a fact to a real turn before anything could check it. Empty
+    sections are dropped.
     """
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -166,7 +187,6 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
         if not bullet:
             continue
         text = bullet.group(1).strip()
-        text = re.sub(r"\s*\[idx\s*=\s*[\d,\s]+\]\s*$", "", text).strip()
         if text:
             sections[current].append(text)
     return sections
@@ -253,7 +273,7 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
 
     for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS):
         for item in sections.get(heading, []):
-            kind, payload, text = _peel_trailing_metadata(item)
+            kind, payload, citations, text = _peel_trailing_metadata(item)
             if not kind:
                 kind, payload = _default_destination(heading, text)
             if not _is_durable(text):
@@ -263,6 +283,7 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
                 text=text,
                 source_section=heading,
                 payload=payload,
+                citations=citations,
             ))
 
     return proposals
@@ -367,9 +388,9 @@ def _promote_to_region(
     writer; nothing was written and the fact stays queued), ``"failed"`` (the
     write itself failed, including a lock that could not be taken; stays
     queued), ``"unshaped"`` (not state-shaped text; stays queued for the
-    curator to rephrase), or ``"deferred"`` (reconcile could not be trusted
-    about this fact; stays queued rather than being appended beside whatever it
-    may supersede).
+    curator to rephrase), or ``"deferred"`` (something about this fact could
+    not be trusted — an uncertain reconcile, or a citation no real user turn
+    backs; stays queued rather than being appended on the model's word).
 
     Fail-safe by construction: the guide lock is *required*, not best-effort.
     An earlier version caught a lock failure and proceeded with ``lock=None``,
@@ -823,9 +844,11 @@ def apply_proposals(
     ``actor``/``source``/``workspace`` are stamped into the region write's
     receipt so the review History can say who changed memory and from where.
 
-    ``stats``, when given, is filled with ``deferred``: region facts an
-    uncertain reconcile sent to the queue instead of the region. They are in
-    ``remaining`` like any other queued row, which alone cannot say why.
+    ``stats``, when given, is filled with ``deferred``: region facts sent to
+    the queue instead of the region because something about them could not be
+    trusted — an uncertain reconcile, or a citation the transcript does not
+    support (:func:`unsupported_region_facts`). They are in ``remaining`` like
+    any other queued row, which alone cannot say why.
     """
     from ciao.memory_tool import resolve_region
 
@@ -1057,6 +1080,142 @@ def _reconcile_candidates(
             continue
         by_region.setdefault(region, []).append(promotable)
     return by_region, entries_by_region
+
+
+@dataclass(slots=True, frozen=True)
+class TranscriptEvidence:
+    """Which transcript turns exist, and which of them the user actually typed.
+
+    Built from the line-oriented JSON :func:`ciao.insights.filter_session_jsonl`
+    hands the extraction model — the same records whose ``idx`` the prompt
+    tells it to cite — so "does this citation name a real turn" is answered
+    against the exact material the model saw, not against prose.
+    """
+
+    known: frozenset[int]
+    attended_user: frozenset[int]
+
+
+def transcript_evidence(filtered_jsonl: str) -> TranscriptEvidence | None:
+    """Index a filtered transcript by citation id. None when there is none.
+
+    None means "no transcript to check against", not "nothing is supported":
+    the text-mode extraction prompt explicitly asks for paraphrase citations
+    and forbids ``[idx=N]``, and a legacy archive re-processed without its
+    session blob has no indices either. Gating those on indices that were
+    never meant to exist would queue every fact in them for no evidence gain.
+    """
+    known: set[int] = set()
+    attended: set[int] = set()
+    for line in filtered_jsonl.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        idx = record.get("idx")
+        # `isinstance(True, int)` is True, so a bool `idx` would index turn 1.
+        if isinstance(idx, bool) or not isinstance(idx, int):
+            continue
+        known.add(idx)
+        # `unattended` marks a turn a schedule or routine fired. Both
+        # extraction prompts forbid extracting facts from one; this is where
+        # that instruction stops being advisory.
+        if record.get("type") == "user" and not record.get("unattended"):
+            attended.add(idx)
+    if not known:
+        return None
+    return TranscriptEvidence(frozenset(known), frozenset(attended))
+
+
+def _evidence_gap(citations: tuple[int, ...], evidence: TranscriptEvidence) -> str:
+    """Why a bullet's citation fails to support it, or "" when it holds.
+
+    Three machine-checkable failures, each one an acceptance criterion of the
+    unverified-fact report: nothing cited at all, a citation naming a turn the
+    transcript does not contain (a fabricated id, or the ``[idx=0]`` the
+    prompt forbids), and a citation that lands only on assistant output or on
+    automation turns — the assistant's own suggestion quoted back as if the
+    user had stated it.
+    """
+    if not citations:
+        return "bullet cites no source turn"
+    unknown = sorted(idx for idx in citations if idx not in evidence.known)
+    if unknown:
+        return f"citation idx={unknown[0]} names no turn in the transcript"
+    if not any(idx in evidence.attended_user for idx in citations):
+        return "no cited turn is one the user typed"
+    return ""
+
+
+def unsupported_region_facts(
+    archive_path: Path,
+    *,
+    filtered_jsonl: str,
+) -> dict[str, dict[str, Any]]:
+    """Defer rows for region facts the transcript does not actually support.
+
+    Region promotion checked a fact's *shape* — durable-rule clause, not
+    event-shaped — which a fluent model satisfies whether or not any turn said
+    the thing. This adds the missing half: the bullet must also cite a turn
+    that exists and that the user typed. Facts that fail take the ``"defer"``
+    route, so an unverifiable fact is handled exactly like an uncertain
+    reconcile — queued in ``Workspace/Memory-Proposals.md`` for a human, never
+    dropped and never written to always-loaded context on the model's word.
+
+    Keyed like :func:`plan_region_reconcile`'s rows so the caller can overlay
+    these on top of a reconcile plan; an evidence failure must win over an
+    ``add``/``update``/``covered`` the reconcile produced, because reconcile
+    only compares a fact against the region, never against the transcript.
+
+    Unlike the reconcile candidates, this covers facts bound for an *empty*
+    region too: nothing to conflict with is not evidence, and the first entry
+    written into an empty always-loaded region is the one nothing later
+    contradicts.
+    """
+    from ciao.memory_tool import resolve_region
+
+    evidence = transcript_evidence(filtered_jsonl)
+    if evidence is None:
+        return {}
+    try:
+        text = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    body = _extract_insights_section(text)
+    if not body:
+        return {}
+
+    rows: dict[str, dict[str, Any]] = {}
+    for proposal in propose_from_insights(body):
+        if proposal.target not in ("memory", "profile"):
+            continue
+        promotable = _promotable_text(proposal.text)
+        if promotable is None:
+            # Already headed for the queue on shape grounds; a second reason
+            # to queue it would change nothing.
+            continue
+        gap = _evidence_gap(proposal.citations, evidence)
+        if not gap:
+            continue
+        try:
+            region = resolve_region(proposal.target)
+        except ValueError:
+            continue
+        logger.info(
+            "memory evidence: %r is unverified (%s); queuing for review",
+            promotable[:80],
+            gap,
+        )
+        rows[_decision_key(region, promotable)] = {
+            "action": "defer",
+            "reason": f"unverified: {gap}",
+        }
+    return rows
 
 
 def defer_region_facts(
@@ -1993,8 +2152,9 @@ def proposals_from_archive(
 
     ``stats``, when given, is filled with ``proposed`` (how many proposals were
     written to the file), ``promoted`` (how many were auto-applied) and
-    ``deferred`` (how many region facts an uncertain reconcile sent to the
-    queue instead of the region). The archived chat reports these counts back
+    ``deferred`` (how many region facts an uncertain reconcile or a failed
+    evidence check sent to the queue instead of the region). The archived
+    chat reports these counts back
     to the user, which the returned path alone cannot express. It stays an
     out-parameter so the return contract every existing caller relies on is
     unchanged.

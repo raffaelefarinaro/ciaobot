@@ -11,6 +11,9 @@ venv/
 
 # Frontend dependencies
 web/node_modules/
+# Playwright run artifacts (traces and screenshots, kept only on failure)
+web/test-results/
+web/playwright-report/
 desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/

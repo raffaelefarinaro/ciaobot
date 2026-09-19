@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
@@ -13,6 +14,13 @@ export default defineConfig({
   build: {
     outDir: '../ciao/web/static',
     emptyOutDir: true,
+  },
+  test: {
+    // `e2e/` holds Playwright specs. They share vitest's default `*.spec.ts`
+    // naming but import `@playwright/test`, which throws the moment vitest
+    // loads it — and a suite that reports "4 files failed, 1168 tests passed"
+    // is the kind of green-with-red that people learn to scroll past.
+    exclude: ['**/node_modules/**', '**/dist/**', 'e2e/**'],
   },
   server: {
     allowedHosts: true,
