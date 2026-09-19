@@ -1,13 +1,69 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
+import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalHistoryRow } from '../lib/types'
 import { kindLabel } from '../lib/proposalKinds'
 import { formatTime } from '../lib/time'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
+const fileViewer = useFileViewerStore()
+
+// -- Changes and undo -------------------------------------------------------
+//
+// History said what was decided and where it landed, never what the decision
+// actually did to the destination. A row carries a `change` pointer when the
+// receipt protocol performed it; the before/after images are fetched per row,
+// on expand, because a page of 200 decisions would otherwise ship 200 bodies
+// nobody opened.
+//
+// A row with NO `change` is one the protocol never recorded — every decision
+// made before receipts landed, and every one made outside them. Those say "No
+// change snapshot available" and get no Undo: claiming every historical edit
+// is reversible would be a lie the undo path then has to refuse.
+const openChangeIds = ref<Set<string>>(new Set())
+
+function isChangeOpen(row: ProposalHistoryRow): boolean {
+  return openChangeIds.value.has(row.id)
+}
+
+async function toggleChange(row: ProposalHistoryRow) {
+  const next = new Set(openChangeIds.value)
+  if (next.has(row.id)) {
+    next.delete(row.id)
+    openChangeIds.value = next
+    return
+  }
+  next.add(row.id)
+  openChangeIds.value = next
+  if (row.change) await store.loadReceipt(row.change.receipt_id, row.workspace)
+}
+
+function receiptFor(row: ProposalHistoryRow) {
+  return row.change ? store.receipts[row.change.receipt_id] : undefined
+}
+
+function receiptError(row: ProposalHistoryRow): string {
+  return row.change ? (store.receiptErrors[row.change.receipt_id] ?? '') : ''
+}
+
+/** Undo is offered ONLY where a receipt can honour it, and the server checks
+ * again: a destination that changed since the operation comes back as a 409,
+ * because restoring the before image would delete an unrelated later fact. */
+async function undoChange(row: ProposalHistoryRow) {
+  if (!row.change?.undoable) return
+  await store.undoReceipt(row.change.receipt_id, row.workspace)
+}
+
+/** Open the archive this fact came from. Only linked when the server could
+ * still find the transcript; otherwise the stem is printed as plain text
+ * rather than as a link that goes nowhere. */
+async function openSource(row: ProposalHistoryRow) {
+  if (!row.source_path) return
+  await fileViewer.open(row.source_path)
+}
 
 onMounted(() => {
   void store.ensureHistoryLoaded(projectStore.activeWorkspace)
@@ -179,10 +235,75 @@ const filtersHideEverything = computed(
             </div>
             <p class="ph-text">{{ row.text }}</p>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
-            <details v-if="row.source" class="ph-source">
-              <summary>details</summary>
-              <p>from {{ row.source }}</p>
-            </details>
+            <p v-if="row.source" class="ph-source-line">
+              from
+              <button
+                v-if="row.source_path"
+                type="button"
+                class="ph-source-link"
+                :title="row.source_path"
+                @click="openSource(row)"
+              >{{ row.source }}</button>
+              <span v-else class="ph-source-name">{{ row.source }}</span>
+            </p>
+
+            <!-- Changes. A button rather than <details> because opening it
+                 fetches the images, and the expanded state has to drive that. -->
+            <button
+              type="button"
+              class="ph-change-toggle"
+              :aria-expanded="isChangeOpen(row)"
+              :aria-controls="`ph-change-${row.id}`"
+              @click="toggleChange(row)"
+            >
+              {{ isChangeOpen(row) ? 'Hide changes' : 'Changes' }}
+            </button>
+            <div v-if="isChangeOpen(row)" :id="`ph-change-${row.id}`" class="ph-change">
+              <p v-if="!row.change" class="ph-change-none">
+                No change snapshot available. This decision was recorded before
+                changes were tracked, so what it wrote cannot be shown or undone.
+              </p>
+              <template v-else>
+                <p v-if="store.isReceiptLoading(row.change.receipt_id)" class="ph-change-none" role="status">Loading the change…</p>
+                <!-- Above the change, not instead of it. A refused undo is the
+                     common case here, and replacing the diff with the refusal
+                     left the operator reading "undo would remove unrelated
+                     facts" with no sight of the change it was talking about. -->
+                <p v-if="receiptError(row)" class="ph-change-error" role="alert">{{ receiptError(row) }}</p>
+                <template v-if="!store.isReceiptLoading(row.change.receipt_id) && receiptFor(row)">
+                  <p v-if="!receiptFor(row)!.has_snapshot" class="ph-change-none">
+                    No change snapshot available.<template v-if="receiptFor(row)!.reason"> {{ receiptFor(row)!.reason }}.</template>
+                  </p>
+                  <template v-else>
+                    <p class="ph-change-dest">{{ receiptFor(row)!.destination || row.destination }}</p>
+                    <ul v-if="receiptFor(row)!.diff?.length" class="ph-change-lines">
+                      <li
+                        v-for="(line, index) in receiptFor(row)!.diff"
+                        :key="`${line.op}-${index}`"
+                        class="ph-change-line"
+                        :class="`ph-change-line--${line.op}`"
+                      >
+                        <span class="ph-change-sign" aria-hidden="true">{{ line.op === 'added' ? '+' : '−' }}</span>
+                        <span class="ph-change-text">{{ line.text }}</span>
+                        <span class="ph-sr-only">{{ line.op }}</span>
+                      </li>
+                    </ul>
+                    <p v-else class="ph-change-none">This operation left the destination unchanged.</p>
+                    <p v-if="receiptFor(row)!.diff_truncated" class="ph-change-none">Only the first part of the change is shown.</p>
+                  </template>
+                  <div class="ph-change-actions">
+                    <button
+                      v-if="receiptFor(row)!.undoable"
+                      type="button"
+                      class="btn-small btn-chip"
+                      :disabled="store.isBusy(row.change.receipt_id)"
+                      @click="undoChange(row)"
+                    >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'undo this change' }}</button>
+                    <span v-else-if="receiptFor(row)!.reason" class="ph-change-none">{{ receiptFor(row)!.reason }}.</span>
+                  </div>
+                </template>
+              </template>
+            </div>
           </li>
         </ul>
       </section>
@@ -316,15 +437,133 @@ const filtersHideEverything = computed(
   font-family: var(--font-mono, ui-monospace, monospace);
 }
 
-.ph-source {
+.ph-source-line {
+  margin: 0;
   color: var(--fg2);
   font-size: 0.8rem;
 }
-.ph-source summary {
+
+.ph-source-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+/* A link, not a chip: it sits inline in a sentence. The touch rule below is
+   the same one .ph-clear-filter uses. */
+.ph-source-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.ph-change-toggle {
+  align-self: flex-start;
+  margin-top: 0.2rem;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
   cursor: pointer;
 }
-.ph-source p {
-  margin: 0.2rem 0 0;
+
+.ph-change {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg2);
+}
+
+.ph-change-dest {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--fg2);
+}
+
+.ph-change-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Shape and text first: the sign and the strike-through carry the meaning, so
+   the diff reads without colour. */
+.ph-change-line {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0.2rem var(--space-2);
+  border-left: 3px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.ph-change-line--added {
+  border-left-color: var(--success);
+}
+
+.ph-change-line--removed {
+  border-left-color: var(--error);
+  text-decoration: line-through;
+  color: var(--fg2);
+}
+
+.ph-change-sign {
+  flex: none;
+  opacity: 0.8;
+}
+
+.ph-change-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ph-change-none {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.78rem;
+}
+
+.ph-change-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.78rem;
+}
+
+.ph-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.ph-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .ph-more {
@@ -369,6 +608,23 @@ const filtersHideEverything = computed(
     padding: var(--ph-clear-pad);
     margin: calc(-1 * var(--ph-clear-pad));
     margin-left: calc(var(--space-2) - var(--ph-clear-pad));
+  }
+
+  /* Same trick for the source link and the Changes toggle: both are
+     glyph-height inline controls, well under the 44px minimum. */
+  .ph-source-link,
+  .ph-change-toggle {
+    --ph-hit-visual: 1.1rem;
+    --ph-hit-pad: calc((var(--touch, 44px) - var(--ph-hit-visual)) / 2);
+    display: inline-block;
+    padding: var(--ph-hit-pad) var(--space-1);
+    margin: calc(-1 * var(--ph-hit-pad)) 0;
+  }
+
+  /* Undo is a destructive-adjacent action reached from a small row; give it a
+     full target rather than the panel's compact chip height. */
+  .ph-change-actions .btn-small {
+    min-height: var(--touch, 44px);
   }
 }
 </style>

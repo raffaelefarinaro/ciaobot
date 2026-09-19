@@ -671,6 +671,19 @@ def _safe_name(name: str) -> str:
     return cleaned[:80]
 
 
+def people_note_path(vault_root: Path, name: str) -> Path | None:
+    """Where a ``[people]`` accept would write, or None for an unusable name.
+
+    Public so the review queue can name the destination — and say whether the
+    note already exists — before the accept runs, without a second copy of the
+    filename rules :func:`write_people_note` applies.
+    """
+    stem = _safe_name(name)
+    if not stem:
+        return None
+    return vault_root / _PEOPLE_DIR / f"{stem}.md"
+
+
 def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     """Create a stub person note. False when it already exists (needs a merge).
 
@@ -678,9 +691,9 @@ def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     performs exactly this write.
     """
     stem = _safe_name(name)
-    if not stem:
+    path = people_note_path(vault_root, name)
+    if path is None:
         return False
-    path = vault_root / _PEOPLE_DIR / f"{stem}.md"
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -740,37 +753,42 @@ def format_learning_line(
     return line
 
 
-def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
-    """File one learning under the Active section of Workspace/Learnings.md.
+_LEARNINGS_STUB = (
+    "---\n"
+    "tags: [ciao, learnings]\n"
+    "---\n"
+    "# Learnings\n\n"
+    "Reusable cross-project knowledge. Active entries are candidates "
+    "for promotion into canonical guidance once they recur (x3 or "
+    "more).\n"
+)
 
-    Structured entries carry a key, first-seen/last-seen dates, a recurrence
-    count, and source chat ids. Re-observing a learning (same normalized
-    statement) increments its count and refreshes last-seen instead of
-    appending a duplicate — recurrence is what the curation skill promotes on,
-    so it must be counted mechanically, not judged from prose. Legacy plain
-    bullets are left untouched; an exact legacy duplicate still short-circuits.
 
-    Public because accepting a ``[learnings]`` proposal from the review queue
-    performs exactly this write.
+def learnings_path(vault_root: Path) -> Path:
+    """Where a ``[learnings]`` accept writes."""
+    return vault_root / _LEARNINGS_RELATIVE
+
+
+def render_learning_append(
+    existing: str, text: str, *, source: str = "", today: str = ""
+) -> tuple[str, str]:
+    """The file ``append_learning`` would write, and which operation that is.
+
+    Returns ``(updated_text, operation)`` — ``"add"`` for a new Active entry,
+    ``"update"`` when an existing entry's recurrence count and last-seen date
+    are refreshed, and ``"none"`` when an exact legacy duplicate is already
+    there and nothing is written (``updated_text`` is then ``existing``).
+
+    Split out of :func:`append_learning` so the review queue can show the exact
+    replacement *before* the accept performs it. The write path goes through
+    this same function, so a preview and the accept it precedes cannot
+    disagree about what lands.
     """
-    path = vault_root / _LEARNINGS_RELATIVE
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-    else:
-        existing = (
-            "---\n"
-            "tags: [ciao, learnings]\n"
-            "---\n"
-            "# Learnings\n\n"
-            "Reusable cross-project knowledge. Active entries are candidates "
-            "for promotion into canonical guidance once they recur (x3 or "
-            "more).\n"
-        )
     if f"- {_one_line(text)}" in existing:
         # Exact legacy duplicate: already recorded in the old plain shape.
-        return True
+        return existing, "none"
 
-    today = date.today().isoformat()
+    stamp = today or date.today().isoformat()
     normalized = _normalized_learning(text)
     lines = existing.split("\n")
     for index, line in enumerate(lines):
@@ -789,27 +807,57 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
         lines[index] = format_learning_line(
             match.group("text"),
             first_seen=match.group("first"),
-            last_seen=today,
+            last_seen=stamp,
             count=int(match.group("count")) + 1,
             sources=sources,
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
-        return True
+        return "\n".join(lines), "update"
 
     entry = format_learning_line(
         text,
-        first_seen=today,
-        last_seen=today,
+        first_seen=stamp,
+        last_seen=stamp,
         count=1,
         sources=[source] if source else [],
     )
     marker = "\n## Active\n"
     if marker in existing:
         head, _, tail = existing.partition(marker)
-        updated = f"{head}{marker}{entry}\n{tail}"
-    else:
-        updated = existing.rstrip() + f"\n\n## Active\n\n{entry}\n"
+        return f"{head}{marker}{entry}\n{tail}", "add"
+    return existing.rstrip() + f"\n\n## Active\n\n{entry}\n", "add"
+
+
+def read_learnings(vault_root: Path) -> str:
+    """The current Learnings file, or the stub a first write would start from.
+
+    Existence, not a swallowed read error, decides: a file that is there but
+    unreadable must surface rather than be silently replaced by the stub,
+    which a following write would then persist over the real content.
+    """
+    path = learnings_path(vault_root)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return _LEARNINGS_STUB
+
+
+def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
+    """File one learning under the Active section of Workspace/Learnings.md.
+
+    Structured entries carry a key, first-seen/last-seen dates, a recurrence
+    count, and source chat ids. Re-observing a learning (same normalized
+    statement) increments its count and refreshes last-seen instead of
+    appending a duplicate — recurrence is what the curation skill promotes on,
+    so it must be counted mechanically, not judged from prose. Legacy plain
+    bullets are left untouched; an exact legacy duplicate still short-circuits.
+
+    Public because accepting a ``[learnings]`` proposal from the review queue
+    performs exactly this write.
+    """
+    path = learnings_path(vault_root)
+    existing = read_learnings(vault_root)
+    updated, operation = render_learning_append(existing, text, source=source)
+    if operation == "none":
+        return True
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8")
     return True
