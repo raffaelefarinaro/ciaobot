@@ -74,6 +74,17 @@ flowchart LR
   that retained window, but the per-tool counters of everything dropped are
   rolled into `.runtime/mcp_tool_calls_totals.json` first, so the Settings
   usage table keeps reporting lifetime call, error, and duration totals.
+- Because retention and lifetime totals disagree about what the log holds,
+  `GET /api/mcp/usage` states the split rather than leaving it implied. Its
+  `window` object carries `scope` (always `lifetime`, since the rollup
+  preserves the dropped counters), a human-readable `label`,
+  `retained_records` and `retained_since` for the detail still on disk,
+  `rolled_up_calls` for the calls that survive only as counters,
+  `max_records`, and `rotated_at` from the last trim.
+- Telemetry is best-effort in both directions: the writer swallows a failed
+  append or a record it cannot serialise so a tool call never fails because
+  of instrumentation, and the reader skips blank, malformed, and non-object
+  lines so a half-written final record cannot break a usage poll.
 
 ## Managed Claude Code configuration
 

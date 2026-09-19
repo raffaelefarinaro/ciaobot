@@ -127,7 +127,25 @@ async def mcp_status_endpoint(request: Request) -> JSONResponse:
 async def mcp_usage_endpoint(request: Request) -> JSONResponse:
     service = getattr(request.app.state, "mcp_service", None)
     if service is None:
-        return JSONResponse({"total_calls": 0, "total_errors": 0, "tool_count": 0, "tools": []})
+        # Same shape as CiaoMcpService.usage() so a caller never has to
+        # special-case the "no service yet" body, window label included.
+        return JSONResponse(
+            {
+                "total_calls": 0,
+                "total_errors": 0,
+                "tool_count": 0,
+                "window": {
+                    "scope": "lifetime",
+                    "label": "No MCP telemetry recorded yet.",
+                    "retained_records": 0,
+                    "retained_since": "",
+                    "rolled_up_calls": 0,
+                    "max_records": 0,
+                    "rotated_at": "",
+                },
+                "tools": [],
+            }
+        )
     return JSONResponse(service.usage())
 
 
