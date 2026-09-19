@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 import yaml
@@ -27,20 +28,124 @@ RESERVED_UNINDEXED_FILES = vault_index.RESERVED_UNINDEXED_FILES
 _is_reserved_bookkeeping = vault_index.is_reserved_bookkeeping
 
 
+def _signature(st: os.stat_result) -> tuple[float, int, float]:
+    """The stored change signature for one file.
+
+    Deliberately not mtime alone. mtime is the only field a writer fully
+    controls, so the cases where it lies are exactly the cases a note vanishes
+    from recall: `cp -p` from a backup, `rsync --times`, `tar -x`, and a git
+    checkout all restore a file with a mtime the index has already recorded, and
+    an mtime-only comparison then reports "unchanged" and never re-reads the new
+    bytes. ``st_size`` catches any change of length; ``st_ctime`` catches the
+    same-length rewrite, because the kernel stamps it on every inode change and
+    userspace cannot set it backwards.
+
+    The cost is nil — all three come from the stat the walk already performs —
+    and a false positive only re-reads one file.
+    """
+    return (st.st_mtime, st.st_size, st.st_ctime)
+
+
+# The size stamped over rows that predate the signature columns. No real file
+# can have it, so it identifies a legacy row exactly.
+#
+# A positive mark, not "size IS NULL". NULL is also what a code path that wrote
+# a meta row WITHOUT a signature would leave behind, and adopting that on mtime
+# alone would let a note the index never actually read pass as indexed — the
+# mutation matrix caught this: with a NULL test, stubbing out index_file's
+# signature write became undetectable. An unmarked NULL now means "unknown",
+# which re-reads, and only the migration can say "legacy".
+_LEGACY_SIZE = -1
+
+
+def _is_legacy_row(prior: tuple[float | None, int | None, float | None]) -> bool:
+    """True for a meta row the migration marked as predating the columns."""
+    return prior[1] == _LEGACY_SIZE
+
+
+def _write_meta_row(
+    conn: sqlite3.Connection,
+    meta_table: str,
+    rel_str: str,
+    st: os.stat_result,
+) -> None:
+    """Record the signature the next pass compares against."""
+    mtime, size, ctime = _signature(st)
+    conn.execute(
+        f"INSERT OR REPLACE INTO {meta_table} "
+        "(path, mtime, size, ctime, indexed_at) VALUES (?, ?, ?, ?, ?)",
+        (rel_str, mtime, size, ctime, datetime.now(timezone.utc).isoformat()),
+    )
+
+
 def _settle_excluded_row(
-    conn: sqlite3.Connection, fts_table: str, meta_table: str, rel_str: str, mtime: float
+    conn: sqlite3.Connection,
+    fts_table: str,
+    meta_table: str,
+    rel_str: str,
+    st: os.stat_result,
 ) -> None:
     """Remove an excluded note's searchable row but keep its meta row fresh.
 
-    The meta row's mtime is what lets every later pass skip re-reading and
+    The meta row's signature is what lets every later pass skip re-reading and
     re-parsing the file — opted-out notes are often the vault's largest
     (rolled log archives), and index_vault runs on every vault_search call.
     """
     conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
-    conn.execute(
-        f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
-        (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
-    )
+    _write_meta_row(conn, meta_table, rel_str, st)
+
+
+def _like_prefix_pattern(prefix: str) -> str:
+    """A LIKE pattern matching every stored key under ``prefix``.
+
+    Escapes explicitly, because a workspace name is user-chosen and may contain
+    `_` or `%`, which LIKE reads as wildcards: a prefix of `my_work/` would
+    otherwise also match `my-work/`.
+    """
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
+
+
+def _walk_notes(
+    root: str, suffix: str, exclude_dirs: set[str]
+) -> Iterator[tuple[str, os.DirEntry[str]]]:
+    """Yield ``(path relative to root, entry)`` for every note file beneath it.
+
+    Replaces ``Path.rglob``, which is where most of the 26ms unchanged-index
+    pass of issue #450 went. rglob descends into the excluded subtrees
+    (``Logs/``, ``.obsidian/``, ``.vault-trash/``) and discards their files only
+    after yielding them, so a vault with a large rolled-log archive paid a stat
+    per archived file on every single search; and it forces a second stat
+    syscall per note, because the caller has to re-stat a path rglob has
+    already stat'ed. Pruning happens before the descent here, and the caller
+    reuses ``DirEntry.stat()``.
+
+    Directory symlinks are not followed, matching ``Path.rglob``'s default: a
+    vault holding a symlink back into itself must not loop.
+    """
+    stack: list[tuple[str, str]] = [("", root)]
+    while stack:
+        rel, path = stack.pop()
+        try:
+            scan = os.scandir(path)
+        except OSError:
+            # An unreadable directory is skipped, not fatal — the same outcome
+            # rglob produces, and the caller's prune is what decides whether
+            # its rows survive.
+            continue
+        with scan:
+            for entry in scan:
+                name = entry.name
+                child_rel = name if not rel else rel + os.sep + name
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir:
+                    if name not in exclude_dirs:
+                        stack.append((child_rel, entry.path))
+                elif name.endswith(suffix):
+                    yield child_rel, entry
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
@@ -104,6 +209,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS vault_meta (
             path TEXT PRIMARY KEY,
             mtime REAL,
+            size INTEGER,
+            ctime REAL,
             indexed_at TEXT
         )
     """)
@@ -119,6 +226,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS transcript_meta (
             path TEXT PRIMARY KEY,
             mtime REAL,
+            size INTEGER,
+            ctime REAL,
             indexed_at TEXT
         )
     """)
@@ -128,7 +237,35 @@ def init_db(conn: sqlite3.Connection) -> None:
             value TEXT
         )
     """)
+    _migrate_meta_signature(conn)
     conn.commit()
+
+
+def _migrate_meta_signature(conn: sqlite3.Connection) -> None:
+    """Add the size/ctime signature columns to a database created before them.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing install, so the new
+    columns have to be added explicitly or every pass would read NULL for a
+    signature it just wrote. The rows that were already there are then marked as
+    legacy, once, so a later pass can tell "recorded before the columns existed"
+    from "written without a signature", which must not be adopted.
+    """
+    for table in ("vault_meta", "transcript_meta"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        added = [
+            (column, decl)
+            for column, decl in (("size", "INTEGER"), ("ctime", "REAL"))
+            if column not in columns
+        ]
+        for column, decl in added:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        if added:
+            # Only on the pass that adds the columns. Running it every time
+            # would also rescue NULLs written after the migration, which is
+            # precisely the state that has to stay unadoptable.
+            conn.execute(
+                f"UPDATE {table} SET size = ? WHERE size IS NULL", (_LEGACY_SIZE,)
+            )
 
 
 def _ensure_path_base(conn: sqlite3.Connection, base: Path) -> None:
@@ -257,12 +394,26 @@ def _scope_prefix(root_dir: Path, base: Path) -> str | None:
     return "" if relative in {"", "."} else relative + os.sep
 
 
+def _is_reserved_key(root_rel: str) -> bool:
+    """``vault_index.is_reserved_bookkeeping`` for a root-relative key string.
+
+    Gated on the filename first. The real check builds a ``Path`` to read its
+    parts, and doing that for every note in the vault on every search was pure
+    overhead: the predicate can only be true for the handful of reserved names,
+    so the set lookup decides it for everything else.
+    """
+    name = root_rel.rpartition(os.sep)[2]
+    if name.casefold() not in RESERVED_UNINDEXED_FILES:
+        return False
+    return _is_reserved_bookkeeping(Path(root_rel))
+
+
 def _index_directory(
     conn: sqlite3.Connection,
     root_dir: Path,
     meta_table: str,
     fts_table: str,
-    file_pattern: str = "*.md",
+    file_suffix: str = ".md",
     exclude_dirs: set[str] | None = None,
     exclude_files: set[str] | None = None,
     path_base: Path | None = None,
@@ -274,68 +425,107 @@ def _index_directory(
     if path_base is not None:
         _ensure_path_base(conn, base)
 
-    # Get existing indexed files and their mtimes
-    cursor = conn.execute(f"SELECT path, mtime FROM {meta_table}")
-    existing = {row[0]: row[1] for row in cursor.fetchall()}
-
     # The prune below must only consider rows under the directory being indexed.
     # Unscoped, indexing one agent root DELETED every row belonging to the
     # others, so a two-workspace install kept exactly one workspace's notes
     # searchable at a time and every switch paid a full re-index.
     scope_prefix = _scope_prefix(root_dir, base)
 
+    # Only this pass's rows, not the whole table. One database holds every
+    # workspace's notes and every transcript archive, so the unscoped SELECT
+    # made each workspace's search pay for every other workspace's index — work
+    # that can never match a key this pass produces, because every key it writes
+    # starts with `scope_prefix`. A NULL prefix (a vault outside the key base)
+    # has no such guarantee, so it still loads everything.
+    if scope_prefix:
+        cursor = conn.execute(
+            f"SELECT path, mtime, size, ctime FROM {meta_table} "
+            "WHERE path LIKE ? ESCAPE '\\'",
+            (_like_prefix_pattern(scope_prefix),),
+        )
+    else:
+        cursor = conn.execute(f"SELECT path, mtime, size, ctime FROM {meta_table}")
+    existing = {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+
+    # The key prefix the walk's root-relative paths are joined onto. The old
+    # loop re-derived it per file, and tested the exclusion set against every
+    # part of every key; both are constant for the whole pass.
+    key_prefix = scope_prefix if scope_prefix is not None else ""
+    # A vault reached through a directory named `Logs`/`Templates` indexed
+    # nothing before, because the exclusion was tested against the whole
+    # base-relative key, prefix segments included. Kept rather than quietly
+    # narrowed: narrowing an exclusion is a change to search results.
+    prefix_excluded = any(part in exclude_dirs for part in Path(key_prefix).parts)
+    walk = (
+        iter(())
+        if prefix_excluded
+        else _walk_notes(str(root_dir), file_suffix, exclude_dirs)
+    )
+
     found_paths: set[str] = set()
     indexed_count = 0
 
-    # Walk directory
-    for md_path in root_dir.rglob(file_pattern):
-        try:
-            rel = md_path.relative_to(base)
-        except ValueError:
-            rel = md_path.relative_to(root_dir)
-        rel_str = str(rel)
-
-        # Skip excluded directories
-        if any(p in exclude_dirs for p in rel.parts):
-            continue
+    for root_rel, entry in walk:
         # Skip specific excluded files (casefolded: the reserved names are
         # spelled lowercase by OKF and titlecase by this vault's history)
-        if rel.name.casefold() in exclude_files:
+        if entry.name.casefold() in exclude_files:
             continue
         # The memory pipeline's own bookkeeping, but only where the pipeline
         # writes it — a user note elsewhere sharing the name stays indexed.
         # Checked against the indexed root, not the key base: keys may carry
         # an install-root prefix, but the pipeline's write location is always
         # `<root>/Workspace/`.
-        if _is_reserved_bookkeeping(md_path.relative_to(root_dir)):
+        if _is_reserved_key(root_rel):
             continue
 
+        rel_str = key_prefix + root_rel
         found_paths.add(rel_str)
 
         try:
-            stat = md_path.stat()
-            mtime = stat.st_mtime
+            # The walk's own stat, not a second syscall against the same path.
+            st = entry.stat()
         except OSError:
             continue
 
         # Check if file changed
-        if rel_str in existing and existing[rel_str] == mtime:
+        signature = _signature(st)
+        prior = existing.get(rel_str)
+        if prior == signature:
+            continue
+        if prior is not None and _is_legacy_row(prior) and prior[0] == signature[0]:
+            # An upgraded install: every row has a mtime and no size/ctime, and
+            # a NULL can never equal a real signature. Re-reading them all costs
+            # 82s on a 10,000-note vault — DELETE+INSERT against a POPULATED
+            # fts5 index, far more than the 37s cold build — and it would be
+            # paid inside one vault_search request, on the first search after an
+            # auto-update. So the row is adopted on exactly the rule that wrote
+            # it (mtime) and stamped with the full signature from the stat in
+            # hand: no read, no parse, no fts5 write.
+            #
+            # This never makes a LATER miss possible — from here the row is
+            # fully signed. What it gives up is a one-time repair: a note that a
+            # timestamp-preserving restore had already desynced BEFORE the
+            # upgrade stays stale, exactly as it is stale today, until it is
+            # next touched or `vault_index_refresh` rebuilds. Trading a
+            # guaranteed minute-long stall for every upgrading user against a
+            # rare pre-existing staleness with a working recovery path.
+            _write_meta_row(conn, meta_table, rel_str, st)
             continue
 
         try:
-            text = md_path.read_text(encoding="utf-8")
+            text = Path(entry.path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            logger.warning("FTS search: failed to read %s", md_path)
+            logger.warning("FTS search: failed to read %s", entry.path)
             continue
 
         if _search_opted_out(text):
             # Remove any FTS rows indexed before the note opted out, but keep
-            # (and refresh) the meta row so the mtime short-circuit above
+            # (and refresh) the meta row so the signature short-circuit above
             # stops every later pass from re-reading the file.
-            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, st)
             continue
 
-        title = _parse_title(text, md_path.stem)
+        title = _parse_title(text, entry.name.removesuffix(file_suffix))
 
         # Delete old index entry if it exists
         conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
@@ -344,11 +534,7 @@ def _index_directory(
             f"INSERT INTO {fts_table} (path, title, body) VALUES (?, ?, ?)",
             (rel_str, title, text),
         )
-        # Update metadata
-        conn.execute(
-            f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
-            (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
-        )
+        _write_meta_row(conn, meta_table, rel_str, st)
         indexed_count += 1
 
     # Remove deleted files from the index, within this subtree only.
@@ -364,10 +550,9 @@ def _index_directory(
         # the guess destroyed every other workspace's index.
         deleted_paths: set[str] = set()
     else:
-        in_scope = {
-            key for key in existing if not scope_prefix or key.startswith(scope_prefix)
-        }
-        deleted_paths = in_scope - found_paths
+        # `existing` is already this pass's rows: the SELECT above applies
+        # `scope_prefix`, and an empty prefix means the pass owns the table.
+        deleted_paths = set(existing) - found_paths
     for rel_str in deleted_paths:
         conn.execute(f"DELETE FROM {fts_table} WHERE path = ?", (rel_str,))
         conn.execute(f"DELETE FROM {meta_table} WHERE path = ?", (rel_str,))
@@ -481,8 +666,7 @@ def index_file(
 
     try:
         text = file_path.read_text(encoding="utf-8")
-        stat = file_path.stat()
-        mtime = stat.st_mtime
+        st = file_path.stat()
     except OSError:
         return False
 
@@ -511,7 +695,7 @@ def index_file(
             # the meta row fresh, so the next index_vault does not re-read the
             # whole file (the bulk pass keeps opted-out notes in found_paths,
             # so the prune spares this row).
-            _settle_excluded_row(conn, fts_table, meta_table, rel_str, mtime)
+            _settle_excluded_row(conn, fts_table, meta_table, rel_str, st)
             conn.commit()
             return False
 
@@ -522,10 +706,7 @@ def index_file(
         f"INSERT INTO {fts_table} (path, title, body) VALUES (?, ?, ?)",
         (rel_str, title, text),
     )
-    conn.execute(
-        f"INSERT OR REPLACE INTO {meta_table} (path, mtime, indexed_at) VALUES (?, ?, ?)",
-        (rel_str, mtime, datetime.now(timezone.utc).isoformat()),
-    )
+    _write_meta_row(conn, meta_table, rel_str, st)
     conn.commit()
     return True
 
@@ -553,17 +734,11 @@ def search(
 
     # Join words with AND for proximity/co-occurrence
     match_query = " AND ".join(words)
-    # LIKE with an explicit ESCAPE, because a workspace name is user-chosen and
-    # may contain `_`, which LIKE treats as a single-character wildcard: a
-    # prefix of `my_work/` would otherwise also match `my-work/`.
     scope_sql = ""
     scope_args: tuple[str, ...] = ()
     if path_prefix:
         scope_sql = " AND path LIKE ? ESCAPE '\\'"
-        escaped = (
-            path_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
-        scope_args = (escaped + "%",)
+        scope_args = (_like_prefix_pattern(path_prefix),)
 
     sql = f"""
         SELECT path, title, snippet({fts_table}, 2, '<<<', '>>>', '...', 32) AS snippet, rank
