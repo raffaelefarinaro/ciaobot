@@ -150,7 +150,12 @@ PRIVATE_MARKERS: tuple[str, ...] = (
     "/Users/private",
 )
 
-MAX_SCENARIOS = 30
+# The catalog is deliberately bounded: the floor keeps coverage from quietly
+# shrinking, and the ceiling keeps one `ciao eval run` affordable, since every
+# scenario costs a provider call per repeat. Raised from 30 to make room for the
+# recall drill-down's negation and no-evidence arms (issue #460) — a widening of
+# the bound, not its removal.
+MAX_SCENARIOS = 32
 MIN_SCENARIOS = 20
 
 
@@ -1883,6 +1888,34 @@ Door code for the studio is 4417.
 """
 _EXPANSION_QUERY = "Northwind retainer rate"
 
+# The other shape the snippet budget cuts. A qualification replaces the value
+# the snippet kept; a NEGATION denies it outright, and the snippet-only answer
+# is then not merely out of date but the opposite of what the note records. The
+# denial again shares no term with the query, which is what keeps it outside
+# the highlighted lines the 32-token budget retains.
+_NEGATION_NOTE = """# Contractor onboarding
+
+## Visas
+
+Contractors from the EU need a work visa for the Zurich office.
+That stopped being true after the 2026-03 bilateral update: no permit is
+required for them any more.
+
+## Emergency
+
+Safe combination is 8891.
+"""
+_NEGATION_QUERY = "work visa Zurich office contractors"
+
+# The abstention shape. The note matches the query by topic while the fact the
+# question asks for is simply not recorded in it. `expand_note` reports
+# `no_line_match` and falls back to one block, which is context and not
+# evidence; the recall rule turns that reason into an abstention rather than an
+# answer read off the fallback. Without the signal the drill-down would hand
+# recall a confident-looking paragraph about the wrong thing — the very failure
+# it exists to prevent.
+_NO_EVIDENCE_QUERY = "penalty percentage for late payment"
+
 
 def _check_recall_expansion(tmp_root: Path) -> list[ContractCheck]:
     """The scoped evidence drill-down closes the snippet gap without widening it.
@@ -1912,6 +1945,9 @@ def _check_recall_expansion(tmp_root: Path) -> list[ContractCheck]:
     )
     (work / "projects" / "Northwind.md").write_text(
         _EXPANSION_NOTE, encoding="utf-8"
+    )
+    (personal / "projects" / "Onboarding.md").write_text(
+        _NEGATION_NOTE, encoding="utf-8"
     )
     conn = sqlite_connect()
     fts_search.init_db(conn)
@@ -1994,6 +2030,87 @@ def _check_recall_expansion(tmp_root: Path) -> list[ContractCheck]:
                 else f"the drill-down expanded a foreign note: {foreign_key}"
             ),
             zero_tolerance=True,
+        )
+    )
+
+    neg_rows = fts_search.search_vault(conn, _NEGATION_QUERY, path_prefix=prefix)
+    neg_snippet = neg_rows[0]["snippet"] if neg_rows else ""
+    neg_gap = (
+        bool(neg_rows)
+        and "need a work visa" in neg_snippet
+        and "no permit" not in neg_snippet
+    )
+    checks.append(
+        ContractCheck(
+            id="recall-snippet-omits-negation",
+            category="recall",
+            passed=neg_gap,
+            detail=(
+                "the snippet keeps the claim and drops the clause that denies it"
+                if neg_gap
+                else f"snippet no longer shows the negation gap: {neg_snippet!r}"
+            ),
+        )
+    )
+
+    neg_key = neg_rows[0]["path"] if neg_rows else ""
+    neg_expanded = (
+        fts_search.expand_note(
+            conn, base, personal, neg_key, _NEGATION_QUERY, path_prefix=prefix
+        )
+        if neg_key
+        else None
+    )
+    neg_body = (
+        "\n".join(str(s.get("text", "")) for s in neg_expanded.get("sections", []))
+        if neg_expanded
+        else ""
+    )
+    # The safe combination lives in the sibling block, so the same widening that
+    # recovers the denial must still leave it behind.
+    neg_ok = "no permit" in neg_body and "8891" not in neg_body
+    checks.append(
+        ContractCheck(
+            id="recall-expansion-recovers-negation",
+            category="recall",
+            passed=neg_ok,
+            detail=(
+                "the drill-down returns the denial without the sibling block"
+                if neg_ok
+                else f"expansion did not recover the denial cleanly: {neg_body!r}"
+            ),
+        )
+    )
+
+    # A note the query matches by topic while the asked-for fact is absent. The
+    # drill-down must say so rather than dress an unrelated block up as evidence.
+    absent = (
+        fts_search.expand_note(
+            conn, base, personal, key, _NO_EVIDENCE_QUERY, path_prefix=prefix
+        )
+        if key
+        else None
+    )
+    absent_body = (
+        "\n".join(str(s.get("text", "")) for s in absent.get("sections", []))
+        if absent
+        else ""
+    )
+    signalled = (
+        absent is not None
+        and absent.get("reason") == "no_line_match"
+        and "penalty" not in absent_body.casefold()
+    )
+    checks.append(
+        ContractCheck(
+            id="recall-expansion-signals-no-evidence",
+            category="abstention",
+            passed=signalled,
+            detail=(
+                "a query the note does not answer comes back as no_line_match"
+                if signalled
+                else f"no abstention signal for an absent fact: {absent!r}"
+            ),
         )
     )
     return checks
