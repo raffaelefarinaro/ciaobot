@@ -1141,6 +1141,7 @@ async def run_archive_pipeline(
 
             if name == "memory_proposals":
                 from ciao.memory_proposals import (
+                    DeferredFact,
                     defer_region_facts,
                     plan_region_reconcile,
                     proposals_from_archive,
@@ -1221,6 +1222,7 @@ async def run_archive_pipeline(
                     extra={"archive": archive_path.name, "chat_id": chat_id},
                 ) as run:
                     proposal_stats: dict[str, int] = {}
+                    proposal_deferrals: list[DeferredFact] = []
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
@@ -1232,6 +1234,7 @@ async def run_archive_pipeline(
                         region_decisions=region_decisions,
                         workspace=trajectory_meta.get("workspace", ""),
                         error_out=proposal_errors,
+                        deferrals=proposal_deferrals,
                     )
                     run.extra["wrote"] = bool(proposals_result)
                     run.extra["proposals"] = proposal_stats.get("proposed", 0)
@@ -1242,6 +1245,20 @@ async def run_archive_pipeline(
                     # reconcile backend that is quietly down looks like a
                     # sudden taste for review.
                     run.extra["deferred"] = proposal_stats.get("deferred", 0)
+                    if proposal_deferrals:
+                        # The count says a reconcile backend is down or a model
+                        # is asserting uncited facts; only the reasons say
+                        # which facts are waiting and on what. Capped so one
+                        # bad archive cannot bloat the job manifest.
+                        run.extra["deferred_reasons"] = [
+                            {
+                                "text": item.text,
+                                "region": item.region,
+                                "reason": item.reason,
+                                "competing": list(item.competing),
+                            }
+                            for item in proposal_deferrals[:10]
+                        ]
                     # Split out of `deferred` on purpose: a reconcile that
                     # cannot decide and a fact no user turn supports look the
                     # same in the queue, but only the second one means the

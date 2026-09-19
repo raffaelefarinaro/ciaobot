@@ -17,12 +17,15 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
+
+if TYPE_CHECKING:  # ``memory_proposals`` is imported lazily everywhere else here.
+    from ciao.memory_proposals import ReconcileDecision
 
 logger = logging.getLogger(__name__)
 
@@ -701,7 +704,57 @@ def _resolve_batch(config, ids: list[str]) -> tuple[list[dict[str, Any]] | None,
     return resolved, None
 
 
-def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
+async def _plan_accept_reconcile(
+    config, row: dict[str, Any], region: str, guide: Path
+) -> tuple[ReconcileDecision | None, str | None]:
+    """Reconcile one queued fact against the region as it stands right now.
+
+    The retry half of the archive-time deferral. A fact queued because the
+    reconcile timed out, replied unusably, or named an entry that had moved
+    under it is otherwise stuck: accepting it took the plain append path, which
+    is the very thing the deferral exists to prevent — the obsolete entry and
+    its replacement both asserted in always-loaded memory.
+
+    Opt-in per request (``reconcile`` on the accept payload) because it is a
+    model call on a click: the default accept stays synchronous and instant,
+    and a row that needs judgment asks for it explicitly.
+
+    Returns ``(decision, error)``. ``decision`` is None when no call was needed
+    — an empty region or an exact duplicate is decided deterministically — and
+    ``error`` is set when the retry came back unable to decide again, in which
+    case the row stays queued rather than being appended on a failed retry.
+    """
+    from ciao.insights import _resolve_insights_call
+    from ciao.memory_proposals import reconcile_region_fact
+
+    model = str(getattr(config, "insights_model", "") or "").strip()
+    if not model:
+        return None, None
+    effective_model, provider, _note = _resolve_insights_call(config, model)
+    try:
+        decision = await reconcile_region_fact(
+            guide,
+            row.get("region") or row["kind"],
+            row["text"],
+            model=effective_model,
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed retry must not write
+        return None, f"could not reconcile against ciao:{region}: {exc}"
+    if decision is not None and decision.get("action") == "defer":
+        competing = decision.get("competing") or []
+        detail = f" It competes with: {'; '.join(competing)}." if competing else ""
+        return None, (
+            f"reconciling against ciao:{region} could not decide "
+            f"({decision.get('reason') or 'uncertain'}), so nothing was "
+            f"written and this stays queued.{detail}"
+        )
+    return decision, None
+
+
+async def _promote_region_row(
+    config, row: dict[str, Any], *, reconcile: bool = False
+) -> dict[str, Any]:
     """Write an accepted memory/profile fact into its workspace's region.
 
     Accept used to remove the bullet and return a descriptor saying what SHOULD
@@ -726,6 +779,13 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
     The guide is resolved through ``agent_root``, so before the re-rooting this
     writes the shared guide (and the row's ``leak_warning`` is why the UI asks
     for confirmation first) and afterwards that workspace's own.
+
+    ``reconcile`` runs one fresh reconcile call against the region's current
+    entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
+    a fact the archive-time reconcile deferred can be resolved on a retry
+    instead of being appended beside whatever it supersedes. It is off by
+    default: the plain accept is one synchronous write, and a model call on
+    every click would cost the batch endpoint one timeout per row.
     """
     from ciao.memory_proposals import accept_region_fact
     from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
@@ -746,12 +806,24 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
         # Only the undo log needs it; a promotion must not fail for want of one.
         vault_root = None
 
+    decision: ReconcileDecision | None = None
+    if reconcile:
+        decision, reconcile_error = await _plan_accept_reconcile(
+            config, row, region, guide
+        )
+        if reconcile_error:
+            # The retry is the way out of a deferral, so a retry that cannot
+            # decide either leaves the row exactly where it was — queued, with
+            # the reason and the entries it competes with on the response.
+            return {"ok": False, "region": region, "error": reconcile_error}
+
     try:
         outcome, promotable = accept_region_fact(
             guide_path=guide,
             target=row.get("region") or row["kind"],
             text=row["text"],
             vault_root=vault_root,
+            decision=decision,
             actor="operator",
             source="pwa",
             workspace=str(row.get("workspace") or ""),
@@ -804,6 +876,20 @@ def _promote_region_row(config, row: dict[str, Any]) -> dict[str, Any]:
             "error": (
                 f"ciao:{region} changed while this was being applied, so nothing "
                 "was written. Retry to apply it against the current entries."
+            ),
+        }
+    if outcome == "deferred":
+        # The reconcile decision named an entry that could not be safely
+        # replaced. Appending instead is the defect this path exists to avoid,
+        # so the row survives and says what to do about it.
+        return {
+            "ok": False,
+            "region": region,
+            "deferred": True,
+            "error": (
+                f"this fact may supersede an entry already in ciao:{region}, and "
+                "the reconcile could not say which. Nothing was written; retry "
+                "to reconcile it against the current entries."
             ),
         }
     return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
