@@ -104,7 +104,7 @@ self-actions, and telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 34 explicit tools. The MCP `tools/list` response is the
+The catalog contains 31 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/opencode session can do
