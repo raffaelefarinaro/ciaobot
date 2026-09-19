@@ -30,19 +30,21 @@ It does three jobs, and each replaces work you would otherwise do by hand:
 2. **It computes the worklist.** Pending proposals, region usage, aging entries, learnings, the weekly marker, log sizes and skill proposals are all mechanical checks; code has already run them. **`"empty": true` means there is genuinely nothing to do — reply with the one-line no-op and stop.** The lease is already released in that case. Do not open a single file to double-check.
 3. **It applies the run budget.** Work only the passes under `planned`, and only the `keys` listed there. Anything under `deferred` is next run's work, not yours — it is already recorded and will not be lost.
 
+**Keep the `lease.holder` string from that JSON.** Every follow-up command of this run must carry it as `--holder`; both require it and refuse to act once the lease is no longer yours. That is what stops a run that ran past its lease from writing the vault underneath the run that replaced it, so do not invent a holder and do not omit the flag.
+
 As you finish items, record them so a short run resumes rather than restarts:
 
 ```
-ciao curation-progress --key <key> --key <key>
+ciao curation-progress --holder <lease.holder> --key <key> --key <key>
 ```
 
 Close every run, including a failed one:
 
 ```
-ciao curation-end --status ok|failed --planned <n> --completed <n>
+ciao curation-end --holder <lease.holder> --status ok|failed --planned <n> --completed <n>
 ```
 
-`curation-end` releases the lease, records planned/completed/deferred counts so a quiet night is distinguishable from skipped or failed work, and stamps `last_full_pass` itself — but only when both weekly checks (pass 6) were recorded done and the status is `ok`. You never write that marker by hand.
+`curation-end` releases the lease, records planned/completed/deferred counts so a quiet night is distinguishable from skipped or failed work, and stamps `last_full_pass` itself — but only when both weekly checks (pass 6) were recorded done, the status is `ok`, and the lease is still yours. You never write that marker by hand. Exit 75 from either command means the lease was lost: stop curating and report the run as failed.
 
 ## Choose the pass
 
@@ -107,10 +109,10 @@ When you create or update People and project notes, add an `aliases:` frontmatte
 
 On a full pass:
 
-1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health. On success record it: `ciao curation-progress --key hygiene:vault-index`.
+1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health. On success record it: `ciao curation-progress --holder <lease.holder> --key hygiene:vault-index`.
 2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is safe to continue; exit 2 means unreliable evidence, so report scan errors, make no audit-derived repair, and leave the full pass due.
 3. When reliable, apply only low-risk unambiguous repairs: dead links, obvious MEMORY.md path drift, and a non-canonical `type:` whose exact canonical target is already named by VOCABULARY.md. Do not rewrite instruction conflicts, skills, orphaned or duplicate notes, expiration tags, schedules, or vocabulary proposals.
-4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. When that verification is reliable, record it: `ciao curation-progress --key hygiene:os-audit`.
+4. Re-run the scoped audit. Record initial/final counts, safe repairs, unresolved findings, and vocabulary proposals in the technical log. When that verification is reliable, record it: `ciao curation-progress --holder <lease.holder> --key hygiene:os-audit`.
 
 Those two keys are what lets `curation-end` stamp `last_full_pass`. Record neither and the weekly pass stays due, which is the correct outcome for a run whose evidence was unreliable — do not write the marker by hand to make the page look green.
 

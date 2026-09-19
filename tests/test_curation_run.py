@@ -157,6 +157,49 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
     assert worklist.empty
 
 
+def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> None:
+    """Acceptance: finishing one row must not retire the rows that read alike.
+
+    The work-item key hashed the bullet text alone, so two actionable rows with
+    identical text — a different kind, a different destination, or a plain
+    duplicate — collided. Completing the first before a failure or a budget
+    boundary persisted that one key, and the next `build_worklist` filtered out
+    every remaining row sharing it: an empty queue reported with unprocessed
+    proposals still in the file.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "- [people Ada] Ships on Fridays.\n"
+        "- [project docs/Release.md] Ships on Fridays.\n"
+        "- [project docs/Release.md] Ships on Fridays.\n",
+        encoding="utf-8",
+    )
+
+    def plan() -> cr.Worklist:
+        return cr.build_worklist(
+            vault_root=vault,
+            guide_path=guide,
+            workspace_dir=tmp_path,
+            today=date(2026, 9, 19),
+            done_keys=frozenset(cr.load_state(vault).done_keys),
+        )
+
+    first = plan()
+    keys = first.items[0].keys
+    assert first.items[0].pass_id == cr.PASS_PROPOSALS
+    # Three rows, three identities: kind, destination and the duplicate ordinal
+    # all separate them even though the sentence is one and the same.
+    assert len(set(keys)) == 3
+
+    cr.record_done(vault, [keys[0]])
+    remaining = plan()
+
+    assert not remaining.empty
+    assert remaining.items[0].keys == keys[1:]
+
+
 def test_a_missing_or_malformed_marker_leaves_the_weekly_pass_due(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
@@ -623,6 +666,88 @@ def test_curation_end_advances_the_marker_and_forgets_the_weekly_keys(
     assert set(cr.load_state(vault).done_keys) == set()
 
 
+def _stale_holder_replaced(vault: Path) -> None:
+    """Leave `run-a`'s lease expired and `run-b` holding the vault."""
+    expired = datetime.now(UTC) - timedelta(hours=2)
+    cr.begin_run(vault, holder="run-a", ttl_s=60, now=expired)
+    cr.begin_run(vault, holder="run-b")
+
+
+def test_follow_up_commands_refuse_to_run_without_the_lease_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance: an ownership check that is optional in practice is no lease.
+
+    `record_done` and `end_run` skip their check when the holder is empty, and
+    the stock workflow used to invoke both without one. An over-budget run
+    therefore kept stamping work done after its lease expired, and its
+    `curation-end` cleared the lease the *newer* run was holding — exactly the
+    overlap the lease exists to prevent.
+    """
+    from ciao.cli import _curation_end_command, _curation_progress_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _stale_holder_replaced(vault)
+    _capture(monkeypatch)
+
+    progress = _curation_progress_command(
+        _args(tmp_path, vault, guide, holder="", key=["proposals:deadbeef"])
+    )
+
+    # The stale run stamps nothing done: the next run must not be told that
+    # items nobody verified were handled.
+    assert cr.load_state(vault).done_keys == {}
+    assert progress == 2
+
+    ended = _curation_end_command(_args(tmp_path, vault, guide, holder=""))
+
+    # And it cannot release the lease the newer run is holding.
+    assert (cr.active_lease(vault) or {})["holder"] == "run-b"
+    assert ended == 2
+
+
+def test_the_parser_will_not_let_a_follow_up_command_omit_the_holder() -> None:
+    """The flag is required at parse time, not merely honoured when present."""
+    from ciao.cli import build_parser
+
+    parser = build_parser()
+    for command in ("curation-progress", "curation-end"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([command])
+        assert parser.parse_args([command, "--holder", "run-a"]).holder == "run-a"
+
+
+def test_a_rejected_run_cannot_advance_the_weekly_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance: the marker moves only for the run that still holds the lease.
+
+    The marker used to be stamped before `end_run` checked ownership, so a run
+    whose lease had expired — one `curation-end` then rejected with 75 —
+    suppressed the weekly hygiene passes for the next seven days on its way
+    out.
+    """
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    _stale_holder_replaced(vault)
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    _capture(monkeypatch)
+
+    code = _curation_end_command(
+        _args(tmp_path, vault, guide, holder="run-a", status="ok")
+    )
+
+    assert code == CURATION_BUSY_EXIT
+    assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
+    # And the run it was rejected in favour of still holds the lease.
+    assert (cr.active_lease(vault) or {})["holder"] == "run-b"
+
+
 # ── Shipped instructions ──────────────────────────────────────────────────
 
 
@@ -647,6 +772,11 @@ def test_the_skill_starts_from_the_computed_worklist() -> None:
     assert "--key hygiene:vault-index" in skill
     assert "--key hygiene:os-audit" in skill
     assert "You never write that marker by hand." in skill
+    # Every follow-up command carries the holder pass 0 returned; without it
+    # the ownership check is skipped and the lease serializes nothing.
+    assert "ciao curation-progress --holder <lease.holder>" in skill
+    assert "ciao curation-end --holder <lease.holder>" in skill
+    assert skill.count("ciao curation-progress --key") == 0
 
 
 def test_the_schedule_prompt_points_at_the_worklist_first() -> None:
@@ -659,5 +789,7 @@ def test_the_schedule_prompt_points_at_the_worklist_first() -> None:
 
     assert "ciao curation-begin --json" in prompt
     assert "one-line no-op" in prompt
+    # The lease only serializes anything if the follow-up commands carry it.
+    assert "`lease.holder`" in prompt and "--holder" in prompt
     # test_stock_package pins this ceiling; keep the dispatcher a dispatcher.
     assert len(prompt) < 1200
