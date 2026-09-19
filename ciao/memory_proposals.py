@@ -40,6 +40,8 @@ from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any
 
+from ciao.curation_run import curation_in_progress
+
 logger = logging.getLogger(__name__)
 
 
@@ -1977,6 +1979,23 @@ def proposals_from_archive(
                     stats["proposed"] = 0
                     stats["promoted"] = stats.get("promoted", 0)
                 return None
+
+        if auto_promote_memory and proposals and curation_in_progress(workspace_vault_root):
+            # A curation run is mid-consolidation: it read the region minutes
+            # ago and will write back a rewritten body. An append landing
+            # underneath that read is either lost to the rewrite or duplicated
+            # by it, and neither outcome is visible to anyone. Standing down
+            # costs nothing here — every proposal falls through to
+            # `append_proposals` below, which is the queue the curation run is
+            # about to work anyway.
+            auto_promote_memory = False
+            logger.info(
+                "memory proposals: curation holds %s; queuing %d fact(s) from %s "
+                "instead of auto-applying",
+                workspace_vault_root,
+                len(proposals),
+                archive_path.name,
+            )
 
         if auto_promote_memory and proposals:
             proposals, promoted = apply_proposals(
