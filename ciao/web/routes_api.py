@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import functools
 import hashlib
@@ -7777,263 +7778,340 @@ async def proposals_batch(request: Request) -> JSONResponse:
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
 
-    # Re-home rows are MOVES, so they are handled before the queue-file grouping
-    # too, and one at a time: each move rewrites references across both vaults, so
-    # the second move has to see what the first one wrote. Off the event loop for
-    # the same reason as the single-row path — a sweep per row is real work, and a
-    # cancelled handler leaves notes moved with their rows still queued.
-    move_rows = [
-        ctx for ctx in resolved
-        if action == "accept" and ctx["row"].get("kind") == "rehome"
-    ]
-    results_moves: list[dict[str, Any]] = []
-    moved_ids: set[str] = set()
-    moved_destinations: dict[str, str] = {}
-    for ctx in move_rows:
-        row = ctx["row"]
-        target, target_error = proposal_service._rehome_target(row, requested_workspace)
-        if target_error:
-            results_moves.append({
-                "id": row["id"], "action": "move_file", "dismissed": False,
-                "error": target_error,
-            })
-            continue
-        outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
-        if not outcome.get("ok"):
-            results_moves.append({
-                "id": row["id"], "action": "move_file", "dismissed": False,
-                "error": outcome["error"],
-            })
-            continue
-        moved_ids.add(row["id"])
-        moved_destinations[row["id"]] = str(outcome.get("destination", ""))
-        results_moves.append({
-            "id": row["id"], "action": "move_file", "dismissed": True,
-            "destination": outcome.get("destination", ""),
-            "already_moved": outcome.get("already_moved", False),
-        })
-    # Only the rows whose move landed may have their bullet dropped; a failed move
-    # keeps its row so the note is not left somewhere nobody asked for with
-    # nothing recording it.
-    resolved = [
-        ctx for ctx in resolved
-        if ctx not in move_rows or ctx["row"]["id"] in moved_ids
-    ]
+    # An accept mutates every destination first - region writes, project-doc
+    # folds, people notes, learnings counts - and only then rewrites the queue,
+    # so both guards the single-row route applies have to run here too, before
+    # the first mutation, and the claim has to stay held until that rewrite
+    # lands. They cover the two ways the old order went wrong:
+    #   * `_rewrite_queue_batch` is what raises `QueueReceiptUnavailable`, and
+    #     it runs last, so an unwritable or full journal returned 503 with
+    #     every destination already mutated and every bullet still queued - and
+    #     the operator's retry applied the whole batch a second time;
+    #   * two requests accepting the same row both reached the promotion and
+    #     contended only at the rewrite, so the fact was written twice and the
+    #     loser still reported success.
+    # The moves below mutate two vaults, so they sit inside both guards.
+    contested: list[str] = []
+    with contextlib.ExitStack() as claims:
+        if action == "accept":
+            queued = [ctx for ctx in resolved if not ctx.get("file")]
+            by_queue: dict[str, list[str]] = {}
+            for ctx in queued:
+                by_queue.setdefault(ctx["path"], []).append(ctx["row"]["id"])
+            claimed: set[str] = set()
+            for claim_path, claim_ids in by_queue.items():
+                claimed |= claims.enter_context(
+                    proposal_service.claim_proposals(Path(claim_path), claim_ids)
+                )
+            # A row another request is already promoting is reported as a
+            # conflict and left queued; the rest of the batch still runs.
+            contested = [
+                ctx["row"]["id"] for ctx in queued if ctx["row"]["id"] not in claimed
+            ]
+            resolved = [
+                ctx
+                for ctx in resolved
+                if ctx.get("file") or ctx["row"]["id"] in claimed
+            ]
+            # Off the event loop, like the single-row probe: a stat on a slow
+            # filesystem must not stall every other request.
+            targets = sorted({(ctx["workspace"], ctx["path"]) for ctx in queued})
+            if targets and not await asyncio.to_thread(
+                _accept_journals_writable, config, targets
+            ):
+                return JSONResponse(
+                    {
+                        "error": "the memory receipt journal is unavailable; "
+                        "no proposals were accepted",
+                    },
+                    status_code=503,
+                )
 
-    # Skill proposals are whole files, so they are handled before the grouping:
-    # the grouping below rewrites a queue file by dropping bullet lines, and a
-    # skill row has no line in any queue.
-    results = list(results_moves)
-    file_rows = [ctx for ctx in resolved if ctx.get("file")]
-    resolved = [ctx for ctx in resolved if not ctx.get("file")]
-    for ctx in file_rows:
-        row = ctx["row"]
-        # Same result shape a bullet dismiss returns, so the client needs no
-        # second contract for a row it renders identically.
-        if action != "dismiss":
+        # Re-home rows are MOVES, so they are handled before the queue-file grouping
+        # too, and one at a time: each move rewrites references across both vaults, so
+        # the second move has to see what the first one wrote. Off the event loop for
+        # the same reason as the single-row path — a sweep per row is real work, and a
+        # cancelled handler leaves notes moved with their rows still queued.
+        move_rows = [
+            ctx for ctx in resolved
+            if action == "accept" and ctx["row"].get("kind") == "rehome"
+        ]
+        results_moves: list[dict[str, Any]] = []
+        moved_ids: set[str] = set()
+        moved_destinations: dict[str, str] = {}
+        for ctx in move_rows:
+            row = ctx["row"]
+            target, target_error = proposal_service._rehome_target(row, requested_workspace)
+            if target_error:
+                results_moves.append({
+                    "id": row["id"], "action": "move_file", "dismissed": False,
+                    "error": target_error,
+                })
+                continue
+            outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
+            if not outcome.get("ok"):
+                results_moves.append({
+                    "id": row["id"], "action": "move_file", "dismissed": False,
+                    "error": outcome["error"],
+                })
+                continue
+            moved_ids.add(row["id"])
+            moved_destinations[row["id"]] = str(outcome.get("destination", ""))
+            results_moves.append({
+                "id": row["id"], "action": "move_file", "dismissed": True,
+                "destination": outcome.get("destination", ""),
+                "already_moved": outcome.get("already_moved", False),
+            })
+        # Only the rows whose move landed may have their bullet dropped; a failed move
+        # keeps its row so the note is not left somewhere nobody asked for with
+        # nothing recording it.
+        resolved = [
+            ctx for ctx in resolved
+            if ctx not in move_rows or ctx["row"]["id"] in moved_ids
+        ]
+
+        # Skill proposals are whole files, so they are handled before the grouping:
+        # the grouping below rewrites a queue file by dropping bullet lines, and a
+        # skill row has no line in any queue.
+        results = list(results_moves)
+        for contested_id in contested:
             results.append({
-                "id": row["id"],
+                "id": contested_id,
                 "action": action,
                 "dismissed": False,
-                "error": "a skill proposal is a file; there is nothing to promote",
+                "error": "this proposal is already being resolved",
             })
-            continue
-        outcome = proposal_service._dismiss_skill_proposal(ctx)
-        entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
-        if not outcome.get("ok"):
-            entry["error"] = outcome["error"]
-        elif ctx["workspace"]:
-            from ciao.memory_proposals import record_dismissal
-
-            # The file is already unlinked; a sidecar write failure must not
-            # fail a dismiss that happened.
-            try:
-                record_dismissal(
-                    proposal_service._proposals_file(config, ctx["workspace"]),
-                    text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
-                )
-            except OSError:
-                logger.info(
-                    "proposals: could not record skill dismissal for %s", row["id"]
-                )
-        results.append(entry)
-
-    # Group by file so each affected file is rewritten exactly once.
-    by_file: dict[str, dict[str, Any]] = {}
-    for ctx in resolved:
-        entry = by_file.setdefault(ctx["path"], {"workspace": ctx["workspace"], "lines": set(), "rows": []})
-        entry["lines"].add(ctx["line"])
-        entry["rows"].append(ctx["row"])
-
-    # Rows whose bullet THIS request actually dropped. A concurrent resolver
-    # may have removed a row between this request's scan and its write; the
-    # loser reports success to the client (the row is gone either way) but
-    # records no outcome - the winner already did.
-    self_request_removed: set[str] = set()
-    recorded: set[str] = set()
-
-    for path, entry in by_file.items():
-        queue = Path(path)
-        # Write every promotion BEFORE dropping any bullet, and only drop the
-        # ones that landed. A batch that removed the lines first would lose every
-        # fact whose region was over cap, silently and in bulk.
-        promoted: dict[str, dict[str, Any]] = {}
-        keep_lines: set[int] = set()
-        if action == "accept":
-            for row in entry["rows"]:
-                accept = proposal_kinds.accept_for(row["kind"])
-                if accept.action == "move_file":
-                    # Performed above the grouping, one at a time off the loop;
-                    # nothing to write here, only result shaping below.
-                    continue
-                if accept.action == "edit_region":
-                    outcome = proposal_service._promote_region_row(config, row)
-                elif accept.action == "fold_doc":
-                    # A fold is a model call, so a large selection folds
-                    # sequentially; write-then-dismiss still holds per row.
-                    outcome = await proposal_service._accept_project_row(config, row)
-                elif accept.action == "write_people_note":
-                    outcome = proposal_service._accept_people_row(config, row)
-                elif accept.action == "append_learnings":
-                    outcome = proposal_service._accept_learnings_row(config, row)
-                else:
-                    # route_manually: nothing to perform, and the row stays.
-                    outcome = {"ok": False, "error": "no destination yet"}
-                promoted[row["id"]] = outcome
-                if not outcome.get("ok"):
-                    keep_lines.add(int(row["line"]))
-
-        # The batch is one atomic file rewrite: a single transaction-level
-        # prepared/applied receipt pair carries the whole-file before/after
-        # image, and the remaining facts are recorded as non-undoable history
-        # rows. Undoing each fact's row separately restored the whole pre-batch
-        # file and resurrected the other bullets (including accepted ones). The
-        # bracket writes the prepared row before the rewrite so a crash between
-        # the write and the record is recoverable. The locked transaction runs
-        # in a worker thread so a contended queue lock cannot stall the loop.
-        try:
-            vault_for_receipt = Path(config.workspace_vault_root(entry["workspace"]))
-        except (AttributeError, ValueError):
-            vault_for_receipt = queue.parent.parent
-        removals = [
-            {
-                "text": str(row.get("text") or ""),
-                "kind": str(row.get("kind") or ""),
-                "promoted": action == "accept",
-            }
-            for row in entry["rows"]
-        ]
-        try:
-            removed_here = await asyncio.to_thread(
-                proposal_service._rewrite_queue_batch,
-                queue,
-                entry["rows"],
-                keep_lines,
-                removals,
-                entry["workspace"],
-                vault_for_receipt,
-            )
-        except QueueReceiptUnavailable as exc:
-            return JSONResponse(
-                {
-                    "error": "the memory receipt journal is unavailable; "
-                    "no proposals were removed",
-                    "detail": str(exc),
-                },
-                status_code=503,
-            )
-        self_request_removed.update(removed_here)
-        # Record THIS queue's outcomes immediately after its rewrite lands: a
-        # later file failing to persist must not take already-persisted
-        # resolutions out of the tally — their ids are gone, so a retry can
-        # never re-record them. Rows whose bullet this request did not remove
-        # (a concurrent resolver won) record nothing; the winner already did.
-        for row in entry["rows"]:
-            pid = row["id"]
-            if pid not in removed_here or pid in recorded:
+        file_rows = [ctx for ctx in resolved if ctx.get("file")]
+        resolved = [ctx for ctx in resolved if not ctx.get("file")]
+        for ctx in file_rows:
+            row = ctx["row"]
+            # Same result shape a bullet dismiss returns, so the client needs no
+            # second contract for a row it renders identically.
+            if action != "dismiss":
+                results.append({
+                    "id": row["id"],
+                    "action": action,
+                    "dismissed": False,
+                    "error": "a skill proposal is a file; there is nothing to promote",
+                })
                 continue
-            recorded.add(pid)
-            if action == "dismiss":
-                # Same contract as the single-row route: the decision's text
-                # must outlive the row, or the nightly curator re-files it.
+            outcome = proposal_service._dismiss_skill_proposal(ctx)
+            entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
+            if not outcome.get("ok"):
+                entry["error"] = outcome["error"]
+            elif ctx["workspace"]:
                 from ciao.memory_proposals import record_dismissal
 
-                record_dismissal(
-                    queue,
-                    text=str(row.get("text") or ""),
-                    kind=str(row.get("kind") or ""),
-                    via="pwa",
-                    source=str(row.get("source") or ""),
-                    proposal_id=pid,
-                )
-            elif action == "accept":
-                from ciao.memory_proposals import record_promotion
+                # The file is already unlinked; a sidecar write failure must not
+                # fail a dismiss that happened.
+                try:
+                    record_dismissal(
+                        proposal_service._proposals_file(config, ctx["workspace"]),
+                        text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                    )
+                except OSError:
+                    logger.info(
+                        "proposals: could not record skill dismissal for %s", row["id"]
+                    )
+            results.append(entry)
 
-                accept_here = proposal_kinds.accept_for(row["kind"])
-                if accept_here.action == "move_file":
-                    row_outcome = {"destination": moved_destinations.get(pid, "")}
-                else:
-                    row_outcome = promoted.get(pid, {})
-                record_promotion(
-                    queue,
-                    text=str(row.get("text") or ""),
-                    kind=str(row.get("kind") or ""),
-                    via="pwa",
-                    source=str(row.get("source") or ""),
-                    destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
-                    outcome="duplicate" if row_outcome.get("duplicate") else "written",
-                    proposal_id=pid,
-                )
-            if not proposal_outcomes.is_extraction_kind(row["kind"]):
-                # Not recorded: this ledger measures the MEMORY extraction
-                # pipeline. Skill proposals come from skill evolution and
-                # rehome rows from vault hygiene.
-                continue
-            proposal_outcomes.record(
-                kind=row["kind"],
-                action="promoted" if action == "accept" else "dismissed",
-                workspace=entry["workspace"],
-                via="pwa",
-            )
-        for row in entry["rows"]:
+        # Group by file so each affected file is rewritten exactly once.
+        by_file: dict[str, dict[str, Any]] = {}
+        for ctx in resolved:
+            entry = by_file.setdefault(ctx["path"], {"workspace": ctx["workspace"], "lines": set(), "rows": []})
+            entry["lines"].add(ctx["line"])
+            entry["rows"].append(ctx["row"])
+
+        # Rows whose bullet THIS request actually dropped. A concurrent resolver
+        # may have removed a row between this request's scan and its write; the
+        # loser reports success to the client (the row is gone either way) but
+        # records no outcome - the winner already did.
+        self_request_removed: set[str] = set()
+        recorded: set[str] = set()
+
+        for path, entry in by_file.items():
+            queue = Path(path)
+            # Write every promotion BEFORE dropping any bullet, and only drop the
+            # ones that landed. A batch that removed the lines first would lose every
+            # fact whose region was over cap, silently and in bulk.
+            promoted: dict[str, dict[str, Any]] = {}
+            keep_lines: set[int] = set()
             if action == "accept":
-                accept = proposal_kinds.accept_for(row["kind"])
-                outcome = promoted.get(row["id"], {})
-                # An absent outcome means nothing was written here (a rehome
-                # move performed above the grouping), which is a success.
-                failed = "ok" in outcome and not outcome["ok"]
-                result = {
-                    "id": row["id"],
-                    "action": accept.action,
-                    "dismissed": not failed,
+                # The claim above only covers this process. Another resolver
+                # (the CLI, the undo path, a second server) may have taken a
+                # row between this request's scan and here, and promoting it
+                # anyway writes the fact a second time for a bullet this
+                # request will then fail to remove. Read off the loop: the
+                # check takes the queue's file lock.
+                present = await asyncio.to_thread(
+                    proposal_service.bullets_present,
+                    queue,
+                    [
+                        (int(row["line"]), str(row.get("raw") or ""))
+                        for row in entry["rows"]
+                    ],
+                )
+                for row in entry["rows"]:
+                    accept = proposal_kinds.accept_for(row["kind"])
+                    if accept.action == "move_file":
+                        # Performed above the grouping, one at a time off the loop;
+                        # nothing to write here, only result shaping below.
+                        continue
+                    if int(row["line"]) not in present:
+                        promoted[row["id"]] = {
+                            "ok": False,
+                            "error": "this proposal was already resolved",
+                        }
+                        keep_lines.add(int(row["line"]))
+                        continue
+                    if accept.action == "edit_region":
+                        outcome = proposal_service._promote_region_row(config, row)
+                    elif accept.action == "fold_doc":
+                        # A fold is a model call, so a large selection folds
+                        # sequentially; write-then-dismiss still holds per row.
+                        outcome = await proposal_service._accept_project_row(config, row)
+                    elif accept.action == "write_people_note":
+                        outcome = proposal_service._accept_people_row(config, row)
+                    elif accept.action == "append_learnings":
+                        outcome = proposal_service._accept_learnings_row(config, row)
+                    else:
+                        # route_manually: nothing to perform, and the row stays.
+                        outcome = {"ok": False, "error": "no destination yet"}
+                    promoted[row["id"]] = outcome
+                    if not outcome.get("ok"):
+                        keep_lines.add(int(row["line"]))
+
+            # The batch is one atomic file rewrite: a single transaction-level
+            # prepared/applied receipt pair carries the whole-file before/after
+            # image, and the remaining facts are recorded as non-undoable history
+            # rows. Undoing each fact's row separately restored the whole pre-batch
+            # file and resurrected the other bullets (including accepted ones). The
+            # bracket writes the prepared row before the rewrite so a crash between
+            # the write and the record is recoverable. The locked transaction runs
+            # in a worker thread so a contended queue lock cannot stall the loop.
+            try:
+                vault_for_receipt = Path(config.workspace_vault_root(entry["workspace"]))
+            except (AttributeError, ValueError):
+                vault_for_receipt = queue.parent.parent
+            removals = [
+                {
+                    "text": str(row.get("text") or ""),
+                    "kind": str(row.get("kind") or ""),
+                    "promoted": action == "accept",
                 }
-                if accept.action == "edit_region":
-                    result["region"] = outcome.get("region", accept.region)
-                    result["promoted"] = bool(outcome.get("ok"))
-                    result["leak_warning"] = row.get("leak_warning", False)
-                    # What actually landed, which is not always the row's text:
-                    # the event-shape guard can promote only a bullet's trailing
-                    # "Durable rule:" clause. `duplicate` says the fact was
-                    # already there and nothing was written.
-                    if outcome.get("written"):
-                        result["written"] = outcome["written"]
-                    if outcome.get("duplicate"):
-                        result["duplicate"] = True
-                    if failed:
-                        result["error"] = outcome.get("error", "could not write the region")
-                elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
-                    result["promoted"] = bool(outcome.get("ok"))
-                    result["destination"] = outcome.get("destination", "")
-                    if failed:
-                        result["error"] = outcome.get("error", "could not write the destination")
+                for row in entry["rows"]
+            ]
+            try:
+                removed_here = await asyncio.to_thread(
+                    proposal_service._rewrite_queue_batch,
+                    queue,
+                    entry["rows"],
+                    keep_lines,
+                    removals,
+                    entry["workspace"],
+                    vault_for_receipt,
+                )
+            except QueueReceiptUnavailable as exc:
+                return JSONResponse(
+                    {
+                        "error": "the memory receipt journal is unavailable; "
+                        "no proposals were removed",
+                        "detail": str(exc),
+                    },
+                    status_code=503,
+                )
+            self_request_removed.update(removed_here)
+            # Record THIS queue's outcomes immediately after its rewrite lands: a
+            # later file failing to persist must not take already-persisted
+            # resolutions out of the tally — their ids are gone, so a retry can
+            # never re-record them. Rows whose bullet this request did not remove
+            # (a concurrent resolver won) record nothing; the winner already did.
+            for row in entry["rows"]:
+                pid = row["id"]
+                if pid not in removed_here or pid in recorded:
+                    continue
+                recorded.add(pid)
+                if action == "dismiss":
+                    # Same contract as the single-row route: the decision's text
+                    # must outlive the row, or the nightly curator re-files it.
+                    from ciao.memory_proposals import record_dismissal
+
+                    record_dismissal(
+                        queue,
+                        text=str(row.get("text") or ""),
+                        kind=str(row.get("kind") or ""),
+                        via="pwa",
+                        source=str(row.get("source") or ""),
+                        proposal_id=pid,
+                    )
+                elif action == "accept":
+                    from ciao.memory_proposals import record_promotion
+
+                    accept_here = proposal_kinds.accept_for(row["kind"])
+                    if accept_here.action == "move_file":
+                        row_outcome = {"destination": moved_destinations.get(pid, "")}
+                    else:
+                        row_outcome = promoted.get(pid, {})
+                    record_promotion(
+                        queue,
+                        text=str(row.get("text") or ""),
+                        kind=str(row.get("kind") or ""),
+                        via="pwa",
+                        source=str(row.get("source") or ""),
+                        destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
+                        outcome="duplicate" if row_outcome.get("duplicate") else "written",
+                        proposal_id=pid,
+                    )
+                if not proposal_outcomes.is_extraction_kind(row["kind"]):
+                    # Not recorded: this ledger measures the MEMORY extraction
+                    # pipeline. Skill proposals come from skill evolution and
+                    # rehome rows from vault hygiene.
+                    continue
+                proposal_outcomes.record(
+                    kind=row["kind"],
+                    action="promoted" if action == "accept" else "dismissed",
+                    workspace=entry["workspace"],
+                    via="pwa",
+                )
+            for row in entry["rows"]:
+                if action == "accept":
+                    accept = proposal_kinds.accept_for(row["kind"])
+                    outcome = promoted.get(row["id"], {})
+                    # An absent outcome means nothing was written here (a rehome
+                    # move performed above the grouping), which is a success.
+                    failed = "ok" in outcome and not outcome["ok"]
+                    result = {
+                        "id": row["id"],
+                        "action": accept.action,
+                        "dismissed": not failed,
+                    }
+                    if accept.action == "edit_region":
+                        result["region"] = outcome.get("region", accept.region)
+                        result["promoted"] = bool(outcome.get("ok"))
+                        result["leak_warning"] = row.get("leak_warning", False)
+                        # What actually landed, which is not always the row's text:
+                        # the event-shape guard can promote only a bullet's trailing
+                        # "Durable rule:" clause. `duplicate` says the fact was
+                        # already there and nothing was written.
+                        if outcome.get("written"):
+                            result["written"] = outcome["written"]
+                        if outcome.get("duplicate"):
+                            result["duplicate"] = True
+                        if failed:
+                            result["error"] = outcome.get("error", "could not write the region")
+                    elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
+                        result["promoted"] = bool(outcome.get("ok"))
+                        result["destination"] = outcome.get("destination", "")
+                        if failed:
+                            result["error"] = outcome.get("error", "could not write the destination")
+                    else:
+                        result["promoted"] = False
+                        result["destination"] = row.get("rehome", {}).get("destination", "")
+                        result["justified"] = row.get("rehome", {}).get("justified", False)
+                    results.append(result)
                 else:
-                    result["promoted"] = False
-                    result["destination"] = row.get("rehome", {}).get("destination", "")
-                    result["justified"] = row.get("rehome", {}).get("justified", False)
-                results.append(result)
-            else:
-                results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
-    return JSONResponse({"ok": True, "action": action, "results": results})
+                    results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
+        return JSONResponse({"ok": True, "action": action, "results": results})
 
 
 def _accept_journal_writable(config: Any, workspace: str, queue_path: str) -> bool:
@@ -8053,6 +8131,21 @@ def _accept_journal_writable(config: Any, workspace: str, queue_path: str) -> bo
     except (AttributeError, ValueError):
         vault = queue.parent.parent
     return _receipts.journal_writable(_receipts.journal_path(vault, queue.parent))
+
+
+def _accept_journals_writable(
+    config: Any, targets: Iterable[tuple[str, str]]
+) -> bool:
+    """The batch accept's pre-flight: every queue it would promote into.
+
+    One worker-thread hop for the whole batch rather than one per row, for the
+    same reason the single-row probe takes one: even stat-only work must not
+    run on the event loop.
+    """
+    return all(
+        _accept_journal_writable(config, workspace, path)
+        for workspace, path in targets
+    )
 
 
 async def proposal_action(request: Request) -> JSONResponse:
@@ -8120,123 +8213,161 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
 
     promoted: dict[str, Any] = {}
-    if action == "accept":
-        # Checked BEFORE any promotion. The queue rewrite below is what raises
-        # `QueueReceiptUnavailable`, and it runs last — so an unwritable
-        # journal returned 503 with the region already written, the doc already
-        # folded or the learning already appended, and the row still queued.
-        # The retry then did it a second time.
-        # Off the event loop (see _accept_journal_writable): the probe runs
-        # before any promotion, and a slow filesystem must not stall the loop.
-        if not await asyncio.to_thread(
-            _accept_journal_writable, config, ctx["workspace"], ctx["path"]
-        ):
+    queue = Path(ctx["path"])
+    # Claimed BEFORE the promotion and held until the queue rewrite has landed:
+    # two tabs accepting the same row both promoted (a doc folded twice, a
+    # recurrence count incremented twice) and only then contended on the
+    # rewrite, where the loser removed nothing and still reported success. See
+    # `proposal_service.claim_proposals` for why the claim is in-process and
+    # the file lock is not held across the promotion. A dismiss promotes
+    # nothing, so it needs no claim: the loser's rewrite is already a no-op.
+    with contextlib.ExitStack() as claim:
+        if action == "accept":
+            if pid not in claim.enter_context(
+                proposal_service.claim_proposals(queue, [pid])
+            ):
+                return JSONResponse(
+                    {
+                        "error": "this proposal is already being resolved; "
+                        "reload the queue to see the outcome",
+                        "id": pid,
+                    },
+                    status_code=409,
+                )
+            # Checked BEFORE any promotion. The queue rewrite below is what raises
+            # `QueueReceiptUnavailable`, and it runs last — so an unwritable
+            # journal returned 503 with the region already written, the doc already
+            # folded or the learning already appended, and the row still queued.
+            # The retry then did it a second time.
+            # Off the event loop (see _accept_journal_writable): the probe runs
+            # before any promotion, and a slow filesystem must not stall the loop.
+            if not await asyncio.to_thread(
+                _accept_journal_writable, config, ctx["workspace"], ctx["path"]
+            ):
+                return JSONResponse(
+                    {
+                        "error": "the memory receipt journal is unavailable; "
+                        "the proposal was not accepted",
+                        "id": pid,
+                    },
+                    status_code=503,
+                )
+            # And the row must still BE queued. The claim above only covers
+            # this process; the CLI, the undo path or a second server may have
+            # resolved the row between this request's scan and here, and
+            # promoting it anyway writes the fact a second time for a bullet
+            # this request will then fail to remove. Off the loop: the check
+            # reads the queue under its file lock.
+            if not await asyncio.to_thread(
+                proposal_service.bullets_present,
+                queue,
+                [(int(ctx["line"]), str(ctx["row"].get("raw") or ""))],
+            ):
+                return JSONResponse(
+                    {
+                        "error": "this proposal was already resolved; "
+                        "reload the queue to see the outcome",
+                        "id": pid,
+                    },
+                    status_code=409,
+                )
+            accept = proposal_kinds.accept_for(row["kind"])
+            if accept.action == "move_file":
+                target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())
+                if error:
+                    return JSONResponse({"error": error, "id": pid}, status_code=400)
+                # Off the event loop: the sweep reads and rewrites notes across both
+                # vaults, and doing that inline blocked the loop long enough for the
+                # request to time out — after the git mv and before the queue row was
+                # dropped, so the note moved and its row stayed.
+                outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
+                if not outcome.get("ok"):
+                    # Move-then-dismiss, the same order as a region write: the bullet
+                    # survives a failed move so the note is not silently left where it
+                    # was with nothing recording that it should not be.
+                    return JSONResponse(
+                        {"error": outcome["error"], "id": pid}, status_code=409
+                    )
+                promoted = outcome
+            elif accept.action == "edit_region":
+                promoted = proposal_service._promote_region_row(config, row)
+                if not promoted.get("ok"):
+                    # The bullet is untouched, so the fact is still queued and the
+                    # operator can fix the cause (usually an over-cap region) and
+                    # retry. Losing it silently is the one outcome to avoid.
+                    return JSONResponse(
+                        {
+                            "error": promoted.get("error", "could not write the region"),
+                            "id": pid,
+                            "region": promoted.get("region", ""),
+                        },
+                        status_code=409,
+                    )
+            elif accept.action == "fold_doc":
+                promoted = await proposal_service._accept_project_row(config, row)
+                if not promoted.get("ok"):
+                    return JSONResponse(
+                        {"error": promoted.get("error", "fold failed"), "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "write_people_note":
+                promoted = proposal_service._accept_people_row(config, row)
+                if not promoted.get("ok"):
+                    return JSONResponse(
+                        {"error": promoted.get("error", "could not write the note"), "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "append_learnings":
+                promoted = proposal_service._accept_learnings_row(config, row)
+                if not promoted.get("ok"):
+                    return JSONResponse(
+                        {"error": promoted.get("error", "could not append"), "id": pid},
+                        status_code=409,
+                    )
+            else:
+                # route_manually: a [review] row has no known destination, so an
+                # accept would be a guess wearing a button.
+                return JSONResponse(
+                    {
+                        "error": "this row has no destination yet; decide what it is first",
+                        "id": pid,
+                    },
+                    status_code=400,
+                )
+
+        try:
+            vault_for_receipt = Path(config.workspace_vault_root(ctx["workspace"]))
+        except (AttributeError, ValueError):
+            vault_for_receipt = queue.parent.parent
+        # A concurrent request, the undo path, or the CLI may have removed this
+        # bullet first; the loser must not rewrite the file around the winner's
+        # deletion, and only the request that actually removes the row records its
+        # outcome (the winner already did). The locked read/remove/rewrite runs in a
+        # worker thread so a contended queue lock cannot stall the event loop, and
+        # the prepared receipt is written before the rewrite so a crash between the
+        # two is still recoverable: bullet gone means the removal landed.
+        try:
+            removed_ours = await asyncio.to_thread(
+                proposal_service._rewrite_queue_single,
+                queue,
+                ctx["line"],
+                str(ctx["row"].get("raw") or ""),
+                str(row.get("text") or ""),
+                str(row.get("kind") or ""),
+                action == "accept",
+                ctx["workspace"],
+                vault_for_receipt,
+            )
+        except QueueReceiptUnavailable as exc:
             return JSONResponse(
                 {
                     "error": "the memory receipt journal is unavailable; "
-                    "the proposal was not accepted",
+                    "the proposal was not removed",
+                    "detail": str(exc),
                     "id": pid,
                 },
                 status_code=503,
             )
-        accept = proposal_kinds.accept_for(row["kind"])
-        if accept.action == "move_file":
-            target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())
-            if error:
-                return JSONResponse({"error": error, "id": pid}, status_code=400)
-            # Off the event loop: the sweep reads and rewrites notes across both
-            # vaults, and doing that inline blocked the loop long enough for the
-            # request to time out — after the git mv and before the queue row was
-            # dropped, so the note moved and its row stayed.
-            outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
-            if not outcome.get("ok"):
-                # Move-then-dismiss, the same order as a region write: the bullet
-                # survives a failed move so the note is not silently left where it
-                # was with nothing recording that it should not be.
-                return JSONResponse(
-                    {"error": outcome["error"], "id": pid}, status_code=409
-                )
-            promoted = outcome
-        elif accept.action == "edit_region":
-            promoted = proposal_service._promote_region_row(config, row)
-            if not promoted.get("ok"):
-                # The bullet is untouched, so the fact is still queued and the
-                # operator can fix the cause (usually an over-cap region) and
-                # retry. Losing it silently is the one outcome to avoid.
-                return JSONResponse(
-                    {
-                        "error": promoted.get("error", "could not write the region"),
-                        "id": pid,
-                        "region": promoted.get("region", ""),
-                    },
-                    status_code=409,
-                )
-        elif accept.action == "fold_doc":
-            promoted = await proposal_service._accept_project_row(config, row)
-            if not promoted.get("ok"):
-                return JSONResponse(
-                    {"error": promoted.get("error", "fold failed"), "id": pid},
-                    status_code=409,
-                )
-        elif accept.action == "write_people_note":
-            promoted = proposal_service._accept_people_row(config, row)
-            if not promoted.get("ok"):
-                return JSONResponse(
-                    {"error": promoted.get("error", "could not write the note"), "id": pid},
-                    status_code=409,
-                )
-        elif accept.action == "append_learnings":
-            promoted = proposal_service._accept_learnings_row(config, row)
-            if not promoted.get("ok"):
-                return JSONResponse(
-                    {"error": promoted.get("error", "could not append"), "id": pid},
-                    status_code=409,
-                )
-        else:
-            # route_manually: a [review] row has no known destination, so an
-            # accept would be a guess wearing a button.
-            return JSONResponse(
-                {
-                    "error": "this row has no destination yet; decide what it is first",
-                    "id": pid,
-                },
-                status_code=400,
-            )
-
-    queue = Path(ctx["path"])
-    try:
-        vault_for_receipt = Path(config.workspace_vault_root(ctx["workspace"]))
-    except (AttributeError, ValueError):
-        vault_for_receipt = queue.parent.parent
-    # A concurrent request, the undo path, or the CLI may have removed this
-    # bullet first; the loser must not rewrite the file around the winner's
-    # deletion, and only the request that actually removes the row records its
-    # outcome (the winner already did). The locked read/remove/rewrite runs in a
-    # worker thread so a contended queue lock cannot stall the event loop, and
-    # the prepared receipt is written before the rewrite so a crash between the
-    # two is still recoverable: bullet gone means the removal landed.
-    try:
-        removed_ours = await asyncio.to_thread(
-            proposal_service._rewrite_queue_single,
-            queue,
-            ctx["line"],
-            str(ctx["row"].get("raw") or ""),
-            str(row.get("text") or ""),
-            str(row.get("kind") or ""),
-            action == "accept",
-            ctx["workspace"],
-            vault_for_receipt,
-        )
-    except QueueReceiptUnavailable as exc:
-        return JSONResponse(
-            {
-                "error": "the memory receipt journal is unavailable; "
-                "the proposal was not removed",
-                "detail": str(exc),
-                "id": pid,
-            },
-            status_code=503,
-        )
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
