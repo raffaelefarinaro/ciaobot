@@ -42,6 +42,13 @@ watch(
 // An action that succeeded but did not do everything its label promises. Not
 // an error — the row really is cleared — so it takes the auto-dismissing info
 // variant rather than the persistent error toast.
+//
+// `immediate: true` because this panel is a `v-if` sibling that is unmounted
+// on every tab flip: `store.decide` awaits a POST, so switching to Proposals
+// (or off the page) while it is in flight stops this watcher before the notice
+// is set. Registered fresh on remount against an already-non-empty ref, a
+// lazy watcher never fires and the message is lost — the exact silent
+// half-success the notice exists to report. The immediate run drains it.
 watch(
   () => store.notice,
   (message) => {
@@ -49,6 +56,7 @@ watch(
     projectStore.pushToast({ chat_id: '', title: 'Nothing to stamp', body: message, variant: 'info' })
     store.notice = ''
   },
+  { immediate: true },
 )
 
 onMounted(() => {
@@ -274,14 +282,20 @@ function trashedTitle(note: VaultTrashedNote): string {
   return candidateLeaf(note.original_path)
 }
 
+/** The date half of an ISO timestamp, or '' when there is none. One helper for
+ * both rows: the retired and the cleared lists print the same shape off
+ * different field names, and two copies of the rule could drift apart. */
+function isoDate(stamp: string | undefined): string {
+  if (!stamp) return ''
+  return stamp.slice(0, 10)
+}
+
 function trashedDate(note: VaultTrashedNote): string {
-  if (!note.trashed_at) return ''
-  return note.trashed_at.slice(0, 10)
+  return isoDate(note.trashed_at)
 }
 
 function clearedDate(note: VaultClearedNote): string {
-  if (!note.decided_at) return ''
-  return note.decided_at.slice(0, 10)
+  return isoDate(note.decided_at)
 }
 </script>
 

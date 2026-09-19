@@ -397,4 +397,53 @@ describe('VaultReviewPanel', () => {
     expect(store.isBusy('abc123abc123abc123abc123')).toBe(false)
     wrapper.unmount()
   })
+
+  // ── the "nothing to stamp" notice reaches the user ────────────────────
+
+  it('toasts a keep that cleared the row without stamping the note', async () => {
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    apiPost.mockResolvedValue({
+      ok: true,
+      candidates: [],
+      trashed: [],
+      result: {
+        candidate_id: 'after',
+        previous_candidate_id: 'abc123abc123abc123abc123',
+        stamped: false,
+        stamp_status: 'no_frontmatter',
+      },
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    const store = useVaultReviewStore()
+
+    await buttonByText(wrapper, 'Still true').trigger('click')
+    await flushPromises()
+
+    const toast = projects.toasts.find(t => t.title === 'Nothing to stamp')
+    expect(toast?.body).toContain('no frontmatter to stamp')
+    expect(toast?.variant).toBe('info')
+    // Drained, so a later remount cannot re-announce the same one.
+    expect(store.notice).toBe('')
+    wrapper.unmount()
+  })
+
+  it('drains a notice raised while the panel was unmounted', async () => {
+    // The panel is a `v-if` sibling: flipping to Proposals while the POST is
+    // in flight stops the watcher before the notice is set, and a lazy
+    // watcher registered fresh on remount never fires for the value already
+    // sitting in the ref.
+    apiGet.mockResolvedValue({ candidates: [], trashed: [] })
+    const store = useVaultReviewStore()
+    const projects = useProjectStore()
+    store.notice = 'The row is cleared, but this note has no frontmatter to stamp.'
+
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(projects.toasts.some(t => t.title === 'Nothing to stamp')).toBe(true)
+    expect(store.notice).toBe('')
+    wrapper.unmount()
+  })
 })

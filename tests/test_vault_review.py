@@ -838,6 +838,94 @@ def test_keep_survives_a_very_long_note_filename(tmp_path: Path) -> None:
     assert "updated:" in path.read_text(encoding="utf-8")
 
 
+def test_temp_prefix_bounds_a_multibyte_name_by_bytes() -> None:
+    """NAME_MAX is a byte limit, so the temp prefix has to be cut in bytes.
+
+    `test_keep_survives_a_very_long_note_filename` above uses an ASCII stem,
+    where one character is one byte and a character-count truncation happens to
+    work. A mostly non-ASCII name is the case that slipped through: 60 emoji
+    plus ".md" is 243 bytes but only 63 characters, so the 64-*character* cut
+    passed the whole name through and the decorated temp name still came to
+    1 + 243 + 1 + 8 + 4 = 257 bytes — ENAMETOOLONG, the exact failure the
+    truncation exists to remove, and one `record_decision` does not catch.
+
+    Asserted on the prefix rather than by writing the file, because macOS
+    (APFS) bounds a filename by *characters* and accepts all 257 bytes; only a
+    byte-bounded filesystem such as ext4 — CI's — refuses it. A test that wrote
+    the note would pass here for the wrong reason.
+    """
+    from ciao.vault_index import temp_prefix
+
+    name = "\N{EARTH GLOBE EUROPE-AFRICA}" * 60 + ".md"
+    assert len(name) == 63  # a 64-character cut keeps all of it...
+    assert len(name.encode("utf-8")) == 243  # ...and all 243 of its bytes.
+
+    # `NamedTemporaryFile`/`mkstemp` decorate the prefix with 8 random
+    # characters and the suffix; the whole basename must fit NAME_MAX.
+    decorated = len(temp_prefix(name).encode("utf-8")) + 8 + len(".tmp")
+
+    assert decorated <= 255, f"decorated temp name is {decorated} bytes"
+
+
+def test_temp_prefix_never_splits_a_character() -> None:
+    """The byte cut must not leave half a character in a filename.
+
+    Slicing the UTF-8 bytes can land mid-character; decoding that back with the
+    default strict handler raises, and with errors="replace" it would write a
+    U+FFFD into the name. 200 is not a multiple of 3, so a name of 3-byte
+    characters (HIRAGANA LETTER A) lands the cut inside one.
+    """
+    from ciao.vault_index import TEMP_PREFIX_NAME_BYTES, temp_prefix
+
+    prefix = temp_prefix("\N{HIRAGANA LETTER A}" * 80)
+
+    assert len(prefix.encode("utf-8")) <= TEMP_PREFIX_NAME_BYTES + 2
+    assert "\ufffd" not in prefix
+    assert prefix.startswith(".") and prefix.endswith(".")
+    # 66 whole characters is 198 bytes; the 2 bytes left in the budget are the
+    # head of the 67th and are dropped rather than decoded.
+    assert prefix == "." + "\N{HIRAGANA LETTER A}" * 66 + "."
+
+
+def test_stamp_updated_names_every_outcome_from_one_parse() -> None:
+    """One scan of the frontmatter decides both the rewrite and the status.
+
+    `_reverify` used to ask a separate `_already_current` helper whether the
+    note was already stamped, which re-implemented this scan and made the
+    "already today" branch here unreachable from the only caller. Two copies of
+    a parse that must agree, with one of them uncovered, is a divergence
+    waiting to happen; these cases pin the single helper's whole contract.
+    """
+    today = "2026-09-18"
+
+    assert review._stamp_updated("---\ntype: note\n---\nBody.\n", today) == (
+        f"---\ntype: note\nupdated: {today}\n---\nBody.\n",
+        "stamped",
+    )
+    assert review._stamp_updated(
+        "---\nupdated: 2020-01-01\n---\nBody.\n", today
+    ) == (f"---\nupdated: {today}\n---\nBody.\n", "stamped")
+    # Quoted, and the quotes are stripped before the comparison — the rule the
+    # two copies had to agree on.
+    assert review._stamp_updated(f'---\nupdated: "{today}"\n---\nBody.\n', today) == (
+        None,
+        "already_current",
+    )
+    assert review._stamp_updated(f"---\nupdated: {today}\n---\nBody.\n", today) == (
+        None,
+        "already_current",
+    )
+    assert review._stamp_updated("# Bare\n\nNo frontmatter.\n", today) == (
+        None,
+        "no_frontmatter",
+    )
+    # Opened and never closed.
+    assert review._stamp_updated("---\ntype: note\nBody.\n", today) == (
+        None,
+        "no_frontmatter",
+    )
+
+
 def test_keep_stamps_a_bom_prefixed_note(tmp_path: Path) -> None:
     """A BOM is not whitespace, so a BOM + "---" line is not seen as "---".
 

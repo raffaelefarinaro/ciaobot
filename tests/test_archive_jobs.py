@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -1749,8 +1751,6 @@ def test_a_stage_does_not_run_when_its_start_cannot_be_recorded(
     assert called == [], "the stage must not run once its start could not be recorded"
 
 
-
-
 def test_a_manifest_is_written_owner_only(tmp_path: Path) -> None:
     """An unfinished job's manifest carries the conversation itself.
 
@@ -1759,8 +1759,6 @@ def test_a_manifest_is_written_owner_only(tmp_path: Path) -> None:
     which `os.replace` preserved — so another local account could read private
     workspace data out of `.runtime/archive_jobs`.
     """
-    import stat
-
     archive = _archive(tmp_path)
     job = _job(tmp_path, archive)
     assert job.save() is True
@@ -1773,8 +1771,6 @@ def test_a_manifest_rewrite_does_not_widen_an_existing_temp_file(
     tmp_path: Path,
 ) -> None:
     """O_CREAT leaves the mode alone, so a stale 0644 temp must be corrected."""
-    import stat
-
     archive = _archive(tmp_path)
     job = _job(tmp_path, archive)
     path = aj.job_path(tmp_path / ".runtime", job.job_id)
@@ -1785,6 +1781,57 @@ def test_a_manifest_rewrite_does_not_widen_an_existing_temp_file(
 
     assert job.save() is True
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_manifest_write_failure_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`save()` reports a failed write; it must never raise at its callers.
+
+    The whole point of the bool return is that a stage mutation can refuse to
+    proceed when its recovery evidence did not persist. Tightening the manifest
+    to 0600 moved the write onto `os.open`/`os.fchmod`, which made it possible
+    to raise *past* the `except OSError` — so pin the contract against the
+    descriptor-level calls the hardening introduced.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+
+    def boom(*args: object, **kwargs: object) -> int:
+        raise OSError(13, "Permission denied")
+
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+    before = path.read_text(encoding="utf-8") if path.exists() else None
+
+    monkeypatch.setattr(aj.os, "open", boom)
+
+    assert job.save() is False
+    # The failed write left the previously persisted manifest alone.
+    assert (path.read_text(encoding="utf-8") if path.exists() else None) == before
+
+
+def test_a_manifest_temp_file_is_cleaned_up_after_a_failed_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-written temp must not be left behind for the next `O_CREAT`.
+
+    The rewrite path deliberately re-chmods a stale temp (see above); leaving
+    one lying around after a failure is what made that repair necessary.
+    """
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    path = aj.job_path(tmp_path / ".runtime", job.job_id)
+
+    real_fchmod = os.fchmod
+
+    def boom(descriptor: int, mode: int) -> None:
+        real_fchmod(descriptor, mode)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(aj.os, "fchmod", boom)
+
+    assert job.save() is False
+    assert not path.with_name(f".{path.name}.tmp").exists()
 
 
 def test_a_changed_archive_blocks_the_pending_stage_not_a_settled_one(

@@ -21,7 +21,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
 # the annotations need the name at module scope.
@@ -40,7 +40,6 @@ from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import desktop_build
 from ciao import provider_registry
-from ciao import vault_rehome
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document

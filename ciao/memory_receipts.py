@@ -58,7 +58,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -532,19 +532,6 @@ def is_undoable(receipt: dict[str, Any]) -> bool:
 # ── Region mutation ───────────────────────────────────────────────────────
 
 
-@dataclass(slots=True)
-class RegionMutation:
-    """The result one region mutation decided, before it is committed."""
-
-    entries: list[str] = field(default_factory=list)
-    wrote: bool = False
-    outcome: str = "written"
-    fact_text: str = ""
-    destination: str = ""
-    removed_texts: list[str] = field(default_factory=list)
-    kind: str = "region_apply"
-
-
 def _image(text: str) -> str | None:
     return text if len(text) <= MAX_IMAGE_CHARS else None
 
@@ -590,6 +577,10 @@ def commit_region_change(
 
     owned = lock is None
     handle = lock
+    # The id this attempt opened its journal rows under, once it is known. The
+    # failure handler below must settle *that* receipt rather than open a
+    # second one; see the comment there.
+    opened_rid: str | None = None
     if owned:
         handle = guide_lock(guide)
     try:
@@ -622,6 +613,7 @@ def commit_region_change(
         rid = new_receipt_id(
             f"{guide}|{region}|{kind}|{fact_text}|{before_revision}", journal
         )
+        opened_rid = rid
         base: dict[str, Any] = {
             "id": rid,
             "ts": _now(),
@@ -661,10 +653,24 @@ def commit_region_change(
     except Exception as exc:  # noqa: BLE001 — record the failure, then surface it
         try:
             journal = journal_path(vault_root, guide)
+            # Settle the row this attempt already opened. The failure row used
+            # to be derived from a *different* basis — no ``before_revision``,
+            # and no journal for the generation step — so it landed on its own
+            # id. `read_receipts` folds by id, so one failed write produced two
+            # History entries: this `failed` one plus the orphaned `prepared`
+            # row, still non-terminal, which `recover_pending` then had to
+            # reconcile at the next startup and settled as `rolled_back`. The
+            # operator saw the same failure twice, under two different verdicts.
+            # The fallback still passes `journal` so a failure with no prepared
+            # row to reuse is generation-stepped like any other id, rather than
+            # folding onto an older undone receipt of the same basis.
+            record_id = opened_rid or new_receipt_id(
+                f"{guide}|{region}|{kind}|{fact_text}", journal
+            )
             _append(
                 journal,
                 {
-                    "id": new_receipt_id(f"{guide}|{region}|{kind}|{fact_text}", journal),
+                    "id": record_id,
                     "ts": _now(),
                     "actor": actor,
                     "source": source,

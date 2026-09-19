@@ -174,7 +174,29 @@ TYPE_ALIASES = {
 # for debuggability, but the full name plus ".", 8 random chars and ".tmp" can
 # exceed NAME_MAX (255) on a long note name and raise ENAMETOOLONG, which none
 # of the three note writers that use it catch.
-TEMP_PREFIX_NAME_CHARS = 64
+#
+# The budget is in *bytes*, because NAME_MAX is: a character count does not
+# bound it. A mostly non-ASCII name is legal on disk up to 255 bytes — 60 emoji
+# plus ".md" is 243 bytes but only 63 characters — so a 64-character cut passes
+# it through whole and the decorated temp name still comes to 257 bytes.
+# 200 + 1 + 1 + 8 + 4 = 214 stays clear of every NAME_MAX.
+TEMP_PREFIX_NAME_BYTES = 200
+
+
+def temp_prefix(name: str) -> str:
+    """Return the ``.<name>.`` prefix for a temp file written beside *name*.
+
+    Truncated to `TEMP_PREFIX_NAME_BYTES` of UTF-8, never mid-character: the
+    prefix is only there so a leftover temp file can be traced back to the note
+    it was staging, and a partial name serves that as well as a whole one.
+    """
+    raw = name.encode("utf-8")
+    if len(raw) > TEMP_PREFIX_NAME_BYTES:
+        # A hard byte cut can land inside a multi-byte character; decoding with
+        # errors="ignore" drops that partial tail rather than writing U+FFFD
+        # into a filename.
+        name = raw[:TEMP_PREFIX_NAME_BYTES].decode("utf-8", errors="ignore")
+    return f".{name}."
 
 
 def canonical_type(raw: str) -> str:
@@ -773,7 +795,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 # Truncated for the same reason as `vault_review`: a note
                 # name near NAME_MAX plus ".", 8 random chars and ".tmp"
                 # raises ENAMETOOLONG, which no caller here catches.
-                prefix=f".{abs_path.name[:TEMP_PREFIX_NAME_CHARS]}.",
+                prefix=temp_prefix(abs_path.name),
                 suffix=".tmp",
             ) as handle:
                 handle.write(new_text)

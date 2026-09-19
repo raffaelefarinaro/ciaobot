@@ -154,6 +154,29 @@ describe('explicit path endpoints', () => {
     expect([mm.pathStart, mm.pathEnd]).toEqual(['b', null])
   })
 
+  test('a toggle never seats one note in both slots', () => {
+    // Reachable from the canvas: set the start from a row's "start" button,
+    // then shift-click the same dot. The toggle branch used to fill the empty
+    // end slot with the note already holding the start, and `pathIds` then
+    // BFS-terminated at once on a degenerate one-note "path".
+    const mm = seedChain()
+    mm.choosePathEndpoint('b', 'start')
+    mm.handleNodeClick('b', true)
+    expect([mm.pathStart, mm.pathEnd]).toEqual([null, null])
+    expect(mm.pathIds.size).toBe(0)
+    expect(mm.pathHint).not.toContain('1 notes')
+  })
+
+  test('a toggle on the note already holding the end slot releases it', () => {
+    // The mirror case: with the end named first and the start empty, the same
+    // branch dropped the id into `pathStart` instead.
+    const mm = seedChain()
+    mm.choosePathEndpoint('b', 'end')
+    mm.choosePathEndpoint('b', 'toggle')
+    expect([mm.pathStart, mm.pathEnd]).toEqual([null, null])
+    expect(mm.pathIds.size).toBe(0)
+  })
+
   test('the hint names the next step in words, not just on a canvas', () => {
     const mm = seedChain()
     expect(mm.pathHint).toContain('start')

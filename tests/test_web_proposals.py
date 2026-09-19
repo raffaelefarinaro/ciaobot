@@ -19,7 +19,6 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
-from ciao.web import routes_api
 from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
     dismiss_older_than,
@@ -1076,8 +1075,6 @@ def test_a_batch_row_removed_by_another_request_records_nothing(
     """When a concurrent resolver drops the bullet between this batch's scan
     and its write, ``_remove_bullet_line`` matches nothing; the loser reports
     success to the client but must not record a second outcome."""
-    from ciao.web import routes_api
-
     config = _config(tmp_path)
     queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
     _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
@@ -1099,8 +1096,6 @@ def test_an_accept_that_loses_the_bullet_race_records_nothing(tmp_path: Path, mo
     between this request's scan and its write: ``_remove_bullet_line`` matches
     nothing. The loser must not rewrite the queue around the winner's deletion
     — and must not record an outcome for a decision it did not carry out."""
-    from ciao.web import routes_api
-
     config = _config(tmp_path)
     _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
     client = _client(config)
@@ -1136,8 +1131,6 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
     row = next(
         r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory"
     )
-
-    from ciao.web import routes_api
 
     real = proposal_service._rewrite_queue_single
     worker_threads: list[int] = []

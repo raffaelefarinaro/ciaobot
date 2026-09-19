@@ -184,6 +184,12 @@ const queueLoading = computed(() => !store.loaded && !store.loadError)
  * empty-queue claim may be made. */
 const queueFailed = computed(() => Boolean(store.loadError) && !store.loaded)
 
+/** The first load is over, one way or the other, so rows may be rendered.
+ * The rows block and the empty-state block share this and differ only by the
+ * stale-refresh clause — spelling the shared half out twice let a later edit
+ * invert one branch and not the other. */
+const queueSettled = computed(() => !queueLoading.value && !queueFailed.value)
+
 /** Rows in the current workspace scope before the kind/search filters. Lets
  * "nothing matches the filter" be told apart from "nothing queued", the way
  * the History list already does. */
@@ -689,7 +695,7 @@ watch(
 
 <template>
   <div class="proposal-review">
-    <header v-if="activeSection === 'queue' && !queueLoading && !queueFailed" class="pr-head">
+    <header v-if="activeSection === 'queue' && queueSettled" class="pr-head">
       <p class="pr-summary">
         <strong>{{ filtered.length }}</strong> to decide in {{ projectStore.activeWorkspace }}
         <button
@@ -793,7 +799,7 @@ watch(
     <!-- Empty-state claims render only on a successful load with no failed
          refresh shadowing it. `filtersHideEverything` needs a filter to be the
          reason; `queueEmpty` is the only branch allowed to say "All reviewed." -->
-    <template v-if="!queueLoading && !queueFailed && !store.loadError">
+    <template v-if="queueSettled && !store.loadError">
       <p v-if="filtersHideEverything" class="pr-empty">
         No proposals match the current filters.
         <button
@@ -806,7 +812,7 @@ watch(
       <p v-else-if="queueEmpty" class="pr-empty">All reviewed.</p>
     </template>
 
-    <template v-if="!queueLoading && !queueFailed">
+    <template v-if="queueSettled">
     <section class="pr-group">
       <header v-if="filtered.length" class="pr-group-head">
         <label class="pr-group-select">

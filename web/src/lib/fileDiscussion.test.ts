@@ -143,6 +143,29 @@ describe('startFileDiscussion', () => {
     expect(store.activeWorkspace).toBe('personal')
   })
 
+  it('reports a failed workspace switch instead of rejecting', async () => {
+    // The switch used to sit outside the guard, so a rejection escaped the
+    // documented "the chat, or null and a toast" contract. None of the three
+    // callers guards the call, so the click ended in an unhandled rejection
+    // with nothing on screen.
+    const store = makeStore()
+    store.switchWorkspace.mockRejectedValue(new Error('router unavailable'))
+
+    const chat = await startFileDiscussion(asStore(store), {
+      path: 'w/n.md',
+      seed: 'hello',
+      workspace: 'work',
+    })
+
+    expect(chat).toBeNull()
+    expect(store.createChat).not.toHaveBeenCalled()
+    expect(store.pinFile).not.toHaveBeenCalled()
+    expect(store.pushErrorToast).toHaveBeenCalledWith(
+      'Could not start discussion',
+      'router unavailable',
+    )
+  })
+
   it('falls back to the workspace when the previous chat was archived mid-flight', async () => {
     // Mirrors `chatExistsInList`: switching back onto an archived chat would
     // leave the active chat pointing at it.
@@ -150,6 +173,7 @@ describe('startFileDiscussion', () => {
       chats: [{ chat_id: 'chat-before', archived: true }],
       createChat: vi.fn(async () => { throw new Error('offline') }),
     })
+
     const chat = await startFileDiscussion(asStore(store), {
       path: 'w/n.md',
       seed: 'hello',

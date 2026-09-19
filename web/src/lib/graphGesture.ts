@@ -131,11 +131,11 @@ export class GraphGesture {
     if (p.pointerId !== this.pointerId) return { tap: 'none' }
     const nodeId = this.nodeId
     const additive = this.additive
-    const tap = this.phase === 'press' ? (nodeId ? 'node' : 'empty') : 'none'
+    const moved = this.phase !== 'press'
     this.reset()
-    if (tap === 'node') return { tap: 'node', nodeId: nodeId as string, additive }
-    if (tap === 'empty') return { tap: 'empty' }
-    return { tap: 'none' }
+    if (moved) return { tap: 'none' }
+    if (nodeId) return { tap: 'node', nodeId, additive }
+    return { tap: 'empty' }
   }
 
   /**

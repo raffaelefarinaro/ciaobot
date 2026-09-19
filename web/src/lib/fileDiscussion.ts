@@ -53,7 +53,21 @@ export async function startFileDiscussion(
     return null
   }
   if (target !== previous) {
-    await store.switchWorkspace(target)
+    try {
+      await store.switchWorkspace(target)
+    } catch (e) {
+      // Inside the guard, not above it: the contract is "the chat, or null and
+      // a toast", and `switchWorkspace` can reject on its own (it awaits a
+      // dynamic `../router` import and a `router.push`). None of the three
+      // callers guards this call — the viewer and the sidebar `await` it bare
+      // and the queue row only has a `try/finally` — so an escaping rejection
+      // ends the click in an unhandled rejection with nothing on screen.
+      store.pushErrorToast(
+        'Could not start discussion',
+        e instanceof Error ? e.message : String(e),
+      )
+      return null
+    }
   }
   // Comments left on the file in the viewer are part of what the user wants to
   // say about it, so they ride along with the opening message.

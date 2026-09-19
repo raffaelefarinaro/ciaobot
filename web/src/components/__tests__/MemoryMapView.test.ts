@@ -185,6 +185,40 @@ describe('MemoryMapView keyboard and touch access', () => {
     wrapper.unmount()
   })
 
+  it('drops the stored return control when the selection moves to another note', async () => {
+    // The return control is recorded by activateRow/openNeighbor, but the
+    // selection also moves through the canvas, focusNode, openNoteFile, the
+    // pending-focus hand-off and the sidebar's requestFocus — none of which
+    // touch it. A leftover entry pointed at Note A's title button, which is
+    // still mounted in the list, so closing Note B's panel threw focus onto
+    // the wrong note's control.
+    const { wrapper, mm } = await mountList()
+    const first = wrapper.findAll('.mm-title-btn')[0]
+    ;(first.element as HTMLElement).focus()
+    await first.trigger('click')
+    await nextTick()
+    expect(mm.selectedId).toBe('a')
+
+    // The sidebar (or a canvas tap) moves the panel to Note B.
+    mm.requestFocus('b')
+    await nextTick()
+    expect(mm.selectedId).toBe('b')
+
+    const close = wrapper.find('.mm-detail-close')
+    ;(close.element as HTMLElement).focus()
+    await close.trigger('click')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    // Note A's title button is still mounted in the list, so the stale entry
+    // would have been restored to it. Focus belongs to the note that was
+    // actually on screen.
+    expect(document.activeElement).not.toBe(first.element)
+    expect(document.activeElement).toBe(wrapper.findAll('.mm-title-btn')[1].element)
+    wrapper.unmount()
+  })
+
   it('renders a neighbor as a named button and offers its path controls', async () => {
     const { wrapper, mm } = await mountList()
     await wrapper.findAll('.mm-title-btn')[0].trigger('click')
@@ -417,6 +451,10 @@ describe('MemoryMapView list sorting', () => {
         // No `updated:` — ageDays null, but a three-year-old mtime, so the
         // Checked cell still shows an age.
         { id: 'old', title: 'Ancient note', type: 'note', tags: [], aliases: [], description: '', workspace: 'personal', degree: 1, mtime: nowSec - 3 * 365 * 86400, updated: '', stale: false, age_days: null },
+        // A person subtype and a log: the Type cell shows 'Colleagues' and
+        // 'Logs', which order the opposite way from the raw 'person'/'log'.
+        { id: 'mo', title: 'Mo', type: 'person', tags: ['colleague'], aliases: [], description: '', workspace: 'personal', degree: 0, mtime: nowSec, updated: '2026-01-01', stale: false, age_days: 1 },
+        { id: 'logbook', title: 'Daily log', type: 'log', tags: [], aliases: [], description: '', workspace: 'personal', degree: 0, mtime: nowSec, updated: '2026-01-01', stale: false, age_days: 2 },
       ],
       edges: [{ source: 'apple', target: 'zebra' }],
     }
@@ -456,6 +494,18 @@ describe('MemoryMapView list sorting', () => {
 
     // The three-year-old note is the stalest, so it leads on the first click.
     expect(titles(wrapper)[0]).toBe('Ancient note')
+  })
+
+  it('orders the Type column by the label its cell renders', async () => {
+    // Sorting the raw `type` put 'log' before 'person', so the six person
+    // subtypes — which the cell names 'Colleagues', 'Family & partner', … —
+    // came out in an order the column never showed.
+    const { wrapper } = await mountSortableList()
+    await sortButton(wrapper, 'Type').trigger('click')
+    await nextTick()
+
+    const order = titles(wrapper)
+    expect(order.indexOf('Mo')).toBeLessThan(order.indexOf('Daily log'))
   })
 
   it('ranks an undated note by the age its cell displays', async () => {

@@ -413,7 +413,23 @@
            tab, and the proposals-only search and kind chips stay with it. -->
       <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
         <h3>Notes to revisit</h3>
-        <div class="mm-stat-grid mm-stat-grid--3">
+        <!-- Three states, not one: a zero is a claim about the vault and may
+             only be printed once a load for this workspace has succeeded. -->
+        <template v-if="retirementPending">
+          <div class="mm-loading-heading" role="status" aria-live="polite">
+            <span class="history-loading-spinner" aria-hidden="true"></span>
+            <span>Loading candidates…</span>
+          </div>
+          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          </div>
+        </template>
+        <p v-else-if="retirementFailed" class="empty-hint" role="status">
+          // could not load the retirement queue
+        </p>
+        <div v-else class="mm-stat-grid mm-stat-grid--3">
           <div class="mm-stat">
             <div class="n">{{ retirementScoped }}</div>
             <div class="l">to revisit</div>
@@ -1212,6 +1228,14 @@ const vaultReview = useVaultReviewStore()
 // the store holds one workspace at a time, so a load for another workspace
 // must read as zero here rather than as the previous workspace's queue.
 const retirementLoaded = computed(() => vaultReview.loadedWorkspace === store.activeWorkspace)
+// `retirementLoaded` alone collapsed three states into one number: the queue
+// not fetched yet, a fetch that failed (the store swallows the error and
+// leaves `loadedWorkspace` where it was), and a queue that really is empty.
+// The first two rendered a hard 0/0/0 beside a panel saying "Loading
+// candidates…" — the stats-vs-rows contradiction this column exists to avoid.
+// The Proposals column above solves it with a skeleton; so does this one.
+const retirementPending = computed(() => !retirementLoaded.value && !vaultReview.error)
+const retirementFailed = computed(() => !retirementLoaded.value && Boolean(vaultReview.error))
 const retirementScoped = computed(() => (retirementLoaded.value ? vaultReview.candidates.length : 0))
 const retirementTrashed = computed(() => (retirementLoaded.value ? vaultReview.trashed.length : 0))
 // Distinct reasons across the queue, not a sum: one note flagged unlinked and
