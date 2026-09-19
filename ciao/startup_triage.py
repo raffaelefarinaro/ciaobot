@@ -187,19 +187,25 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
 
     runtime_dir = Path(config.state_path).parent
 
+    now = datetime.now(UTC)
+    last = _last_triage_at(runtime_dir)
+
     # Exclude the triage's own past dispatch runs: a run flagged an error
     # stores this triage's summary prose in its error field, which would
     # otherwise re-trigger a triage of itself on the next boot.
+    # The marker doubles as the acknowledgement of everything an earlier
+    # triage was already handed: the run log is append-only, so a one-off
+    # failure used to re-open a triage chat on every boot past the cooldown,
+    # forever.
     report = await asyncio.to_thread(
         build_issue_report,
         config.workspace_root,
         exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
+        failures_since=last,
     )
     if not report.get("error_line_count") and not report.get("failed_jobs"):
         return False
 
-    now = datetime.now(UTC)
-    last = _last_triage_at(runtime_dir)
     if last is not None and (now - last).total_seconds() < TRIAGE_COOLDOWN_S:
         logger.info(
             "Startup found runtime errors but a triage chat ran at %s; "
