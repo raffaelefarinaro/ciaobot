@@ -608,7 +608,9 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * `'start'`/`'end'` name the slot outright so a mouse-less user is never
    * relying on "the first one you pick becomes the start". `'toggle'` is the
    * single-button form: the first pick is the start, the second the end, and a
-   * third starts over.
+   * third *new* note starts over. Re-picking a note that already holds a slot
+   * releases that slot, which is what makes the gesture a toggle — and, more
+   * importantly, is why it can never seat one note in both slots.
    */
   function choosePathEndpoint(id: string, which: 'start' | 'end' | 'toggle') {
     if (which === 'start') {
@@ -621,6 +623,12 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       if (pathStart.value === id) pathStart.value = null
       return
     }
+    // Dedupe first, like the named slots above. Without it, shift-clicking the
+    // dot already sitting in `pathStart` dropped the same id into the empty
+    // `pathEnd`: `pathIds` then BFS-terminates on the start node and the hint
+    // reports a degenerate "1 notes on the path".
+    if (pathStart.value === id) { pathStart.value = null; return }
+    if (pathEnd.value === id) { pathEnd.value = null; return }
     if (!pathStart.value) pathStart.value = id
     else if (!pathEnd.value) pathEnd.value = id
     else { pathStart.value = id; pathEnd.value = null }

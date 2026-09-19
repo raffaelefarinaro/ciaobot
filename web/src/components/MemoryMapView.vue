@@ -171,17 +171,13 @@
           <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Path finder for the focused note">
             <span class="mm-path-controls-label">{{ mm.selectedNode.title }}</span>
             <button
+              v-for="s in PATH_SLOTS"
+              :key="s.slot"
               type="button"
-              :class="['btn-chip', { active: mm.pathStart === mm.selectedNode.id }]"
-              :aria-pressed="mm.pathStart === mm.selectedNode.id"
-              @click="mm.choosePathEndpoint(mm.selectedNode.id, 'start')"
-            >Start path</button>
-            <button
-              type="button"
-              :class="['btn-chip', { active: mm.pathEnd === mm.selectedNode.id }]"
-              :aria-pressed="mm.pathEnd === mm.selectedNode.id"
-              @click="mm.choosePathEndpoint(mm.selectedNode.id, 'end')"
-            >End path</button>
+              :class="['btn-chip', { active: pathSlotHolds(s.slot, mm.selectedNode.id) }]"
+              :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
+              @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
+            >{{ s.chip }}</button>
           </div>
           <div class="mm-hint-overlay">
             <span>
@@ -269,21 +265,15 @@
                      shares a visible label. -->
                 <td class="path-cell">
                   <button
+                    v-for="s in PATH_SLOTS"
+                    :key="s.slot"
                     type="button"
                     class="mm-path-btn"
-                    :class="{ active: mm.pathStart === n.id }"
-                    :aria-pressed="mm.pathStart === n.id"
-                    :aria-label="`Set ${n.title} as path start`"
-                    @click.stop="mm.choosePathEndpoint(n.id, 'start')"
-                  >start</button>
-                  <button
-                    type="button"
-                    class="mm-path-btn"
-                    :class="{ active: mm.pathEnd === n.id }"
-                    :aria-pressed="mm.pathEnd === n.id"
-                    :aria-label="`Set ${n.title} as path end`"
-                    @click.stop="mm.choosePathEndpoint(n.id, 'end')"
-                  >end</button>
+                    :class="{ active: pathSlotHolds(s.slot, n.id) }"
+                    :aria-pressed="pathSlotHolds(s.slot, n.id)"
+                    :aria-label="pathSlotLabel(s.slot, n.title)"
+                    @click.stop="mm.choosePathEndpoint(n.id, s.slot)"
+                  >{{ s.compact }}</button>
                 </td>
               </tr>
             </tbody>
@@ -317,19 +307,14 @@
              surface actually opened it. -->
         <div class="mm-detail-path-controls" role="group" aria-label="Path finder for this note">
           <button
+            v-for="s in PATH_SLOTS"
+            :key="s.slot"
             type="button"
             class="btn-chip"
-            :class="{ active: mm.pathStart === mm.selectedNode.id }"
-            :aria-pressed="mm.pathStart === mm.selectedNode.id"
-            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'start')"
-          >Start path</button>
-          <button
-            type="button"
-            class="btn-chip"
-            :class="{ active: mm.pathEnd === mm.selectedNode.id }"
-            :aria-pressed="mm.pathEnd === mm.selectedNode.id"
-            @click="mm.choosePathEndpoint(mm.selectedNode.id, 'end')"
-          >End path</button>
+            :class="{ active: pathSlotHolds(s.slot, mm.selectedNode.id) }"
+            :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
+            @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
+          >{{ s.chip }}</button>
           <button
             v-if="mm.pathStart || mm.pathEnd"
             type="button"
@@ -401,21 +386,15 @@
                  of view by the note title. -->
             <span class="mm-link-actions">
               <button
+                v-for="s in PATH_SLOTS"
+                :key="s.slot"
                 type="button"
                 class="mm-path-btn"
-                :class="{ active: mm.pathStart === nb.id }"
-                :aria-pressed="mm.pathStart === nb.id"
-                :aria-label="`Set ${nb.title} as path start`"
-                @click.stop="mm.choosePathEndpoint(nb.id, 'start')"
-              >start</button>
-              <button
-                type="button"
-                class="mm-path-btn"
-                :class="{ active: mm.pathEnd === nb.id }"
-                :aria-pressed="mm.pathEnd === nb.id"
-                :aria-label="`Set ${nb.title} as path end`"
-                @click.stop="mm.choosePathEndpoint(nb.id, 'end')"
-              >end</button>
+                :class="{ active: pathSlotHolds(s.slot, nb.id) }"
+                :aria-pressed="pathSlotHolds(s.slot, nb.id)"
+                :aria-label="pathSlotLabel(s.slot, nb.title)"
+                @click.stop="mm.choosePathEndpoint(nb.id, s.slot)"
+              >{{ s.compact }}</button>
               <button
                 type="button"
                 class="mm-link-focus"
@@ -626,6 +605,28 @@ function openNoteFile(id: string) {
 function openNeighbor(id: string, event: Event) {
   detailReturnFocus.value = { id, el: (event.currentTarget as HTMLElement | null) }
   openNoteFile(id)
+}
+
+// ---------- path endpoints ----------
+// Four surfaces offer the same pair of buttons: the canvas overlay, each list
+// row, the detail panel and every neighbor row. Written out by hand that was
+// eight near-identical blocks, each carrying its own copy of the active class,
+// the `aria-pressed` expression and (for the compact pair) the `aria-label`
+// sentence — so a wording or ARIA change had eight places to land and could
+// silently reach only some of them. Each surface now renders one `v-for` over
+// this table, and the three bindings are computed here, once.
+const PATH_SLOTS = [
+  { slot: 'start' as const, chip: 'Start path', compact: 'start' },
+  { slot: 'end' as const, chip: 'End path', compact: 'end' },
+]
+/** Whether `id` currently occupies `slot` — the active class and aria-pressed. */
+function pathSlotHolds(slot: 'start' | 'end', id: string): boolean {
+  return (slot === 'start' ? mm.pathStart : mm.pathEnd) === id
+}
+/** The accessible name for the compact buttons, whose visible text ("start")
+ * is shared by every row and so names neither the note nor the action. */
+function pathSlotLabel(slot: 'start' | 'end', title: string): string {
+  return `Set ${title} as path ${slot}`
 }
 const deletingNote = ref(false)
 async function deleteNote(id: string) {
@@ -1605,7 +1606,24 @@ function closeDetail() {
   mm.selectNode(null)
 }
 watch(() => mm.selectedId, (id) => {
-  if (id !== null || !detailReturnFocus.value) return
+  if (id !== null) {
+    // The selection moves through paths that never record a return control: a
+    // canvas tap (`mm.handleNodeClick`), `focusNode`, `openNoteFile`,
+    // `deliverPendingFocus` and the sidebar's `mm.requestFocus`. An entry left
+    // over from an earlier note is stale the moment one of those lands — on
+    // close, focus would jump to the other note's button while it is still
+    // mounted (list view), or the fallback would re-find that other note's
+    // title. Only the control that opened the note actually on screen may
+    // claim the restore, so the stale element is dropped — but the entry is
+    // re-pointed at the new note rather than cleared, so the fallback below
+    // still lands on that note's own title (or the surface region) instead of
+    // letting focus fall to the document body mid-journey.
+    if (detailReturnFocus.value && detailReturnFocus.value.id !== id) {
+      detailReturnFocus.value = { id, el: null }
+    }
+    return
+  }
+  if (!detailReturnFocus.value) return
   const { id: returnId, el } = detailReturnFocus.value
   detailReturnFocus.value = null
   void nextTick(() => {
@@ -1662,7 +1680,11 @@ const sortedVisibleNodes = computed(() => {
       av = x.age; bv = y.age
     } else if (key === 'type') {
       av = x.label; bv = y.label
-    } else { av = (x.n as any)[key] || ''; bv = (y.n as any)[key] || '' }
+    } else {
+      // Every other key has been eliminated above, so `key` narrows to
+      // 'title' and this indexes MemoryGraphNode as a plain string — no cast.
+      av = x.n[key] || ''; bv = y.n[key] || ''
+    }
     if (typeof av === 'string' && typeof bv === 'string') {
       // Collator, not `<`: raw comparison orders by code point, so every
       // capitalised title sorts ahead of every lowercase one ('Zebra' < 'apple')
