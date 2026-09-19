@@ -7518,6 +7518,198 @@ async def list_proposals(request: Request) -> JSONResponse:
 _HISTORY_DEFAULT_LIMIT = 200
 _HISTORY_MAX_LIMIT = 1000
 
+# Receipts are read newest-first and only the newest slice can plausibly match
+# a page of decisions, so the join never walks a whole long-lived journal.
+_HISTORY_RECEIPT_WINDOW = 1000
+
+
+def _history_norm(text: str) -> str:
+    """Comparison form for joining a decision to the receipt that performed it."""
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _receipt_for_row(
+    row: dict[str, Any], candidates: list[dict[str, Any]], claimed: set[str]
+) -> dict[str, Any] | None:
+    """The receipt that recorded one decision, or None.
+
+    Text-matching fallback, used only for ledger rows written before the
+    decision carried its receipt's id. A row that names one is resolved by id
+    and never reaches here.
+
+    The two sides are written by different functions and do not share an id:
+    the sidecar records the bullet's text, the receipt records the *promotable*
+    text, which for an event-shaped bullet is only its trailing durable-rule
+    clause. So an exact match is tried first and a contained one second.
+
+    Each receipt is claimed by at most one decision. Accepting the same fact
+    twice (accept, undo, accept) writes two of each, and without the claim both
+    decisions pointed at the newest receipt — offering an undo on a row whose
+    change had already been reversed.
+    """
+    target = _history_norm(row.get("text", ""))
+    if not target:
+        return None
+    ts = str(row.get("ts", ""))
+
+    def _pick(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+        free = [r for r in pool if str(r.get("id", "")) not in claimed]
+        if not free:
+            return None
+        # Nearest in time, on the ISO strings both sides write. A receipt is
+        # recorded just before the decision it belongs to, so the closest one
+        # is the right one even when the same fact was decided twice.
+        return min(free, key=lambda r: abs_ts_gap(str(r.get("ts", "")), ts))
+
+    exact = [r for r in candidates if _history_norm(r.get("fact_text", "")) == target]
+    chosen = _pick(exact)
+    if chosen is not None:
+        return chosen
+    partial = [
+        r
+        for r in candidates
+        if (fact := _history_norm(r.get("fact_text", "")))
+        and fact != target
+        and fact in target
+    ]
+    return _pick(partial)
+
+
+def abs_ts_gap(left: str, right: str) -> float:
+    """Seconds between two ISO timestamps; a huge gap when either is unparseable."""
+    try:
+        return abs(
+            (datetime.fromisoformat(left) - datetime.fromisoformat(right)).total_seconds()
+        )
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
+    """The `change` pointer one decision row carries, from its receipt."""
+    from ciao.memory_receipts import is_undoable
+
+    return {
+        "receipt_id": str(receipt.get("id", "")),
+        "kind": str(receipt.get("kind", "")),
+        "status": str(receipt.get("status", "")),
+        "destination": str(receipt.get("destination", ""))
+        or str(receipt.get("region", "")),
+        "undoable": is_undoable(receipt),
+        "changed": bool(receipt.get("changed", True)),
+        "ts": str(receipt.get("ts", "")),
+    }
+
+
+def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
+    """Point each decision at the receipt that performed it, where one exists.
+
+    A decision written since the ledger started carrying ``receipt_id`` names
+    its receipt outright, and that is the only reliable join: the ledger records
+    the ORIGINAL bullet — append-time dedupe compares a re-extracted fact
+    against it — while the receipt records what was actually written, so an
+    accept of an operator-edited wording shares no text with its own receipt.
+
+    Rows with no receipt keep no ``change`` key at all, which is what the
+    History surface renders as "No change snapshot available" — every decision
+    recorded before the receipt protocol landed, and every one made outside it.
+    Claiming an undo affordance for those would be a lie about what can be
+    reversed.
+    """
+    from ciao.memory_receipts import (
+        MemoryReceiptError,
+        journal_path,
+        read_receipts,
+    )
+
+    try:
+        receipts = read_receipts(journal_path(vault, None))
+    except (MemoryReceiptError, OSError, ValueError):
+        return
+    receipts.sort(key=lambda r: str(r.get("ts", "")), reverse=True)
+    by_id = {str(r.get("id", "")): r for r in receipts if r.get("id")}
+    claimed: set[str] = set()
+    # Explicit references first, over the WHOLE journal rather than the window
+    # the heuristic scans: a named receipt is right however old it is, and
+    # claiming it here also keeps the text-matching pass below from handing the
+    # same receipt to some other decision that merely reads alike.
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        rid = str(row.pop("receipt_id", "") or "")
+        found = by_id.get(rid) if rid else None
+        if found is not None:
+            claimed.add(rid)
+            row["change"] = _change_payload(found)
+        elif rid:
+            # The ledger names a receipt this journal does not hold (a vault
+            # restored without its journal, a trimmed archive). Recording it
+            # was still a decision; it just has no snapshot to show, which is
+            # the honest "No change snapshot available" state. Do NOT fall back
+            # to text matching here: the id was written precisely because the
+            # text cannot identify the write.
+            continue
+        else:
+            pending.append(row)
+    rows = pending
+    receipts = receipts[:_HISTORY_RECEIPT_WINDOW]
+    # Fallback for rows the ledger wrote before it carried a receipt id.
+    #
+    # A promotion writes the destination AND removes the bullet, so two
+    # receipts describe it. Each action is matched against exactly one pool,
+    # with no cross-fallback:
+    #
+    # * An ACCEPT means "what did this do to my memory", which is the
+    #   destination write. Falling back to that accept's queue receipt would
+    #   describe the bullet's removal instead, and its undo would re-queue a
+    #   fact the destination still holds — a duplicate wearing an Undo button.
+    #   A legacy accept whose destination receipt cannot be identified by text
+    #   stays snapshot-less, which is the honest answer.
+    # * A DISMISS touches nothing but the queue, so its queue receipt IS the
+    #   change, and undoing it restores the bullet.
+    region_rows = [r for r in receipts if str(r.get("kind", "")).startswith("region_")]
+    queue_rows = [r for r in receipts if str(r.get("kind", "")) == "queue_resolve"]
+    # Newest decision first, so the newest receipt is claimed by the decision it
+    # actually belongs to rather than by an older one that merely matched.
+    for row in sorted(rows, key=lambda r: str(r.get("ts", "")), reverse=True):
+        pool = region_rows if row.get("action") == "accepted" else queue_rows
+        found = _receipt_for_row(row, pool, claimed)
+        if found is None:
+            continue
+        claimed.add(str(found.get("id", "")))
+        row["change"] = _change_payload(found)
+
+
+# The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
+# proposal's `source` is that stem. Resolving it means listing that fixed depth,
+# which is why the result is cached: a History page asks for up to 1000 rows and
+# would otherwise re-list the tree for each one.
+_SOURCE_INDEX: dict[str, tuple[float, dict[str, str]]] = {}
+_SOURCE_INDEX_TTL_S = 60.0
+
+
+def _source_index(config: Any) -> dict[str, str]:
+    """Archive stem → absolute transcript path, cached briefly."""
+    root = Path(config.logs_root) / "Chats"
+    key = str(root)
+    cached = _SOURCE_INDEX.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _SOURCE_INDEX_TTL_S:
+        return cached[1]
+    index: dict[str, str] = {}
+    try:
+        for chat_dir in root.iterdir():
+            if not chat_dir.is_dir():
+                continue
+            for provider_dir in chat_dir.iterdir():
+                if not provider_dir.is_dir():
+                    continue
+                for transcript in provider_dir.glob("*.md"):
+                    index.setdefault(transcript.stem, str(transcript))
+    except OSError:
+        index = {}
+    _SOURCE_INDEX[key] = (now, index)
+    return index
+
 
 async def proposals_history(request: Request) -> JSONResponse:
     """Every recorded proposal decision across workspaces, newest first.
@@ -7564,6 +7756,7 @@ async def proposals_history(request: Request) -> JSONResponse:
         if key in seen:
             continue
         seen.add(key)
+        workspace_rows: list[dict[str, Any]] = []
         for entry in read_decisions(queue):
             if action_filter and entry["action"] != action_filter:
                 continue
@@ -7573,7 +7766,19 @@ async def proposals_history(request: Request) -> JSONResponse:
             # Read-side disambiguators for the id only; not part of the contract.
             row.pop("seq", None)
             row.pop("log", None)
-            rows.append(row)
+            workspace_rows.append(row)
+        # Join this workspace's decisions to the receipts that performed them,
+        # so History can show what each one actually changed and offer an undo
+        # exactly where one is safe. The journal is per vault, so the join has
+        # to happen inside the workspace loop rather than over the merged list.
+        try:
+            vault_for_receipts = Path(config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            vault_for_receipts = queue.parent.parent
+        await asyncio.to_thread(
+            _attach_change_receipts, vault_for_receipts, workspace_rows
+        )
+        rows.extend(workspace_rows)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
     rows.sort(key=lambda r: r["ts"], reverse=True)
@@ -7585,15 +7790,54 @@ async def proposals_history(request: Request) -> JSONResponse:
     # did nothing forever. It keys off the served limit reaching the cap, not
     # ``requested > limit`` — a request for exactly the cap is already at it,
     # and reporting False there bought one pointless full-page refetch.
+    served = rows[:limit]
+    # Resolve the archive each served decision came from, so History can link to
+    # it instead of printing a bare filename stem. Only the served page is
+    # resolved, and only once per request. Off the event loop: it lists a
+    # directory tree.
+    index = await asyncio.to_thread(_source_index, config)
+    for row in served:
+        path = index.get(str(row.get("source", "")))
+        if path:
+            row["source_path"] = path
     return JSONResponse(
         {
-            "rows": rows[:limit],
+            "rows": served,
             "total": total,
             "truncated": total > limit,
             "limit": limit,
             "at_max": limit >= _HISTORY_MAX_LIMIT,
         }
     )
+
+
+async def proposal_preview(request: Request) -> JSONResponse:
+    """Exactly what accepting one queued proposal would write, without writing.
+
+    The queued bullet says what was noticed; the promotion reconciles against
+    whatever the destination holds now, so the bullet's own text is not the
+    change. This returns the destination, the Add/Update operation and the
+    before/after body the accept would produce, plus the ``revision`` that
+    body was computed against.
+
+    That revision is the contract with :func:`proposal_action`: hand it back on
+    the accept and a destination that moved in between is refused with a
+    conflict and a refreshed preview, rather than silently overwritten.
+
+    ``?text=`` previews an edited wording (the review card's "edit suggestion")
+    against the same current destination.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    text = request.query_params.get("text", "")
+    # Off the event loop: the preview reads a guide (taking no lock) and a
+    # learnings file, and a slow filesystem must not stall every other request.
+    preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx, text)
+    return JSONResponse({"ok": True, "preview": preview})
 
 
 async def memory_receipts(request: Request) -> JSONResponse:
@@ -7634,6 +7878,156 @@ async def memory_receipts(request: Request) -> JSONResponse:
             rows.append(row)
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
     return JSONResponse({"rows": rows[: max(1, requested)], "total": len(rows)})
+
+
+def _receipt_units(text: str, separator: str) -> list[str]:
+    """One body as the diffable units it is actually made of.
+
+    Two conventions have to be stripped before a diff means anything:
+
+    * The terminating newline a serialized region (or a markdown file) ends
+      with is a file convention, not content. Splitting on it yields a trailing
+      empty line, which surfaced as a blank added/removed row under every real
+      change.
+    * A bounded region's entries are joined by a ``\n§\n`` separator. Diffed
+      as lines, appending one entry showed the separator as a second added row
+      reading "§", and a multi-line entry was torn into unrelated rows. The
+      unit of a region is the entry, so that is what gets compared.
+    """
+    if not text:
+        return []
+    body = text[:-1] if text.endswith("\n") else text
+    return body.split(separator)
+
+
+def _receipt_separator(kind: str) -> str:
+    """What joins one destination's units; ``\n`` for an ordinary file."""
+    from ciao.memory_tool import SECTION_SEP
+
+    return f"\n{SECTION_SEP}\n" if kind.startswith("region_") else "\n"
+
+
+# How much of a receipt's before/after image the detail view ships. The list
+# surface strips the images entirely (see `list_receipts`); this is the one
+# place they are served, and only for the row the operator opened.
+_RECEIPT_IMAGE_MAX = 20_000
+# Diff rows past this point are dropped with a flag. A region diff is a handful
+# of lines; a queue-file receipt can carry a whole markdown queue.
+_RECEIPT_DIFF_MAX = 400
+
+
+def _receipt_diff(
+    before: str, after: str, separator: str = "\n"
+) -> tuple[list[dict[str, Any]], bool]:
+    """A diff of one receipt's before/after, for the History card.
+
+    Context is dropped: what a History row has to answer is *what changed*, and
+    a region body reprinted in full buries the one entry that did.
+    """
+    import difflib
+
+    old = _receipt_units(before, separator)
+    new = _receipt_units(after, separator)
+    rows: list[dict[str, Any]] = []
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for line in old[i1:i2]:
+            rows.append({"op": "removed", "text": line})
+        for line in new[j1:j2]:
+            rows.append({"op": "added", "text": line})
+    if len(rows) > _RECEIPT_DIFF_MAX:
+        return rows[:_RECEIPT_DIFF_MAX], True
+    return rows, False
+
+
+def _find_receipt_in_workspaces(
+    config: Any, rid: str, workspace: str
+) -> tuple[dict[str, Any] | None, str]:
+    """One receipt by id, searching every workspace journal when none is named."""
+    from ciao.memory_receipts import find_receipt, journal_path
+
+    names = [workspace] if workspace else list(config.workspace_names())
+    for name in names:
+        try:
+            vault = Path(config.workspace_vault_root(name))
+        except (AttributeError, ValueError):
+            continue
+        found = find_receipt(journal_path(vault, None), rid)
+        if found is not None:
+            return found, name
+    return None, ""
+
+
+async def memory_receipt_detail(request: Request) -> JSONResponse:
+    """One receipt with its before/after images and a line diff.
+
+    The list endpoint deliberately strips the images, so this is what the
+    History row's Changes section reads when it is opened. A receipt with no
+    image — a legacy row, a failure, an operation this protocol cannot reverse
+    — comes back with ``has_snapshot: false``, which the UI renders as "No
+    change snapshot available" rather than as an empty diff.
+    """
+    from ciao.memory_receipts import is_undoable
+
+    config = request.app.state.config
+    rid = request.path_params["id"]
+    workspace = request.query_params.get("workspace", "").strip()
+    receipt, found_in = await asyncio.to_thread(
+        _find_receipt_in_workspaces, config, rid, workspace
+    )
+    if receipt is None:
+        return JSONResponse({"error": f"unknown receipt: {rid}"}, status_code=404)
+    before = receipt.get("before_text")
+    after = receipt.get("after_text")
+    has_snapshot = isinstance(before, str) and isinstance(after, str)
+    payload: dict[str, Any] = {
+        "id": rid,
+        "workspace": found_in or str(receipt.get("workspace", "")),
+        "kind": str(receipt.get("kind", "")),
+        "status": str(receipt.get("status", "")),
+        "ts": str(receipt.get("ts", "")),
+        "actor": str(receipt.get("actor", "")),
+        "source": str(receipt.get("source", "")),
+        "destination": str(receipt.get("destination", "")) or str(receipt.get("region", "")),
+        "fact_text": str(receipt.get("fact_text", "")),
+        "undoable": is_undoable(receipt),
+        "has_snapshot": has_snapshot,
+        "changed": bool(receipt.get("changed", True)),
+        "error": str(receipt.get("error", "")),
+    }
+    if not has_snapshot:
+        payload["reason"] = (
+            "this operation was recorded before change snapshots existed, or it "
+            "is not one the receipt protocol can reverse"
+        )
+        return JSONResponse(payload)
+    diff, diff_truncated = _receipt_diff(
+        str(before), str(after), _receipt_separator(str(receipt.get("kind", "")))
+    )
+    payload["before"] = str(before)[:_RECEIPT_IMAGE_MAX]
+    payload["after"] = str(after)[:_RECEIPT_IMAGE_MAX]
+    payload["truncated"] = (
+        len(str(before)) > _RECEIPT_IMAGE_MAX or len(str(after)) > _RECEIPT_IMAGE_MAX
+    )
+    payload["diff"] = diff
+    payload["diff_truncated"] = diff_truncated
+    if not payload["undoable"]:
+        # Say which of the reasons applies rather than only hiding the button:
+        # a row that simply belongs to a multi-row batch is not "legacy".
+        if receipt.get("undoable") is False:
+            payload["reason"] = (
+                "this row is part of a batch whose single transaction receipt "
+                "carries the undo; undoing it alone would restore the other rows too"
+            )
+        elif str(receipt.get("status", "")) != "applied":
+            payload["reason"] = f"this operation is {receipt.get('status', 'unsettled')}"
+        elif receipt.get("undo_of"):
+            payload["reason"] = "this is itself an undo"
+        else:
+            payload["reason"] = "this operation is not one the protocol can reverse"
+    return JSONResponse(payload)
 
 
 async def memory_receipt_undo(request: Request) -> JSONResponse:
@@ -7774,6 +8168,19 @@ async def proposals_batch(request: Request) -> JSONResponse:
         return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
     ids = [str(pid).strip() for pid in raw_ids]
     requested_workspace = str(body.get("workspace", "") or "").strip()
+    # Per-row revisions from the review cards the operator actually read, the
+    # same contract the single-row accept uses. A row whose destination moved
+    # since its preview fails on its own and stays queued; the rest of the
+    # batch still runs, because one stale card is not a reason to refuse a
+    # selection of twenty.
+    raw_revisions = body.get("revisions")
+    revisions: dict[str, str] = {}
+    if isinstance(raw_revisions, dict):
+        revisions = {
+            str(key): str(value or "").strip()
+            for key, value in raw_revisions.items()
+            if str(value or "").strip()
+        }
     resolved, error = proposal_service._resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
@@ -7964,6 +8371,20 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         }
                         keep_lines.add(int(row["line"]))
                         continue
+                    expected = revisions.get(row["id"], "")
+                    if expected:
+                        current = await asyncio.to_thread(
+                            proposal_service.destination_revision, config, row
+                        )
+                        if current and current != expected:
+                            promoted[row["id"]] = {
+                                "ok": False,
+                                "conflict": True,
+                                "error": "the destination changed since this "
+                                "preview; nothing was written",
+                            }
+                            keep_lines.add(int(row["line"]))
+                            continue
                     if accept.action == "edit_region":
                         outcome = proposal_service._promote_region_row(config, row)
                     elif accept.action == "fold_doc":
@@ -8061,6 +8482,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
                         outcome="duplicate" if row_outcome.get("duplicate") else "written",
                         proposal_id=pid,
+                        # The ledger keeps the ORIGINAL bullet as ``text``
+                        # (append-time dedupe compares against it), so an
+                        # edited accept is unmatchable by text. The write hands
+                        # its receipt back here instead.
+                        receipt_id=str(row_outcome.get("receipt_id") or ""),
                     )
                 if not proposal_outcomes.is_extraction_kind(row["kind"]):
                     # Not recorded: this ledger measures the MEMORY extraction
@@ -8108,10 +8534,90 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         result["promoted"] = False
                         result["destination"] = row.get("rehome", {}).get("destination", "")
                         result["justified"] = row.get("rehome", {}).get("justified", False)
+                    if outcome.get("conflict"):
+                        # Told apart from an ordinary refusal: a conflict means
+                        # the row is still promotable, just not against the body
+                        # the operator read. The UI reopens its preview rather
+                        # than reporting a permanent failure.
+                        result["conflict"] = True
                     results.append(result)
                 else:
                     results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
-        return JSONResponse({"ok": True, "action": action, "results": results})
+        return JSONResponse(
+            {
+                "ok": True,
+                "action": action,
+                "results": results,
+                "summary": _batch_summary(action, results),
+            }
+        )
+
+
+def _batch_destination(result: dict[str, Any]) -> str:
+    """Where one batch row landed (or would have), as the summary groups it.
+
+    A region row names its region; the file-writing kinds name their path; a
+    dismiss has no destination at all, which is its own group.
+    """
+    action = str(result.get("action", ""))
+    if action == "edit_region":
+        region = str(result.get("region", ""))
+        return f"ciao:{region}" if region else "ciao:memory"
+    if action == "dismiss":
+        return ""
+    return str(result.get("destination", ""))
+
+
+def _batch_summary(action: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per destination the batch touched, with its per-row outcomes.
+
+    A fifty-row accept used to report fifty independent lines, which is the
+    same information the queue already showed and says nothing about where the
+    facts went. Grouping by destination answers the question a bulk accept
+    actually raises — what changed, and where — while `failed_ids` keeps every
+    per-row failure addressable rather than averaged away.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for result in results:
+        destination = _batch_destination(result)
+        group = groups.get(destination)
+        if group is None:
+            group = {
+                "destination": destination,
+                "action": action,
+                "total": 0,
+                "ok": 0,
+                "failed": 0,
+                "conflicts": 0,
+                "duplicates": 0,
+                "failed_ids": [],
+                "errors": [],
+            }
+            groups[destination] = group
+            order.append(destination)
+        group["total"] += 1
+        # A dismiss reports `dismissed`; an accept reports `promoted`, and a
+        # rehome move reports neither because the move happened before the
+        # grouping — `dismissed` is the only signal it leaves.
+        succeeded = (
+            bool(result.get("promoted"))
+            if "promoted" in result
+            else bool(result.get("dismissed"))
+        )
+        if result.get("duplicate"):
+            group["duplicates"] += 1
+        if succeeded and not result.get("error"):
+            group["ok"] += 1
+            continue
+        group["failed"] += 1
+        if result.get("conflict"):
+            group["conflicts"] += 1
+        group["failed_ids"].append(str(result.get("id", "")))
+        message = str(result.get("error", ""))
+        if message and message not in group["errors"]:
+            group["errors"].append(message)
+    return [groups[key] for key in order]
 
 
 def _accept_journal_writable(config: Any, workspace: str, queue_path: str) -> bool:
@@ -8157,6 +8663,17 @@ async def proposal_action(request: Request) -> JSONResponse:
     stays and the error comes back, because the reverse order loses the fact.
 
     ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
+
+    An optional JSON body carries the review card's two extras:
+
+    * ``expected_revision`` — the destination digest the operator's preview was
+      computed against. A destination that changed since then is refused with
+      409 and a refreshed preview, so an accept can never land on top of an
+      edit nobody saw. Absent means "no preview was shown", which keeps every
+      existing client and the MCP path working unchanged.
+    * ``text`` — an edited wording to promote instead of the bullet's own. The
+      decision history still records the bullet's original text, because that
+      is what the dedupe readers compare a re-extracted fact against.
     """
     config = request.app.state.config
     pid = request.path_params["id"]
@@ -8165,6 +8682,16 @@ async def proposal_action(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
+    # A body is optional here and always has been; a client that sends none
+    # (or sends something unparseable) gets the pre-preview behaviour rather
+    # than a 400 for a field it never had to supply.
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001 — no body, or not JSON: both mean "no extras"
+        raw_body = {}
+    body = raw_body if isinstance(raw_body, dict) else {}
+    expected_revision = str(body.get("expected_revision", "") or "").strip()
+    edited_text = str(body.get("text", "") or "").strip()
     # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
     # Unvalidated, anything that was not "accept" skipped the promotion block
     # below but still fell through to the bullet removal and returned the
@@ -8271,6 +8798,38 @@ async def proposal_action(request: Request) -> JSONResponse:
                     },
                     status_code=409,
                 )
+            # The destination must still be what the operator's preview showed.
+            # Without this, an accept sitting open while a /remember, a nightly
+            # pass or a hand edit changed the region landed on top of a body
+            # nobody had read — the "unseen overwrite" the review card exists to
+            # rule out. The refreshed preview rides along so the client can
+            # re-render the card instead of asking for it again. Off the loop:
+            # it reads the destination.
+            if expected_revision:
+                current = await asyncio.to_thread(
+                    proposal_service.destination_revision, config, row
+                )
+                if current and current != expected_revision:
+                    refreshed = await asyncio.to_thread(
+                        proposal_service.preview_row, config, ctx, edited_text
+                    )
+                    return JSONResponse(
+                        {
+                            "error": "the destination changed since this preview; "
+                            "nothing was written. Review the refreshed change and "
+                            "confirm again.",
+                            "id": pid,
+                            "conflict": True,
+                            "preview": refreshed,
+                        },
+                        status_code=409,
+                    )
+            # An edited wording promotes instead of the bullet's own text. The
+            # queue removal and the decision record below still use `row`: the
+            # dedupe readers compare a re-extracted fact against the ORIGINAL
+            # text, so recording the edit there would let the curator re-queue
+            # the same bullet on its next pass.
+            promote_row = {**row, "text": edited_text} if edited_text else row
             accept = proposal_kinds.accept_for(row["kind"])
             if accept.action == "move_file":
                 target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())
@@ -8290,7 +8849,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                     )
                 promoted = outcome
             elif accept.action == "edit_region":
-                promoted = proposal_service._promote_region_row(config, row)
+                promoted = proposal_service._promote_region_row(config, promote_row)
                 if not promoted.get("ok"):
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
@@ -8304,21 +8863,21 @@ async def proposal_action(request: Request) -> JSONResponse:
                         status_code=409,
                     )
             elif accept.action == "fold_doc":
-                promoted = await proposal_service._accept_project_row(config, row)
+                promoted = await proposal_service._accept_project_row(config, promote_row)
                 if not promoted.get("ok"):
                     return JSONResponse(
                         {"error": promoted.get("error", "fold failed"), "id": pid},
                         status_code=409,
                     )
             elif accept.action == "write_people_note":
-                promoted = proposal_service._accept_people_row(config, row)
+                promoted = proposal_service._accept_people_row(config, promote_row)
                 if not promoted.get("ok"):
                     return JSONResponse(
                         {"error": promoted.get("error", "could not write the note"), "id": pid},
                         status_code=409,
                     )
             elif accept.action == "append_learnings":
-                promoted = proposal_service._accept_learnings_row(config, row)
+                promoted = proposal_service._accept_learnings_row(config, promote_row)
                 if not promoted.get("ok"):
                     return JSONResponse(
                         {"error": promoted.get("error", "could not append"), "id": pid},
@@ -8415,6 +8974,10 @@ async def proposal_action(request: Request) -> JSONResponse:
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
                 outcome="duplicate" if promoted.get("duplicate") else "written",
                 proposal_id=pid,
+                # See the batch path: the recorded text is the original bullet,
+                # so the receipt reference is the only way back to what an
+                # edited accept actually wrote.
+                receipt_id=str(promoted.get("receipt_id") or ""),
             )
         return JSONResponse({"ok": True, "result": result})
     if removed_ours and action == "dismiss":
