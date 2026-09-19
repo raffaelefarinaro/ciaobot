@@ -56,6 +56,16 @@ export interface ProposalKindDescriptor {
   label: string
   /** The line under the title: where an accept writes. */
   destination: (row: ProposalRow) => string
+  /**
+   * What accepting this row does, in words that name no file.
+   *
+   * `destination` answers "which path", which is the right answer for someone
+   * who already knows the vault's layout and the wrong one for everybody else:
+   * `ciao:memory` and `Workspace/Learnings.md` are the same shape of string and
+   * say nothing about the difference between them. The row shows this and keeps
+   * the path itself in the details disclosure.
+   */
+  consequence: (row: ProposalRow) => string
   /** Whether an accept can do what the button says. */
   canAccept: (row: ProposalRow) => boolean
   /** What a refused accept falls back to; null surfaces the error instead. */
@@ -149,6 +159,22 @@ function rehomeDestination(row: ProposalRow): string {
   return `${from} · no destination, needs a decision`
 }
 
+/** The same three cases as `rehomeDestination`, said without arrows or paths. */
+function rehomeConsequence(row: ProposalRow): string {
+  const sig = row.rehome
+  if (sig?.stale) return 'No longer applies — safe to dismiss'
+  if (sig?.candidates?.length && sig.candidates.length > 1) {
+    return 'Moves this note to another workspace — its tags name more than one, so pick'
+  }
+  if (sig?.destination) {
+    const to = sig.destination.split('/')[0]
+    return sig.justified
+      ? `Moves this note to the ${to} workspace`
+      : `Moves this note to the ${to} workspace — no tag backs that, so check first`
+  }
+  return 'Nowhere to move it to yet — it needs your decision'
+}
+
 // ---- the registry ----------------------------------------------------------
 
 const ALWAYS = () => true
@@ -161,10 +187,11 @@ const REGION_FALLBACK: ProposalMergeFallback = {
   when: ALWAYS,
 }
 
-function regionKind(label: string): ProposalKindDescriptor {
+function regionKind(label: string, consequence: string): ProposalKindDescriptor {
   return {
     label,
     destination: regionDestination,
+    consequence: () => consequence,
     canAccept: ALWAYS,
     fallback: REGION_FALLBACK,
     discussLabel: () => `a \`${label}\` proposal`,
@@ -175,21 +202,27 @@ function regionKind(label: string): ProposalKindDescriptor {
 export const GENERIC: ProposalKindDescriptor = {
   label: '',
   destination: regionDestination,
+  consequence: () => 'Kept as a standing note for this workspace',
   canAccept: ALWAYS,
   fallback: null,
   discussLabel: (row) => `a \`${row.kind}\` proposal`,
 }
 
 export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
-  memory: regionKind('memory'),
+  memory: regionKind('memory', 'Kept as a standing fact for this workspace'),
   // `user` is the server's older spelling of the same region; both show as
   // "profile" so the queue does not appear to hold two different things.
-  profile: regionKind('profile'),
-  user: { ...regionKind('profile'), discussLabel: () => 'a `user` proposal' },
+  profile: regionKind('profile', 'Kept as a standing fact about you'),
+  user: {
+    ...regionKind('profile', 'Kept as a standing fact about you'),
+    discussLabel: () => 'a `user` proposal',
+  },
 
   people: {
     label: 'people',
     destination: (row) => `People/${row.target || '?'}.md`,
+    consequence: (row) =>
+      `Added to the note about ${row.target || 'this person'}, creating it if there is none`,
     canAccept: ALWAYS,
     fallback: {
       chatTitle: (row) => `Merge ${row.target || 'person'} fact`,
@@ -203,6 +236,8 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   project: {
     label: 'project',
     destination: (row) => row.target || 'no project doc named',
+    consequence: (row) =>
+      row.target ? 'Added to that project’s document' : 'No project document named yet',
     canAccept: ALWAYS,
     fallback: {
       chatTitle: () => 'Merge project fact',
@@ -216,6 +251,7 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   learnings: {
     label: 'learnings',
     destination: () => 'Workspace/Learnings.md',
+    consequence: () => 'Added to this workspace’s list of learnings',
     canAccept: ALWAYS,
     fallback: {
       chatTitle: () => 'Merge learning',
@@ -231,6 +267,7 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   review: {
     label: 'review',
     destination: () => 'no destination yet — decide what it is',
+    consequence: () => 'Nowhere to put this yet — it needs your decision',
     canAccept: () => false,
     fallback: null,
     discussLabel: () => 'a fact with no decided destination',
@@ -240,6 +277,7 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   rehome: {
     label: 're-home',
     destination: rehomeDestination,
+    consequence: rehomeConsequence,
     canAccept: (row) => rehomeMode(row) === 'accept',
     fallback: null,
     discussLabel: () => 'a re-home proposal',
@@ -253,6 +291,7 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   skill: {
     label: 'skill',
     destination: (row) => row.path || 'a skill proposal file',
+    consequence: () => 'A suggested skill — building it opens a chat, dismissing deletes the file',
     canAccept: () => false,
     fallback: null,
     discussLabel: () => 'a `skill` proposal',

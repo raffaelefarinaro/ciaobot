@@ -77,8 +77,8 @@
             to="/memory"
             class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
-            title="memory"
-            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} to review` : 'memory'"
+            :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
+            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested memories across all workspaces` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. It also now covers review, since
@@ -390,13 +390,20 @@
           type="button"
           :class="{ active: mm.view === 'review' }"
           :aria-pressed="mm.view === 'review'"
+          :title="decisionsWaiting ? `${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : undefined"
+          :aria-label="decisionsWaiting ? `Review — ${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : 'Review'"
           @click="setMemoryView('review')"
         >
           <!-- Scoped, not the global tally: the workspace toggle directly
-               above scopes the queue, so a global count here claimed items the
+               above scopes the queues, so a global count here claimed items the
                Review list would not show — 12 next to a selected workspace
-               whose list is empty. -->
-          Review<span v-if="reviewScoped" class="view-count">{{ reviewScoped }}</span>
+               whose list is empty.
+
+               Both queues, not just the proposals one: this button is the
+               answer to "is there anything to decide", and a badge that
+               counted one of the two tabs behind it said no while the other
+               held five notes. -->
+          Review<span v-if="decisionsWaiting" class="view-count">{{ decisionsWaiting }}</span>
         </button>
       </div>
 
@@ -405,19 +412,19 @@
            five notes to review sat beside "0 of 0 shown". The stats follow the
            tab, and the proposals-only search and kind chips stay with it. -->
       <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
-        <h3>Retirements</h3>
+        <h3>Notes to revisit</h3>
         <div class="mm-stat-grid mm-stat-grid--3">
           <div class="mm-stat">
             <div class="n">{{ retirementScoped }}</div>
-            <div class="l">to review</div>
+            <div class="l">to revisit</div>
           </div>
           <div class="mm-stat">
             <div class="n">{{ retirementTrashed }}</div>
-            <div class="l">in trash</div>
+            <div class="l">retired</div>
           </div>
           <div class="mm-stat">
             <div class="n">{{ retirementSignals }}</div>
-            <div class="l">signals</div>
+            <div class="l">reasons</div>
           </div>
         </div>
       </div>
@@ -429,7 +436,7 @@
            memory view's. -->
       <div v-else-if="mode === 'proposals'" class="mm-sidebar-scroll">
         <template v-if="proposals.loading">
-          <h3>Queue</h3>
+          <h3>Suggested memories</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading proposals…</span>
@@ -450,7 +457,7 @@
           </div>
         </template>
         <template v-else>
-          <h3>Queue</h3>
+          <h3>Suggested memories</h3>
           <div class="mm-stat-grid mm-stat-grid--3">
             <div class="mm-stat">
               <div class="n">{{ reviewVisible }}</div>
@@ -1218,6 +1225,10 @@ const retirementSignals = computed(() => {
 })
 
 const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
+// What the Review button promises: everything in this workspace still waiting
+// on a decision, across both of its queues. Retired notes and the decision
+// ledger are records, not work, so neither counts here.
+const decisionsWaiting = computed(() => reviewScoped.value + retirementScoped.value)
 const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
 const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
 const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))

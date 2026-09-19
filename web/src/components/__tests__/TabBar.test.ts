@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import TabBar from '../TabBar.vue'
 
 const TABS = [
@@ -92,5 +93,50 @@ describe('TabBar', () => {
     const wrapper = mountBar('queue')
     await wrapper.findAll('[role="tab"]')[0]!.trigger('click')
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  // A bar with more tabs than fit scrolls sideways — which a four-tab Review
+  // bar does at 390px. Selecting a tab any way other than clicking it (a deep
+  // link, a "review this note" button, the bar left scrolled from a previous
+  // visit) could leave the selected tab, and the underline that says where you
+  // are, entirely outside that window.
+  describe('keeping the selected tab in view', () => {
+    function withSpy() {
+      const calls: unknown[] = []
+      const original = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function (this: Element, arg?: unknown) {
+        calls.push({ text: this.textContent?.trim(), arg })
+      } as typeof original
+      return { calls, restore: () => { Element.prototype.scrollIntoView = original } }
+    }
+
+    it('reveals the selected tab on mount', () => {
+      const { calls, restore } = withSpy()
+      try {
+        mountBar('trash')
+        expect(calls).toHaveLength(1)
+        expect(calls[0]).toMatchObject({ text: 'Trash' })
+      } finally { restore() }
+    })
+
+    it('reveals the newly selected tab when the model changes from outside', async () => {
+      const { calls, restore } = withSpy()
+      try {
+        const wrapper = mountBar('queue')
+        calls.length = 0
+        await wrapper.setProps({ modelValue: 'trash' })
+        await nextTick()
+        expect(calls).toHaveLength(1)
+        expect(calls[0]).toMatchObject({ text: 'Trash' })
+      } finally { restore() }
+    })
+
+    it('scrolls by the smallest amount, so the rest of the bar stays put', () => {
+      const { calls, restore } = withSpy()
+      try {
+        mountBar('history')
+        expect(calls[0]).toMatchObject({ arg: { block: 'nearest', inline: 'nearest' } })
+      } finally { restore() }
+    })
   })
 })

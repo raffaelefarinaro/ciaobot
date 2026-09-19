@@ -113,7 +113,39 @@ describe('VaultReviewPanel', () => {
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Nothing flagged here')
+    expect(wrapper.text()).toContain('Nothing to revisit')
+    wrapper.unmount()
+  })
+
+  it('opens with one sentence and folds the per-button detail into a disclosure', async () => {
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const lede = wrapper.find('.vr-lede')
+    expect(lede.exists()).toBe(true)
+    expect(lede.text().length).toBeLessThan(160)
+
+    const how = wrapper.find('.vr-how')
+    expect(how.exists()).toBe(true)
+    expect(how.attributes('open')).toBeUndefined()
+    expect(wrapper.find('.vr-how-summary').text()).toBe('What each choice does')
+    wrapper.unmount()
+  })
+
+  it('keeps the Still true promise qualified, wherever the copy moves', async () => {
+    // "Still true" reports honestly when a note has no frontmatter to stamp.
+    // Shortening the surface copy may not shorten that into a flat claim.
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const how = wrapper.find('.vr-how').text()
+    expect(how).toContain('no frontmatter')
+    expect(how).toContain('nowhere to record')
+    // And the button's own tooltip keeps the same condition.
+    expect(buttonByText(wrapper, 'Still true').attributes('title'))
+      .toContain('when it has frontmatter to stamp')
     wrapper.unmount()
   })
 
@@ -289,7 +321,7 @@ describe('VaultReviewPanel', () => {
 
     const text = wrapper.text()
     expect(text).not.toContain('30 days')
-    expect(text).toContain('until you delete them')
+    expect(text).toContain('nothing is removed on a timer')
     wrapper.unmount()
   })
 

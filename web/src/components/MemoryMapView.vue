@@ -3,13 +3,17 @@
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
     <div v-if="mm.view === 'review'" class="mm-review-wrap">
-      <!-- One surface, two queues: agent proposals (additions) and stale-note
-           retirement live side by side so "decide things" has one address.
-           The tab state is shared (`mm.reviewTab`) so entry points elsewhere
-           — the sidebar's "Needs review" list, a stale note's detail panel —
-           can land directly on retirement. -->
+      <!-- One navigation level for everything Review holds. It used to be two:
+           Proposals/Retirements here, then Queue/History inside the proposal
+           panel and To review/Trash inside the retirement one — so the trash
+           was a tab inside a tab inside a sidebar button, and no single row
+           said what there was to decide. The four destinations are peers: two
+           things waiting for a decision, two records of decisions already
+           made. The underlying state is unchanged, so every existing entry
+           point (the sidebar's "Needs review" list, a stale note's detail
+           panel, /proposals) still lands where it did. -->
       <TabBar
-        v-model="mm.reviewTab"
+        v-model="reviewTab"
         :tabs="reviewTabs"
         label="Review"
         id-prefix="mm-review"
@@ -18,37 +22,28 @@
       <!-- TabBar points every tab at `<id-prefix>-panel-<key>` via
            aria-controls, so those panels have to exist. Both components are
            single-root, so these attributes fall through onto their root
-           element and change no layout. -->
+           element and change no layout.
+
+           The proposal panel is bound without `key`, so moving between
+           Suggested memories and History swaps its section rather than
+           remounting it — which would refetch the queue on every flip. -->
       <ProposalReviewPanel
-        v-if="mm.reviewTab === 'proposals'"
-        id="mm-review-panel-proposals"
+        v-if="reviewTab === 'proposals' || reviewTab === 'history'"
+        :section="reviewTab === 'history' ? 'history' : 'queue'"
+        :id="`mm-review-panel-${reviewTab}`"
         role="tabpanel"
-        aria-labelledby="mm-review-tab-proposals"
+        :aria-labelledby="`mm-review-tab-${reviewTab}`"
       />
-      <div
+      <!-- One component, two sections: the queue and the trash share the
+           store, the busy set and the error toast, so splitting them into
+           two components would only duplicate all three. -->
+      <VaultReviewPanel
         v-else
-        id="mm-review-panel-retirement"
-        class="mm-retirement-wrap"
+        :section="reviewTab === 'trash' ? 'trash' : 'candidates'"
+        :id="`mm-review-panel-${reviewTab}`"
         role="tabpanel"
-        aria-labelledby="mm-review-tab-retirement"
-      >
-        <TabBar
-          v-model="mm.retirementTab"
-          :tabs="retirementTabs"
-          label="Retirements"
-          id-prefix="mm-retirement"
-          class="mm-retirement-tabs"
-        />
-        <!-- One component, two sections: the queue and the trash share the
-             store, the busy set and the error toast, so splitting them into
-             two components would only duplicate all three. -->
-        <VaultReviewPanel
-          :section="mm.retirementTab"
-          :id="`mm-retirement-panel-${mm.retirementTab}`"
-          role="tabpanel"
-          :aria-labelledby="`mm-retirement-tab-${mm.retirementTab}`"
-        />
-      </div>
+        :aria-labelledby="`mm-review-tab-${reviewTab}`"
+      />
     </div>
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
@@ -1452,25 +1447,58 @@ const vaultReview = useVaultReviewStore()
 const proposalCount = computed(() => proposals.scopedRows(store.activeWorkspace).length)
 // Candidates only. The tally used to add the trash in, so a queue with nothing
 // left to decide still wore a badge counting notes already retired — a number
-// asking for attention no click could clear. The trash has its own sub-tab
-// count one level down, which is where a "how much is in there" number belongs.
+// asking for attention no click could clear. Retired notes carry their own
+// count on their own tab, which is where a "how much is in there" number
+// belongs.
 const retirementCount = computed(() =>
   vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.candidates.length : 0,
 )
 const trashCount = computed(() =>
   vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.trashed.length : 0,
 )
-const reviewTabs = computed<TabSpec<'proposals' | 'retirement'>[]>(() => [
+// Null until the ledger has loaded, and the badge stays hidden while it is: a
+// count rendered before the fetch read "History 0" on a ledger with hundreds
+// of rows. Unfiltered it reports the server's scoped total rather than the
+// rows we happen to hold, because the page is capped.
+const historyCount = computed(() => {
+  if (!proposals.historyLoaded) return null
+  if (proposals.historyFiltersActive) return proposals.visibleHistory(store.activeWorkspace).length
+  return proposals.historyTotal
+})
+
+/** Which of Review's four sections is on screen.
+ *
+ * Derived rather than stored: the underlying state (`mm.reviewTab`,
+ * `mm.retirementTab`, `proposals.view`) is what every other entry point sets,
+ * so flattening the navigation may not fork it into a fifth source of truth
+ * that those entry points would have to learn about.
+ */
+type ReviewTabKey = 'proposals' | 'retirement' | 'trash' | 'history'
+const reviewTab = computed<ReviewTabKey>({
+  get() {
+    if (mm.reviewTab === 'retirement') return mm.retirementTab === 'trash' ? 'trash' : 'retirement'
+    return proposals.view === 'history' ? 'history' : 'proposals'
+  },
+  set(key) {
+    if (key === 'retirement' || key === 'trash') {
+      mm.reviewTab = 'retirement'
+      mm.retirementTab = key === 'trash' ? 'trash' : 'candidates'
+      return
+    }
+    mm.reviewTab = 'proposals'
+    proposals.view = key === 'history' ? 'history' : 'queue'
+    if (key === 'history') void proposals.ensureHistoryLoaded(store.activeWorkspace)
+  },
+})
+
+// Labels name the decision, not the machinery. "Proposals" and "Retirements"
+// described the pipeline that produced the rows; these say what is in them.
+const reviewTabs = computed<TabSpec<ReviewTabKey>[]>(() => [
   // `|| undefined` rather than 0: a zero pill on an empty queue is noise.
-  { key: 'proposals', label: 'Proposals', count: proposalCount.value || undefined },
-  { key: 'retirement', label: 'Retirements', count: retirementCount.value || undefined },
-])
-// The second level: retiring a note and emptying the trash are different jobs
-// on different rows, and stacking them in one scroll put the whole candidate
-// queue between a note you had just retired and the button that brings it back.
-const retirementTabs = computed<TabSpec<'candidates' | 'trash'>[]>(() => [
-  { key: 'candidates', label: 'To review', count: retirementCount.value || undefined },
-  { key: 'trash', label: 'Trash', count: trashCount.value || undefined },
+  { key: 'proposals', label: 'Suggested memories', count: proposalCount.value || undefined },
+  { key: 'retirement', label: 'Notes to revisit', count: retirementCount.value || undefined },
+  { key: 'trash', label: 'Retired', count: trashCount.value || undefined },
+  { key: 'history', label: 'History', count: historyCount.value },
 ])
 
 /** Switch the map's rendering. Both live at /memory, so there is no route to
@@ -1509,7 +1537,13 @@ mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : m
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
-    if (store.activeWorkspace) void vaultReview.ensureLoaded(store.activeWorkspace)
+    // The History tab's count now lives on the shared bar, which is on screen
+    // whichever section is showing — so the ledger has to be loaded even when
+    // the panel that used to prefetch it is not mounted.
+    if (store.activeWorkspace) {
+      void proposals.ensureHistoryLoaded(store.activeWorkspace)
+      void vaultReview.ensureLoaded(store.activeWorkspace)
+    }
   }
 }, { immediate: true })
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
@@ -1680,9 +1714,8 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
 }
-/* The Review surface holds two queues — agent proposals and stale-note
-   retirement — under one tab bar, matching ProposalReviewPanel's own
-   Queue/History underline style so switching sub-views reads the same way. */
+/* The Review surface holds all four sections — two queues waiting on a
+   decision and two records of decisions already made — under one tab bar. */
 .mm-review-wrap {
   flex: 1;
   min-height: 0;
@@ -1690,24 +1723,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
 }
 /* Layout only. The tab styling itself lives in TabBar, which this bar renders
-   through — it sits directly above ProposalReviewPanel's own bar, so a copied
-   ruleset here would visibly desync two adjacent rows of identical tabs. */
+   through. It is now the only tab row on the Review surface; at a phone width
+   the four tabs scroll sideways inside it rather than wrapping, so the panel
+   below always starts at the same height. */
 .mm-review-tabs {
   padding: 0 var(--space-4);
   flex: none;
-}
-/* Second-level tabs (To review / Trash). Same bar component, indented under
-   the first so the two rows read as a hierarchy rather than as two peers. */
-.mm-retirement-wrap {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.mm-retirement-tabs {
-  padding: 0 var(--space-4);
-  flex: none;
-  border-bottom: 0;
 }
 /* A stale note's way into the retirement queue, next to its last-verified
    line. A text button, not a pink bar: deciding happens in Review, not here. */
