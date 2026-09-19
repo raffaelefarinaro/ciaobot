@@ -1294,11 +1294,15 @@ def test_parse_reconcile_reply_shapes() -> None:
     assert mp._parse_reconcile_reply('[{"action": "add"}]', 2) is None
     assert mp._parse_reconcile_reply('{"action": "add"}', 1) is None
     assert mp._parse_reconcile_reply("not json", 1) is None
-    # Per-row junk degrades to the safe plain add.
+    # Per-row junk defers: the candidate reached a model call only because the
+    # region already holds entries, so a row we cannot read is no licence to
+    # append beside whatever this fact might supersede.
     rows = mp._parse_reconcile_reply(
         '[{"action": "update"}, {"action": "delete"}, 42]', 3
     )
-    assert rows == [{"action": "add"}, {"action": "add"}, {"action": "add"}]
+    assert rows is not None
+    assert [row["action"] for row in rows] == ["defer", "defer", "defer"]
+    assert all(row.get("reason") for row in rows)
 
 
 def test_promote_update_decision_replaces_and_logs_undo(tmp_path: Path) -> None:
@@ -1357,7 +1361,13 @@ def test_promote_covered_decision_drops_the_fact(tmp_path: Path) -> None:
     assert len(entries) == 1
 
 
-def test_promote_malformed_update_degrades_to_append(tmp_path: Path) -> None:
+def test_promote_malformed_update_defers_instead_of_appending(tmp_path: Path) -> None:
+    """An unusable update decision queues the fact; it never appends it.
+
+    The decision says this fact supersedes an entry already in the region but
+    names one we cannot safely replace. Appending it anyway left the superseded
+    entry and its replacement both asserted in always-loaded memory.
+    """
     guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["Only entry."])
     proposal = mp.MemoryProposal(
         target="memory", text="A brand new durable fact.", source_section="Decisions"
@@ -1369,13 +1379,128 @@ def test_promote_malformed_update_degrades_to_append(tmp_path: Path) -> None:
             "text": "merged",
         }
     }
+    stats: dict[str, int] = {}
+    remaining, promoted = mp.apply_proposals(
+        [proposal],
+        guide_path=guide,
+        vault_root=tmp_path,
+        region_decisions=decisions,
+        stats=stats,
+    )
+    assert promoted == []
+    assert remaining == [proposal]  # preserved, not dropped
+    assert stats["deferred"] == 1
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Only entry."]  # region untouched
+
+
+def test_promote_stale_update_defers_instead_of_appending(tmp_path: Path) -> None:
+    """A snapshot that changed under the model call queues rather than appends.
+
+    ``old`` is the entry the model actually saw. When the region moved on
+    during the up-to-two-minute call, replacing that index would overwrite an
+    unrelated fact — and appending would leave the fact the model read as a
+    supersession sitting beside whatever now occupies the region.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Insights model is llama-local. [2026-02-02]"],
+    )
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Insights model is sonnet.",
+        source_section="Decisions",
+    )
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Insights model is sonnet.",
+            "old": "Insights model is deepseek-flash.",
+        }
+    }
     remaining, promoted = mp.apply_proposals(
         [proposal], guide_path=guide, vault_root=tmp_path, region_decisions=decisions
     )
-    assert promoted and not remaining
+    assert promoted == []
+    assert remaining == [proposal]
     entries, _diags = mt.read_region(guide, "memory")
-    assert len(entries) == 2  # appended; nothing replaced
-    assert "Only entry." in entries
+    assert entries == ["Insights model is llama-local. [2026-02-02]"]
+
+
+def test_promote_update_without_a_vault_defers(tmp_path: Path) -> None:
+    """No vault means no undo log, so the update cannot run — nor can an append.
+
+    The replaced entry is copied to ``Memory-Consolidations.md`` before it goes;
+    with nowhere to write that the update is off, and appending would leave the
+    entry and its supersession both live in the region.
+    """
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Deploys run on Tuesdays."]
+    )
+    proposal = mp.MemoryProposal(
+        target="memory", text="Deploys run on Thursdays.", source_section="Decisions"
+    )
+    decisions = {
+        mp._decision_key("memory", proposal.text): {
+            "action": "update",
+            "index": 1,
+            "text": "Deploys run on Thursdays.",
+        }
+    }
+    remaining, promoted = mp.apply_proposals(
+        [proposal], guide_path=guide, vault_root=None, region_decisions=decisions
+    )
+    assert promoted == []
+    assert remaining == [proposal]
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Deploys run on Tuesdays."]
+
+
+def test_deferred_fact_is_preserved_in_the_queue(tmp_path: Path) -> None:
+    """The uncertain path must never silently drop a fact.
+
+    Deferring is the alternative to appending, not to preserving: the bullet
+    has to reach ``Workspace/Memory-Proposals.md`` so a human can still resolve
+    it against the region.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Prefers tabs over spaces."]
+    )
+    archive = tmp_path / "chat-x1.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- User asked for spaces. Durable rule: Prefers spaces over tabs. "
+        "[idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+    decisions = {
+        mp._decision_key("memory", "Prefers spaces over tabs."): {
+            "action": "defer",
+            "reason": "reconcile unavailable for ciao:memory",
+        }
+    }
+    stats: dict[str, int] = {}
+
+    written = mp.proposals_from_archive(
+        archive,
+        vault,
+        auto_promote_memory=True,
+        guide_path=guide,
+        stats=stats,
+        region_decisions=decisions,
+    )
+
+    assert written is not None
+    queued = written.read_text(encoding="utf-8")
+    assert "Prefers spaces over tabs." in queued
+    assert stats["deferred"] == 1
+    assert stats.get("promoted", 0) == 0
+    assert stats["proposed"] == 1
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Prefers tabs over spaces."]  # obsolete fact still alone
 
 
 def test_plan_region_reconcile_maps_facts_to_decisions(
@@ -1417,9 +1542,15 @@ def test_plan_region_reconcile_maps_facts_to_decisions(
     }
 
 
-def test_plan_region_reconcile_failure_returns_none(
+def test_plan_region_reconcile_failure_defers_every_candidate(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """A dead backend must not read downstream as "no reconcile was needed".
+
+    Emitting no row at all is indistinguishable from the plain append path, and
+    these candidates only reached a model call because the region already held
+    entries they might supersede.
+    """
     import asyncio
 
     guide = write_guide(
@@ -1438,7 +1569,91 @@ def test_plan_region_reconcile_failure_returns_none(
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", broken_run_oneshot)
 
-    assert asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet")) is None
+    decisions = asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet"))
+    assert decisions is not None
+    row = decisions[mp._decision_key("memory", "A new standing rule.")]
+    assert row["action"] == "defer"
+    assert row["reason"]
+
+
+def test_plan_region_reconcile_defers_an_out_of_range_update(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An index the model's own snapshot cannot contain is not a plain add.
+
+    The reply still claims this fact supersedes an existing entry; only the
+    number is junk. Carrying it downstream as ``add`` appended it beside the
+    entry it was meant to replace.
+    """
+    import asyncio
+
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Deploys run on Tuesdays."]
+    )
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- Durable rule: Deploys run on Thursdays. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def out_of_range(prompt: str, **kwargs: object) -> str:
+        return '[{"action": "update", "index": 7, "text": "Deploys run on Thursdays."}]'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", out_of_range)
+
+    decisions = asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet"))
+    assert decisions is not None
+    row = decisions[mp._decision_key("memory", "Deploys run on Thursdays.")]
+    assert row["action"] == "defer"
+
+
+def test_reconcile_timeout_leaves_the_region_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end: a timed-out reconcile queues the fact, region untouched.
+
+    The competing-fact case the deferral exists for — an old rate and a new
+    one, where appending both leaves every future session loading two answers.
+    """
+    import asyncio
+
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Contractor day rate is 800 EUR. [2026-01-01]"],
+    )
+    archive = tmp_path / "chat-r9.md"
+    archive.write_text(
+        "# chat\n\nturns.\n\n## Session insights\n\n"
+        "## User corrections\n"
+        "- User corrected the rate. Durable rule: Contractor day rate is "
+        "950 EUR. [idx=3] [memory]\n",
+        encoding="utf-8",
+    )
+
+    async def timing_out(prompt: str, **kwargs: object) -> str:
+        raise TimeoutError("reconcile timed out")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", timing_out)
+
+    decisions = asyncio.run(mp.plan_region_reconcile(archive, guide, model="sonnet"))
+    stats: dict[str, int] = {}
+    written = mp.proposals_from_archive(
+        archive,
+        vault,
+        auto_promote_memory=True,
+        guide_path=guide,
+        stats=stats,
+        region_decisions=decisions,
+    )
+
+    entries, _diags = mt.read_region(guide, "memory")
+    assert entries == ["Contractor day rate is 800 EUR. [2026-01-01]"]
+    assert stats["deferred"] == 1
+    assert written is not None
+    assert "950 EUR" in written.read_text(encoding="utf-8")
 
 
 # ---- Structured learnings -------------------------------------------------

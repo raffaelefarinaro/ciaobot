@@ -26,8 +26,9 @@ Auto-apply is the default posture (``auto_promote_memory``): every confident,
 state-shaped fact is written straight to its destination at archive time —
 regions through the :mod:`ciao.memory_audit` event-shape guard, people notes
 as stubs when absent, learnings as dated bullets. Anything the guards reject,
-any destination whose write fails, and every ``[review]`` bullet land in the
-queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
+any destination whose write fails, every region fact whose write-time
+reconcile came back unusable, and every ``[review]`` bullet land in the queue
+file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
 """
 
 from __future__ import annotations
@@ -365,8 +366,10 @@ def _promote_to_region(
     remaining), ``"conflict"`` (the destination changed under a concurrent
     writer; nothing was written and the fact stays queued), ``"failed"`` (the
     write itself failed, including a lock that could not be taken; stays
-    queued), or ``"unshaped"`` (not state-shaped text; stays queued for the
-    curator to rephrase).
+    queued), ``"unshaped"`` (not state-shaped text; stays queued for the
+    curator to rephrase), or ``"deferred"`` (reconcile could not be trusted
+    about this fact; stays queued rather than being appended beside whatever it
+    may supersede).
 
     Fail-safe by construction: the guide lock is *required*, not best-effort.
     An earlier version caught a lock failure and proceeded with ``lock=None``,
@@ -386,8 +389,9 @@ def _promote_to_region(
     the caller ran one: ``{"action": "covered"}`` drops the fact as already
     remembered, ``{"action": "update", "index": N, "text": ...}`` replaces
     entry ``N`` (1-based) with the merged text — the replaced entry goes to
-    the consolidations undo log first — and ``{"action": "add"}`` or ``None``
-    is the plain append path.
+    the consolidations undo log first — ``{"action": "defer", "reason": ...}``
+    routes the fact to the queue, and ``{"action": "add"}`` or ``None`` is the
+    plain append path.
     """
     from ciao.memory_receipts import (
         RevisionConflict,
@@ -445,6 +449,19 @@ def _promote_to_region(
 
         decision = decision or {}
         action = str(decision.get("action", "add"))
+        if action == "defer":
+            # Reconcile ran against a non-empty region and came back with
+            # nothing usable for this fact, so nobody knows whether it
+            # supersedes an entry already there. Appending anyway is what put
+            # "Insights model is deepseek-flash" and "Insights model is sonnet"
+            # in the same always-loaded region; the queue holds the text
+            # instead, so the fact is preserved without asserting itself.
+            logger.info(
+                "memory apply: deferring %r to the queue (%s)",
+                promotable[:80],
+                decision.get("reason") or "uncertain reconcile",
+            )
+            return "deferred", promotable
         if action == "covered":
             logger.info(
                 "memory apply: reconcile says already covered: %r",
@@ -470,7 +487,19 @@ def _promote_to_region(
                     label="auto-reconcile covered",
                 )
                 return "duplicate", promotable
-        if action == "update" and vault_root is not None:
+        if action == "update":
+            if vault_root is None:
+                # The replaced entry is copied to the consolidations undo log
+                # before it disappears, and there is nowhere to write that. The
+                # update cannot run, and the fact the model read as superseding
+                # an existing entry must not be appended next to it, so it
+                # waits in the queue.
+                logger.info(
+                    "memory apply: deferring %r to the queue (no vault for the "
+                    "consolidations undo log)",
+                    promotable[:80],
+                )
+                return "deferred", promotable
             index = decision.get("index")
             merged = str(decision.get("text", "")).strip()
             plan_old = str(decision.get("old", ""))
@@ -528,9 +557,20 @@ def _promote_to_region(
                     region,
                 )
                 return "written", promotable
-            # A malformed or stale update decision degrades to the safe plain
-            # append — never to silently dropping either the old or the new
-            # fact.
+            # The update named an entry we cannot safely replace — out of
+            # range, empty or event-shaped merge text, or an entry that changed
+            # during the up-to-two-minute model call. Appending instead used to
+            # leave the superseded entry and its replacement both live in the
+            # region every session loads; neither is dropped, the fact goes to
+            # the queue for a human to resolve against the current region.
+            logger.info(
+                "memory apply: deferring %r to the queue (unusable update of "
+                "entry %r in ciao:%s)",
+                promotable[:80],
+                decision.get("index"),
+                region,
+            )
+            return "deferred", promotable
         # The learned-at stamp is system time — when this fact entered the
         # region — read by the aging audit so unverified old facts surface
         # for re-verification instead of asserting themselves forever.
@@ -764,6 +804,7 @@ def apply_proposals(
     actor: str = "auto",
     source: str = "archive",
     workspace: str = "",
+    stats: dict[str, int] | None = None,
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Write every confidently-addressed proposal to its destination.
 
@@ -781,6 +822,10 @@ def apply_proposals(
 
     ``actor``/``source``/``workspace`` are stamped into the region write's
     receipt so the review History can say who changed memory and from where.
+
+    ``stats``, when given, is filled with ``deferred``: region facts an
+    uncertain reconcile sent to the queue instead of the region. They are in
+    ``remaining`` like any other queued row, which alone cannot say why.
     """
     from ciao.memory_tool import resolve_region
 
@@ -843,11 +888,14 @@ def apply_proposals(
                         outcome="duplicate",
                     )
                 else:
-                    # Failed writes, revision conflicts and event-shaped text
-                    # all stay queued: the first and second for a retry or a
-                    # re-plan, the third for a curator to rephrase into a
-                    # standing rule. None is a decision yet, so none is
-                    # recorded.
+                    # Failed writes, revision conflicts, event-shaped text and
+                    # deferred facts all stay queued: the first two for a retry
+                    # or a re-plan, the third for a curator to rephrase into a
+                    # standing rule, the fourth for a human to resolve against
+                    # the region it may supersede. None of them is a decision
+                    # yet, so none is recorded.
+                    if outcome == "deferred" and stats is not None:
+                        stats["deferred"] = stats.get("deferred", 0) + 1
                     remaining.append(proposal)
             elif proposal.target == "people" and vault_root is not None:
                 name = proposal.payload or _safe_name(proposal.text.split("-")[0])
@@ -919,9 +967,12 @@ def _decision_key(region: str, fact: str) -> str:
 def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
     """Parse the model's JSON array; None when the shape is unusable.
 
-    Per-row problems degrade that row to ``{"action": "add"}`` — the plain
-    append never loses a fact — but a reply that is not a JSON array of the
-    right length is discarded whole rather than guessed at.
+    Per-row problems degrade that row to ``{"action": "defer"}`` — the
+    candidate is compared against a non-empty region, so a row we cannot read
+    says nothing about whether the fact supersedes an entry already there, and
+    appending it regardless is how both ended up asserted at once. A reply that
+    is not a JSON array of the right length is discarded whole rather than
+    guessed at, and the caller defers every candidate in that batch.
     """
     text = raw.strip()
     if text.startswith("```"):
@@ -933,23 +984,26 @@ def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
         return None
     if not isinstance(data, list) or len(data) != count:
         return None
+    unreadable = {"action": "defer", "reason": "unreadable reconcile row"}
     rows: list[dict[str, Any]] = []
     for item in data:
         if not isinstance(item, dict):
-            rows.append({"action": "add"})
+            rows.append(dict(unreadable))
             continue
-        action = str(item.get("action", "add")).lower()
+        action = str(item.get("action", "")).lower()
         if action == "update":
             index = item.get("index")
             merged = str(item.get("text", "")).strip()
             if isinstance(index, bool) or not isinstance(index, int) or not merged:
-                rows.append({"action": "add"})
+                rows.append(
+                    {"action": "defer", "reason": "update row missing index or text"}
+                )
                 continue
             rows.append({"action": "update", "index": index, "text": merged})
         elif action in ("covered", "add"):
             rows.append({"action": action})
         else:
-            rows.append({"action": "add"})
+            rows.append(dict(unreadable))
     return rows
 
 
@@ -967,9 +1021,16 @@ async def plan_region_reconcile(
     sync apply step runs, one small model call per region compares the new
     facts against the region's current entries (the whole region fits in a
     prompt — it is capped at a few thousand characters). Returns a map from
-    promotable fact text to its decision row, or None when there is nothing
-    to reconcile or the call failed — the caller then takes today's plain
-    append path, which never blocks archiving and never loses a fact.
+    promotable fact text to its decision row, or None when there is nothing to
+    reconcile — the caller then takes the plain append path, which never blocks
+    archiving.
+
+    A call that fails or replies unusably yields a ``defer`` row per candidate
+    rather than no row at all: the candidates that reach a model call are the
+    ones with existing region content to conflict with, and appending them
+    unreconciled is what left an obsolete fact and its replacement both live in
+    the region every session loads. Deferred facts stay in the proposals queue,
+    so nothing is lost and a human resolves them against the current region.
     """
     from ciao.memory_tool import read_region, resolve_region
 
@@ -1026,6 +1087,14 @@ async def plan_region_reconcile(
             cwd=cwd,
         )
         if rows is None:
+            # No row at all reads downstream as "no reconcile was run", which
+            # is the plain append path. These candidates were compared against
+            # a non-empty region, so that is the one thing it must not mean.
+            for fact in candidates:
+                decisions[_decision_key(region_name, fact)] = {
+                    "action": "defer",
+                    "reason": f"reconcile unavailable for ciao:{region_name}",
+                }
             continue
         for fact, row in zip(candidates, rows):
             decisions[_decision_key(region_name, fact)] = row
@@ -1045,8 +1114,9 @@ async def _reconcile_region(
     """One reconcile call: decide ADD / UPDATE / COVERED per candidate.
 
     Returns one row per candidate in the given order, or None when the call
-    failed or replied unparseably — every caller then degrades to the plain
-    append path, which never blocks and never loses a fact.
+    failed or replied unparseably — :func:`plan_region_reconcile` then defers
+    every candidate in the batch to the proposals queue, which never blocks and
+    never loses a fact.
 
     An ``update`` row carries ``old``: the entry its index named in the snapshot
     the model actually saw. The apply step re-reads the region and refuses the
@@ -1074,13 +1144,13 @@ async def _reconcile_region(
             provider=provider,
             cwd=cwd,
         )
-    except Exception as exc:  # noqa: BLE001 — degrade to plain appends
-        logger.info("memory reconcile: call failed (%s); using plain adds", exc)
+    except Exception as exc:  # noqa: BLE001 — defer rather than append blind
+        logger.info("memory reconcile: call failed (%s); deferring to review", exc)
         return None
     rows = _parse_reconcile_reply(reply, len(candidates))
     if rows is None:
         logger.info(
-            "memory reconcile: unparseable reply for ciao:%s; using plain adds",
+            "memory reconcile: unparseable reply for ciao:%s; deferring to review",
             region_name,
         )
         return None
@@ -1089,9 +1159,14 @@ async def _reconcile_region(
         if row.get("action") == "update":
             index = row.get("index")
             if not (isinstance(index, int) and 1 <= index <= len(entries)):
-                # Out-of-range against the very snapshot the model saw:
-                # degrade now rather than carry a junk decision around.
-                row = {"action": "add"}
+                # Out-of-range against the very snapshot the model saw, so the
+                # decision is junk — but it still says this fact supersedes
+                # something in the region, which is the one case a plain append
+                # must not take.
+                row = {
+                    "action": "defer",
+                    "reason": "update index outside the region snapshot",
+                }
             else:
                 row = dict(row)
                 row["old"] = entries[index - 1]
@@ -1871,10 +1946,12 @@ def proposals_from_archive(
     Swallows all exceptions; this runs as a fire-and-forget step.
 
     ``stats``, when given, is filled with ``proposed`` (how many proposals were
-    written to the file) and ``promoted`` (how many were auto-applied). The
-    archived chat reports these counts back to the user, which the returned
-    path alone cannot express. It stays an out-parameter so the return
-    contract every existing caller relies on is unchanged.
+    written to the file), ``promoted`` (how many were auto-applied) and
+    ``deferred`` (how many region facts an uncertain reconcile sent to the
+    queue instead of the region). The archived chat reports these counts back
+    to the user, which the returned path alone cannot express. It stays an
+    out-parameter so the return contract every existing caller relies on is
+    unchanged.
 
     ``error_out``, when given, records a reason for an internal failure (the
     archive was unreadable, or a write/dedupe step raised). ``None`` alone
@@ -2007,6 +2084,7 @@ def proposals_from_archive(
                 actor="auto",
                 source="archive",
                 workspace=workspace,
+                stats=stats,
             )
             if promoted:
                 if stats is not None:
