@@ -3,6 +3,8 @@
 ## v0.17.0 - 2026-09-18
 
 ### Added
+- feat(security): deny the agent its own workspace credentials and runtime state (`f25482b2`)
+- feat(providers): reclaim a chat's provider once it has been idle (`bb42e7b9`)
 - feat(review): talk about a retirement candidate before deciding (`30b86eff`)
 - feat(curation): compute the nightly worklist, then budget and serialize it (`39f15fbc`, #461)
 - feat(recall): add a scoped evidence drill-down for truncated snippets (`8d93ef22`, #460)
