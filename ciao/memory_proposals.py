@@ -267,14 +267,25 @@ def _default_destination(section: str, text: str) -> tuple[str, str]:
 
 
 def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
-    """Scan an insights markdown blob and emit destination-addressed proposals."""
+    """Scan an insights markdown blob and emit destination-addressed proposals.
+
+    The unreadable-output section is scanned alongside the routed ones. A
+    structured extraction renders every row it could not parse there as a
+    ``[review]`` bullet carrying the parse error
+    (:func:`ciao.fact_candidates.candidates_from_structured`); without this the
+    row would reach the archive and stop, which is the silent loss the review
+    destination exists to prevent. Nothing is auto-applied from it — ``review``
+    is queue-only — so the section can only ever add a question for a human.
+    """
+    from ciao.fact_candidates import UNREADABLE_SECTION
+
     if not insights_md.strip():
         return []
 
     sections = _split_sections(insights_md)
     proposals: list[MemoryProposal] = []
 
-    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS):
+    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION):
         for item in sections.get(heading, []):
             kind, payload, citations, text = _peel_trailing_metadata(item)
             if not kind:

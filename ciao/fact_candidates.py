@@ -110,6 +110,13 @@ SUPERSEDED = "superseded"
 UNKNOWN_DESTINATION = "unknown-destination"
 UNPARSABLE = "unparsable-candidate"
 
+UNREADABLE_SECTION = "Unreadable extraction output"
+"""The insights section an unreadable structured row is rendered under.
+
+Named here rather than spelled out at both ends: ``candidates_from_structured``
+writes it and ``memory_proposals.propose_from_insights`` reads it, and a typo
+in either copy would turn "queued for review" back into a silent drop."""
+
 
 class CandidateSchemaError(ValueError):
     """A structured row that does not parse as a fact candidate v1 record."""
@@ -962,7 +969,7 @@ def candidates_from_structured(raw: str) -> tuple[list[FactCandidate], list[str]
             candidates.append(FactCandidate(
                 text=recovered or f"(unreadable candidate row {position})",
                 destination="review",
-                section="Unreadable extraction output",
+                section=UNREADABLE_SECTION,
                 provenance=PROVENANCE_UNKNOWN,
                 extraction_version=EXTRACTION_VERSION_STRUCTURED,
                 parse_error=str(exc),

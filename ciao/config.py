@@ -546,6 +546,13 @@ class CiaoConfig:
     # Asynchronously backfill missing insights on server startup.
     # Enable with ``CIAO_INSIGHTS_BACKFILL_ON_STARTUP=1``.
     insights_backfill_on_startup: bool = False
+    # Ask the extraction model for fact candidate v1 rows as JSON instead of
+    # Markdown, and render the archive's `## Session insights` section from the
+    # parsed records. Opt-in (``CIAO_INSIGHTS_STRUCTURED=1``) and additionally
+    # gated on the runtime: a provider that cannot hold the contract falls back
+    # to the Markdown path rather than failing the archive
+    # (``ciao.insights.structured_unsupported_reason``).
+    insights_structured: bool = False
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
@@ -1573,6 +1580,10 @@ class CiaoConfig:
                 "CIAO_INSIGHTS_BACKFILL_ON_STARTUP", "false"
             ).strip().lower()
             not in {"0", "false", "no", "off"},
+            insights_structured=source.get(
+                "CIAO_INSIGHTS_STRUCTURED", "false"
+            ).strip().lower()
+            not in {"", "0", "false", "no", "off"},
             trajectories_enabled=source.get(
                 "CIAO_TRAJECTORIES_DISABLED", ""
             ).strip().lower()
