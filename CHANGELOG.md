@@ -54,6 +54,12 @@
 - fix(chat): stop dropping a message queued as the turn ends (`c63539bb`)
 - fix(memory): require source evidence before auto-saving a region fact (`59fc2365`, #456)
 - fix(review): rename the section computed off the prop's name (`fe95bb93`)
+- fix(review): keep the review panels' promises when a step fails (`5fed1b90`)
+- fix(memory-map): stop a stale return-focus target and a one-note path (`39506b23`)
+- fix(review): bound the temp-file prefix in bytes, and stamp from one parse (`2697deaf`)
+- fix(receipts): settle the row a failed region write opened, drop dead code (`8f8f7010`)
+- fix(tests): stop the auto-sync config tests writing the developer's ~/.ciao (`dbb852cb`)
+- fix(tests): stop 51 tests minting a token in the developer's ~/.ciao (`5447a649`)
 
 ### Maintenance
 - chore(mcp): retire the deprecated loop tools and compatibility surface (`08d9a6b0`)
