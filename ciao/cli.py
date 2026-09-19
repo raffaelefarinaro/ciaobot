@@ -2808,11 +2808,10 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
+    from ciao import proposal_actions
     from ciao import proposal_outcomes
     from ciao.memory_proposals import (
         find_proposal_matches,
-        record_dismissal,
-        record_promotion,
         remove_proposal_by_substring,
     )
 
@@ -2948,17 +2947,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         )
         return 1
     kind, removed_text = removed
-    # Preserve what was decided, not just that something was: append-time
-    # dedupe consults this history, so without it the next curator pass that
-    # re-reads the same transcript re-files the fact the user just rejected.
-    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
-    # under `dismissed_at` used to make `was_promoted()` false for anything
-    # the agent filed itself, and hid it from the review page's History tab
-    # as an accepted row.
-    if args.promoted:
-        record_promotion(path, text=removed_text, kind=kind, via="agent")
-    else:
-        record_dismissal(path, text=removed_text, kind=kind, via="agent")
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
     # a .runtime beside the shell. Precedence: explicit --runtime-root, then
@@ -2970,19 +2958,31 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             or workspace / ".runtime"
         )
     )
-    # The curator files a fact first and dismisses second, so that flow is a
-    # PROMOTION; only a bare rejection is a dismissal. The logical workspace
-    # name rides in CIAO_ACTIVE_WORKSPACE on scheduled runs (same convention
-    # as os-audit --workspace-name); a manual run without it lands in the
-    # shared bucket rather than recording a filesystem path as a name.
-    # Rehome rows are vault-hygiene decisions, not extraction outcomes.
-    if proposal_outcomes.is_extraction_kind(kind):
-        proposal_outcomes.record(
-            kind=kind,
-            action="promoted" if args.promoted else "dismissed",
-            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
-            via="agent",
-        )
+    # One handler for both ledgers, shared with the PWA's accept/dismiss
+    # routes (`ciao/proposal_actions.py`). Preserve what was decided, not just
+    # that something was: append-time dedupe consults the decision history, so
+    # without it the next curator pass that re-reads the same transcript
+    # re-files the fact the user just rejected.
+    #
+    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
+    # under `dismissed_at` used to make `was_promoted()` false for anything
+    # the agent filed itself, and hid it from the review page's History tab
+    # as an accepted row. The curator files a fact first and dismisses second,
+    # so that flow is a promotion; only a bare rejection is a dismissal.
+    #
+    # The logical workspace name rides in CIAO_ACTIVE_WORKSPACE on scheduled
+    # runs (same convention as os-audit --workspace-name); a manual run
+    # without it lands in the shared bucket rather than recording a filesystem
+    # path as a name. Rehome rows are vault-hygiene decisions, not extraction
+    # outcomes, and the handler keeps them out of the tally.
+    proposal_actions.record_decision(
+        path,
+        action="accept" if args.promoted else "dismiss",
+        text=removed_text,
+        kind=kind,
+        via="agent",
+        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+    )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
         # dismissed by a disambiguating fragment (`(from: Alpha)`), and handing
