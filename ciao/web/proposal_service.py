@@ -1068,7 +1068,13 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
     try:
-        append_learning(Path(vault), row["text"])
+        # The source goes in. `_learnings_preview` renders the replacement with
+        # it, and the whole point of the card is that the preview and the write
+        # cannot disagree — dropping it here made an accepted recurrence bump
+        # land with a shorter sources list than the card had just shown, and
+        # left a review-accepted learning with no provenance at all, which the
+        # archive path has always recorded.
+        append_learning(Path(vault), row["text"], source=str(row.get("source") or ""))
     except OSError as exc:
         return AcceptOutcome(ok=False, error=f"could not append the learning: {exc}")
     return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
