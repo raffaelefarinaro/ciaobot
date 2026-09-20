@@ -17,17 +17,21 @@ The macOS release installer is not a Linux installer.
 sudo apt-get update
 sudo apt-get install python3-venv git
 sudo useradd --create-home --home-dir /var/lib/ciaobot --shell /bin/bash ciaobot
-sudo install -d -o ciaobot -g ciaobot /opt/ciaobot
+# Application code and the virtualenv stay administrator-owned and are never
+# writable by the service account: a compromised ciaobot account must not be
+# able to modify the code it runs. Otherwise it could rewrite the source, the
+# venv launcher, or the linux-service output and escalate through the
+# root-installed unit (whose User/ExecStart verify accepts on syntax alone).
+sudo install -d -o root -g root /opt/ciaobot
 # The workspace holds private vault notes and the one-time setup token, so it
 # must not be world-readable: omitting -m defaults to 0755, and the default
 # 0022 umask would leave initial notes and .runtime/setup-token readable by
 # any other local account (the token redeems via the loopback setup route).
 sudo install -d -m 0700 -o ciaobot -g ciaobot /srv/ciaobot
-sudo chown -R ciaobot:ciaobot /opt/ciaobot/source
-sudo -u ciaobot python3 -m venv /opt/ciaobot/venv
-sudo -u ciaobot /opt/ciaobot/venv/bin/pip install -e /opt/ciaobot/source
-sudo -u ciaobot npm --prefix /opt/ciaobot/source/web ci
-sudo -u ciaobot npm --prefix /opt/ciaobot/source/web run build
+sudo python3 -m venv /opt/ciaobot/venv
+sudo /opt/ciaobot/venv/bin/pip install -e /opt/ciaobot/source
+sudo npm --prefix /opt/ciaobot/source/web ci
+sudo npm --prefix /opt/ciaobot/source/web run build
 sudo -u ciaobot -H /opt/ciaobot/venv/bin/ciao setup --workspace /srv/ciaobot
 ```
 
@@ -114,11 +118,12 @@ directly at the HTTPS hostname with its dashboard password.
 
 ## Updates and backups
 
-Linux source installs are updated by the administrator. Pin the chosen source
-revision, build its frontend, install its Python dependencies, and restart the
-service after active work has drained. For staging, prepare a separate release
-directory and virtualenv and change the unit's interpreter path at cutover.
-Preserve the prior application release for rollback.
+Linux source installs are updated by the administrator — never as the ciaobot
+account, which owns neither the source checkout nor the virtualenv. Pin the
+chosen source revision, build its frontend, install its Python dependencies,
+and restart the service after active work has drained. For staging, prepare a
+separate release directory and virtualenv and change the unit's interpreter
+path at cutover. Preserve the prior application release for rollback.
 
 Before upgrading, stop the service and back up `/srv/ciaobot` (including `.env`,
 `.runtime`, per-workspace agent roots and vaults) and `/var/lib/ciaobot` (provider
