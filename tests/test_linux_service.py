@@ -46,7 +46,10 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
         home=Path("/var/lib/ciaobot"), python=python,
     )
     assert f'ExecStart="{str(python).replace("%", "%%").replace("$", "$$")}" -m ciao.cli run' in unit
-    assert 'WorkingDirectory="/srv/ciao \\"personal\\" %%n"' in unit
+    # WorkingDirectory= is literal: systemd-analyze rejects a quoted value as
+    # "not absolute", so quotes render raw and only % is escaped. Backslashes
+    # cannot be represented and are refused below.
+    assert 'WorkingDirectory=/srv/ciao "personal" %%n' in unit
     assert 'Environment="HOME=/var/lib/ciaobot"' in unit
     assert "KillMode=control-group" in unit
     assert "EnvironmentFile=" not in unit  # dotenv owns parsing of the workspace file
@@ -55,6 +58,7 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
 @pytest.mark.parametrize("overrides", [
     {"user": "root"}, {"user": "bad\nExecStart=oops"},
     {"workspace": Path("relative")}, {"home": Path("/home/bad\npath")},
+    {"workspace": Path("/srv/bad\\path")},
 ])
 def test_service_refuses_invalid_values(overrides):
     kwargs = dict(workspace=Path("/srv/ciao"), user="ciaobot", home=Path("/home/ciaobot"), python=Path("/opt/ciao/bin/python"))
