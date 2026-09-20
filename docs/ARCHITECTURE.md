@@ -512,6 +512,26 @@ Trace styling lives in `components/chatTrace.css`, pulled into both components
 through `<style scoped src>`, because a parent's scoped rules do not reach a
 child's subtree.
 
+`SettingsView.vue` is being decomposed the same way, one settings surface at a
+time, into `components/settings/`. The MCP tab is the first: `composables/
+useMcpServers.ts` owns every MCP ref (status, per-server edit drafts, the
+expansion map, secret inputs, tool probes, the add form) and every `/api/mcp/*`
+call, taking its API client, its two notify callbacks and its delete
+confirmation as options so it imports no store, no router and no lifecycle
+hook. `components/settings/SettingsMcpServers.vue` owns only the markup: it
+receives that controller as one prop and emits `create-via-chat`, because
+creating a chat and navigating needs the project store and the router, which
+stay in `SettingsView`. `SettingsView` also keeps the decision of *when* MCP
+data loads — its `onMounted` calls `fetchStatus()` and `fetchUsage()` for every
+tab, as before, so opening a different tab still issues the same requests.
+`/api/mcp/usage` is fetched although nothing renders it: the operator reads
+that endpoint by hand to decide which MCP tools to prune. Shared settings
+styling lives in `components/settings/settingsPanels.css`, pulled into both
+`SettingsView` and the panel with `<style scoped src>`; the rules are in their
+original order and the shared block loads first, so the cascade is unchanged.
+Origin badges for skills, subagents, commands and MCP servers come from the
+Vue-free `lib/assetOrigin.ts`.
+
 When a chat reply, approval request, or model question needs the user's attention, `PushManager` appends its payload to `.runtime/notifications.jsonl` before attempting Web Push. A chat read mutation appends a clear control and sends it to every Web Push subscription; service workers close the matching notification tag, while the macOS menu-bar companion removes delivered banners for that chat. The companion tails the bounded log, starting at its current end on launch so it never replays old alerts while still honoring queued clear controls. Its regular refresh still derives the unread menu and badge from `.runtime/web_projects.json`. A deliberate "mark unread" (`POST /api/chats/{id}/unread`, `ProjectChatManager.mark_unread`) clears `last_read_at` so the chat is unread again on every device and publishes a `chat_unread` event; opening the chat or sending a turn marks it read through the normal paths.
 
 Rendered markdown is sanitized through the shared frontend renderer before any `v-html` use. Keep new markdown surfaces on that helper. Chat tables render inside their own keyboard-focusable horizontal viewport: compact tables shrink to their contents, while wide tables scroll without widening the conversation or collapsing key columns. Fenced code blocks are wrapped by the chat renderer with a copy button (`web/src/lib/codeCopy.ts`) that copies the block's raw text; because chat markdown is injected with `v-html` and rebuilt on every streamed token, the button is plain markup driven by one delegated click listener on the chat panel, and it stays dimmed-but-visible rather than hover-only. Completed chat traces render as compact `Activity` disclosures; deduplicated file touches move to an `Outputs` group below the final answer, while interrupted turns retain them inside the trace. The build outputs to `ciao/web/static/` so the same Starlette server hosts both the API and the PWA.

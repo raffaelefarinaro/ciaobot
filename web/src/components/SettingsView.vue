@@ -1718,261 +1718,11 @@
         </div>
       </template>
 
-      <!-- MCP TAB -->
+      <!-- MCP TAB. The panel renders; `useMcpServers` holds the state and
+           talks to /api/mcp/*; this view decides when it loads and owns the
+           one action that needs the project store and the router. -->
       <template v-if="currentTab === 'mcp'">
-        <div class="card" id="mcp-servers">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">mcp servers</p>
-              <p class="hint">
-                Model Context Protocol (MCP) servers and tools available to Ciaobot agents.
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <button class="btn-small" @click="createMcpViaChat">Add via chat</button>
-              <button class="btn-small" @click="toggleAddMcpServer">
-                {{ showAddMcpServer ? 'Cancel' : '+ New MCP server' }}
-              </button>
-            </div>
-          </div>
-
-          <!-- Add MCP Server Form -->
-          <div v-if="showAddMcpServer" class="settings-form-panel">
-            <div class="settings-field-grid">
-              <label class="settings-field">
-                <span class="ws-label">Server Name</span>
-                <input class="routine-input" v-model="newMcpName" :disabled="addingMcpServer" placeholder="e.g. postgres-db" />
-              </label>
-              <label class="settings-field">
-                <span class="ws-label">Transport Type</span>
-                <select class="routine-select" v-model="newMcpTransport" :disabled="addingMcpServer">
-                  <option value="http">HTTP / SSE</option>
-                  <option value="stdio">stdio (Command)</option>
-                </select>
-              </label>
-              <label v-if="newMcpTransport === 'http'" class="settings-field settings-field--wide">
-                <span class="ws-label">Server URL</span>
-                <input class="routine-input" v-model="newMcpUrl" :disabled="addingMcpServer" placeholder="https://mcp.example.com/http" />
-              </label>
-              <label v-else class="settings-field settings-field--wide">
-                <span class="ws-label">Command Line</span>
-                <input class="routine-input" v-model="newMcpCommand" :disabled="addingMcpServer" placeholder="npx -y @modelcontextprotocol/server-postgres postgresql://..." />
-              </label>
-            </div>
-            <div class="action-row settings-actions">
-              <button class="btn-primary" @click="addCustomMcpServer" :disabled="addingMcpServer || !newMcpName.trim() || (newMcpTransport === 'http' ? !newMcpUrl.trim() : !newMcpCommand.trim())">
-                {{ addingMcpServer ? 'Adding...' : 'Add MCP server' }}
-              </button>
-            </div>
-            <div v-if="addMcpServerResult" class="action-result" :class="{ '--error': addMcpServerError }">{{ addMcpServerResult }}</div>
-          </div>
-
-          <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
-          <div class="skill-list">
-            <!-- 1. Built-in Ciaobot FastMCP Server -->
-            <div
-              class="skill-row"
-              :class="{ expanded: isMcpExpanded('ciaobot-fastmcp') }"
-              @click="toggleMcp('ciaobot-fastmcp')"
-            >
-              <div class="skill-main">
-                <div class="skill-title-row command-title-row">
-                  <span class="skill-chevron">{{ isMcpExpanded('ciaobot-fastmcp') ? '&#9662;' : '&#9656;' }}</span>
-                  <span class="skill-name">ciaobot</span>
-                  <span class="skill-badges">
-                    <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
-                    <span class="badge" :class="fastMcpEnabled ? 'badge--success' : 'badge--muted'">
-                      {{ fastMcpEnabled ? 'enabled' : 'disabled' }}
-                    </span>
-                  </span>
-                </div>
-                <p class="skill-description">Vault, chats, projects, and schedules.</p>
-                <div v-if="isMcpExpanded('ciaobot-fastmcp')" class="skill-detail" @click.stop>
-                  <p class="skill-meta"><span class="skill-meta-label">Endpoint</span><code>http://127.0.0.1:8443/mcp/</code></p>
-                  <div class="setting-row setting-row--inline setting-row--toggle" style="margin-top: 8px;">
-                    <span class="routine-name">FastMCP Control Plane Active</span>
-                    <label class="settings-checkbox-hit">
-                      <input type="checkbox" class="settings-checkbox" v-model="fastMcpEnabled" @change="saveFastMcpToggle" />
-                    </label>
-                  </div>
-                  <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Embedded Tools ({{ inspectorEmbeddedTools.length }})</span></p>
-                  <div class="mcp-tag-grid mcp-tag-grid--wide">
-                    <span v-for="tool in inspectorEmbeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">{{ tool }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 2. Custom & Project .mcp.json Servers -->
-            <template v-if="mcpStatus?.project_servers && mcpStatus.project_servers.length">
-              <div
-                v-for="srv in mcpStatus.project_servers"
-                :key="srv.name"
-                class="skill-row"
-                :class="{ expanded: isMcpExpanded(srv.name) }"
-                @click="toggleMcp(srv.name)"
-              >
-                <div class="skill-main">
-                  <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ isMcpExpanded(srv.name) ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ srv.name }}</span>
-                    <span class="skill-badges">
-                      <span :class="assetOriginClass(mcpServerOrigin(srv))">{{ assetOriginLabel(mcpServerOrigin(srv)) }}</span>
-                      <span
-                        class="badge"
-                        :class="srv.ready === false ? 'badge--warn' : 'badge--success'"
-                      >
-                        {{ srv.ready === false ? 'needs .env' : 'ready' }}
-                      </span>
-                    </span>
-                  </div>
-                  <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
-                  <p v-else-if="srv.command" class="skill-description">
-                    Command: {{ srv.command }}<template v-if="srv.args?.length"> {{ srv.args.join(' ') }}</template>
-                  </p>
-                  <div v-if="isMcpExpanded(srv.name)" class="skill-detail" @click.stop>
-                    <div class="settings-field-grid mcp-edit-grid">
-                      <label v-if="(mcpEditDraft(srv).transport || srv.transport) === 'http'" class="settings-field settings-field--wide">
-                        <span class="ws-label">URL</span>
-                        <input
-                          class="routine-input"
-                          :value="mcpEditDraft(srv).url"
-                          :disabled="mcpServerSaving === srv.name"
-                          aria-label="MCP server URL"
-                          @input="setMcpEditField(srv.name, 'url', ($event.target as HTMLInputElement).value)"
-                        />
-                      </label>
-                      <template v-else>
-                        <label class="settings-field">
-                          <span class="ws-label">Command</span>
-                          <input
-                            class="routine-input"
-                            :value="mcpEditDraft(srv).command"
-                            :disabled="mcpServerSaving === srv.name"
-                            aria-label="MCP server command"
-                            @input="setMcpEditField(srv.name, 'command', ($event.target as HTMLInputElement).value)"
-                          />
-                        </label>
-                        <label class="settings-field settings-field--wide">
-                          <span class="ws-label">Args</span>
-                          <input
-                            class="routine-input"
-                            :value="mcpEditDraft(srv).argsText"
-                            :disabled="mcpServerSaving === srv.name"
-                            placeholder="e.g. -y @notionhq/notion-mcp-server"
-                            aria-label="MCP server args"
-                            @input="setMcpEditField(srv.name, 'argsText', ($event.target as HTMLInputElement).value)"
-                          />
-                        </label>
-                      </template>
-                      <p v-if="srv.env_path || mcpStatus?.env_path" class="settings-field settings-field--wide hint hint--compact">
-                        Secrets are saved to <code>{{ srv.env_path || mcpStatus?.env_path }}</code>. Connection config stays in <code>.mcp.json</code>.
-                      </p>
-                    </div>
-
-                    <div class="mcp-env-block">
-                      <p class="skill-meta">
-                        <span class="skill-meta-label">Secrets for this server</span>
-                      </p>
-                      <p class="hint hint--compact">
-                        Paste the token into the field below. It is saved to the workspace <code>.env</code> (not into <code>.mcp.json</code>).
-                      </p>
-                      <div
-                        v-for="envKey in mcpEnvKeysFor(srv)"
-                        :key="`${srv.name}:${envKey.key}`"
-                        class="credential-row mcp-env-row"
-                      >
-                        <div class="setting-row-main setting-row-main--inline">
-                          <div class="routine-info">
-                            <span class="routine-name">{{ envKey.key }}</span>
-                            <p v-if="envKey.hint" class="hint hint--compact">{{ envKey.hint }}</p>
-                          </div>
-                          <span class="badge" :class="envKey.configured ? 'badge--success' : 'badge--error'">
-                            {{ envKey.configured ? 'Configured' : 'Missing' }}
-                          </span>
-                        </div>
-                        <input
-                          type="password"
-                          class="routine-input"
-                          :value="mcpEnvInputs[envKey.key] || ''"
-                          :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Paste ${envKey.key}`"
-                          :disabled="mcpEnvSaving"
-                          :aria-label="envKey.key"
-                          @input="mcpEnvInputs[envKey.key] = ($event.target as HTMLInputElement).value"
-                        />
-                      </div>
-                      <p v-if="!mcpEnvKeysFor(srv).length" class="hint hint--compact">
-                        No secrets referenced by this server's <code>.mcp.json</code> config.
-                      </p>
-                      <div class="action-row settings-actions">
-                        <button
-                          class="btn-small"
-                          :disabled="mcpEnvSaving || !hasMcpEnvEdits(srv)"
-                          @click="saveMcpEnvKeys(srv)"
-                        >
-                          {{ mcpEnvSaving ? 'Saving...' : 'Save secrets' }}
-                        </button>
-                        <button
-                          class="btn-small"
-                          :disabled="mcpServerSaving === srv.name || !mcpEditDirty(srv)"
-                          @click="saveMcpServer(srv)"
-                        >
-                          {{ mcpServerSaving === srv.name ? 'Saving...' : 'Save connection' }}
-                        </button>
-                      </div>
-                      <div
-                        v-if="(mcpEnvResult && mcpEnvResultServer === srv.name) || (mcpServerResult && mcpServerResultName === srv.name)"
-                        class="action-result"
-                        :class="{ '--error': (mcpEnvResultServer === srv.name && mcpEnvError) || (mcpServerResultName === srv.name && mcpServerError) }"
-                      >{{ (mcpEnvResultServer === srv.name && mcpEnvResult) || (mcpServerResultName === srv.name && mcpServerResult) }}</div>
-                    </div>
-
-                    <div class="mcp-tools-block">
-                      <div class="setting-row setting-row--inline" style="margin-top: 8px;">
-                        <p class="skill-meta" style="margin: 0;">
-                          <span class="skill-meta-label">
-                            Tools ({{ (mcpServerTools[srv.name] || srv.tools || []).length }})
-                            <template v-if="srv.tools_source && srv.tools_source !== 'none'">
-                              · {{ srv.tools_source }}
-                            </template>
-                          </span>
-                        </p>
-                        <button
-                          class="btn-small"
-                          :disabled="mcpToolsLoading[srv.name]"
-                          @click="refreshMcpServerTools(srv)"
-                        >
-                          {{ mcpToolsLoading[srv.name] ? 'Loading...' : (srv.transport === 'http' ? 'Probe tools' : 'Refresh') }}
-                        </button>
-                      </div>
-                      <p
-                        v-if="mcpToolsError[srv.name] || (!(mcpServerTools[srv.name] || srv.tools || []).length && srv.tools_note)"
-                        class="hint hint--compact"
-                        :class="{ 'hint--warn': !!mcpToolsError[srv.name] }"
-                      >
-                        {{ mcpToolsError[srv.name] || srv.tools_note }}
-                      </p>
-                      <div
-                        v-if="(mcpServerTools[srv.name] || srv.tools || []).length"
-                        class="mcp-tag-grid mcp-tag-grid--wide"
-                      >
-                        <span
-                          v-for="tool in (mcpServerTools[srv.name] || srv.tools || [])"
-                          :key="tool"
-                          class="mcp-tag mcp-tag--embedded"
-                        >{{ tool }}</span>
-                      </div>
-                    </div>
-
-                    <div class="asset-actions">
-                      <button class="btn-small btn-danger" @click.stop="deleteCustomMcpServer(srv.name)">Delete</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-          </div>
-        </div>
+        <SettingsMcpServers :mcp="mcp" @create-via-chat="createMcpViaChat" />
       </template>
 
 
@@ -2009,10 +1759,6 @@ import type {
   LocalStatus,
   ModelsResponse,
   NodeStatus,
-  McpStatus,
-  McpUsage,
-  McpProjectServer,
-  McpEnvKey,
   ProviderConfigSettings,
   ProposalOutcomes,
   RoutineSettings,
@@ -2038,10 +1784,13 @@ import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
 import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
+import { useMcpServers } from '../composables/useMcpServers'
+import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
@@ -2059,6 +1808,21 @@ const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const housekeeping = useHousekeepingStore()
+
+// Settings → MCP. The controller holds every MCP ref and every /api/mcp/*
+// call; this view keeps only the two things the controller deliberately has
+// no access to — when the data loads (its own onMounted, below) and the
+// "Add via chat" path, which needs the project store and the router.
+const mcp = useMcpServers({
+  api,
+  notifySaved: (body, title) => notifySaved(body, title),
+  notifyFailed: (title, detail) => notifyFailed(title, detail),
+  confirmDelete: (name) => askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
+    title: 'Delete MCP server',
+    confirmLabel: 'Delete server',
+    destructive: true,
+  }),
+})
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -2104,248 +1868,7 @@ const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
-// MCP Server management state
-const showAddMcpServer = ref(false)
-const addingMcpServer = ref(false)
-const addMcpServerResult = ref('')
-const addMcpServerError = ref(false)
-const newMcpName = ref('')
-const newMcpTransport = ref<'http' | 'stdio'>('http')
-const newMcpUrl = ref('')
-const newMcpCommand = ref('')
-const fastMcpEnabled = ref(true)
 const { reentrySummaryEnabled, setReentrySummaryEnabled } = useReentrySummaryPreference()
-const expandedMcp = ref<Record<string, boolean>>({})
-const mcpEnvInputs = ref<Record<string, string>>({})
-const mcpEnvSaving = ref(false)
-const mcpEnvResult = ref('')
-const mcpEnvError = ref(false)
-const mcpEnvResultServer = ref('')
-const mcpEditDrafts = ref<Record<string, { transport: string; url: string; command: string; argsText: string }>>({})
-const mcpServerSaving = ref('')
-const mcpServerResult = ref('')
-const mcpServerError = ref(false)
-const mcpServerResultName = ref('')
-const mcpServerTools = ref<Record<string, string[]>>({})
-const mcpToolsLoading = ref<Record<string, boolean>>({})
-const mcpToolsError = ref<Record<string, string>>({})
-
-function toggleAddMcpServer() {
-  showAddMcpServer.value = !showAddMcpServer.value
-  addMcpServerResult.value = ''
-}
-
-function isMcpExpanded(name: string) {
-  return !!expandedMcp.value[name]
-}
-
-function ensureMcpEditDraft(srv: McpProjectServer) {
-  if (!mcpEditDrafts.value[srv.name]) {
-    mcpEditDrafts.value[srv.name] = {
-      transport: srv.transport || (srv.url ? 'http' : 'stdio'),
-      url: srv.url || '',
-      command: srv.command || '',
-      argsText: (srv.args || []).join(' '),
-    }
-  }
-}
-
-function mcpEditDraft(srv: McpProjectServer) {
-  ensureMcpEditDraft(srv)
-  return mcpEditDrafts.value[srv.name]
-}
-
-function setMcpEditField(name: string, field: 'url' | 'command' | 'argsText', value: string) {
-  const draft = mcpEditDrafts.value[name]
-  if (!draft) return
-  draft[field] = value
-}
-
-function mcpEditDirty(srv: McpProjectServer) {
-  const draft = mcpEditDraft(srv)
-  const args = (srv.args || []).join(' ')
-  if ((draft.transport || srv.transport) === 'http') {
-    return draft.url.trim() !== (srv.url || '').trim()
-  }
-  return draft.command.trim() !== (srv.command || '').trim() || draft.argsText.trim() !== args.trim()
-}
-
-function toggleMcp(name: string) {
-  const next = !expandedMcp.value[name]
-  expandedMcp.value[name] = next
-  if (next) {
-    const srv = mcpStatus.value?.project_servers?.find((s) => s.name === name)
-    if (srv) {
-      ensureMcpEditDraft(srv)
-      if (!(mcpServerTools.value[name]?.length) && !(srv.tools?.length)) {
-        void refreshMcpServerTools(srv)
-      }
-    }
-  }
-}
-
-function hasMcpEnvEdits(srv: McpProjectServer) {
-  return mcpEnvKeysFor(srv).some((entry) => (mcpEnvInputs.value[entry.key] || '').length > 0)
-}
-
-/** Well-known secrets when the status API has not returned env_keys yet. */
-const MCP_DEFAULT_ENV_KEYS: Record<string, { key: string; hint: string }> = {
-  n8n_mcp: {
-    key: 'N8N_MCP_TOKEN',
-    hint: 'Bearer token for your n8n MCP HTTP endpoint.',
-  },
-  notion: {
-    key: 'NOTION_TOKEN',
-    hint: 'Notion internal integration secret.',
-  },
-}
-
-type McpEnvKeyView = McpEnvKey & { hint?: string }
-
-function mcpEnvKeysFor(srv: McpProjectServer): McpEnvKeyView[] {
-  if (srv.env_keys?.length) {
-    return srv.env_keys.map((entry) => {
-      const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
-      return {
-        ...entry,
-        hint: fallback?.key === entry.key ? fallback.hint : undefined,
-      }
-    })
-  }
-  const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
-  if (!fallback) return []
-  return [{
-    key: fallback.key,
-    configured: false,
-    source: 'suggested',
-    hint: fallback.hint,
-  }]
-}
-
-function splitMcpArgs(text: string): string[] {
-  return text.trim().split(/\s+/).filter(Boolean)
-}
-
-async function saveMcpEnvKeys(srv: McpProjectServer) {
-  const keys: Record<string, string> = {}
-  for (const entry of mcpEnvKeysFor(srv)) {
-    const value = mcpEnvInputs.value[entry.key]
-    if (value != null && value.length > 0) {
-      keys[entry.key] = value
-    }
-  }
-  if (!Object.keys(keys).length) return
-  mcpEnvSaving.value = true
-  mcpEnvResult.value = ''
-  mcpEnvError.value = false
-  mcpEnvResultServer.value = srv.name
-  try {
-    const res = await api.post<McpStatus>('/api/mcp/env-keys', { keys, server: srv.name })
-    mcpStatus.value = res
-    for (const key of Object.keys(keys)) {
-      mcpEnvInputs.value[key] = ''
-    }
-    const updated = res.project_servers?.find((s) => s.name === srv.name)
-    if (updated) {
-      mcpEditDrafts.value[srv.name] = {
-        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
-        url: updated.url || '',
-        command: updated.command || '',
-        argsText: (updated.args || []).join(' '),
-      }
-    }
-    mcpEnvResult.value = 'Saved to workspace .env. New chats will pick up the keys.'
-    notifySaved(`Saved MCP secrets for ${srv.name}.`)
-    setTimeout(() => {
-      if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
-    }, 3000)
-  } catch (e) {
-    mcpEnvError.value = true
-    mcpEnvResult.value = errorMessage(e, 'Failed to save MCP secrets.')
-  } finally {
-    mcpEnvSaving.value = false
-  }
-}
-
-async function saveMcpServer(srv: McpProjectServer) {
-  const draft = mcpEditDraft(srv)
-  mcpServerSaving.value = srv.name
-  mcpServerResult.value = ''
-  mcpServerError.value = false
-  mcpServerResultName.value = srv.name
-  try {
-    const body: Record<string, unknown> = {}
-    if ((draft.transport || srv.transport) === 'http') {
-      body.url = draft.url.trim()
-      body.command = ''
-      body.args = []
-    } else {
-      body.command = draft.command.trim()
-      body.args = splitMcpArgs(draft.argsText)
-      body.url = ''
-    }
-    const res = await api.patch<McpStatus>(`/api/mcp/servers/${encodeURIComponent(srv.name)}`, body)
-    mcpStatus.value = res
-    const updated = res.project_servers?.find((s) => s.name === srv.name)
-    if (updated) {
-      mcpEditDrafts.value[srv.name] = {
-        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
-        url: updated.url || '',
-        command: updated.command || '',
-        argsText: (updated.args || []).join(' '),
-      }
-    }
-    mcpServerResult.value = 'Connection saved to .mcp.json.'
-    notifySaved(`Updated MCP server ${srv.name}.`)
-    setTimeout(() => {
-      if (mcpServerResultName.value === srv.name) mcpServerResult.value = ''
-    }, 3000)
-  } catch (e) {
-    mcpServerError.value = true
-    mcpServerResult.value = errorMessage(e, 'Failed to save MCP server.')
-  } finally {
-    mcpServerSaving.value = ''
-  }
-}
-
-async function refreshMcpServerTools(srv: McpProjectServer) {
-  mcpToolsLoading.value[srv.name] = true
-  mcpToolsError.value[srv.name] = ''
-  try {
-    const res = await api.get<{
-      ok: boolean
-      tools?: string[]
-      error?: string
-      tools_note?: string
-      tools_source?: string
-    }>(`/api/mcp/servers/${encodeURIComponent(srv.name)}/tools`)
-    const tools = res.tools || []
-    mcpServerTools.value[srv.name] = tools
-    if (mcpStatus.value?.project_servers) {
-      const target = mcpStatus.value.project_servers.find((s) => s.name === srv.name)
-      if (target) {
-        target.tools = tools
-        target.tools_source = res.tools_source || (tools.length ? 'probed' : 'none')
-        if (res.tools_note) target.tools_note = res.tools_note
-      }
-    }
-    if (!res.ok && res.error) {
-      mcpToolsError.value[srv.name] = res.error
-    }
-  } catch (e) {
-    const message = errorMessage(e, 'Could not load tools.')
-    mcpToolsError.value[srv.name] = /not available on the running server|Unexpected token|<!DOCTYPE|not valid JSON/i.test(message)
-      ? 'MCP tools endpoint not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.'
-      : message
-  } finally {
-    mcpToolsLoading.value[srv.name] = false
-  }
-}
-
-function saveFastMcpToggle() {
-  notifySaved(fastMcpEnabled.value ? 'Ciaobot FastMCP enabled.' : 'Ciaobot FastMCP disabled.')
-}
-
 function onReentrySummaryToggle() {
   setReentrySummaryEnabled(reentrySummaryEnabled.value)
   // The store action already evicts cached summaries when the toggle goes
@@ -2383,65 +1906,6 @@ async function createMcpViaChat() {
     notifyFailed('Could not create chat', errorMessage(e))
   }
 }
-
-async function addCustomMcpServer() {
-  if (!newMcpName.value.trim()) return
-  addingMcpServer.value = true
-  addMcpServerResult.value = ''
-  addMcpServerError.value = false
-  const name = newMcpName.value.trim()
-  try {
-    const body: Record<string, unknown> = { name }
-    if (newMcpTransport.value === 'http') {
-      body.url = newMcpUrl.value.trim()
-    } else {
-      const parts = splitMcpArgs(newMcpCommand.value)
-      body.command = parts[0] || ''
-      body.args = parts.slice(1)
-    }
-    const res = await api.post<McpStatus>('/api/mcp/servers', body)
-    mcpStatus.value = res
-    newMcpName.value = ''
-    newMcpUrl.value = ''
-    newMcpCommand.value = ''
-    showAddMcpServer.value = false
-    expandedMcp.value[name] = true
-    const created = res.project_servers?.find((s) => s.name === name)
-    if (created) {
-      mcpEditDrafts.value[name] = {
-        transport: created.transport || (created.url ? 'http' : 'stdio'),
-        url: created.url || '',
-        command: created.command || '',
-        argsText: (created.args || []).join(' '),
-      }
-    }
-    notifySaved(`Added MCP server ${name}.`)
-  } catch (e) {
-    addMcpServerError.value = true
-    addMcpServerResult.value = errorMessage(e, `Failed to add MCP server`)
-  } finally {
-    addingMcpServer.value = false
-  }
-}
-
-async function deleteCustomMcpServer(name: string) {
-  if (!await askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
-    title: 'Delete MCP server',
-    confirmLabel: 'Delete server',
-    destructive: true,
-  })) return
-  try {
-    const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
-    mcpStatus.value = res
-    delete mcpEditDrafts.value[name]
-    delete mcpServerTools.value[name]
-    delete mcpToolsError.value[name]
-    notifySaved(`Removed MCP server ${name}.`)
-  } catch (e) {
-    notifyFailed(`Could not delete MCP server ${name}`, errorMessage(e, 'The request failed.'))
-  }
-}
-
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 // The scale itself, its bounds, its step and its persistence live in
@@ -2917,10 +2381,6 @@ function routineModelSummary(key: RoutineModelKey): string {
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
-const mcpStatus = ref<McpStatus | null>(null)
-const mcpUsage = ref<McpUsage | null>(null)
-const mcpUsageLoaded = ref(false)
-const mcpUsageError = ref('')
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
 const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
@@ -3318,31 +2778,6 @@ async function fetchProviderKeys() {
   }
 }
 
-async function fetchMcpStatus() {
-  try {
-    mcpStatus.value = await api.get<McpStatus>('/api/mcp/status')
-  } catch {
-    mcpStatus.value = { enabled: false, bound: false, tool_count: 0 }
-  }
-}
-
-async function fetchMcpUsage() {
-  mcpUsageError.value = ''
-  try {
-    mcpUsage.value = await api.get<McpUsage>('/api/mcp/usage')
-  } catch (err) {
-    mcpUsage.value = null
-    const message = err instanceof Error ? err.message : String(err)
-    // A non-JSON body (the SPA index.html) means the /api/mcp/usage route
-    // isn't served yet — the running backend predates it and needs a restart.
-    mcpUsageError.value = /Unexpected token|not valid JSON|<!DOCTYPE/i.test(message)
-      ? 'MCP usage endpoint not available on the running server yet. Restart the Ciaobot service (or ask the operator to Deploy) to enable it.'
-      : message || 'Could not load MCP tool usage.'
-  } finally {
-    mcpUsageLoaded.value = true
-  }
-}
-
 
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
@@ -3433,42 +2868,6 @@ const stockSkills = computed(() => {
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
 })
-
-/** Shared origin labels: Ciaobot-shipped vs user-authored. */
-type AssetOrigin = 'builtin' | 'custom' | 'installed' | 'global'
-
-function assetOriginLabel(origin: AssetOrigin): string {
-  if (origin === 'custom') return 'Custom'
-  if (origin === 'installed') return 'Installed'
-  if (origin === 'global') return 'Global'
-  return 'Built-in'
-}
-
-function assetOriginClass(origin: AssetOrigin): string {
-  if (origin === 'custom') return 'badge badge--success command-source'
-  if (origin === 'builtin') return 'badge badge--builtin command-source'
-  return 'badge badge--muted command-source'
-}
-
-function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
-  // Scope is definitive when set: stock commands/subagents are seeded into
-  // the same editable location as custom ones (so users can override them
-  // in place), so `editable` alone can't distinguish "built-in" from
-  // "custom" — it's only a fallback for the rare case scope is unset.
-  if (command.scope === 'custom') return 'custom'
-  if (command.scope === 'built-in') return 'builtin'
-  if (command.scope === 'global') return 'global'
-  if (command.scope === 'installed') return 'installed'
-  return command.editable ? 'custom' : 'installed'
-}
-
-function subagentOrigin(agent: { editable?: boolean; scope?: string }): AssetOrigin {
-  return commandOrigin(agent)
-}
-
-function mcpServerOrigin(_srv: { name?: string; source?: string }): AssetOrigin {
-  return 'custom'
-}
 
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
@@ -4001,20 +3400,6 @@ function formatConnectorLabel(name: string): string {
 
 
 
-const inspectorEmbeddedTools = computed(() => {
-  if (mcpStatus.value?.tools && mcpStatus.value.tools.length) {
-    return mcpStatus.value.tools
-  }
-  return [
-    'context_get', 'vault_search', 'projects_list', 'project_get', 'project',
-    'chats_list', 'chat_get', 'chat_create', 'chat_send',
-    'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
-    'schedules_list', 'schedule', 'schedule_action',
-    'file_surface',
-    'project_action',
-  ]
-})
-
 // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
 // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
 const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
@@ -4160,8 +3545,8 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
-  fetchMcpStatus()
-  fetchMcpUsage()
+  mcp.fetchStatus()
+  mcp.fetchUsage()
   // Render from cache immediately, then pick up anything connected elsewhere.
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
@@ -4548,6 +3933,12 @@ async function doPackageUpdate() {
 
 </script>
 
+<!-- Styles the extracted Settings panels share with this view. Scoped rules
+     do not cross into a child component, so anything a child needs lives in
+     the shared sheet and both sides pull it in. It loads first, which keeps
+     every rule that used to follow one of these still following it. -->
+<style scoped src="./settings/settingsPanels.css"></style>
+
 <style scoped>
 .settings-pane {
   display: flex;
@@ -4595,13 +3986,6 @@ async function doPackageUpdate() {
   gap: var(--space-4);
   align-items: center;
 }
-.card {
-  width: min(100%, 1040px);
-  margin: 0 auto;
-  gap: var(--space-4);
-  border-color: var(--border);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
-}
 /* The inline device panel renders its own .card tiles; give the wrapper the
    same width as every other card here so they line up with the rest. */
 .device-tile {
@@ -4610,43 +3994,6 @@ async function doPackageUpdate() {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-}
-.section-title {
-  letter-spacing: 0.08em;
-}
-.settings-card-header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
-}
-/* No divider when the header is the only element in the card (nothing below
-   it to separate). v-if="false" siblings render as comment nodes, which
-   :last-child ignores, so this also covers cards whose body is conditional. */
-.settings-card-header:last-child {
-  padding-bottom: 0;
-  border-bottom: none;
-}
-.settings-card-header--split {
-  flex-direction: row;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-.settings-card-header--split > div {
-  min-width: 0;
-}
-.settings-card-header .hint {
-  margin: var(--space-2) 0 0;
-  max-width: 76ch;
-}
-.settings-card-header-actions {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  flex: 0 0 auto;
 }
 /* Open-source card with the star ask still live: the pixel face sits on the
    right, out of the prose's flow. Without the nudge the card has no class and
@@ -4677,9 +4024,6 @@ async function doPackageUpdate() {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin-top: var(--space-2);
-}
-.hint--compact {
-  margin: 0;
 }
 .skill-scope-note {
   margin-top: var(--space-2);
@@ -4758,16 +4102,8 @@ async function doPackageUpdate() {
   color: var(--fg);
 }
 
-.action-row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
 .action-row--spaced {
   margin-top: var(--space-3);
-}
-.action-row > button {
-  flex: 1 1 0;
 }
 .action-row--compact > button {
   flex: 0 1 auto;
@@ -4806,10 +4142,6 @@ async function doPackageUpdate() {
 .btn-caution:active { transform: scale(0.98); }
 .btn-secondary:disabled,
 .btn-caution:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-.settings-actions {
-  justify-content: flex-end;
-  margin-top: var(--space-2);
-}
 
 /* Router links used as buttons in card headers (e.g. "Open device settings"). */
 a.btn-secondary {
@@ -4822,20 +4154,8 @@ a.btn-secondary {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
 }
-.settings-actions > button {
-  flex: 0 0 auto;
-  min-width: 150px;
-}
 
-.action-result {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  padding: 4px 0;
-}
 .action-result--error {
-  color: var(--error);
-}
-.action-result.--error {
   color: var(--error);
 }
 .action-result--prewrap {
@@ -5121,21 +4441,6 @@ a.btn-secondary {
   border-top: 0;
   padding-top: 0;
 }
-.routine-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  max-width: 62ch;
-}
-.routine-name {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--fg);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 .routine-voice-icon {
   flex: none;
   color: var(--fg2);
@@ -5171,36 +4476,6 @@ a.btn-secondary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.routine-select,
-.routine-input {
-  max-width: none;
-  min-width: 0;
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  /* 44px min tap target height on mobile is handled by padding + font */
-  min-height: 38px;
-}
-.routine-input::placeholder {
-  color: var(--fg3);
-}
-.routine-select {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  padding-right: 30px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  background-size: 12px 12px;
-}
-.routine-select::-ms-expand {
-  display: none;
 }
 .workspace-root-path {
   display: block;
@@ -5250,41 +4525,12 @@ a.btn-secondary {
 .routine-model-hint a:hover {
   color: var(--accent2);
 }
-.setting-row,
-.credential-row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--border);
-}
-.setting-row--inline {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
 .setting-row--flush {
   border-top: 0;
   padding-top: 0;
 }
 .setting-row--stack {
   margin-top: 0;
-}
-.setting-row-main {
-  min-width: 0;
-}
-.setting-row-main--inline {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  width: 100%;
-}
-.credential-row .routine-input {
-  max-width: none;
-  min-width: 0;
-  width: 100%;
 }
 .provider-connections {
   display: flex;
@@ -5308,22 +4554,6 @@ a.btn-secondary {
   width: min(100%, 430px);
   min-width: 320px;
   flex: 0 0 auto;
-}
-.settings-checkbox {
-  width: 20px;
-  height: 20px;
-  flex: 0 0 auto;
-  cursor: pointer;
-  accent-color: var(--accent);
-}
-.settings-checkbox-hit {
-  width: var(--touch);
-  height: var(--touch);
-  flex: 0 0 var(--touch);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
 }
 .voice-warning {
   display: flex;
@@ -5647,21 +4877,6 @@ a.btn-secondary {
   .pane-body {
     padding: var(--space-3);
   }
-  .settings-card-header--split,
-  .setting-row--inline:not(.setting-row--toggle),
-  .setting-row-main--inline {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .settings-card-header-actions {
-    justify-content: stretch;
-  }
-  .settings-card-header-actions .btn-small {
-    flex: 1 1 auto;
-  }
-  .settings-actions > button {
-    flex: 1 1 auto;
-  }
   .action-row--compact > button {
     flex: 1 1 100%;
     width: 100%;
@@ -5673,11 +4888,6 @@ a.btn-secondary {
   .routine-row {
     grid-template-columns: 1fr;
     gap: var(--space-3);
-  }
-  .routine-select,
-  .routine-input {
-    max-width: none;
-    min-height: 44px;
   }
   .routine-model-controls {
     max-width: none;
@@ -5721,25 +4931,8 @@ a.btn-secondary {
   color: var(--fg2);
 }
 
-.skill-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: var(--space-3);
-}
 .skill-list--section {
   margin-bottom: var(--space-4);
-}
-.settings-form-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-2);
-  margin: var(--space-3) 0 var(--space-4);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
 }
 .changelog-list {
   list-style: none;
@@ -5765,15 +4958,6 @@ a.btn-secondary {
 .changelog-subject {
   min-width: 0;
   word-break: break-word;
-}
-.asset-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: var(--space-2);
-  flex-wrap: wrap;
-}
-.asset-actions .btn-small {
-  flex: 0 0 auto;
 }
 .asset-edit-panel {
   margin-bottom: 0;
@@ -5873,11 +5057,6 @@ a.btn-secondary {
 .workspace-actions .btn-small {
   flex: 0 0 auto;
 }
-.settings-field-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
-}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5915,9 +5094,6 @@ a.btn-secondary {
     grid-template-columns: 1fr;
   }
 }
-.settings-field--wide {
-  grid-column: 1 / -1;
-}
 .workspace-color-swatches {
   display: flex;
   flex-wrap: wrap;
@@ -5951,20 +5127,6 @@ a.btn-secondary {
 .workspace-color-swatch:disabled {
   opacity: 0.55;
   cursor: not-allowed;
-}
-.settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-.settings-field > .ws-label,
-.settings-label-row {
-  min-height: 20px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
 }
 .field-info {
   position: relative;
@@ -6027,11 +5189,6 @@ a.btn-secondary {
 .field-info-panel a {
   color: var(--accent);
 }
-.settings-field .routine-input {
-  max-width: none;
-  min-width: 0;
-  width: 100%;
-}
 .workspace-select {
   appearance: none;
   -webkit-appearance: none;
@@ -6082,9 +5239,6 @@ a.btn-secondary {
     align-items: stretch;
     flex-direction: column;
   }
-  .settings-field-grid {
-    grid-template-columns: 1fr;
-  }
   .workspace-card-header {
     flex-direction: column;
     align-items: stretch;
@@ -6096,83 +5250,9 @@ a.btn-secondary {
     flex: 1 1 auto;
   }
 }
-.skill-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  cursor: pointer;
-}
-.skill-main {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.skill-title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.skill-name {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.skill-description,
-.skill-source {
-  margin: 4px 0 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
-.skill-description {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.skill-row.expanded .skill-description {
-  display: block;
-  -webkit-line-clamp: unset;
-  overflow: visible;
-}
 .skill-source {
   color: var(--fg2);
   opacity: 0.7;
-}
-.skill-chevron {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  flex-shrink: 0;
-}
-.skill-detail {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.skill-meta {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  margin: 0;
-}
-.skill-meta-label {
-  display: inline-block;
-  min-width: 84px;
-  color: var(--fg2);
-  opacity: 0.7;
-  flex-shrink: 0;
 }
 .skill-targets-inline {
   display: flex;
@@ -6203,9 +5283,6 @@ a.btn-secondary {
   opacity: 0.85;
 }
 
-.command-title-row {
-  flex-wrap: wrap;
-}
 .command-name {
   color: var(--fg);
   font-size: var(--text-sm);
@@ -6217,18 +5294,6 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;
-}
-.skill-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-}
-.command-source {
-  flex: 0 0 auto;
-  text-transform: capitalize;
 }
 .command-path {
   min-width: 0;
@@ -6293,121 +5358,6 @@ a.btn-secondary {
   color: var(--fg);
   flex: 0 0 56px;
   text-align: center;
-}
-.ws-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-/* MCP tool usage tab */
-.usage-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-/* When docked into the split card header, sit on the right and drop the
-   bottom margin (the header divider already provides the spacing). */
-.usage-summary--header {
-  margin-bottom: 0;
-  gap: var(--space-2);
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-.usage-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 88px;
-  padding: var(--space-3);
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.usage-stat-value {
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-.usage-stat-value--warn {
-  color: var(--warning);
-}
-.usage-stat-label {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.usage-table-wrap {
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.usage-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-.usage-th {
-  text-align: left;
-  padding: var(--space-2) var(--space-3);
-  color: var(--fg2);
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg2);
-  position: sticky;
-  top: 0;
-}
-.usage-th--num {
-  text-align: right;
-}
-.usage-th--active {
-  color: var(--fg);
-}
-.usage-th:hover {
-  color: var(--fg);
-}
-.usage-sort {
-  margin-left: 4px;
-  font-size: var(--text-xs);
-}
-.usage-td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border);
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-.usage-td--tool {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--fg);
-  white-space: nowrap;
-}
-.usage-td--num {
-  text-align: right;
-}
-.usage-td--warn {
-  color: var(--warning);
-  font-weight: 600;
-}
-.usage-td--providers {
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-.usage-row--idle .usage-td {
-  color: var(--fg3);
-}
-.usage-row--idle .usage-td--tool {
-  color: var(--fg3);
-}
-.usage-table tbody tr:last-child .usage-td {
-  border-bottom: none;
-}
-.usage-table tbody tr:hover .usage-td {
-  background: var(--bg2);
 }
 
 /* Provider & Workspace MCP Connectors Bar */
@@ -6531,40 +5481,11 @@ a.btn-secondary {
   font-size: var(--text-sm);
 }
 
-.mcp-env-block,
-.mcp-tools-block {
-  margin-top: 10px;
-}
 
-.mcp-env-row {
-  margin-top: 8px;
-}
 
-.mcp-edit-grid {
-  margin-top: 8px;
-}
 
-.mcp-tag-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
 
-.mcp-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono, monospace);
-}
 
-.mcp-tag--embedded {
-  background: var(--bg);
-  color: var(--fg);
-}
 
 .mcp-tag--active {
   background: rgba(46, 160, 67, 0.1);
@@ -6618,8 +5539,5 @@ a.btn-secondary {
   margin-right: var(--space-2);
 }
 
-.mcp-tag-grid--wide {
-  gap: 8px;
-}
 
 </style>
