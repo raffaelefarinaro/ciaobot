@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.web import routes_api as ra
+from ciao.web import transcript_service as ts
 
 
 def _chat(**overrides) -> SimpleNamespace:
@@ -75,10 +75,10 @@ async def test_claude_history_rows_carry_transcript_usage(monkeypatch) -> None:
         },
     ]
     monkeypatch.setattr(
-        ra, "_read_session_segment", lambda _sid, _dirs: _sdk_turn("hello", "The answer")
+        ts, "_read_session_segment", lambda _sid, _dirs: _sdk_turn("hello", "The answer")
     )
 
-    rows = await ra._assemble_chat_messages(
+    rows = await ts._assemble_chat_messages(
         _pcm(transcript_rows), _config(), _chat()
     )
 
@@ -114,9 +114,9 @@ async def test_claude_history_usage_lands_on_the_turns_last_assistant_row(
             message={"content": [{"type": "text", "text": "second part"}]},
         ),
     ]
-    monkeypatch.setattr(ra, "_read_session_segment", lambda _sid, _dirs: segment)
+    monkeypatch.setattr(ts, "_read_session_segment", lambda _sid, _dirs: segment)
 
-    rows = await ra._assemble_chat_messages(_pcm(transcript_rows), _config(), _chat())
+    rows = await ts._assemble_chat_messages(_pcm(transcript_rows), _config(), _chat())
 
     assistant = [r for r in rows if r.get("role") == "assistant"]
     assert [r["content"] for r in assistant] == ["first part", "second part"]
@@ -128,10 +128,10 @@ async def test_claude_history_usage_lands_on_the_turns_last_assistant_row(
 async def test_claude_history_without_transcript_still_renders(monkeypatch) -> None:
     """No durable transcript (pruned runtime) must not break history."""
     monkeypatch.setattr(
-        ra, "_read_session_segment", lambda _sid, _dirs: _sdk_turn("hello", "Answer")
+        ts, "_read_session_segment", lambda _sid, _dirs: _sdk_turn("hello", "Answer")
     )
 
-    rows = await ra._assemble_chat_messages(_pcm([]), _config(), _chat())
+    rows = await ts._assemble_chat_messages(_pcm([]), _config(), _chat())
 
     assert [r["content"] for r in rows if r.get("role") == "assistant"] == ["Answer"]
 

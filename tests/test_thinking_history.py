@@ -9,7 +9,7 @@ matching the live stream.
 
 from __future__ import annotations
 
-from ciao.web.routes_api import _extract_assistant_blocks
+from ciao.web.transcript_service import _extract_assistant_blocks
 
 
 def test_thinking_block_is_classified_as_thinking() -> None:

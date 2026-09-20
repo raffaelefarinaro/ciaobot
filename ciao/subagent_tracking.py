@@ -61,7 +61,7 @@ _TASK_NOTIFICATION_RE = re.compile(
 _INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 
 # User-turn skip rules mirrored from the /messages renderer
-# (ciao/web/routes_api.py): records matching these never render as user
+# (ciao/web/transcript_service.py): records matching these never render as user
 # bubbles there, so they must not advance the turn counter here either or
 # `turn_index` anchoring drifts.
 _CONTROL_SLASH_PREFIXES = ("/model", "/mode")
