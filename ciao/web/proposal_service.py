@@ -7,6 +7,10 @@ into a bounded region, folding a doc, re-homing a note. The route handlers in
 ``ciao/web/routes_api.py`` keep request parsing, authorization, and response
 mapping and call in here for everything else, so a queue rewrite or a promotion
 can be exercised without building a request.
+
+Every accept helper answers with :class:`AcceptOutcome` — one typed shape for
+what a promotion did, whichever destination it wrote — rather than a
+dictionary the routes read back by string.
 """
 
 from __future__ import annotations
@@ -15,9 +19,10 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
@@ -38,6 +43,83 @@ _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
 # Skill-reflection proposals live under this folder, one canonical file per skill.
 _SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
+
+
+@dataclass(frozen=True)
+class AcceptOutcome:
+    """What one promotion attempt did with one accepted row.
+
+    Every accept helper below — the region write, the doc fold, the people
+    note, the learnings append — used to answer with a hand-built
+    ``dict[str, Any]`` whose keys the routes then read back by string. The keys
+    were never the same two branches running: a written region reports its
+    receipt, a duplicate does not; a deferral reports what it competes with, an
+    unshaped refusal does not; only a region names a region at all. So nothing
+    said which key any branch could actually produce, and the fields three
+    separate changes added (``receipt_id``, ``deferred``/``reason``/
+    ``competing``, ``conflict``) each had to be traced by hand through the
+    routes that read them.
+
+    The fields default to ``None``/``False`` meaning "not part of this
+    outcome", which is what :meth:`as_dict` emits on: an absent key, never a
+    null one, exactly as :class:`ciao.proposal_actions.ProposalActionResult`
+    does for the payload it builds from this. The dictionary this replaces is
+    reproduced key for key — the type names the contract, it does not widen it.
+
+    The route reads the fields directly and hands ``as_dict()`` to
+    ``proposal_actions.build_accept_result``, which stays a ``Mapping``
+    consumer: ``proposal_actions`` sits one level above ``ciao/web/`` so the
+    CLI can resolve a row without importing the web package, and it must not
+    start importing this module to keep that.
+    """
+
+    ok: bool | None = None
+    region: str | None = None
+    written: str | None = None
+    usage: Mapping[str, Any] | None = None
+    receipt_id: str | None = None
+    duplicate: bool = False
+    conflict: bool = False
+    deferred: bool = False
+    reason: str | None = None
+    competing: Sequence[str] | None = None
+    destination: str | None = None
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """This outcome as the mapping ``proposal_actions`` reads.
+
+        An outcome with no ``ok`` at all is a real case, not an oversight:
+        ``build_accept_result`` reads an absent ``ok`` as "nothing was written
+        here", which is how a re-home (moved above the queue-file grouping)
+        and a row the batch never reached report success.
+        """
+        payload: dict[str, Any] = {}
+        if self.ok is not None:
+            payload["ok"] = self.ok
+        if self.region is not None:
+            payload["region"] = self.region
+        if self.written is not None:
+            payload["written"] = self.written
+        if self.usage is not None:
+            payload["usage"] = dict(self.usage)
+        if self.receipt_id is not None:
+            payload["receipt_id"] = self.receipt_id
+        if self.duplicate:
+            payload["duplicate"] = True
+        if self.conflict:
+            payload["conflict"] = True
+        if self.deferred:
+            payload["deferred"] = True
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        if self.competing is not None:
+            payload["competing"] = list(self.competing)
+        if self.destination is not None:
+            payload["destination"] = self.destination
+        if self.error is not None:
+            payload["error"] = self.error
+        return payload
 
 
 def _proposals_file(config, workspace: str) -> Path:
@@ -753,7 +835,7 @@ async def _plan_accept_reconcile(
     return decision, None
 
 
-def _deferred_response(region: str, deferral: ReconcileDecision) -> dict[str, Any]:
+def _deferred_response(region: str, deferral: ReconcileDecision) -> AcceptOutcome:
     """The refusal body for a fact no reconcile could place.
 
     One shape for both ways a reconcile-backed accept defers — the retry that
@@ -766,22 +848,24 @@ def _deferred_response(region: str, deferral: ReconcileDecision) -> dict[str, An
     reason = str(deferral.get("reason") or "the reconcile could not decide")
     competing = [str(entry) for entry in (deferral.get("competing") or [])]
     detail = f" It competes with: {'; '.join(competing)}." if competing else ""
-    return {
-        "ok": False,
-        "region": region,
-        "deferred": True,
-        "reason": reason,
-        "competing": competing,
-        "error": (
+    return AcceptOutcome(
+        ok=False,
+        region=region,
+        deferred=True,
+        reason=reason,
+        # Emitted even when empty: the client tells "nothing to weigh it
+        # against" apart from "the field was not reported" by its presence.
+        competing=competing,
+        error=(
             f"reconciling against ciao:{region} could not decide ({reason}), so "
             f"nothing was written and this stays queued.{detail}"
         ),
-    }
+    )
 
 
 async def _promote_region_row(
     config, row: dict[str, Any], *, reconcile: bool = False
-) -> dict[str, Any]:
+) -> AcceptOutcome:
     """Write an accepted memory/profile fact into its workspace's region.
 
     Accept used to remove the bullet and return a descriptor saying what SHOULD
@@ -825,7 +909,9 @@ async def _promote_region_row(
         # the same call sync makes, and it is a no-op once the markers are there.
         ensure_regions(guide)
     except (OSError, ValueError) as exc:
-        return {"ok": False, "error": f"could not prepare {guide}: {exc}", "region": region}
+        return AcceptOutcome(
+            ok=False, error=f"could not prepare {guide}: {exc}", region=region
+        )
 
     try:
         vault_root = Path(config.workspace_vault_root(row["workspace"]))
@@ -869,7 +955,7 @@ async def _promote_region_row(
             receipt_out=receipt,
         )
     except (ValueError, OSError) as exc:
-        return {"ok": False, "error": str(exc), "region": region}
+        return AcceptOutcome(ok=False, error=str(exc), region=region)
 
     def _usage() -> dict[str, Any]:
         try:
@@ -889,41 +975,41 @@ async def _promote_region_row(
         # `written` is reported because the guard can promote only the trailing
         # durable-rule clause of a bullet, so what landed is not always the
         # sentence the operator read on the row.
-        return {
-            "ok": True,
-            "region": region,
-            "written": promotable,
-            "usage": _usage(),
-            "receipt_id": str(receipt.get("id", "")),
-        }
+        return AcceptOutcome(
+            ok=True,
+            region=region,
+            written=promotable,
+            usage=_usage(),
+            receipt_id=str(receipt.get("id", "")),
+        )
     if outcome == "duplicate":
         # Already remembered. The fact is in the region either way, so the row
         # is resolved and may leave the queue.
-        return {"ok": True, "region": region, "duplicate": True, "usage": _usage()}
+        return AcceptOutcome(ok=True, region=region, duplicate=True, usage=_usage())
     if outcome == "unshaped":
         # Event-shaped text is exactly what the region must not hold; this used
         # to be written verbatim. The row stays queued.
-        return {
-            "ok": False,
-            "region": region,
-            "error": (
+        return AcceptOutcome(
+            ok=False,
+            region=region,
+            error=(
                 "this reads as an event, not a standing rule, so it would rot "
                 "in always-loaded memory. Use \u201ctalk about it\u201d to rephrase it as "
                 "what is true from now on, then accept."
             ),
-        }
+        )
     if outcome == "conflict":
         # The region changed under a concurrent writer between planning and
         # write. Nothing was written; the row survives and a retry re-reads.
-        return {
-            "ok": False,
-            "region": region,
-            "conflict": True,
-            "error": (
+        return AcceptOutcome(
+            ok=False,
+            region=region,
+            conflict=True,
+            error=(
                 f"ciao:{region} changed while this was being applied, so nothing "
                 "was written. Retry to apply it against the current entries."
             ),
-        }
+        )
     if outcome == "deferred":
         # The reconcile decision named an entry that could not be safely
         # replaced. Appending instead is the defect this path exists to avoid,
@@ -940,10 +1026,12 @@ async def _promote_region_row(
                 ),
             },
         )
-    return {"ok": False, "region": region, "error": f"could not write ciao:{region}"}
+    return AcceptOutcome(
+        ok=False, region=region, error=f"could not write ciao:{region}"
+    )
 
 
-def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
+def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Write an accepted `[people]` fact into a stub person note.
 
     A note that already exists is not appended to blindly — merging a new fact
@@ -954,39 +1042,39 @@ def _accept_people_row(config, row: dict[str, Any]) -> dict[str, Any]:
 
     name = str(row.get("target") or "").strip()
     if not name:
-        return {"ok": False, "error": "the bullet names no person"}
+        return AcceptOutcome(ok=False, error="the bullet names no person")
     try:
         vault = config.workspace_vault_root(row["workspace"])
     except (AttributeError, ValueError) as exc:
-        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
     try:
         created = write_people_note(Path(vault), name, row["text"])
     except OSError as exc:
-        return {"ok": False, "error": f"could not write the note: {exc}"}
+        return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
     if not created:
-        return {
-            "ok": False,
-            "error": f"People/{name}.md already exists; merge the fact manually, then dismiss",
-        }
-    return {"ok": True, "destination": f"People/{name}.md"}
+        return AcceptOutcome(
+            ok=False,
+            error=f"People/{name}.md already exists; merge the fact manually, then dismiss",
+        )
+    return AcceptOutcome(ok=True, destination=f"People/{name}.md")
 
 
-def _accept_learnings_row(config, row: dict[str, Any]) -> dict[str, Any]:
+def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Append an accepted `[learnings]` fact to Workspace/Learnings.md."""
     from ciao.memory_proposals import append_learning
 
     try:
         vault = config.workspace_vault_root(row["workspace"])
     except (AttributeError, ValueError) as exc:
-        return {"ok": False, "error": f"could not resolve the vault: {exc}"}
+        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
     try:
         append_learning(Path(vault), row["text"])
     except OSError as exc:
-        return {"ok": False, "error": f"could not append the learning: {exc}"}
-    return {"ok": True, "destination": "Workspace/Learnings.md"}
+        return AcceptOutcome(ok=False, error=f"could not append the learning: {exc}")
+    return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
 
 
-async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
+async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Fold an accepted `[project]` bullet into its canonical doc.
 
     Reuses the archive-time fold (guards, NO_CHANGES sentinel, per-doc lock)
@@ -999,13 +1087,13 @@ async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
 
     doc_raw = str(row.get("target") or "").strip()
     if not doc_raw:
-        return {"ok": False, "error": "the bullet names no project doc"}
+        return AcceptOutcome(ok=False, error="the bullet names no project doc")
     doc = Path(doc_raw)
     if not doc.is_absolute():
         # Same resolution the archive-time fold uses: workspace-root-relative.
         doc = Path(config.workspace_root) / doc
     if not doc.is_file():
-        return {"ok": False, "error": f"project doc not found: {doc_raw}"}
+        return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")
     insights = f"## Decisions\n- {row['text']}\n"
     try:
         wrote = await update_project_doc(
@@ -1014,16 +1102,16 @@ async def _accept_project_row(config, row: dict[str, Any]) -> dict[str, Any]:
             model=getattr(config, "insights_model", "") or "sonnet",
         )
     except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
-        return {"ok": False, "error": f"fold failed: {exc}"}
+        return AcceptOutcome(ok=False, error=f"fold failed: {exc}")
     if not wrote:
-        return {
-            "ok": False,
-            "error": "the fold reported no changes; dismiss instead if the doc already covers this",
-        }
-    return {"ok": True, "destination": doc_raw}
+        return AcceptOutcome(
+            ok=False,
+            error="the fold reported no changes; dismiss instead if the doc already covers this",
+        )
+    return AcceptOutcome(ok=True, destination=doc_raw)
 
 
-def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict[str, Any]) -> str:
+def _decision_destination(accept_action: str, row: dict[str, Any], outcome: AcceptOutcome) -> str:
     """Where an accepted row's fact landed, for the decision history's benefit.
 
     Mirrors the per-branch destination each accept helper already knows, so
@@ -1033,12 +1121,12 @@ def _decision_destination(accept_action: str, row: dict[str, Any], outcome: dict
     move's own ``destination``.
     """
     if accept_action == "edit_region":
-        region = outcome.get("region") or row.get("region") or row.get("kind", "")
+        region = outcome.region or row.get("region") or row.get("kind", "")
         return f"ciao:{region}" if region else ""
     if accept_action == "move_file":
-        return str(outcome.get("destination", ""))
+        return str(outcome.destination or "")
     # fold_doc, write_people_note, append_learnings all set "destination".
-    return str(outcome.get("destination", ""))
+    return str(outcome.destination or "")
 
 
 # ── Accept preview ────────────────────────────────────────────────────────
