@@ -410,3 +410,90 @@ def test_rehomed_wall_clock_replacement_keeps_the_dispatch_provider(
     assert replacement.model == "opus"
     assert replacement.mode == "auto"
     assert replacement.provider == "opencode"
+
+
+def test_a_superseded_run_does_not_restamp_the_current_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Issue #490, at the seam where the outcome is actually written.
+
+    The run's entry snapshot names the dispatch it belongs to. When the stored
+    row has moved on to a newer dispatch (an overlapping "Run now", or the cron
+    slot arriving while a manual run streams), the health field describes that
+    newer run and this one has no business writing it.
+    """
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+    )
+    # This run started under one dispatch...
+    entry.last_dispatch_id = "2026-06-15#aaaaaaaaaaaa"
+    # ...and a newer one has since taken the row over and is still streaming.
+    superseding = store.get(entry.schedule_id)
+    superseding.last_dispatch_id = "2026-06-15#bbbbbbbbbbbb"
+    superseding.last_status = "running"
+    store.replace(superseding)
+    pcm.start_stream = _stream_stub([{"type": "error"}])  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
+    )
+
+    # The run's own result is still reported (and recorded in the job log)...
+    assert result["status"] == "error"
+    stored = store.get(entry.schedule_id)
+    # ...but the entry keeps describing the run that is actually its latest.
+    assert stored.last_status == "running"
+    assert stored.last_dispatch_id == "2026-06-15#bbbbbbbbbbbb"
+
+
+def test_a_superseded_run_still_credits_the_slot_it_completed(
+    tmp_path: Path,
+) -> None:
+    """The other half of the rule. Completion belongs to the occurrence the run
+    was dispatched for, not to whichever dispatch the row names now — otherwise
+    a slot whose work is done is replayed because a later run for it failed.
+    """
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+    )
+    entry.last_dispatch_id = "2026-06-15#aaaaaaaaaaaa"
+    superseding = store.get(entry.schedule_id)
+    superseding.last_dispatch_id = "2026-06-15#bbbbbbbbbbbb"
+    superseding.last_status = "running"
+    store.replace(superseding)
+    pcm.start_stream = _stream_stub(
+        [{"type": "result", "text": "done", "is_error": False}]
+    )  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
+    )
+
+    assert result["status"] == "ok"
+    stored = store.get(entry.schedule_id)
+    assert stored.last_completed_on == "2026-06-15"
+    assert stored.last_status == "running"

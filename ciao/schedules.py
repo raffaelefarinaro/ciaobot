@@ -101,6 +101,8 @@ SYSTEM_STATE_FIELDS = {
     "last_run_chat_id",
     "last_status",
     "last_recovered_on",
+    "last_dispatch_id",
+    "last_completed_on",
     "workspace",
     "model",
     "provider",
@@ -596,10 +598,90 @@ def was_dispatched_since(entry: "ScheduleEntry", when: datetime) -> bool:
 # interval path, which has no expected slot to satisfy.
 FAILED_RUN_STATUSES = frozenset({"error"})
 
+# The mirror image: a dispatch whose run reached one of these needs no replay.
+# "skipped" is here for the same reason it is absent above — the turn was not
+# abandoned, somebody is still expected to finish it — so the occurrence it
+# served counts as served.
+COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped"})
+
+# Separates the occurrence a dispatch was made for from the token that makes it
+# unique, inside ``last_dispatch_id``. Same shape as SYSTEM_ID_SEPARATOR: one
+# character that appears in neither half (the slot is `YYYY-MM-DD`, the token is
+# hex), so splitting is unambiguous.
+DISPATCH_ID_SEPARATOR = "#"
+
+# Slot placeholder for a dispatch with no wall-clock occurrence to serve: an
+# interval run, or a manual run on an entry whose first slot has not come round
+# yet. Written rather than left empty so the id keeps one shape.
+NO_DISPATCH_SLOT = "-"
+
+
+def new_dispatch_id(slot_day: str = "") -> str:
+    """Mint the identity of one dispatch: ``<slot-day>#<token>``.
+
+    The token is what makes an outcome attributable: two dispatches that
+    overlap (a manual "Run now" started shortly before the cron slot) are
+    otherwise indistinguishable, because ``last_dispatched_at`` and
+    ``last_status`` are separate fields and the newer dispatch replaces the
+    timestamp while either run can still write the status (issue #490).
+
+    The slot travels *inside* the id instead of in a field of its own because
+    the id is the only thing the dispatch pipeline carries back: the run is
+    handed the entry as it stood when it started, and the answer to "which
+    occurrence was this run for?" has to be decided at dispatch, not at
+    completion. That is the midnight rule — a run dispatched at 23:58 for the
+    23:55 slot belongs to the 23:55 slot however long past midnight it streams.
+    """
+    token = uuid.uuid4().hex[:12]
+    return f"{slot_day or NO_DISPATCH_SLOT}{DISPATCH_ID_SEPARATOR}{token}"
+
+
+def dispatch_slot(dispatch_id: str) -> str:
+    """The occurrence day a dispatch id was minted for, or "" when it has none.
+
+    Tolerates an id from before this field existed (empty, or without the
+    separator): those simply report no slot, which keeps every caller on the
+    pre-#490 behaviour rather than attributing a run to a slot nobody recorded.
+    """
+    day, separator, _token = (dispatch_id or "").partition(DISPATCH_ID_SEPARATOR)
+    if not separator or day == NO_DISPATCH_SLOT:
+        return ""
+    return day
+
+
+def dispatch_is_current(entry: "ScheduleEntry", dispatch_id: str) -> bool:
+    """True when ``entry`` still points at the dispatch ``dispatch_id`` names.
+
+    False means a newer dispatch has superseded that run, so whatever it has to
+    say about "the latest run" is no longer about this entry's latest run.
+
+    An empty ``dispatch_id`` reports True: it belongs to a run started before
+    this field existed (an upgrade with a turn in flight) or by a caller outside
+    the manager, and last-writer-wins is exactly what the entry did for those
+    before, so nothing regresses.
+    """
+    if not dispatch_id:
+        return True
+    return (getattr(entry, "last_dispatch_id", "") or "") == dispatch_id
+
+
+def slot_completed_since(entry: "ScheduleEntry", when: datetime) -> bool:
+    """True when some dispatch *for* the occurrence at ``when`` (or a later one)
+    produced a completed run.
+
+    This is a property of the slot, not of the entry's latest dispatch, which is
+    why it is recorded separately from ``last_status``: when two runs overlap,
+    the one that finished the work is not necessarily the one the entry now
+    points at.
+    """
+    return bool(entry.last_completed_on) and (
+        entry.last_completed_on >= when.date().isoformat()
+    )
+
 
 def run_failed_since(entry: "ScheduleEntry", when: datetime) -> bool:
     """True when the schedule's latest dispatch is at/after ``when`` *and* the
-    run it started ended in failure.
+    run it started ended in failure, *and* no run for that occurrence completed.
 
     ``last_triggered_on``/``last_dispatched_at`` are stamped at dispatch, before
     the turn's outcome is known, so on their own they report a run that died
@@ -609,16 +691,57 @@ def run_failed_since(entry: "ScheduleEntry", when: datetime) -> bool:
     terminal failure counts as leaving its slot unsatisfied, so a run that
     completed cleanly can never be replayed by the callers of this helper.
 
-    The entry remembers one outcome, not one per dispatch, so a *manual* re-run
-    that fails after the scheduled run for the same slot succeeded also reads
-    as unsatisfied. That over-reports in the safe direction — the operator is
-    looking at an automation whose latest run failed either way — and the
-    alternative, a per-occurrence ledger written from the dispatch pipeline,
-    has to guess which slot a run that crosses midnight belongs to.
+    Two dispatches can overlap, though — a manual "Run now" started shortly
+    before the cron slot — and then "the latest outcome" and "was this slot
+    served?" are different questions (issue #490). ``last_status`` answers the
+    first: :func:`stamp_run_outcome` writes it only while the entry still points
+    at the dispatch that produced it, so a superseded run can no longer
+    misreport the current one. ``last_completed_on`` answers the second, and is
+    checked first here: a completed run marks its own occurrence served whether
+    or not a later dispatch has since replaced it, so a slot whose work is done
+    is never replayed because a *different* run for it failed afterwards.
     """
+    if slot_completed_since(entry, when):
+        return False
     if entry.last_status not in FAILED_RUN_STATUSES:
         return False
     return was_dispatched_since(entry, when)
+
+
+def stamp_run_outcome(
+    entry: "ScheduleEntry", dispatch_id: str, status: str
+) -> bool:
+    """Record one run's outcome on the stored row. True when the row changed.
+
+    Two rules, because the two things being recorded have different owners.
+
+    ``last_status`` describes the entry's *latest dispatch*, so it is written
+    only while the row still names the dispatch this outcome came from. Before
+    this, the last run to finish won: an overlapping manual run writing ``ok``
+    over an interrupted cron dispatch hid the interrupted slot from catch-up,
+    and the reverse completion order retried a slot that had already succeeded
+    (issue #490). A superseded run's status is dropped here rather than
+    misattributed — its own result stays in the job-run log and in its chat.
+
+    ``last_completed_on`` describes the *occurrence* the run was dispatched for,
+    which a superseded run served just as well as a current one. Recording it
+    regardless is what stops a completed slot being replayed, and it only ever
+    moves forward, so a late write from an older run cannot un-serve a newer
+    slot.
+
+    The caller persists the row; this only mutates it, so an unchanged row
+    costs no write.
+    """
+    changed = False
+    if status in COMPLETED_RUN_STATUSES:
+        slot = dispatch_slot(dispatch_id)
+        if slot and slot > (entry.last_completed_on or ""):
+            entry.last_completed_on = slot
+            changed = True
+    if dispatch_is_current(entry, dispatch_id) and entry.last_status != status:
+        entry.last_status = status
+        changed = True
+    return changed
 
 
 @dataclass(slots=True)
@@ -670,6 +793,21 @@ class ScheduleEntry:
     # down with it — cannot turn every restart into another dispatch. The slot
     # stays flagged as missed in the UI, where "Run all" is the operator's call.
     last_recovered_on: str = ""
+    # Identity of the most recent dispatch, ``<slot-day>#<token>`` (see
+    # ``new_dispatch_id``). ``last_status`` describes *this* dispatch and
+    # nothing else: an outcome arriving from a run the entry has since moved
+    # past is dropped rather than written over the current one. Without it the
+    # last run to finish won, and two overlapping non-interval dispatches (a
+    # manual "Run now" started just before the cron slot) paired the newer
+    # timestamp with the older run's result (issue #490).
+    last_dispatch_id: str = ""
+    # The latest occurrence day (YYYY-MM-DD, entry tz) for which *some* dispatch
+    # produced a completed run — the slot it was dispatched for, not the day it
+    # happened to finish on. Unlike ``last_status`` this is not scoped to the
+    # current dispatch: a run that finished the work for its slot has served it
+    # even if a later dispatch superseded it, so the slot is never replayed
+    # afterwards because a second run for it failed.
+    last_completed_on: str = ""
     days_of_week: list[str] | None = None  # e.g. ["sun"] or ["mon","wed","fri"]; used when frequency="weekly"
     thread_id: int | None = None           # target topic (None = DM)
     frequency: str = "weekly"              # "daily", "weekly", "monthly", "manual", "once", "interval"
@@ -1349,6 +1487,41 @@ class ScheduleManager:
         """Persist a validated schedule update through the public manager API."""
         self._store.replace(entry)
 
+    def _begin_dispatch(
+        self,
+        entry: ScheduleEntry,
+        now: datetime,
+        *,
+        slot_day: str | None = None,
+    ) -> str:
+        """Stamp a fresh dispatch identity on ``entry`` and return it.
+
+        Called on the entry object *before* it is handed to the dispatch
+        pipeline, because that object is the only thing the run carries back:
+        the outcome is matched against this id, and the occurrence embedded in
+        it is what the run's completion is credited to.
+
+        The occurrence is decided here, at dispatch, and never re-derived when
+        the run ends — that is the midnight rule. A run dispatched at 23:58 for
+        the 23:55 slot belongs to the 23:55 slot even when it finishes at 00:03,
+        exactly as ``last_triggered_on`` (also stamped at dispatch) already
+        says. ``slot_day`` lets ``catch_up`` pass the occurrence it is
+        recovering rather than have it recomputed from a clock that has since
+        moved on; everywhere else the current occurrence is the right one, and
+        a dispatch with none (an interval run, or a manual run before the first
+        slot) simply records no completion day.
+
+        The caller persists the entry; this only mutates it.
+        """
+        if slot_day is None:
+            last_expected = compute_last_expected_run(entry, now=now)
+            slot_day = (
+                last_expected.date().isoformat() if last_expected is not None else ""
+            )
+        dispatch_id = new_dispatch_id(slot_day)
+        entry.last_dispatch_id = dispatch_id
+        return dispatch_id
+
     async def _dispatch_entry(
         self,
         entry: ScheduleEntry,
@@ -1453,13 +1626,23 @@ class ScheduleManager:
         entry.last_dispatched_at = now.isoformat(timespec="seconds")
         entry.last_run_chat_id = chat_id
         entry.last_status = "running"
+        # Interval entries have no expected slot (compute_last_expected_run
+        # returns None for them), so the id carries no occurrence — it is here
+        # purely so a superseded run cannot write its status over a newer one.
+        dispatch_id = self._begin_dispatch(entry, now, slot_day="")
         self._store.replace(entry)
         self._dispatched_ids.add(entry.schedule_id)
         self._inflight.add(entry.schedule_id)
         self._claimed_chats.add(chat_id)
         task = asyncio.create_task(
             self._run_interval(
-                entry, model, mode, provider, chat_id, bound_before=bound_before
+                entry,
+                model,
+                mode,
+                provider,
+                chat_id,
+                bound_before=bound_before,
+                dispatch_id=dispatch_id,
             ),
             name=f"interval-run-{entry.schedule_id}",
         )
@@ -1478,6 +1661,7 @@ class ScheduleManager:
         chat_id: str,
         *,
         bound_before: str | None = None,
+        dispatch_id: str = "",
     ) -> None:
         status = "ok"
         try:
@@ -1503,6 +1687,14 @@ class ScheduleManager:
         # from our copy; everything else on the stored row is the user's edit.
         latest = self._store.get(entry.schedule_id)
         if latest is None:
+            return
+        if not dispatch_is_current(latest, dispatch_id):
+            # A newer dispatch owns the entry's run state now. Record whatever
+            # this run's outcome says about its *own* occurrence (nothing, for
+            # an interval entry — it has no slot) and leave the fields that
+            # describe the latest run to the dispatch that is now the latest.
+            if stamp_run_outcome(latest, dispatch_id, status):
+                self._store.replace(latest)
             return
         latest.last_status = status
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
@@ -1534,7 +1726,9 @@ class ScheduleManager:
             return
         await self._fire_interval(entry, now)
 
-    async def _dispatch_interval_now(self, entry: ScheduleEntry) -> dict:
+    async def _dispatch_interval_now(
+        self, entry: ScheduleEntry, now: datetime | None = None
+    ) -> dict:
         """Fire one interval run immediately, even while the entry is disabled."""
         result: dict = {
             "schedule_id": entry.schedule_id,
@@ -1548,24 +1742,32 @@ class ScheduleManager:
                 "status": "busy",
                 "chat_id": entry.web_chat_id or "",
             }
-        chat_id = await self._fire_interval(entry, _now_utc())
+        chat_id = await self._fire_interval(entry, now or _now_utc())
         if chat_id is None:
             return {**result, "status": "missing-chat"}
         return {**result, "status": "started", "chat_id": chat_id}
 
-    async def dispatch_now(self, schedule_id: str) -> dict:
+    async def dispatch_now(
+        self, schedule_id: str, *, now: datetime | None = None
+    ) -> dict:
         """Trigger a schedule immediately through the chat pipeline.
 
         Returns the schedule_id and, when available, the chat_id of the
         created/target chat so the frontend can link to it. Interval entries
         additionally report a ``status`` — a manual run into a chat that is
         already streaming is refused rather than queued.
+
+        ``now`` is the dispatch clock, defaulting to the real one. It is what
+        both the dispatch stamp and the occurrence this run is credited to are
+        read from, so a caller that has to place a manual run relative to a
+        slot (the overlap tests) can say when it happened.
         """
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
+        current = now or _now_utc()
         if is_interval(entry):
-            return await self._dispatch_interval_now(entry)
+            return await self._dispatch_interval_now(entry, current)
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
@@ -1576,6 +1778,14 @@ class ScheduleManager:
         chat_id: str | None = None
         if self._prepare_chat is not None:
             chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+        # Identify the dispatch before handing the entry to the pipeline: the
+        # run reads its id off this object, and a manual run started while a
+        # scheduled one is still streaming must not inherit its identity. The
+        # occurrence is the one current *now* — a "Run now" after today's slot
+        # serves today's slot, and one before it serves yesterday's, which is
+        # the same rule `was_dispatched_since` has always applied to the
+        # dispatch stamp.
+        self._begin_dispatch(entry, current)
         # Always dispatch in the background for manual "Run now" so the API can
         # return the prepared chat_id immediately and the PWA can link to the
         # live run while it is still streaming.
@@ -1587,7 +1797,7 @@ class ScheduleManager:
         # or "Run now"). Removing the entry here keeps the semantics simple:
         # once it has run, it's gone. Stamp the dispatch timestamp FIRST so
         # the replace-before-delete write actually lands for "once" entries.
-        entry.last_dispatched_at = datetime.now(UTC).isoformat(timespec="seconds")
+        entry.last_dispatched_at = current.isoformat(timespec="seconds")
         if chat_id:
             entry.last_run_chat_id = chat_id
         # Same in-flight marker the cron path writes. It is what clears a
@@ -1658,6 +1868,13 @@ class ScheduleManager:
             chat_id: str | None = None
             if self._prepare_chat is not None:
                 chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            # The slot being served is the one this tick matched, whatever the
+            # clock says by the time the run ends: a 23:55 daily dispatched at
+            # 23:55:07 is credited to that day even if the turn streams past
+            # midnight. Same day `last_triggered_on` is about to be stamped
+            # with, and stamped here for the same reason — at dispatch, where
+            # the answer is known.
+            self._begin_dispatch(entry, current, slot_day=current_day)
             await self._dispatch_entry(
                 entry, model, mode, provider, target_chat_id=chat_id
             )
@@ -1834,6 +2051,11 @@ class ScheduleManager:
             chat_id = None
             if self._prepare_chat is not None:
                 chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            # The occurrence being recovered, not the one current at boot: a
+            # catch-up that runs after midnight is still serving the slot it
+            # found unserved, which is the same day `last_triggered_on` below
+            # is stamped with.
+            self._begin_dispatch(entry, current, slot_day=expected_day)
             await self._dispatch_entry(
                 entry, model, mode, provider, target_chat_id=chat_id
             )

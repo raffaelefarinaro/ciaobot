@@ -17,7 +17,12 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.schedules import ScheduleManager, ScheduleStore, migrate_loops
+from ciao.schedules import (
+    ScheduleManager,
+    ScheduleStore,
+    dispatch_is_current,
+    migrate_loops,
+)
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
@@ -570,8 +575,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # interval), and did so *before* `_run_interval`'s own re-read, so
             # that function's documented "the user's edit survives" guarantee
             # was reading an already-clobbered row.
+            #
+            # And only while the row still names this dispatch: a superseded
+            # run writing its own (older) chat here would re-point the
+            # "last run" link away from the run the entry now describes.
             latest = schedule_store.get(entry.schedule_id)
-            if latest is not None:
+            if latest is not None and dispatch_is_current(
+                latest, getattr(entry, "last_dispatch_id", "") or ""
+            ):
                 latest.last_run_chat_id = result["chat_id"]
                 schedule_store.replace(latest)
         return result
