@@ -77,6 +77,7 @@ from ciao.schedules import (
     normalize_archive_policy,
     normalize_interval_minutes,
     publish_automations_changed,
+    run_failed_since,
     stamp_fallback_project,
     wall_clock_time_error,
     wall_clock_time_value_error,
@@ -5562,7 +5563,8 @@ def _enrich_schedule(
     next_run = compute_next_run(entry)
     entry_dict["next_run"] = next_run.isoformat() if next_run is not None else None
     # "Missed" detection: a schedule whose last expected fire has passed but
-    # which never recorded a trigger for that day. The 5-minute grace avoids
+    # which never recorded a trigger for that day, or whose run for that day
+    # ended in failure instead of finishing. The 5-minute grace avoids
     # flagging a schedule during the brief window between its fire time and the
     # next poll tick (or the startup catch-up pass).
     last_expected = compute_last_expected_run(entry, now=now)
@@ -5581,9 +5583,19 @@ def _enrich_schedule(
         # attended to (even a late manual run the next morning), regardless of
         # whether the auto tick stamped the daily-idempotency key.
         dispatched_since_expected = was_dispatched_since(entry, last_expected)
-        not_triggered = (
-            not entry.last_triggered_on or expected_day > entry.last_triggered_on
-        ) and not dispatched_since_expected
+        # ...unless the run that dispatch started never finished. Both stamps
+        # are written at dispatch, before the outcome is known, so a turn that
+        # died mid-flight (server restart, provider subprocess killed) marked
+        # the slot as served and the work vanished with only a `last_status`
+        # on the detail page to show for it (issue #486). A failed run leaves
+        # its slot unsatisfied, so it belongs in the Missed list where "Run
+        # all" can recover it. A run that completed — or one still waiting on
+        # the user or the provider ("skipped") — never lands here.
+        failed_since_expected = run_failed_since(entry, last_expected)
+        not_triggered = failed_since_expected or (
+            (not entry.last_triggered_on or expected_day > entry.last_triggered_on)
+            and not dispatched_since_expected
+        )
         overdue = ((now or datetime.now(UTC)) - last_expected) > timedelta(minutes=5)
         missed = not_triggered and overdue
     entry_dict["missed"] = missed

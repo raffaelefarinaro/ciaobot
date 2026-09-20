@@ -1739,8 +1739,10 @@ class CiaoMcpService:
                 schedule_id: (update only) The schedule to update.
 
             An enabled schedule with a missed latest occurrence (e.g. the
-            server was off) runs once on startup; older missed intervals are
-            not replayed. Interval schedules are excluded from that catch-up:
+            server was off, or a run stopped before it finished) runs once on
+            startup; older missed intervals are not replayed, a run that
+            completed is never repeated, and a slot gets one automatic
+            recovery. Interval schedules are excluded from that catch-up:
             their cadence simply resumes.
             """
             # Snapshot the caller's arguments before any other local exists.
