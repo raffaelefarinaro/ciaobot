@@ -677,6 +677,7 @@ def _launchd_setup_argv(workspace: Path, launch_agents: Path) -> list[str]:
 def test_setup_quiets_only_the_expected_launchd_unload_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     calls: list[tuple[list[str], dict[str, object]]] = []
     real_run = subprocess.run
 
@@ -708,6 +709,7 @@ def test_setup_preserves_load_failure_status_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     calls: list[tuple[list[str], dict[str, object]]] = []
     real_run = subprocess.run
 

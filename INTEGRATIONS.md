@@ -333,6 +333,17 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Optional env vars
 
+Linux hosts can run the Python backend and PWA under systemd. `ciao setup`
+initializes their workspace without launchd; `ciao linux-service --workspace
+/srv/ciaobot --user ciaobot --home /var/lib/ciaobot --python
+/opt/ciaobot/venv/bin/python` prints a unit for explicit administrator installation.
+The service reads `.env` through Ciaobot's dotenv loader, not systemd's different
+EnvironmentFile syntax. Keep provider credentials in the service account's home.
+Linux production Settings uses `/api/admin/restart` for a draining restart,
+without a git checkout, package reinstall, or desktop build.
+See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recovery.
+Apple-native voice and Apple Intelligence are unavailable on Linux hosts.
+
 - `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** Execution mode is fixed at `auto` for every provider (Claude Code and opencode). Auto lets safe reads and edits run silently and asks before destructive operations. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.

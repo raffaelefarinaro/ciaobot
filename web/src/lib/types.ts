@@ -706,6 +706,7 @@ export interface LocalStatus {
   branch: string | null
   dirty: boolean
   dev_mode?: boolean
+  restart_only?: boolean
 }
 
 export interface DeployResult {

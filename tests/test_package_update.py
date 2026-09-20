@@ -51,6 +51,15 @@ def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
     assert "Editable checkouts" in result["error"]
 
 
+def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "unknown")
+    result = update_package()
+    assert result["ok"] is False
+    assert "docs/LINUX.md" in result["error"]
+    assert result["command"] == ""
+
+
 def test_package_update_endpoint_explains_app_owned_updates() -> None:
     app = Starlette(
         routes=[Route("/api/package/update", package_update_endpoint, methods=["POST"])]

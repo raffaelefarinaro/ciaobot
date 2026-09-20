@@ -148,6 +148,7 @@ ciao/                          Python backend (Starlette).
   # instead, so the CLI never has to import ciao.web to reach it.
   # mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
+  linux_service.py             Side-effect-free systemd unit renderer (`ciao linux-service`). Linux setup initializes workspace data independently of service installation; the unit runs the virtualenv interpreter under a dedicated account.
 
 web/                           Vue 3 PWA frontend.
   src/App.vue                  Root component.
@@ -232,6 +233,12 @@ secrets/                       OAuth credentials (gitignored).
 ```
 
 ## Server and chat pipeline
+
+Linux production hosts run the engine under systemd. Settings uses the
+authenticated `POST /api/admin/restart` endpoint, selected by `restart_only` in
+`/api/local/status`, to enter the same chat-drain/re-exec lifecycle without a
+source checkout or desktop rebuild. Code updates remain administrator-managed;
+developer mode retains the deploy endpoint.
 
 `ciao/` is a Starlette web server that mounts the PWA frontend, exposes a JSON API for projects/chats/schedules, and drives Claude Agent SDK sessions for each chat turn. Auth is a pre-shared token (`PWA_AUTH_TOKEN` — the dashboard password) traded for a signed session cookie, and it is required by default: an unset `PWA_AUTH_REQUIRED` protects any workspace that has a token, and only an explicit `PWA_AUTH_REQUIRED=false` runs the dashboard open. Settings can change the password but not disable protection. Operational state lives in `.runtime/` under `CIAO_WORKSPACE`; durable memory lives under `CIAO_VAULT_ROOT` (default `<CIAO_WORKSPACE>/memory-vault`).
 

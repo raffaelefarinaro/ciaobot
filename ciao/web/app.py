@@ -46,6 +46,7 @@ from ciao.web.routes_auth import (
 from ciao.web.routes_api import (
     admin_add_skill,
     admin_deploy,
+    admin_restart,
     admin_snapshot,
     admin_skills,
     admin_status,
@@ -403,6 +404,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Admin
         Route("/api/admin/snapshot", admin_snapshot, methods=["POST"]),
         Route("/api/admin/deploy", admin_deploy, methods=["POST"]),
+        Route("/api/admin/restart", admin_restart, methods=["POST"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),

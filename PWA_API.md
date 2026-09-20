@@ -158,6 +158,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
+| POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
@@ -188,6 +189,17 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 `healthy` means a reliable scan found no actionable items. `needs_attention` means a reliable scan found findings. `error` means one or more required inputs could not be inspected reliably; `total_issues` includes those scan errors, while `total_errors` counts them separately. Each section object contains its detailed counts, findings, and local errors. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 
 ## Agent recipes
+
+### Restart an installed Linux server
+
+`POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
+does not run git, pip, npm, or desktop builds. Linux production Settings chooses
+this action when `/api/local/status` reports `restart_only: true`. Development
+deploys retain `/api/admin/deploy`.
+
+```sh
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/restart"
+```
 
 Concrete curl examples for the in-session agent acting on the local API. Auth once, reuse the cookie jar.
 

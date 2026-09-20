@@ -390,6 +390,15 @@ def update_package(
             "error": "The bundled app and engine update together through Ciaobot.app.",
             "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
         }
+    import sys
+
+    if sys.platform.startswith("linux"):
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "Linux servers are updated by the administrator: install the chosen source release, rebuild the PWA, and restart the service. See docs/LINUX.md.",
+            "command": "",
+        }
     return {
         "ok": False,
         "mode": mode,

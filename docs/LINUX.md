@@ -1,0 +1,124 @@
+# Linux hosting
+
+Ciaobot's Python backend and PWA can run on Ubuntu 24.04 with Python 3.12 and
+Node 22. Use a browser or installed PWA from macOS, Windows, Linux, or a phone.
+The agents execute on the server and use its files and credentials. Apple-native
+voice and Apple Intelligence require a Mac host; select Claude/OpenCode models
+for Linux routines. Native Windows and Linux desktop bundles are separate work.
+
+## Install
+
+Use a dedicated account and separate application code from workspace data.
+The following administrator commands assume a source checkout (at the desired
+release/ref) is already at `/opt/ciaobot/source`, including the Linux support.
+The macOS release installer is not a Linux installer.
+
+```sh
+sudo apt-get update
+sudo apt-get install python3-venv git
+sudo useradd --create-home --home-dir /var/lib/ciaobot --shell /bin/bash ciaobot
+sudo install -d -o ciaobot -g ciaobot /opt/ciaobot /srv/ciaobot
+sudo chown -R ciaobot:ciaobot /opt/ciaobot/source
+sudo -u ciaobot python3 -m venv /opt/ciaobot/venv
+sudo -u ciaobot /opt/ciaobot/venv/bin/pip install -e /opt/ciaobot/source
+sudo -u ciaobot npm --prefix /opt/ciaobot/source/web ci
+sudo -u ciaobot npm --prefix /opt/ciaobot/source/web run build
+sudo -u ciaobot -H /opt/ciaobot/venv/bin/ciao setup --workspace /srv/ciaobot
+```
+
+Install Node 22 before building; alternatively build the PWA on another machine
+and transfer `ciao/web/static/` with the source. The server does not need Vite.
+Setup generates the dashboard password in `/srv/ciaobot/.env`, mode `0600`, and
+prints a one-time login URL. Existing passwords and config are preserved on rerun.
+
+For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
+
+```dotenv
+PWA_HOST=127.0.0.1
+PWA_PORT=8443
+PWA_AUTH_REQUIRED=true
+CIAO_ALLOWED_ORIGINS=bot.example.com
+```
+
+Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as `ciaobot`,
+not root. The Claude SDK includes a Claude binary; `ciao auth claude --print-only`
+prints the login command. Run it from an interactive SSH session as that account.
+Install OpenCode separately if using that provider, then run `ciao auth opencode`.
+Provider OAuth may require completing a browser flow on your own computer.
+
+The service account also needs a Git author identity for automatic workspace
+snapshots. If it has no configured identity, set `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` in the workspace
+`.env` to the identity you want recorded for automation (for example `Ciaobot`
+and `ciaobot@localhost`). This does not change the administrator's Git settings.
+
+## Service
+
+Generate and inspect the unit, then install it explicitly:
+
+```sh
+/opt/ciaobot/venv/bin/ciao linux-service \
+  --workspace /srv/ciaobot --user ciaobot --home /var/lib/ciaobot \
+  --python /opt/ciaobot/venv/bin/python > /tmp/ciaobot.service
+sudo systemd-analyze verify /tmp/ciaobot.service
+sudo install -m 644 /tmp/ciaobot.service /etc/systemd/system/ciaobot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ciaobot
+sudo systemctl status ciaobot
+sudo journalctl -u ciaobot -n 100 --no-pager
+```
+
+`linux-service` only renders text: it neither creates an account nor changes a
+service. Paths must be absolute. The unit preserves the virtualenv interpreter,
+sets `HOME` and tool `PATH`, uses a private umask, and restarts on failure.
+Subprocesses belong to the same service control group and are stopped with it.
+The application handles its own `.env`; do not also use an `EnvironmentFile`.
+
+Settings → Restart drains active chat work and re-executes the backend. A direct
+`systemctl stop/restart` is an administrative stop, not that application drain:
+wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
+
+## HTTPS access
+
+Use Tailscale Serve for private HTTPS access, or point a domain at the VPS and
+put Caddy in front of the loopback backend. A minimal Caddyfile is:
+
+```caddyfile
+bot.example.com {
+    reverse_proxy 127.0.0.1:8443
+}
+```
+
+Allow SSH and the chosen HTTPS ingress through the firewall. Keep port 8443
+on loopback. Caddy handles WebSocket upgrades; HTTPS enables PWA browser
+features. For initial local-only browser onboarding, use an SSH tunnel:
+
+```sh
+ssh -L 8543:127.0.0.1:8443 your-admin@your-vps
+```
+
+Then visit `http://localhost:8543`. A workspace initialized by CLI can be used
+directly at the HTTPS hostname with its dashboard password.
+
+## Updates and backups
+
+Linux source installs are updated by the administrator. Pin the chosen source
+revision, build its frontend, install its Python dependencies, and restart the
+service after active work has drained. For staging, prepare a separate release
+directory and virtualenv and change the unit's interpreter path at cutover.
+Preserve the prior application release for rollback.
+
+Before upgrading, stop the service and back up `/srv/ciaobot` (including `.env`,
+`.runtime`, per-workspace agent roots and vaults) and `/var/lib/ciaobot` (provider
+credentials and native sessions). Include any separately configured vault paths.
+Store backups privately. Git does not include runtime state or credentials.
+If an upgrade migrates data, rollback requires its matching pre-upgrade backup,
+not just the previous code. Keep only one active host scheduler during migration.
+
+## Verification
+
+Run `mypy ciao`, `pytest tests/`, and frontend tests/build from the checkout.
+On the live host verify authenticated HTTP, event/chat WebSockets, a provider
+turn and tool execution, archive/insights, schedule execution, Settings restart,
+and recovery after a reboot. Missing provider authentication prevents real chat
+verification even when the server, PWA, and automated tests are healthy.
