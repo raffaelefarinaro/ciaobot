@@ -239,8 +239,13 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 `ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
-**Runtime:** `CIAO_WORKSPACE`, `PWA_PORT`. `CIAO_PORT` is a CLI-only fallback
-for commands whose workspace `.env` does not define `PWA_PORT`.
+**Runtime:** `CIAO_WORKSPACE`, `PWA_PORT`. `CIAO_PORT` does not control the
+port the server binds; it is a legacy fallback used to *locate* a running
+server when the workspace `.env` does not define `PWA_PORT` — read by CLI
+commands, by the desktop shell (`desktop/src-tauri/src/runtime.rs`) and by
+the macOS service manager (`ciao/macos_service.py`), each of which falls
+back to it from the LaunchAgent or process environment. Leave it in place on
+a legacy install rather than removing it.
 
 **Ciaobot agent control plane:**
 
