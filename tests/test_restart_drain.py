@@ -7,6 +7,7 @@ import pytest
 from ciao.main import _wait_for_chat_drain
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
 from ciao.web.project_chats import ProjectChatManager, RestartDrainingError
+from ciao.web.subagent_watchers import SubagentWatchers
 
 
 class _SequencedManager:
@@ -39,10 +40,14 @@ async def test_restart_wait_requires_stable_idle_window() -> None:
 def _bare_manager() -> ProjectChatManager:
     manager = object.__new__(ProjectChatManager)
     manager._broker = ChatStreamBroker()
-    manager._background_agents_last = {}
-    manager._pending_subagent_watchers = {}
     manager._restart_draining = False
     manager._events = EventsHub()
+    # The subagent watchers own the running counts and the live watcher
+    # tasks, so a hand-built manager has to carry the collaborator; the two
+    # assignments below write through to its state.
+    manager._subagents = SubagentWatchers(manager)
+    manager._background_agents_last = {}
+    manager._pending_subagent_watchers = {}
     return manager
 
 
