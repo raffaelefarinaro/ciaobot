@@ -17,7 +17,12 @@ The macOS release installer is not a Linux installer.
 sudo apt-get update
 sudo apt-get install python3-venv git
 sudo useradd --create-home --home-dir /var/lib/ciaobot --shell /bin/bash ciaobot
-sudo install -d -o ciaobot -g ciaobot /opt/ciaobot /srv/ciaobot
+sudo install -d -o ciaobot -g ciaobot /opt/ciaobot
+# The workspace holds private vault notes and the one-time setup token, so it
+# must not be world-readable: omitting -m defaults to 0755, and the default
+# 0022 umask would leave initial notes and .runtime/setup-token readable by
+# any other local account (the token redeems via the loopback setup route).
+sudo install -d -m 0700 -o ciaobot -g ciaobot /srv/ciaobot
 sudo chown -R ciaobot:ciaobot /opt/ciaobot/source
 sudo -u ciaobot python3 -m venv /opt/ciaobot/venv
 sudo -u ciaobot /opt/ciaobot/venv/bin/pip install -e /opt/ciaobot/source

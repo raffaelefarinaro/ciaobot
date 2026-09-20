@@ -33,6 +33,9 @@ def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_pa
 
 
 def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
+    # The bundled app is macOS-only; on Linux every install mode gets the
+    # administrator workflow instead.
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "bundled_app")
 
     result = update_package()
