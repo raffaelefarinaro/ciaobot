@@ -4,6 +4,8 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -42,6 +44,7 @@ def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
 
 
 def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
 
     result = update_package()
@@ -53,11 +56,13 @@ def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
 
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "unknown")
-    result = update_package()
-    assert result["ok"] is False
-    assert "docs/LINUX.md" in result["error"]
-    assert result["command"] == ""
+    for mode in ("editable", "unknown"):
+        monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda m=mode: m)
+        result = update_package()
+        assert result["ok"] is False
+        assert result["mode"] == mode
+        assert "docs/LINUX.md" in result["error"]
+        assert result["command"] == ""
 
 
 def test_package_update_endpoint_explains_app_owned_updates() -> None:

@@ -46,7 +46,7 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
         home=Path("/var/lib/ciaobot"), python=python,
     )
     assert f'ExecStart="{str(python).replace("%", "%%").replace("$", "$$")}" -m ciao.cli run' in unit
-    assert 'WorkingDirectory=/srv/ciao "personal" %%n' in unit
+    assert 'WorkingDirectory="/srv/ciao \\"personal\\" %%n"' in unit
     assert 'Environment="HOME=/var/lib/ciaobot"' in unit
     assert "KillMode=control-group" in unit
     assert "EnvironmentFile=" not in unit  # dotenv owns parsing of the workspace file

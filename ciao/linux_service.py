@@ -29,9 +29,12 @@ def render_service(*, workspace: Path, user: str, home: Path, python: Path) -> s
     template = resources.files("ciao.stock").joinpath("deploy/ciaobot.service.tmpl").read_text(encoding="utf-8")
     return template.format(
         user=user,
-        # WorkingDirectory= consumes a single literal path, unlike the shell-
-        # style word lists accepted by ExecStart= and Environment=.
-        workspace=str(workspace).replace("%", "%%"),
+        # WorkingDirectory= parses quotes and backslash escapes, so a
+        # literal quote or backslash must be quoted rather than inserted
+        # raw. _quoted() applies systemd's quoting rules (including %%
+        # specifier escaping); $ stays literal here because this directive
+        # does not perform environment expansion the way ExecStart= does.
+        workspace=_quoted(str(workspace)),
         workspace_env=_quoted(f"CIAO_WORKSPACE={workspace}"),
         home_env=_quoted(f"HOME={home}"),
         path_env=_quoted(f"PATH={tool_path}"),
