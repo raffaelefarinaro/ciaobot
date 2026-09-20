@@ -30,9 +30,11 @@ web/
     router.ts             routes: /login, /device, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
                           (/device is device-scoped and unguarded: it must load when a client's host is down)
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
+    components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
     composables/          reactive logic shared between components, and behaviour lifted
-                          out of oversized panes (useHoverPinPopover, useChatComposer)
+                          out of oversized panes (useHoverPinPopover, useChatComposer,
+                          useMcpServers)
     lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
@@ -121,6 +123,27 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   is pulled into both components with `<style scoped src>`; scoped rules in a
   parent do not reach a child's subtree, so moving markup into a component
   without moving its styles silently unstyles it.
+- **`SettingsView.vue` ownership boundary.** Settings is being split the same
+  way, one tab at a time, into `components/settings/`. The MCP tab is the first
+  one out. `composables/useMcpServers.ts` owns the MCP state and every
+  `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
+  map, the secret inputs, the tool probes and the add form. It imports no
+  store, no router and no lifecycle hook: the API client, `notifySaved`,
+  `notifyFailed` and the delete confirmation all arrive as options, so
+  `composables/useMcpServers.test.ts` drives all of it without mounting
+  anything. `components/settings/SettingsMcpServers.vue` owns only the markup;
+  it takes the controller as one prop and emits `create-via-chat` for the one
+  action it cannot do itself (creating a chat and navigating).
+  `SettingsView` keeps the tab routing, the project store and the router, and
+  keeps deciding *when* MCP data loads — `fetchStatus()`/`fetchUsage()` still
+  run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
+  though no template renders it: the operator reads that endpoint by hand to
+  decide which MCP tools to prune. Do not drop the call.
+  Shared settings styling lives in `components/settings/settingsPanels.css`,
+  loaded by both sides with `<style scoped src>` — a parent's scoped rules
+  never reach a child, and the alternative is silently unstyled markup. New
+  panels split out of Settings reuse that sheet rather than copying rules.
+  Asset origin badges come from `lib/assetOrigin.ts`, which stays Vue-free.
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.
