@@ -8356,7 +8356,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # Write every promotion BEFORE dropping any bullet, and only drop the
             # ones that landed. A batch that removed the lines first would lose every
             # fact whose region was over cap, silently and in bulk.
-            promoted: dict[str, dict[str, Any]] = {}
+            promoted: dict[str, proposal_service.AcceptOutcome] = {}
             keep_lines: set[int] = set()
             if action == "accept":
                 # The claim above only covers this process. Another resolver
@@ -8380,10 +8380,9 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # nothing to write here, only result shaping below.
                         continue
                     if int(row["line"]) not in present:
-                        promoted[row["id"]] = {
-                            "ok": False,
-                            "error": "this proposal was already resolved",
-                        }
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(
+                            ok=False, error="this proposal was already resolved"
+                        )
                         keep_lines.add(int(row["line"]))
                         continue
                     expected = revisions.get(row["id"], "")
@@ -8392,34 +8391,37 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             proposal_service.destination_revision, config, row
                         )
                         if current and current != expected:
-                            promoted[row["id"]] = {
-                                "ok": False,
-                                "conflict": True,
-                                "error": "the destination changed since this "
+                            promoted[row["id"]] = proposal_service.AcceptOutcome(
+                                ok=False,
+                                conflict=True,
+                                error="the destination changed since this "
                                 "preview; nothing was written",
-                            }
+                            )
                             keep_lines.add(int(row["line"]))
                             continue
+                    promotion: proposal_service.AcceptOutcome
                     if accept.action == "edit_region":
                         # No reconcile in the batch path: it is one model call
                         # per row, and a large selection would spend a timeout
                         # on each. A row that needs it is retried singly.
-                        outcome = await proposal_service._promote_region_row(
+                        promotion = await proposal_service._promote_region_row(
                             config, row
                         )
                     elif accept.action == "fold_doc":
                         # A fold is a model call, so a large selection folds
                         # sequentially; write-then-dismiss still holds per row.
-                        outcome = await proposal_service._accept_project_row(config, row)
+                        promotion = await proposal_service._accept_project_row(config, row)
                     elif accept.action == "write_people_note":
-                        outcome = proposal_service._accept_people_row(config, row)
+                        promotion = proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
-                        outcome = proposal_service._accept_learnings_row(config, row)
+                        promotion = proposal_service._accept_learnings_row(config, row)
                     else:
                         # route_manually: nothing to perform, and the row stays.
-                        outcome = {"ok": False, "error": "no destination yet"}
-                    promoted[row["id"]] = outcome
-                    if not outcome.get("ok"):
+                        promotion = proposal_service.AcceptOutcome(
+                            ok=False, error="no destination yet"
+                        )
+                    promoted[row["id"]] = promotion
+                    if not promotion.ok:
                         keep_lines.add(int(row["line"]))
 
             # The batch is one atomic file rewrite: a single transaction-level
@@ -8478,13 +8480,20 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # reach the outcomes tally (skill rows come from skill
                 # evolution, rehome rows from vault hygiene).
                 destination = ""
-                row_outcome: dict[str, Any] = {}
+                # An outcome with nothing set is how a row this request did not
+                # promote reports: no ``ok`` at all, which the builders read as
+                # "nothing was written here", not as a failure.
+                row_outcome = proposal_service.AcceptOutcome()
                 if action == "accept":
                     accept_here = proposal_kinds.accept_for(row["kind"])
                     if accept_here.action == "move_file":
-                        row_outcome = {"destination": moved_destinations.get(pid, "")}
+                        # The move ran above the grouping; only where the note
+                        # landed matters to the decision record.
+                        row_outcome = proposal_service.AcceptOutcome(
+                            destination=moved_destinations.get(pid, "")
+                        )
                     else:
-                        row_outcome = promoted.get(pid, {})
+                        row_outcome = promoted.get(pid, proposal_service.AcceptOutcome())
                     destination = proposal_service._decision_destination(
                         accept_here.action, row, row_outcome
                     )
@@ -8498,7 +8507,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     source=str(row.get("source") or ""),
                     destination=destination,
                     outcome=(
-                        ("duplicate" if row_outcome.get("duplicate") else "written")
+                        ("duplicate" if row_outcome.duplicate else "written")
                         if action == "accept"
                         else ""
                     ),
@@ -8508,7 +8517,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     # accept is unmatchable by text. The write hands its
                     # receipt back here instead. A dismiss has no outcome and
                     # so no receipt, which is the empty default.
-                    receipt_id=str(row_outcome.get("receipt_id") or ""),
+                    receipt_id=row_outcome.receipt_id or "",
                 )
             for row in entry["rows"]:
                 if action == "accept":
@@ -8527,7 +8536,9 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         row["id"],
                         accept,
                         row,
-                        promoted.get(row["id"], {}),
+                        promoted.get(
+                            row["id"], proposal_service.AcceptOutcome()
+                        ).as_dict(),
                         include_usage=False,
                     ).as_dict())
                 else:
@@ -8737,7 +8748,10 @@ async def proposal_action(request: Request) -> JSONResponse:
             ).as_dict()
         )
 
-    promoted: dict[str, Any] = {}
+    # What the promotion did, whichever accept ran — one typed outcome, so the
+    # refusals below, the result builder and the decision record read one
+    # shape. A dismiss promotes nothing and leaves it empty.
+    promoted = proposal_service.AcceptOutcome()
     queue = Path(ctx["path"])
     # Claimed BEFORE the promotion and held until the queue rewrite has landed:
     # two tabs accepting the same row both promoted (a doc folded twice, a
@@ -8845,7 +8859,12 @@ async def proposal_action(request: Request) -> JSONResponse:
                     return JSONResponse(
                         {"error": outcome["error"], "id": pid}, status_code=409
                     )
-                promoted = outcome
+                # The move reports more than an accept does (the rewritten files,
+                # the mover's own result); what the response and the decision
+                # record read from it is where the note landed.
+                promoted = proposal_service.AcceptOutcome(
+                    ok=True, destination=str(outcome.get("destination", ""))
+                )
             elif accept.action == "edit_region":
                 # `?reconcile=1` re-runs the write-time reconcile against the
                 # region's current entries before writing, which is how a fact
@@ -8860,16 +8879,16 @@ async def proposal_action(request: Request) -> JSONResponse:
                 promoted = await proposal_service._promote_region_row(
                     config, promote_row, reconcile=reconcile
                 )
-                if not promoted.get("ok"):
+                if not promoted.ok:
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
                     # retry. Losing it silently is the one outcome to avoid.
                     refusal: dict[str, Any] = {
-                        "error": promoted.get("error", "could not write the region"),
+                        "error": promoted.error or "could not write the region",
                         "id": pid,
-                        "region": promoted.get("region", ""),
+                        "region": promoted.region or "",
                     }
-                    if promoted.get("deferred"):
+                    if promoted.deferred:
                         # The one refusal another `?reconcile=1` can resolve, so
                         # it is marked as such and carries what it was weighed
                         # against. Every other refusal here needs a human to
@@ -8877,28 +8896,28 @@ async def proposal_action(request: Request) -> JSONResponse:
                         # text), and offering a retry for those would be a button
                         # that cannot do what it says.
                         refusal["deferred"] = True
-                        refusal["reason"] = promoted.get("reason", "")
-                        refusal["competing"] = promoted.get("competing", [])
+                        refusal["reason"] = promoted.reason or ""
+                        refusal["competing"] = list(promoted.competing or ())
                     return JSONResponse(refusal, status_code=409)
             elif accept.action == "fold_doc":
                 promoted = await proposal_service._accept_project_row(config, promote_row)
-                if not promoted.get("ok"):
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "fold failed"), "id": pid},
+                        {"error": promoted.error or "fold failed", "id": pid},
                         status_code=409,
                     )
             elif accept.action == "write_people_note":
                 promoted = proposal_service._accept_people_row(config, promote_row)
-                if not promoted.get("ok"):
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "could not write the note"), "id": pid},
+                        {"error": promoted.error or "could not write the note", "id": pid},
                         status_code=409,
                     )
             elif accept.action == "append_learnings":
                 promoted = proposal_service._accept_learnings_row(config, promote_row)
-                if not promoted.get("ok"):
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "could not append"), "id": pid},
+                        {"error": promoted.error or "could not append", "id": pid},
                         status_code=409,
                     )
             else:
@@ -8957,7 +8976,7 @@ async def proposal_action(request: Request) -> JSONResponse:
         # doing half of it from a queue row would leave the links pointing at
         # a path that moved.
         result = proposal_actions.build_accept_result(
-            pid, accept, row, promoted, include_usage=True
+            pid, accept, row, promoted.as_dict(), include_usage=True
         )
         if removed_ours:
             # Preserve the accepted row's text in the same decision history a
@@ -8975,12 +8994,12 @@ async def proposal_action(request: Request) -> JSONResponse:
                 workspace=ctx["workspace"],
                 source=str(row.get("source") or ""),
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
-                outcome="duplicate" if promoted.get("duplicate") else "written",
+                outcome="duplicate" if promoted.duplicate else "written",
                 proposal_id=pid,
                 # See the batch path: the recorded text is the original bullet,
                 # so the receipt reference is the only way back to what an
                 # edited accept actually wrote.
-                receipt_id=str(promoted.get("receipt_id") or ""),
+                receipt_id=promoted.receipt_id or "",
             )
         return JSONResponse({"ok": True, "result": result.as_dict()})
     if removed_ours:
