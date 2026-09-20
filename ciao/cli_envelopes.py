@@ -151,6 +151,13 @@ def task_notification_fields(content: str) -> dict[str, str] | None:
 def envelope_notification_fields(content: str) -> dict[str, str] | None:
     """Fields of the notification `content` **is**, else None.
 
+    Known limits, deliberately left to #502 rather than fixed here: the field
+    dict is last-wins, so a sweep envelope naming several tasks yields only
+    its ``__orphan_summary`` marker, and only the FIRST notification in a
+    record is read. Widening either one re-opens the hazard described below
+    unless the scan is bounded to the leading run of notifications — that is
+    what #502 has to get right, with the reproduction for it.
+
     A completion is a record the CLI wrote as a ``<task-notification>``
     envelope, so it has to *open* with that tag. Text that merely carries the
     grammar in its body is something else that happens to quote it, and both
