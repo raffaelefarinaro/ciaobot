@@ -7045,7 +7045,10 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # every restart.
 
     relaunch_desktop = False
-    if getattr(config, "dev_mode", False):
+    # The desktop shell is a macOS Tauri bundle: attempting its rebuild on
+    # Linux fails after git/pip/npm have already mutated the install, and the
+    # resulting 500 aborts before the restart. Linux dev deploys skip it.
+    if getattr(config, "dev_mode", False) and sys.platform == "darwin":
         needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
         if not needed:
             steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
@@ -7061,6 +7064,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
                     {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
                     status_code=500,
                 )
+    elif getattr(config, "dev_mode", False):
+        steps.append({"step": "desktop app", "ok": True, "output": "skipped: the desktop shell builds on macOS only"})
 
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
