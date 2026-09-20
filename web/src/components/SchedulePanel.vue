@@ -69,10 +69,10 @@
             mode — the way to keep context between runs.
           </p>
           <p>
-            Missed time-of-day runs (the app was off when one was due) are caught
-            up on the next launch. Interval runs are not replayed; their cadence
-            just resumes. Any automation can be run on demand, and paused without
-            deleting it.
+            Missed time-of-day runs (the app was off when one was due, or a run
+            stopped before it finished) are caught up on the next launch.
+            Interval runs are not replayed; their cadence just resumes. Any
+            automation can be run on demand, and paused without deleting it.
           </p>
           <p>
             Set <strong>archive behavior</strong> to automatic and a classifier
@@ -118,9 +118,10 @@
             <!-- Interval cadence has no expected slot, so the missed-run check
                  cannot report its health. last_status does instead. A
                  wall-clock entry shows the row too when its last dispatch
-                 failed: the missed-run check only trips long after the failed
-                 fire (next occurrence + 5 minutes), and without it the failure
-                 sat in the job log with nothing user-visible anywhere. -->
+                 failed. The missed-run check now counts a failed run as an
+                 unserved slot (issue #486), but it still waits out the
+                 5-minute grace, and this row names the failure rather than
+                 leaving it to a badge. -->
             <div
               v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped'"
               class="prop-row"
@@ -485,8 +486,9 @@
                 one existing chat and inherits its model and mode.
               </p>
               <p>
-                Missed time-of-day runs (app was off when one was due) are caught up on next
-                launch; interval cadence just resumes. Set <strong>archive behavior</strong> to
+                Missed time-of-day runs (app was off when one was due, or a run stopped before it
+                finished) are caught up on next launch; interval cadence just resumes. Set
+                <strong>archive behavior</strong> to
                 automatic and, after each clean run, a classifier checks the result — if there's
                 nothing to judge (no proposals, decisions, or warnings) the chat is archived out
                 of the way; anything worth your attention stays visible.
@@ -904,9 +906,8 @@ function enabledToggleLabel(s: Schedule): string {
 
 // Interval entries have no expected slot, so the missed-run check cannot speak
 // for them. last_status is the server's health report instead. A wall-clock
-// entry lands here too when its last dispatch failed (the dispatch stamps
-// last_status = "error" on the row), which the missed-run check alone reports
-// far too late to be actionable.
+// entry lands here too when its last dispatch failed (the run's outcome is
+// stamped back onto the row), which the missed badge alone does not explain.
 function intervalStatusLabel(s: Schedule): string {
   if (s.last_status === 'missing-chat') return 'stopped — chat missing'
   if (s.last_status === 'busy') return 'waiting — chat busy'

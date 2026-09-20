@@ -100,6 +100,7 @@ SYSTEM_STATE_FIELDS = {
     "last_dispatched_at",
     "last_run_chat_id",
     "last_status",
+    "last_recovered_on",
     "workspace",
     "model",
     "provider",
@@ -587,6 +588,39 @@ def was_dispatched_since(entry: "ScheduleEntry", when: datetime) -> bool:
     return dt >= when
 
 
+# ``last_status`` values that mean the dispatch did not produce a completed
+# run. "skipped" is deliberately absent: it marks work the provider or the user
+# is still expected to finish (a quota-deferred retry, an approval card, an
+# AskUserQuestion, unsettled background subagents), and re-running that would
+# duplicate a turn nobody abandoned. "busy" and "missing-chat" belong to the
+# interval path, which has no expected slot to satisfy.
+FAILED_RUN_STATUSES = frozenset({"error"})
+
+
+def run_failed_since(entry: "ScheduleEntry", when: datetime) -> bool:
+    """True when the schedule's latest dispatch is at/after ``when`` *and* the
+    run it started ended in failure.
+
+    ``last_triggered_on``/``last_dispatched_at`` are stamped at dispatch, before
+    the turn's outcome is known, so on their own they report a run that died
+    mid-turn (a server restart, a killed provider subprocess) as an attended
+    slot. The work was never done, and nothing surfaced it (issue #486). The
+    outcome stamp is what tells the two apart: only a run that reached a
+    terminal failure counts as leaving its slot unsatisfied, so a run that
+    completed cleanly can never be replayed by the callers of this helper.
+
+    The entry remembers one outcome, not one per dispatch, so a *manual* re-run
+    that fails after the scheduled run for the same slot succeeded also reads
+    as unsatisfied. That over-reports in the safe direction — the operator is
+    looking at an automation whose latest run failed either way — and the
+    alternative, a per-occurrence ledger written from the dispatch pipeline,
+    has to guess which slot a run that crosses midnight belongs to.
+    """
+    if entry.last_status not in FAILED_RUN_STATUSES:
+        return False
+    return was_dispatched_since(entry, when)
+
+
 @dataclass(slots=True)
 class ScheduleEntry:
     """One persisted schedule (wall-clock, one-off, manual, or interval)."""
@@ -626,9 +660,16 @@ class ScheduleEntry:
     # expected wall-clock slot to compare against: "" (never ran), "running",
     # "ok", "error", "busy" (skipped, the target chat had a turn in flight) or
     # "missing-chat" (target gone and unrecoverable; the entry was disabled).
-    # Wall-clock entries leave this empty and report health through the
-    # missed-run check instead.
+    # Wall-clock entries also carry it: "running" from their own dispatch, then
+    # the run's outcome written back by the dispatch pipeline, which is what
+    # tells an attended slot apart from one whose turn died mid-flight.
     last_status: str = ""
+    # The expected-run day (YYYY-MM-DD, entry tz) for which ``catch_up`` has
+    # already re-fired a failed run. Bounds the automatic recovery at one
+    # dispatch per slot, so a run that fails again — or that takes the server
+    # down with it — cannot turn every restart into another dispatch. The slot
+    # stays flagged as missed in the UI, where "Run all" is the operator's call.
+    last_recovered_on: str = ""
     days_of_week: list[str] | None = None  # e.g. ["sun"] or ["mon","wed","fri"]; used when frequency="weekly"
     thread_id: int | None = None           # target topic (None = DM)
     frequency: str = "weekly"              # "daily", "weekly", "monthly", "manual", "once", "interval"
@@ -1176,6 +1217,13 @@ class ScheduleManager:
         # the automation would read "run in progress" forever.
         self._run_tasks: set[asyncio.Task[Any]] = set()
         self._loop_task: asyncio.Task[None] | None = None
+        # Schedule ids this manager has dispatched. A `last_status` of
+        # "running" on any other row was written by a previous process, which
+        # is how `reconcile_interrupted_runs` tells a turn this process just
+        # started apart from one that was interrupted and will never report
+        # back. Membership, not a timestamp comparison: the stamps are written
+        # from the caller's clock, which tests (and a backdated catch-up) move.
+        self._dispatched_ids: set[str] = set()
 
     def start(self) -> None:
         if self._loop_task is None:
@@ -1311,6 +1359,10 @@ class ScheduleManager:
         target_chat_id: str | None = None,
     ) -> None:
         """Dispatch a schedule entry through the web pipeline."""
+        # Recorded even when there is no dispatch callback: the caller stamps
+        # the entry "running" either way, and only this process can say whether
+        # that stamp is its own.
+        self._dispatched_ids.add(entry.schedule_id)
         if self._dispatch_to_web is not None:
             task = asyncio.create_task(
                 self._dispatch_to_web(
@@ -1402,6 +1454,7 @@ class ScheduleManager:
         entry.last_run_chat_id = chat_id
         entry.last_status = "running"
         self._store.replace(entry)
+        self._dispatched_ids.add(entry.schedule_id)
         self._inflight.add(entry.schedule_id)
         self._claimed_chats.add(chat_id)
         task = asyncio.create_task(
@@ -1537,6 +1590,11 @@ class ScheduleManager:
         entry.last_dispatched_at = datetime.now(UTC).isoformat(timespec="seconds")
         if chat_id:
             entry.last_run_chat_id = chat_id
+        # Same in-flight marker the cron path writes. It is what clears a
+        # previous failure from the missed list while the manual re-run is
+        # streaming, so "Run all missed" does not keep offering a slot it has
+        # already started.
+        entry.last_status = "running"
         if entry.frequency == "once":
             self._store.replace(entry)
             self._store.delete(entry.schedule_id)
@@ -1613,12 +1671,56 @@ class ScheduleManager:
                 # git-sync race, disk error), catch_up won't refire it.
                 entry.last_triggered_on = "done"
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
+                entry.last_status = "running"
                 self._store.replace(entry)
                 self._store.delete(entry.schedule_id)
             else:
                 entry.last_triggered_on = current_day
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
+                # The dispatch stamps above say a run started, not that it
+                # finished. Mark the turn in flight so the outcome the
+                # dispatch pipeline writes back replaces a known state rather
+                # than whatever the previous run left behind, and so a turn
+                # that never reports back is still recognisable as interrupted
+                # after a restart (issue #486).
+                entry.last_status = "running"
                 self._store.replace(entry)
+
+    def reconcile_interrupted_runs(self) -> list[str]:
+        """Record as failed any run that was still in flight when the process
+        stopped. Returns the schedule ids that were repaired.
+
+        ``last_status`` is stamped ``"running"`` at dispatch and overwritten
+        with the turn's outcome when the dispatch pipeline reports back. No run
+        survives a process restart, so a ``"running"`` stamp on a schedule
+        *this* manager never dispatched belongs to a turn that was interrupted
+        — a server restart, a killed provider subprocess — and will never
+        report anything. Recording it as an error is what lets
+        :func:`run_failed_since` (and so the missed-run check and
+        :meth:`catch_up`) see that slot as unsatisfied rather than attended to
+        by the dispatch stamp alone (issue #486).
+
+        Ownership is decided by membership in ``_dispatched_ids``, not by
+        comparing timestamps: a run this process started seconds ago — the
+        startup tick and this pass race by design — is never mistaken for an
+        interrupted one and so can never be replayed.
+        """
+        repaired: list[str] = []
+        for entry in self._store.list_entries():
+            if entry.last_status != "running":
+                continue
+            if entry.schedule_id in self._dispatched_ids:
+                continue
+            entry.last_status = "error"
+            self._store.replace(entry)
+            repaired.append(entry.schedule_id)
+            logger.info(
+                "Schedule %s: run interrupted before it finished (dispatched %s); "
+                "recording it as failed",
+                entry.schedule_id,
+                entry.last_dispatched_at or "unknown",
+            )
+        return repaired
 
     async def catch_up(
         self,
@@ -1644,8 +1746,21 @@ class ScheduleManager:
         that on its own within one interval of boot. Firing them here would
         mean every restart re-runs every interval entry at once.
 
+        A slot whose dispatch produced no completed run counts as missed here
+        too, not only one that was never dispatched: a turn interrupted
+        mid-flight stamps the same fields a healthy one does, so before this it
+        looked attended to and the work was silently lost until the next
+        occurrence (issue #486). Only a *failed* run qualifies — a run that
+        completed, or one still waiting on the user or the provider, is never
+        replayed — and only once per slot (``last_recovered_on``), so a run
+        that keeps failing cannot make every restart dispatch it again.
+
         Returns the list of schedule_ids that were fired.
         """
+        # Turns that were streaming when the previous process stopped are
+        # indistinguishable from running ones until they are written down as
+        # failed; do that before reading any status below.
+        self.reconcile_interrupted_runs()
         current = now or _now_utc()
         fired: list[str] = []
         for entry in self._store.list_entries():
@@ -1673,20 +1788,33 @@ class ScheduleManager:
             if last_expected is None:
                 continue
             expected_day = last_expected.date().isoformat()
-            if entry.last_triggered_on and entry.last_triggered_on >= expected_day:
-                continue
-            if was_dispatched_since(entry, last_expected):
-                continue
+            # Both guards below read a dispatch, not a result. When the run
+            # that dispatch started ended in failure the slot was not served,
+            # so the guards are bypassed and the occurrence is recovered —
+            # once. `last_recovered_on` is the bound: a recovery that fails
+            # again (or that takes the server down with it) leaves the entry
+            # flagged missed for the operator instead of re-firing on every
+            # subsequent restart.
+            recovering = (
+                run_failed_since(entry, last_expected)
+                and entry.last_recovered_on != expected_day
+            )
+            if not recovering:
+                if entry.last_triggered_on and entry.last_triggered_on >= expected_day:
+                    continue
+                if was_dispatched_since(entry, last_expected):
+                    continue
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
                 else ("claude", entry.model, entry_mode(entry), entry.provider)
             )
             logger.info(
-                "Schedule %s: catch-up fire (latest missed %s, now %s)",
+                "Schedule %s: catch-up fire (latest missed %s, now %s%s)",
                 entry.schedule_id,
                 last_expected.isoformat(),
                 localized.isoformat(),
+                "; recovering a run that did not finish" if recovering else "",
             )
             chat_id = None
             if self._prepare_chat is not None:
@@ -1701,6 +1829,11 @@ class ScheduleManager:
             # tick must still be allowed to run later.
             entry.last_triggered_on = expected_day
             entry.last_dispatched_at = localized.isoformat(timespec="seconds")
+            entry.last_status = "running"
+            if recovering:
+                # Spend this slot's one automatic recovery, whatever the run
+                # goes on to do.
+                entry.last_recovered_on = expected_day
             self._store.replace(entry)
             fired.append(entry.schedule_id)
         return fired
