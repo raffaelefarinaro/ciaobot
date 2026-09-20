@@ -4207,6 +4207,18 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
+  // Fail closed on unknown host state: with no status, restart_only reads as
+  // false, and guessing deploy on a production Linux host would
+  // snapshot/pull/rebuild an administrator-managed checkout. Re-check once;
+  // if the host still cannot be identified, stop before touching either
+  // endpoint.
+  if (localStatus.value === null) {
+    await fetchLocalStatus()
+    if (localStatus.value === null) {
+      actionResult.value = 'Could not determine the server type. Reload Settings and try again.'
+      return
+    }
+  }
   const restartOnly = !!localStatus.value?.restart_only
   // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
   // which is a multi-minute Rust build that ends by quitting and relaunching the

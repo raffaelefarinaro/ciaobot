@@ -36,3 +36,26 @@ it.each([true, false])('chooses the advertised restart action (restart_only=%s)'
     wrapper.unmount()
   }
 })
+
+it('fails closed when the server type cannot be determined', async () => {
+  setActivePinia(createPinia())
+  const stub = defineComponent({ render: () => h('div') })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
+  await router.push('/settings')
+  await router.isReady()
+  // Both the initial load and the pre-action re-check fail: localStatus stays null.
+  vi.spyOn(api, 'get').mockRejectedValue(new Error('status unavailable'))
+  const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, steps: [] })
+  const confirm = vi.spyOn(confirmation, 'askConfirm')
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  try {
+    await flushPromises()
+    await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')
+    await flushPromises()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Could not determine the server type')
+  } finally {
+    wrapper.unmount()
+  }
+})
