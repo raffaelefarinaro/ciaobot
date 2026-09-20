@@ -22,7 +22,7 @@ def store(tmp_path: Path) -> ScheduleStore:
     return ScheduleStore(tmp_path)
 
 
-async def _make_manager(store: ScheduleStore):
+async def _make_manager(store: ScheduleStore, *, is_node_active=None):
     dispatched: list[str] = []
 
     async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
@@ -31,6 +31,7 @@ async def _make_manager(store: ScheduleStore):
     mgr = ScheduleManager(
         store=store,
         dispatch_to_web=dispatch,
+        is_node_active=is_node_active,
     )
     return mgr, dispatched
 
@@ -1466,6 +1467,124 @@ async def test_reconcile_leaves_this_process_runs_alone(store: ScheduleStore):
     fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
     await asyncio.sleep(0.05)
     assert fired == []
+    assert dispatched == [entry.schedule_id]
+
+
+async def test_catch_up_fires_nothing_on_a_client_node(store: ScheduleStore):
+    """Automatic firing belongs to the host. A second machine in client mode
+    must not dispatch the missed slots the host owns — the startup catch-up
+    pass is an automation, not a person asking for a run.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: False)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == []
+    assert dispatched == []
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_triggered_on is None or reloaded.last_triggered_on == ""
+    assert reloaded.last_status in ("", None)
+
+
+async def test_catch_up_on_a_client_node_leaves_persisted_run_state_alone(
+    store: ScheduleStore,
+):
+    """The guard sits ahead of `reconcile_interrupted_runs`: a client must not
+    rewrite the host's run state either. The "running" stamp it would find
+    belongs to a turn on the host, and converting it to "error" would both
+    mislabel it and make it look recoverable.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "running"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: False)
+
+    assert await mgr.catch_up(now=_AFTER_THE_SLOT) == []
+    await asyncio.sleep(0.05)
+
+    assert dispatched == []
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_triggered_on == "2026-06-15"
+    assert reloaded.last_dispatched_at == "2026-06-15T08:00:00+00:00"
+    assert reloaded.last_recovered_on in ("", None)
+
+
+async def test_catch_up_recovers_an_interrupted_run_on_a_host_node(
+    store: ScheduleStore,
+):
+    """The host side of the same guard: an explicitly active node still
+    reconciles and recovers exactly as it did without the callback.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "running"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: True)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_recovered_on == "2026-06-15"
+
+
+async def test_catch_up_without_a_node_callback_still_runs(store: ScheduleStore):
+    """Most callers (and every other test) build the manager without the node
+    callback; `is not None` is what keeps them catching up.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+    assert mgr._is_node_active is None
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
     assert dispatched == [entry.schedule_id]
 
 
