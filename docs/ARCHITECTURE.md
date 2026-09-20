@@ -154,8 +154,15 @@ web/                           Vue 3 PWA frontend.
   src/main.ts                  App bootstrap.
   src/router.ts                Vue Router config.
   src/components/              UI components (chat, projects, settings, voice, etc.).
-  src/stores/                  Pinia stores.
-  src/lib/                     Helpers (API client, formatters, etc.).
+  src/stores/                  Pinia stores, plus store modules: a `create*` factory that owns one
+                               slice of a store's state and is instantiated inside that store's setup
+                               (chatAnnotations.ts, owned by projects.ts). A slice with its own
+                               localStorage keys and no dependency on the rest of the store belongs in
+                               a module; splitting it into a second Pinia store instead would change
+                               what consumers see.
+  src/lib/                     Helpers (API client, formatters, etc.). Pure, and free of Vue imports:
+                               logic a store can hand over whole (chatHistory.ts, chatQuestions.ts,
+                               chatWs.ts) goes here so it is testable without Pinia or a mount.
   package.json                 npm deps and scripts (build, typecheck, test).
   Vite + TypeScript. Build outputs to ciao/web/static/.
 

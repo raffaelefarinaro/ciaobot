@@ -31,7 +31,8 @@ web/
                           (/device is device-scoped and unguarded: it must load when a client's host is down)
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
-    stores/               Pinia stores (auth, projects, tasks, fileViewer)
+    stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
+                          modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers)
@@ -123,6 +124,36 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   is pulled into both components with `<style scoped src>`; scoped rules in a
   parent do not reach a child's subtree, so moving markup into a component
   without moving its styles silently unstyles it.
+- **`stores/projects.ts` ownership boundary.** The store is being split in
+  behaviour-preserving steps; put new work on the right side of the line.
+  `stores/chatAnnotations.ts` owns everything the user stages against the *next*
+  message plus the notes and pins anchored to a file: the per-chat pending-image,
+  pending-file-comment and pending-chat-comment buckets, the durable per-file
+  comment store, pinned paths, auto-pin dismissals, and the six `localStorage`
+  keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
+  `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
+  `ciao-dismissed-auto-pins`). It also composes an outgoing message from that
+  material (`prepareMessage`) and clears it once sent
+  (`consumePreparedAttachments`) — the send itself stays in the store. It is a
+  plain `create*` factory, **not** a second Pinia store: `useProjectStore` calls
+  it once in its setup and spreads the result, so the refs it hands over are the
+  same refs it mutates and `store.pendingComments` behaves exactly as before. A
+  second `defineStore` would have put a proxy and a second `$state` in between.
+  `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
+  chat — no Pinia, no mount.
+  Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
+  testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
+  grouping, metadata merge, superseded live-tail pruning, tool icons),
+  `lib/chatQuestions.ts` (AskUserQuestion and capability-question parsing plus
+  the picker signature), `lib/chatWs.ts` (per-chat reconnect policy) and
+  `lib/safeList.ts`. The four names that used to be exported from
+  `stores/projects.ts` itself — `shouldReconnectActiveChatOnStreamingStarted`,
+  `chatWsReconnectDelayMs`, `isHostConnectionUnavailableMessage` and
+  `setListIndex` — are re-exported from there, so importers do not move.
+  The store keeps chats, projects and workspaces, message history and its
+  reconciliation, every socket (per-chat and `/ws/events`) with its event
+  handlers, unread and attention counts, the send path with its queue, deferred
+  and unacked sends, the streaming timeline, toasts and package status.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. The MCP tab is the first
   one out. `composables/useMcpServers.ts` owns the MCP state and every
