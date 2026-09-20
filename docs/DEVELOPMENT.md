@@ -4,6 +4,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 
 ## Server install
 
+Linux production Settings restarts the installed engine through
+`POST /api/admin/restart`; `CIAO_DEV_MODE=true` retains the source deploy workflow.
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -12,7 +15,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for shared runtime discovery, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for shared runtime discovery, and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 

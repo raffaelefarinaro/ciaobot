@@ -38,7 +38,7 @@
               <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
                 {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
               </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
                 {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
               </button>
             </div>
@@ -603,8 +603,8 @@
                   </template>
                   <template v-else>
                     <span class="hint--warn">
-                      Read-aloud is unavailable. Install Ciaobot with the
-                      one-line installer from the release page.
+                      Read-aloud is unavailable. It requires a macOS host with
+                      the Ciaobot desktop app installed.
                     </span>
                   </template>
                 </span>
@@ -3592,25 +3592,42 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
+  // Fail closed on unknown host state: with no status, restart_only reads as
+  // false, and guessing deploy on a production Linux host would
+  // snapshot/pull/rebuild an administrator-managed checkout. Re-check once;
+  // if the host still cannot be identified, stop before touching either
+  // endpoint.
+  if (localStatus.value === null) {
+    await fetchLocalStatus()
+    if (localStatus.value === null) {
+      actionResult.value = 'Could not determine the server type. Reload Settings and try again.'
+      return
+    }
+  }
+  const restartOnly = !!localStatus.value?.restart_only
   // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
   // which is a multi-minute Rust build that ends by quitting and relaunching the
   // app. Worth warning about before the window disappears.
   const devNote = localStatus.value?.dev_mode
     ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
     : ''
-  if (!confirmWarnings && !await askConfirm(`Restart? This will pull latest, rebuild, and restart.${devNote}`, {
-    title: 'Restart and redeploy',
+  const confirmation = restartOnly
+    ? 'Restart the installed server? Active chats will finish before it restarts.'
+    : `Restart? This will pull latest, rebuild, and restart.${devNote}`
+  if (!confirmWarnings && !await askConfirm(confirmation, {
+    title: restartOnly ? 'Restart server' : 'Restart and redeploy',
     confirmLabel: 'Restart',
   })) return
   actionPending.value = 'deploy'
   actionResult.value = ''
   deploySteps.value = []
   try {
-    const r = await api.post<DeployResult>('/api/admin/deploy', { confirm_warnings: confirmWarnings })
+    const endpoint = restartOnly ? '/api/admin/restart' : '/api/admin/deploy'
+    const r = await api.post<DeployResult>(endpoint, { confirm_warnings: confirmWarnings })
     deploySteps.value = r.steps
     if (r.ok) {
       actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
-      projectStore.beginServerRestart('Deploy complete. Restarting Ciaobot…')
+      projectStore.beginServerRestart(restartOnly ? 'Waiting for active chats, then restarting Ciaobot…' : 'Deploy complete. Restarting Ciaobot…')
     } else {
       actionResult.value = 'Restart failed. See steps below.'
     }

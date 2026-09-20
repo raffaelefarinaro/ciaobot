@@ -4,6 +4,8 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -31,6 +33,9 @@ def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_pa
 
 
 def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
+    # The bundled app is macOS-only; on Linux every install mode gets the
+    # administrator workflow instead.
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "bundled_app")
 
     result = update_package()
@@ -42,6 +47,7 @@ def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
 
 
 def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
 
     result = update_package()
@@ -49,6 +55,17 @@ def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["command"] == "git pull"
     assert "Editable checkouts" in result["error"]
+
+
+def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    for mode in ("editable", "unknown"):
+        monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda m=mode: m)
+        result = update_package()
+        assert result["ok"] is False
+        assert result["mode"] == mode
+        assert "docs/LINUX.md" in result["error"]
+        assert result["command"] == ""
 
 
 def test_package_update_endpoint_explains_app_owned_updates() -> None:

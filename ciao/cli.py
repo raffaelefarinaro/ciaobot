@@ -697,7 +697,8 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    if not confirm_repoint:
+    write_launchd = sys.platform == "darwin" or launch_agents_dir is not None
+    if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
             "true",
@@ -787,12 +788,14 @@ def setup_workspace(
         ("CIAO_VAULT_ROOT", vault_value),
         ("CIAO_VAULT_MODE", vault_mode),
         ("CIAO_RUNTIME_ROOT", ".runtime"),
+        ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
         env_path.write_text(
             "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
             encoding="utf-8",
         )
+        env_path.chmod(0o600)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -1062,20 +1065,20 @@ def setup_workspace(
     # launch. It used to be created as a side effect of writing the launcher
     # bundle, which no longer exists.
     _ensure_setup_token(root)
-    written.append(_write_launchd_plist(
-        workspace=root,
-        launch_agents_dir=launch_dir,
-        engine_path=resolved_engine,
-        runtime_root=runtime_root,
-        port=port,
-        path=os.environ.get("PATH", ""),
-        plist_name="com.ciao.server.plist",
-        confirm_repoint=confirm_repoint,
-    ))
-    # Existing installs may still carry the launcher bundle and its agent from
-    # a previous version; remove them rather than leaving orphans behind.
-    _remove_legacy_app_shortcuts(app_root_dir)
-    _disable_legacy_menubar_agent(launch_dir)
+    if write_launchd:
+        written.append(_write_launchd_plist(
+            workspace=root,
+            launch_agents_dir=launch_dir,
+            engine_path=resolved_engine,
+            runtime_root=runtime_root,
+            port=port,
+            path=os.environ.get("PATH", ""),
+            plist_name="com.ciao.server.plist",
+            confirm_repoint=confirm_repoint,
+        ))
+        # Explicit --launch-agents-dir also permits offline plist generation.
+        _remove_legacy_app_shortcuts(app_root_dir)
+        _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1120,6 +1123,15 @@ def _plist_workspace(launch_agents_dir: Path) -> Path | None:
 
 def _setup_command(args: argparse.Namespace) -> int:
     root = Path(args.workspace).expanduser().resolve()
+    if args.load_launchd and sys.platform != "darwin":
+        print(
+            "Error: --load-launchd requires macOS. On Linux use `ciao linux-service`.",
+            file=sys.stderr,
+        )
+        return 2
+    launch_dir = args.launch_agents_dir
+    if launch_dir is None and sys.platform == "darwin":
+        launch_dir = default_launch_agents_dir()
 
     # Guard against the two ways `ciao setup` silently hijacks the workspace:
     # running it inside the source checkout, or re-pointing an already
@@ -1147,7 +1159,7 @@ def _setup_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        existing = _plist_workspace(Path(args.launch_agents_dir))
+        existing = _plist_workspace(Path(launch_dir)) if launch_dir is not None else None
         if existing is not None and existing != root:
             allow_env = os.environ.get(
                 "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
@@ -1195,8 +1207,11 @@ def _setup_command(args: argparse.Namespace) -> int:
         )
     # One agent now: setup deletes the retired com.ciao.menubar plist rather
     # than writing it, so there is nothing else here to load.
-    server_plist = Path(args.launch_agents_dir).expanduser() / "com.ciao.server.plist"
-    plists = [server_plist] if server_plist.is_file() else []
+    server_plist = (
+        Path(launch_dir).expanduser() / "com.ciao.server.plist"
+        if launch_dir is not None else None
+    )
+    plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -1217,11 +1232,16 @@ def _setup_command(args: argparse.Namespace) -> int:
                 ["launchctl", "load", "-w", str(plist)],
                 check=False,
             ).returncode or rc
-        _print_setup_summary(root, args.port)
+        _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
     for plist in plists:
         print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
-    _print_setup_summary(root, args.port)
+    if sys.platform.startswith("linux") and not plists:
+        print(
+            "Workspace ready. Run `ciao run` from the workspace, or use "
+            "`ciao linux-service` to render a systemd unit."
+        )
+    _print_setup_summary(root, _pwa_port_from_env(root, args.port))
     return 0
 
 
@@ -3654,6 +3674,20 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=bool(args.as_json))
 
 
+def _linux_service_command(args: argparse.Namespace) -> int:
+    from ciao.linux_service import render_service
+
+    try:
+        unit = render_service(
+            workspace=args.workspace, user=args.user, home=args.home, python=args.python,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(unit, end="")
+    return 0
+
+
 def _desktop_command(args: argparse.Namespace) -> int:
     from ciao import desktop_install
 
@@ -3762,6 +3796,24 @@ def build_parser() -> argparse.ArgumentParser:
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
 
+    linux_service_parser = subparsers.add_parser(
+        "linux-service",
+        help="Print a systemd service unit for a Linux host (does not install it).",
+    )
+    linux_service_parser.add_argument("--workspace", type=Path, required=True)
+    linux_service_parser.add_argument(
+        "--user", required=True, help="Unprivileged Linux service account.",
+    )
+    linux_service_parser.add_argument(
+        "--home", type=Path, required=True,
+        help="Service account home (provider credentials live here).",
+    )
+    linux_service_parser.add_argument(
+        "--python", type=Path, default=Path(sys.executable),
+        help="Absolute path to the installed virtualenv Python.",
+    )
+    linux_service_parser.set_defaults(func=_linux_service_command)
+
     setup_parser = subparsers.add_parser(
         "setup",
         help="Scaffold a local Ciaobot workspace from packaged stock assets.",
@@ -3809,13 +3861,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=8443,
-        help="Localhost port used by the LaunchAgent and app shortcut.",
+        help="Server port to record in a new workspace configuration.",
     )
     setup_parser.add_argument(
         "--launch-agents-dir",
         type=Path,
-        default=default_launch_agents_dir(),
-        help="Directory where com.ciao.server.plist is written.",
+        default=None,
+        help="Directory for an explicit launchd plist export (generated by default only on macOS).",
     )
     setup_parser.add_argument(
         "--app-dir",

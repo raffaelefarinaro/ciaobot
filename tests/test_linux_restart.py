@@ -1,0 +1,60 @@
+from types import SimpleNamespace
+
+from itsdangerous import URLSafeTimedSerializer
+import pytest
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+from ciao.web.routes_api import admin_restart, local_status
+
+
+def test_restart_requires_auth_and_calls_drain_hook_without_a_checkout():
+    serializer = URLSafeTimedSerializer("restart-test")
+    app = Starlette(
+        routes=[Route("/api/admin/restart", admin_restart, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = SimpleNamespace(
+        restart_exit_code=75, pwa_auth_required=True, pwa_auth_token="restart-test",
+    )
+    calls = []
+    app.state.request_restart = calls.append
+    with TestClient(app, base_url="https://ciao.example") as client:
+        assert client.post("/api/admin/restart").status_code == 401
+        assert calls == []
+        client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+        response = client.post("/api/admin/restart", headers={"Origin": "https://ciao.example"})
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert calls == [75]
+        del app.state.request_restart
+        assert client.post("/api/admin/restart", headers={"Origin": "https://ciao.example"}).status_code == 503
+
+
+async def test_restart_hook_runs_only_after_response_is_sent():
+    calls = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        config=SimpleNamespace(restart_exit_code=42), request_restart=calls.append,
+    )))
+    response = await admin_restart(request)
+    assert calls == []
+    await response.background()
+    assert calls == [42]
+
+
+@pytest.mark.parametrize("platform,dev_mode,expected", [
+    ("linux", False, True), ("linux", True, False), ("darwin", False, False),
+])
+async def test_local_status_advertises_linux_restart_only(monkeypatch, platform, dev_mode, expected):
+    import json
+    import sys
+
+    monkeypatch.setattr(sys, "platform", platform)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        local_session_manager=SimpleNamespace(status=lambda: {"dev_mode": dev_mode}),
+    )))
+    response = await local_status(request)
+    assert json.loads(response.body)["restart_only"] is expected

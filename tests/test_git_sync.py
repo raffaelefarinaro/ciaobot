@@ -31,6 +31,15 @@ def _git_env(repo: Path) -> dict[str, str]:
     return env
 
 
+@pytest.fixture(autouse=True)
+def _isolate_git_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # sync_workspace spawns its own git processes; isolate those too rather
+    # than relying on the developer's global identity for automatic commits.
+    for key, value in _git_env(tmp_path).items():
+        if key.startswith("GIT_") or key == "HOME":
+            monkeypatch.setenv(key, value)
+
+
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         ["git", *args], cwd=str(repo), check=True, capture_output=True, env=_git_env(repo)
