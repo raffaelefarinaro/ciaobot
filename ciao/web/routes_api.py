@@ -5537,6 +5537,23 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
+async def admin_restart(request: Request) -> JSONResponse:
+    """Restart the installed engine after draining work, without updating code."""
+    from starlette.background import BackgroundTask
+
+    restart = getattr(request.app.state, "request_restart", None)
+    if not callable(restart):
+        return JSONResponse({"ok": False, "error": "restart unavailable"}, status_code=503)
+
+    async def after_response() -> None:
+        restart(request.app.state.config.restart_exit_code)
+
+    return JSONResponse(
+        {"ok": True, "steps": [{"step": "restart", "ok": True, "output": "Waiting for active chat work to drain"}]},
+        background=BackgroundTask(after_response),
+    )
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
     mgr = getattr(request.app.state, "local_session_manager", None)
@@ -5650,7 +5667,10 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # every restart.
 
     relaunch_desktop = False
-    if getattr(config, "dev_mode", False):
+    # The desktop shell is a macOS Tauri bundle: attempting its rebuild on
+    # Linux fails after git/pip/npm have already mutated the install, and the
+    # resulting 500 aborts before the restart. Linux dev deploys skip it.
+    if getattr(config, "dev_mode", False) and sys.platform == "darwin":
         needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
         if not needed:
             steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
@@ -5666,6 +5686,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
                     {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
                     status_code=500,
                 )
+    elif getattr(config, "dev_mode", False):
+        steps.append({"step": "desktop app", "ok": True, "output": "skipped: the desktop shell builds on macOS only"})
 
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
@@ -6016,7 +6038,9 @@ async def local_status(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "local session manager not initialised"}, status_code=500
         )
-    return JSONResponse(mgr.status())
+    status = dict(mgr.status())
+    status["restart_only"] = sys.platform.startswith("linux") and not status.get("dev_mode", False)
+    return JSONResponse(status)
 
 
 async def local_handback(request: Request) -> JSONResponse:

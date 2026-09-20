@@ -374,7 +374,20 @@ def update_package(
     re-running the signed one-line installer. There is no package-manager
     branch here anymore.
     """
+    import sys
+
     mode = detect_install_mode()
+    if sys.platform.startswith("linux"):
+        # The documented Linux install is `pip install -e`, which
+        # detect_install_mode() classifies as `editable`. A generic
+        # `git pull` answer would omit the PWA rebuild and service
+        # restart the administrator workflow requires.
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "Linux servers are updated by the administrator: install the chosen source release, rebuild the PWA, and restart the service. See docs/LINUX.md.",
+            "command": "",
+        }
     if mode == "editable":
         return {
             "ok": False,

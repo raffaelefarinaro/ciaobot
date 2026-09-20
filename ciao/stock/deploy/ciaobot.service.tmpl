@@ -1,0 +1,25 @@
+[Unit]
+Description=Ciaobot personal assistant
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User={user}
+WorkingDirectory={workspace}
+Environment={workspace_env}
+Environment={home_env}
+Environment={path_env}
+Environment=CIAO_NO_BROWSER=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart={python} -m ciao.cli run
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=120
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

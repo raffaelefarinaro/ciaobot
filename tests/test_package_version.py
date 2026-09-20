@@ -45,7 +45,8 @@ def test_tag_from_url_strips_v_prefix() -> None:
     assert _tag_from_url("https://github.com/x/y/releases") == ""
 
 
-def test_package_status_reports_available_update() -> None:
+def test_package_status_reports_available_update(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
     def opener(request, timeout: float):
         # The recurring check uses the public web redirect, not the REST API.
         assert request.full_url == (
