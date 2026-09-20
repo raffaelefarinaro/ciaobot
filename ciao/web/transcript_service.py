@@ -39,7 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from ciao import subagent_tracking
+from ciao import cli_envelopes, subagent_tracking
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
@@ -335,44 +335,16 @@ def _strip_injected_context(content: str) -> str:
     return legacy.strip() or content
 
 
-# Slash commands the Claude Agent SDK injects as user turns when the PWA
-# changes model or mode mid-session (via ClaudeSDKClient.set_model /
-# set_permission_mode). They end up in the session JSONL and would otherwise
-# render as user bubbles the user didn't type. The assistant acknowledgement
-# ("Set model to ..." / "Set mode to ...") gets collapsed into a single
-# system bubble in _classify_control_ack below.
-_CONTROL_SLASH_PREFIXES = ("/model", "/mode")
-
-
-def _is_control_slash_command(content: str) -> bool:
-    head = content.strip().split(None, 1)[0] if content.strip() else ""
-    return head in _CONTROL_SLASH_PREFIXES
-
-
-# Sentinel that the Claude Code CLI writes into the session JSONL when a turn
-# is interrupted (steer/queue mid-stream) or hits an empty rate-limit error.
-# It's the `UXH` constant in claude_agent_sdk/_bundled/claude. Claude Code's
-# own UI hides these (`case UXH: return null`); we mirror that here so reloads
-# don't render a literal "No response requested." bubble after every interrupt.
-_NO_RESPONSE_SENTINEL = "No response requested."
-
-# Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
-# ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
-# just the bare form. Steer/queue interrupts an in-flight tool call produce
-# "[Request interrupted by user for tool use]" — without this wildcard that
-# variant survives as a synthetic user record and renders as a quoted bubble
-# that looks like an error reply to a question.
-_INTERRUPTED_REQUEST_RE = re.compile(
-    r"\[Request interrupted by user[^\]]*\]"
-)
-
-
-def _is_no_response_sentinel(text: str) -> bool:
-    return text.strip() == _NO_RESPONSE_SENTINEL
-
-
-def _is_interrupted_request_sentinel(text: str) -> bool:
-    return bool(_INTERRUPTED_REQUEST_RE.fullmatch(text.strip()))
+# The user-record skip rules (/model and /mode echoes, the interrupted-turn
+# sentinel, the interrupt marker, the CLI envelope tags) and the
+# task-notification grammar live in ciao/cli_envelopes.py. They are shared
+# with ciao/subagent_tracking.py, whose turn counter must skip exactly the
+# records this renderer hides or `turn_index` anchoring drifts. The assistant
+# acknowledgement of a control slash command ("Set model to ..." / "Set mode
+# to ...") is collapsed into a system bubble by _classify_control_ack below.
+_is_control_slash_command = cli_envelopes.is_control_slash_command
+_is_no_response_sentinel = cli_envelopes.is_no_response_sentinel
+_is_interrupted_request_sentinel = cli_envelopes.is_interrupted_request_sentinel
 
 
 def _classify_control_ack(text: str) -> str | None:
@@ -385,51 +357,6 @@ def _classify_control_ack(text: str) -> str | None:
     return None
 
 
-# CLI-internal user-message envelopes. The Claude Code CLI synthesizes
-# user-role messages wrapped in these XML tags to feed the parent agent
-# subagent completion, bash output, slash-command invocations, etc. They
-# are NOT from the human; they're the CLI talking to its own model. The
-# tag names come from the constant table in
-# claude_agent_sdk/_bundled/claude (IO="task-notification",
-# EtH="bash-input", WV="command-name", and so on).
-#
-# Without this filter the envelopes leak into chat history as user bubbles:
-# the browser strips the unknown tags and lays out only the inner text,
-# producing the "task_id  toolu_id  /tmp/.../output completed\nAgent ..."
-# blocks visible in chats with parallel subagents.
-_CLI_ENVELOPE_TAGS = (
-    "task-notification",
-    "bash-input",
-    "bash-stdout",
-    "bash-stderr",
-    "bash-exit-code",
-    "local-command-stdout",
-    "local-command-stderr",
-    "local-command-caveat",
-    "command-name",
-    "command-message",
-    "command-args",
-    "remote-review",
-    "remote-review-progress",
-    "teammate-message",
-    "cross-session-message",
-    "fork-boilerplate",
-)
-
-_CLI_ENVELOPE_RE = re.compile(
-    r"^\s*<(?:" + "|".join(re.escape(t) for t in _CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
-)
-
-_TASK_NOTIFICATION_RE = re.compile(
-    r"^\s*<task-notification>(.*)</task-notification>\s*$",
-    re.DOTALL,
-)
-
-# Pulls <tag>content</tag> pairs out of a task-notification body. Names match
-# the schema fields the CLI emits (task-id, tool-use-id, output-file, status,
-# summary, plus an optional task-type).
-_INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
-
 # The subagent's own final message often self-reports its sign-off ("Agent
 # "X" completed", "...finished", "...done", ...) rather than a fixed CLI
 # string, so the "already shaped, pass through as-is" check has to tolerate
@@ -440,10 +367,7 @@ _AGENT_SELF_STATUS_RE = re.compile(
     r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
 )
 
-
-def _is_cli_internal_envelope(content: str) -> bool:
-    """True if `content` starts with a CLI-synthesized user-message wrapper."""
-    return bool(_CLI_ENVELOPE_RE.match(content))
+_is_cli_internal_envelope = cli_envelopes.is_cli_envelope
 
 
 # Stands in for the injected subagent-synthesis nudge in the transcript. Same
@@ -454,15 +378,19 @@ _SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a 
 def _summarize_task_notification(content: str) -> str | None:
     """Render a <task-notification> envelope as a one-line system bubble.
 
-    Returns None if `content` isn't a task-notification. The CLI emits this
+    Returns None if `content` carries no task-notification. The CLI emits this
     XML as a user-role message after a Task subagent finishes. We surface it
     as a system status bubble so the user retains visibility into subagent
     completions without seeing the raw envelope.
+
+    Only the first notification is summarised when the CLI concatenates
+    several into one record; the rest stay hidden with the envelope. Callers
+    must have established that `content` is a CLI envelope — a notification
+    quoted inside the human's own prose is their text, not a completion.
     """
-    m = _TASK_NOTIFICATION_RE.match(content)
-    if not m:
+    fields = cli_envelopes.task_notification_fields(content)
+    if fields is None:
         return None
-    fields = {tag: text.strip() for tag, text in _INNER_TAG_RE.findall(m.group(1))}
     status = fields.get("status", "completed")
     summary = fields.get("summary", "")
     first_line = summary.splitlines()[0].strip() if summary else ""
@@ -1360,11 +1288,15 @@ async def _assemble_chat_messages(
         # without incrementing user_idx — these aren't real user turns and the
         # image-ref index must only advance on human sends.
         if m.type == "user":
-            task_summary = _summarize_task_notification(content)
-            if task_summary is not None:
-                result.append({"role": "system", "content": task_summary})
-                continue
             if _is_cli_internal_envelope(content):
+                # A task-notification envelope earns a status line; every
+                # other envelope is hidden outright. Asking the summariser
+                # first would have let a record that merely *opens* with a
+                # notification but carries anything after the closing tag
+                # fall through to the blanket hide.
+                task_summary = _summarize_task_notification(content)
+                if task_summary is not None:
+                    result.append({"role": "system", "content": task_summary})
                 continue
             # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
             # It's a server-injected prompt, not something the user typed, so
