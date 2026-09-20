@@ -912,7 +912,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
-        # serving requests.
+        # serving requests. On a client node it is a no-op that returns no
+        # schedule ids (the host owns automatic runs), so the count below is
+        # only ever logged for a host.
         #
         # Right after a first-time setup the onboarding chat should be the only
         # new conversation: within the post-setup grace window, system routines
