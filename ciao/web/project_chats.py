@@ -9521,6 +9521,11 @@ class ProjectChatManager:
         _sched_perf = time.perf_counter()
         _sched_started = datetime.now(UTC)
         _sched_schedule_id = getattr(entry, "schedule_id", "") or ""
+        # Which dispatch this run *is*, sampled from the entry as it stood when
+        # the run started. The stored row can have moved on to a newer dispatch
+        # by the time the outcome lands (an overlapping manual "Run now"), and
+        # that is exactly what the write-back below has to be able to tell.
+        _sched_dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
 
         # Save original model/mode for fixed-chat dispatches. Interval entries
         # are exempt: prepare_schedule_chat leaves the chat's settings alone for
@@ -9705,12 +9710,20 @@ class ProjectChatManager:
         # the row first: the run streamed for minutes and the user may have
         # edited or retargeted it meanwhile — only the health field is ours to
         # write.
+        #
+        # `stamp_run_outcome` decides what "ours" means when two dispatches
+        # overlap: the health field belongs to the dispatch the row still names,
+        # while a completed run credits the occurrence it was dispatched for
+        # either way (issue #490).
         if _sched_schedule_id and _sched_status in {"error", "ok", "skipped"}:
             store = getattr(self, "schedule_store", None)
             if store is not None:
+                from ciao.schedules import stamp_run_outcome
+
                 latest = store.get(_sched_schedule_id)
-                if latest is not None and latest.last_status != _sched_status:
-                    latest.last_status = _sched_status
+                if latest is not None and stamp_run_outcome(
+                    latest, _sched_dispatch_id, _sched_status
+                ):
                     store.replace(latest)
                     # An open sidebar or Automations page only refetches on the
                     # schedules_changed event; without publishing it the newly
@@ -9733,6 +9746,11 @@ class ProjectChatManager:
             error=_sched_error,
             extra={
                 "schedule_id": _sched_schedule_id,
+                # Which dispatch produced this result. The entry keeps one
+                # outcome (the latest dispatch's); the run log keeps every
+                # run's, so a superseded one is still attributable to the
+                # dispatch it came from instead of being lost.
+                "dispatch_id": _sched_dispatch_id,
                 "chat_id": target_id,
                 "archived_to": outcome.archived_to,
                 "permission_requested": outcome.permission_requested,
