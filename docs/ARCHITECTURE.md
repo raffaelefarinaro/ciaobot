@@ -488,6 +488,23 @@ Unsent composer text is cached in browser-local storage by chat id. Switching ch
 or reloading the PWA restores each chat's draft on that device; dispatching the
 message clears only that chat's cached draft.
 
+`ChatPanel.vue` is being decomposed in behaviour-preserving steps, and the
+boundary is stated rather than implied. `composables/useChatComposer.ts` owns
+the composer: the draft ref and its synchronous persistence, prompt-history
+recall, textarea auto-sizing, caret insertion, and every attachment path
+(paste, drag-drop, the native desktop drop grant, the image picker). It takes
+no store and no lifecycle hooks — the ids it needs arrive as getters and the
+store methods it calls arrive as one small interface — so composer behaviour is
+testable without mounting the panel. `ChatTurnActivity.vue` owns the rendering
+of one *completed* turn's `Activity` disclosure; it holds no state at all, and
+reports every action (toggle, body click, open file, expand a lazy reasoning
+step) as an emit. `ChatPanel` keeps what genuinely spans the pane: the send
+path, the slash-command and @-mention pickers, the open/closed trace map, the
+memoised markdown renderer, scroll anchoring, and the live (streaming) trace.
+Trace styling lives in `components/chatTrace.css`, pulled into both components
+through `<style scoped src>`, because a parent's scoped rules do not reach a
+child's subtree.
+
 When a chat reply, approval request, or model question needs the user's attention, `PushManager` appends its payload to `.runtime/notifications.jsonl` before attempting Web Push. A chat read mutation appends a clear control and sends it to every Web Push subscription; service workers close the matching notification tag, while the macOS menu-bar companion removes delivered banners for that chat. The companion tails the bounded log, starting at its current end on launch so it never replays old alerts while still honoring queued clear controls. Its regular refresh still derives the unread menu and badge from `.runtime/web_projects.json`. A deliberate "mark unread" (`POST /api/chats/{id}/unread`, `ProjectChatManager.mark_unread`) clears `last_read_at` so the chat is unread again on every device and publishes a `chat_unread` event; opening the chat or sending a turn marks it read through the normal paths.
 
 Rendered markdown is sanitized through the shared frontend renderer before any `v-html` use. Keep new markdown surfaces on that helper. Chat tables render inside their own keyboard-focusable horizontal viewport: compact tables shrink to their contents, while wide tables scroll without widening the conversation or collapsing key columns. Fenced code blocks are wrapped by the chat renderer with a copy button (`web/src/lib/codeCopy.ts`) that copies the block's raw text; because chat markdown is injected with `v-html` and rebuilt on every streamed token, the button is plain markup driven by one delegated click listener on the chat panel, and it stays dimmed-but-visible rather than hover-only. Completed chat traces render as compact `Activity` disclosures; deduplicated file touches move to an `Outputs` group below the final answer, while interrupted turns retain them inside the trace. The build outputs to `ciao/web/static/` so the same Starlette server hosts both the API and the PWA.

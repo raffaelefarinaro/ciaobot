@@ -31,7 +31,8 @@ web/
                           (/device is device-scoped and unguarded: it must load when a client's host is down)
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
-    composables/          reactive logic shared between components (useHoverPinPopover)
+    composables/          reactive logic shared between components, and behaviour lifted
+                          out of oversized panes (useHoverPinPopover, useChatComposer)
     lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
@@ -102,6 +103,24 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
+- **`ChatPanel.vue` ownership boundary.** The panel is being split in
+  behaviour-preserving steps; put new work on the right side of the line.
+  `composables/useChatComposer.ts` owns the composer — the draft and its
+  synchronous persistence, prompt-history recall, textarea auto-sizing, caret
+  insertion, and every attachment path (paste, drop, the native desktop drop
+  grant, the image picker). It deliberately imports no store and registers no
+  lifecycle hook: ids arrive as getters, the store arrives as the
+  `ComposerAttachmentStore` interface, and `fetch` is injectable, so
+  `composables/useChatComposer.test.ts` exercises all of it without mounting
+  anything. `ChatTurnActivity.vue` owns the rendering of one completed turn's
+  `Activity` disclosure and owns no state — open/closed, the thinking
+  preference and the markdown renderer are props, and every action is an emit.
+  `ChatPanel` keeps the send path, the slash-command and @-mention pickers,
+  the trace open/closed map, the memoised markdown cache, scroll anchoring and
+  the live streaming trace. Trace CSS lives in `components/chatTrace.css` and
+  is pulled into both components with `<style scoped src>`; scoped rules in a
+  parent do not reach a child's subtree, so moving markup into a component
+  without moving its styles silently unstyles it.
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.

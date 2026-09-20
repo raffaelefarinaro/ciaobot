@@ -267,3 +267,58 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
   return parts
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Presentation helpers for one trace row.
+ *
+ * These were private to `ChatPanel.vue` until the completed-turn Activity
+ * row moved into `ChatTurnActivity.vue`; both the live trace and the
+ * completed trace render the same rows, so the helpers live here rather
+ * than being duplicated or passed down as props.
+ * ------------------------------------------------------------------ */
+
+/** Split an `_activity` step's body into the non-empty lines it renders as. */
+export function activityLines(content: string): string[] {
+  return content.split('\n').map(line => line.trim()).filter(Boolean)
+}
+
+/** A trace line a subagent produced: the server prefixes those with `↳`. */
+export function isSubagentLine(line: string): boolean {
+  return line.trimStart().startsWith('↳')  // ↳
+}
+
+/** Images open in the image viewer; everything else (markdown, code, config,
+ *  plain text) goes through `open`. Binary formats the viewer doesn't render
+ *  (PDF, docx, xlsx, pptx, zip) fall through to `open`, which will 415 and
+ *  show a clear error. */
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|tiff?)$/i
+
+export function isImageFilePath(filePath: string): boolean {
+  return IMAGE_EXT_RE.test(filePath)
+}
+
+export function fileCardBasename(filePath: string): string {
+  if (!filePath) return ''
+  const cleaned = filePath.replace(/[/\\]+$/, '')
+  const slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'))
+  return slash >= 0 ? cleaned.slice(slash + 1) : cleaned
+}
+
+export function fileCardDirname(filePath: string): string {
+  if (!filePath) return ''
+  const slash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  return slash > 0 ? filePath.slice(0, slash) : ''
+}
+
+/** Subset of `AppIconName` a file card can use. Kept as a literal union so
+ *  `lib/` stays free of Vue imports; `AppIcon` accepts all three. */
+export type FileCardIcon = 'image' | 'doc' | 'file'
+
+// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
+// docs/DESIGN_SYSTEM.md rule S4.
+export function fileCardIcon(filePath: string): FileCardIcon {
+  if (isImageFilePath(filePath)) return 'image'
+  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
+  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
+  return 'file'
+}
