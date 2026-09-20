@@ -29,7 +29,8 @@ from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
-from ciao.web.routes_api import _read_session_segment, chat_messages
+from ciao.web.routes_api import chat_messages
+from ciao.web.transcript_service import _read_session_segment
 
 
 def _manager(tmp_path: Path, *, migrated: bool) -> ProjectChatManager:

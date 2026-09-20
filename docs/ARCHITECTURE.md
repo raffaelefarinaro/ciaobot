@@ -122,7 +122,7 @@ ciao/                          Python backend (Starlette).
     app.py                     Starlette app factory: middleware, route table, SPA catch-all.
     auth.py                    Session-cookie auth middleware and serializer.
     security.py                Security response headers middleware.
-    routes_api.py              REST route handlers. Catch-all for handlers without a domain home. The vault read handlers (`/api/vault/backlinks`, `/api/vault-markdown-paths`) do their whole file traversal in a bounded worker via `ciao/async_reads.run_read`, so a large-vault scan cannot stall WebSocket keepalives or unrelated responses.
+    routes_api.py              REST route handlers. Catch-all for handlers without a domain home. The vault read handlers (`/api/vault/backlinks`, `/api/vault-markdown-paths`) do their whole file traversal in a bounded worker via `ciao/async_reads.run_read`, so a large-vault scan cannot stall WebSocket keepalives or unrelated responses. The chat-history handlers keep only their transport — query params, the pagination envelope, the part cache and the 404 — and hand the rendering to `transcript_service.py`.
     document_conversion.py     Lazy firecrawl-anydoc conversion for chat attachments.
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
@@ -137,15 +137,16 @@ ciao/                          Python backend (Starlette).
     chat_broker.py             Chat WebSocket broker, file-touch tagging, snapshot scheduling.
     project_chats.py           ProjectChatManager: chat lifecycle, streaming, transcripts, archives.
     chat_service.py            Chat-workflow domain logic behind ProjectChatManager: provider-error retry classification, fork/handover transcript trimming, re-entry summary parsing and capping, chat-title derivation, project-doc frontmatter description writes, project-file upload policy, and scheduled-run grading (`ScheduleRunOutcome`). project_chats.py and routes_api.py import it as a module; the manager keeps the state file, the live streams, and the background tasks.
+    transcript_service.py      The chat transcript's read path: stored provider messages -> the rows the PWA renders. Ownership boundary: `routes_api.py` owns the HTTP surface of a chat, this module owns everything between what a provider stored and what the transcript shows. That is the per-message rules (which blocks an assistant message contributes, which tool calls earn a file card and which lose it when the call failed, which user turns are the CLI talking to itself rather than the human, which injected context is stripped back off a prompt), the per-session renderers (the Claude session JSONL, an opencode thread, the nested subagent transcripts), the assembly that stitches a chat's sessions, handover messages and durable-transcript metadata into one chronological list (`_assemble_chat_messages`), and the last shaping step before the wire (`_prune_rows_for_wire`). It imports no Starlette and takes no `Request`: callers pass the manager, the config and the chat. `routes_api.py` imports it as a module, not by name, so a test that patches one helper has the handlers see the patch. `tests/test_transcript_service_contract.py` pins the route table, the no-transport rule and the golden row payloads.
     file_snapshots.py          SnapshotStore: append-only file snapshots behind the file viewer.
     artifact_bridge.py         Comment bridge injected into /api/workspace-html responses: the in-frame script that turns selections and Alt+Clicks into postMessage anchors for the panel's comment composer.
     push.py                    PushManager: bounded notification log, Web Push publishing, and cross-device read-clear controls.
   # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
   # handlers without a domain home; new domains get their own routes_*.py rather than growing
   # routes_api.py. Domain logic a handler or a manager needs belongs in a service module beside it
-  # (proposal_service.py, chat_service.py), not inline in the handler or the manager. Logic TWO
-  # surfaces share — a route and the CLI — goes one level up into ciao/ (proposal_actions.py)
-  # instead, so the CLI never has to import ciao.web to reach it.
+  # (proposal_service.py, chat_service.py, transcript_service.py), not inline in the handler or the
+  # manager. Logic TWO surfaces share — a route and the CLI — goes one level up into ciao/
+  # (proposal_actions.py) instead, so the CLI never has to import ciao.web to reach it.
   # mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
 

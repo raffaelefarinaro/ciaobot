@@ -598,7 +598,7 @@ def test_default_model_on_a_config_without_opencode():
 
 # ── collaboration tree counts ────────────────────────────────────────────
 # opencode session objects carry no status field; the running count comes from
-# each child's own messages (see `_opencode_child_status` in routes_api).
+# each child's own messages (see `_opencode_child_status` in transcript_service).
 
 
 def test_collab_tree_counts_derive_running_from_child_messages():

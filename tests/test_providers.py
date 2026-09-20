@@ -249,7 +249,7 @@ def test_summarize_task_notification_extracts_completion_line() -> None:
     system bubble so subagent completions stay visible without leaking the
     raw XML into chat history.
     """
-    from ciao.web.routes_api import _summarize_task_notification
+    from ciao.web.transcript_service import _summarize_task_notification
 
     envelope = (
         "<task-notification>\n"
@@ -293,7 +293,7 @@ def test_summarize_task_notification_passes_through_finished_phrasing() -> None:
     "Subagent {status}: ..." wrapper (e.g. "Subagent completed: Agent "X"
     finished").
     """
-    from ciao.web.routes_api import _summarize_task_notification
+    from ciao.web.transcript_service import _summarize_task_notification
 
     envelope = (
         "<task-notification>\n"
@@ -311,7 +311,7 @@ def test_is_cli_internal_envelope_matches_known_wrappers() -> None:
     """Bash output, command echoes, and other CLI-synthesized user-role
     messages should be recognized so chat_messages can drop them on replay.
     """
-    from ciao.web.routes_api import _is_cli_internal_envelope
+    from ciao.web.transcript_service import _is_cli_internal_envelope
 
     cli_payloads = [
         "<task-notification><status>completed</status></task-notification>",
@@ -332,7 +332,7 @@ def test_is_cli_internal_envelope_matches_known_wrappers() -> None:
 
 def test_strip_injected_context_removes_image_manifest(tmp_path: Path) -> None:
     """The UI replay path must undo the manifest `build_prompt` appends."""
-    from ciao.web.routes_api import _strip_injected_context
+    from ciao.web.transcript_service import _strip_injected_context
 
     request = AgentRequest(
         prompt="First line.\nSecond line.",
