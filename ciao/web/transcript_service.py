@@ -384,11 +384,13 @@ def _summarize_task_notification(content: str) -> str | None:
     completions without seeing the raw envelope.
 
     Only the first notification is summarised when the CLI concatenates
-    several into one record; the rest stay hidden with the envelope. Callers
-    must have established that `content` is a CLI envelope — a notification
-    quoted inside the human's own prose is their text, not a completion.
+    several into one record; the rest stay hidden with the envelope. A record
+    that merely *carries* the grammar — the human's own prose quoting it, or
+    shell output from a command that printed a session JSONL — is not a
+    completion and returns None, the same rule `ciao/subagent_tracking.py`
+    applies so the two readers stay aligned.
     """
-    fields = cli_envelopes.task_notification_fields(content)
+    fields = cli_envelopes.envelope_notification_fields(content)
     if fields is None:
         return None
     status = fields.get("status", "completed")
@@ -1288,22 +1290,19 @@ async def _assemble_chat_messages(
         # without incrementing user_idx — these aren't real user turns and the
         # image-ref index must only advance on human sends.
         if m.type == "user":
-            opening_tag = cli_envelopes.opening_envelope_tag(content)
-            if opening_tag is not None:
+            if _is_cli_internal_envelope(content):
                 # A task-notification envelope earns a status line; every
                 # other envelope is hidden outright. Asking the summariser
                 # first would have let a record that merely *opens* with a
                 # notification but carries anything after the closing tag
-                # fall through to the blanket hide. Keyed on the *opening*
-                # tag, because the shared parser is unanchored: a
-                # <bash-stdout> record whose body happens to contain a
-                # notification (a command that printed a session JSONL) would
-                # otherwise render a fabricated "Subagent failed: ..." line
-                # built out of shell output.
-                if opening_tag == "task-notification":
-                    task_summary = _summarize_task_notification(content)
-                    if task_summary is not None:
-                        result.append({"role": "system", "content": task_summary})
+                # fall through to the blanket hide. The summariser itself
+                # answers None for an envelope that is not a notification, so
+                # <bash-stdout> from a command that printed a session JSONL
+                # stays hidden instead of rendering a status line assembled
+                # out of shell output.
+                task_summary = _summarize_task_notification(content)
+                if task_summary is not None:
+                    result.append({"role": "system", "content": task_summary})
                 continue
             # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
             # It's a server-injected prompt, not something the user typed, so

@@ -136,8 +136,39 @@ def is_interrupted_request_sentinel(content: str) -> bool:
 
 
 def task_notification_fields(content: str) -> dict[str, str] | None:
-    """Fields of the first ``<task-notification>`` in `content`, else None."""
+    """Fields of the first ``<task-notification>`` anywhere in `content`.
+
+    Does not ask whether `content` *is* a notification — use
+    :func:`envelope_notification_fields` for that. This one exists for a
+    caller that already knows what it is holding.
+    """
     m = TASK_NOTIFICATION_RE.search(content)
     if not m:
         return None
     return {tag: text.strip() for tag, text in INNER_TAG_RE.findall(m.group(1))}
+
+
+def envelope_notification_fields(content: str) -> dict[str, str] | None:
+    """Fields of the notification `content` **is**, else None.
+
+    A completion is a record the CLI wrote as a ``<task-notification>``
+    envelope, so it has to *open* with that tag. Text that merely carries the
+    grammar in its body is something else that happens to quote it, and both
+    readers get that wrong in the same expensive way if they only search:
+
+    * ``<bash-stdout>`` from a command that printed a session JSONL (``cat``,
+      ``grep task-notification``) flips a running agent to "failed" out of
+      shell output, and opens a synthesis-nudge window for a completion that
+      never happened;
+    * a human message quoting a notification ("why did this fail? …") does the
+      same, and is skipped by the turn counter while the renderer shows it as
+      a user bubble — which is exactly the ``turn_index`` drift this module
+      exists to prevent.
+
+    The body search stays unanchored *within* such a record: a notification
+    with anything appended after the closing tag is still a notification, and
+    only the first is read when the CLI concatenated several.
+    """
+    if opening_envelope_tag(content) != "task-notification":
+        return None
+    return task_notification_fields(content)

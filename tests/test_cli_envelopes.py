@@ -11,6 +11,7 @@ the unified semantics and the one call site whose behaviour that changed.
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -270,3 +271,113 @@ def test_real_user_prose_counts_for_both_readers(content: str) -> None:
     assert subagent_tracking._is_countable_user_turn(content)
     assert not transcript_service._is_cli_internal_envelope(content)
     assert not transcript_service._is_control_slash_command(content)
+
+# ------------------------------------- a record that only quotes the grammar
+SHELL_OUTPUT = (
+    "<bash-stdout>\n"
+    "$ grep task-notification ~/.claude/projects/x/session.jsonl\n"
+    f"{ONE}\n"
+    "</bash-stdout>"
+)
+
+
+def _session(tmp_path, records: list[dict]) -> Path:
+    path = tmp_path / "session.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    return path
+
+
+_DISPATCH = {
+    "type": "assistant",
+    "message": {
+        "content": [{
+            "type": "tool_use",
+            "id": "tu1",
+            "name": "Agent",
+            "input": {
+                "description": "check the logs",
+                "subagent_type": "Explore",
+                "run_in_background": True,
+            },
+        }]
+    },
+}
+_DISPATCH_RESULT = {
+    "type": "user",
+    "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1"}]},
+    "toolUseResult": {"agentId": "aaa", "isAsync": True},
+}
+
+
+def _user(text: str) -> dict:
+    return {"type": "user", "message": {"content": text}}
+
+
+def test_only_a_record_that_opens_with_the_tag_is_a_notification() -> None:
+    """The anchored predicate both readers use to identify a completion.
+
+    A completion is a record the CLI *wrote* as an envelope. Shell output
+    that printed a session JSONL, and a human quoting a notification, carry
+    the same grammar and are not completions.
+    """
+    assert cli_envelopes.envelope_notification_fields(ONE) is not None
+    assert cli_envelopes.envelope_notification_fields(ONE + "\ntrailing") is not None
+    assert cli_envelopes.envelope_notification_fields(SHELL_OUTPUT) is None
+    assert cli_envelopes.envelope_notification_fields(f"why did this fail?\n{ONE}") is None
+
+
+def test_shell_output_quoting_a_notification_never_completes_an_agent(
+    tmp_path,
+) -> None:
+    """Regression: a `grep` of a session JSONL flipped a running agent.
+
+    The tracker identified a completion by searching the record's body, so
+    the agent's own transcript being printed into the chat reported it
+    "failed" — and opened a synthesis-nudge window for a completion that
+    never happened, which is the window steering into kills the run.
+    """
+    state = subagent_tracking.parse_session_subagents(
+        _session(tmp_path, [_DISPATCH, _DISPATCH_RESULT, _user(SHELL_OUTPUT)])
+    )
+    assert state.subagents["aaa"].status == "running"
+    assert state.notification_pending is False
+
+
+def test_a_real_notification_still_completes_its_agent(tmp_path) -> None:
+    """The guard must not cost the tracker the completions it exists for."""
+    state = subagent_tracking.parse_session_subagents(
+        _session(tmp_path, [
+            _DISPATCH,
+            _DISPATCH_RESULT,
+            _user(
+                "<task-notification><task-id>aaa</task-id>"
+                "<status>completed</status><summary>done</summary>"
+                "</task-notification>"
+            ),
+        ])
+    )
+    assert state.subagents["aaa"].status == "completed"
+
+
+def test_prose_quoting_a_notification_advances_both_turn_counters(
+    tmp_path,
+) -> None:
+    """Regression: the two readers disagreed and `turn_index` drifted.
+
+    The renderer shows a quoting human message as their bubble (pinned
+    above), but the tracker treated it as a notification and skipped it, so
+    every later dispatch was stamped one turn too low and its subagent panel
+    anchored to the wrong bubble.
+    """
+    records = [
+        _user("first"),
+        _user(f"why did this fail?\n{ONE}"),
+        _user("third"),
+        _DISPATCH,
+        _DISPATCH_RESULT,
+    ]
+    state = subagent_tracking.parse_session_subagents(_session(tmp_path, records))
+    assert state.subagents["aaa"].turn_index == 2
+
+    # The renderer's side of the same claim: three user bubbles.
+    assert subagent_tracking._is_countable_user_turn(f"why did this fail?\n{ONE}")

@@ -42,8 +42,8 @@ from ciao.cli_envelopes import (
     is_cli_envelope,
     is_control_slash_command,
     is_interrupted_request_sentinel,
+    envelope_notification_fields,
     is_no_response_sentinel,
-    task_notification_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -431,7 +431,13 @@ def _is_countable_user_turn(content: str) -> bool:
 
 
 def _notification_fields(content: str) -> dict[str, str] | None:
-    return task_notification_fields(content)
+    """Fields of the notification this record *is*, else None.
+
+    Shared with the /messages renderer (ciao/cli_envelopes.py) so the two
+    readers agree on which records are completions, and therefore on which
+    ones advance `turn_index`.
+    """
+    return envelope_notification_fields(content)
 
 
 def _normalize_agent_id(agent_id: str) -> str:
