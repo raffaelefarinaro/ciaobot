@@ -1695,6 +1695,23 @@ watch(
   min-width: 0;
 }
 
+/* Six controls at phone width — one primary plus five neutral chips, after
+   the reconcile check joined the card. Nothing overflows and every target is
+   still 44px, but at 320px the default 16px side padding pushes the strip
+   into five wrapped rows: 236px of buttons, a third of the screen, under a
+   card that also has to show the destination and the replacement. Tightening
+   only the horizontal padding packs it back to four rows (188px) at 320px and
+   keeps three at 390px, with the 44px hit area untouched — it comes from
+   `min-height`, not from this padding. The chips stay neutral: crowding is
+   not a reason to promote a secondary into a second pink bar. */
+@media (max-width: 480px) {
+  .pr-actions--card .btn-small,
+  .pr-card-edit-actions .btn-small {
+    padding-left: var(--space-3);
+    padding-right: var(--space-3);
+  }
+}
+
 .pr-summary-block {
   display: flex;
   flex-direction: column;

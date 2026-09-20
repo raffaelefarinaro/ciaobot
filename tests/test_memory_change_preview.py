@@ -669,6 +669,66 @@ def test_undo_restores_a_conflict_free_operation(tmp_path: Path) -> None:
     assert row["text"] not in _guide(config).read_text(encoding="utf-8")
 
 
+def test_undo_restores_the_guide_byte_for_byte(tmp_path: Path) -> None:
+    """Not "the same facts": the same bytes.
+
+    Undoing the only entry a region held used to leave one extra blank line
+    behind, because the empty-region body was written as the heading's own
+    trailing blank line plus another newline. The entries compared equal and
+    the diff was empty, so nothing in the change-preview work could see it —
+    only the file did, and it drifted by a line per emptied region.
+    """
+    from ciao.memory_tool import ensure_regions
+
+    config = _vault(tmp_path)
+    client = _client(config)
+    ensure_regions(_guide(config))
+    pristine = _guide(config).read_bytes()
+
+    row = _row(client, "memory", "check-first")
+    client.post(f"/api/proposals/{row['id']}/accept")
+    change = next(
+        r["change"]
+        for r in client.get("/api/proposals/history").json()["rows"]
+        if r["text"] == row["text"]
+    )
+    assert _guide(config).read_bytes() != pristine
+
+    assert (
+        client.post(f"/api/memory/receipts/{change['receipt_id']}/undo").status_code
+        == 200
+    )
+
+    assert _guide(config).read_bytes() == pristine
+
+
+def test_accepting_a_learning_writes_the_source_the_card_showed(
+    tmp_path: Path,
+) -> None:
+    """The preview renders the source into the entry; so must the write.
+
+    The accept called `append_learning` without the row's source, so a
+    recurrence bump previewed as "sources: chat-7, chat-1" and landed as
+    "sources: chat-7" — the one disagreement between the card and the write
+    that the preview contract is supposed to rule out.
+    """
+    from ciao.memory_proposals import append_learning, learnings_path
+
+    config = _vault(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    # Filed from a different chat, so the accepted row's own source is what
+    # the entry is missing and the bump has to add.
+    append_learning(vault, "Vitest skips component files on old Node.", source="chat-7")
+    client = _client(config)
+    row = _row(client, "learnings")
+    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
+    assert preview["operation"] == "update"
+
+    client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert learnings_path(vault).read_text(encoding="utf-8") == preview["after"]
+
+
 def test_receipt_detail_is_404_for_an_unknown_id(tmp_path: Path) -> None:
     assert _client(_vault(tmp_path)).get("/api/memory/receipts/nope").status_code == 404
 

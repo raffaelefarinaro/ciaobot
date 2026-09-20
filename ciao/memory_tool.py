@@ -366,12 +366,14 @@ def replace_region_body(text: str, region: str, entries: list[str]) -> str:
     starts, ends = _find_marker_spans(text, canonical)
     start, end = starts[0], ends[0]
     meta = _REGION_META[canonical]
+    # `\n<heading>\n\n` already ends the body on a blank line, so the end
+    # marker lands at the start of its own line either way. An empty region
+    # used to append one more newline on top of that, which is why emptying a
+    # region did not reproduce the pristine body byte for byte: undoing the
+    # only entry a region held left an extra blank line behind, and the guide
+    # never returned to the text it had before the accept.
     body = f"\n{meta['heading']}\n\n"
-    serialized = serialize_entries(entries)
-    if serialized:
-        body += serialized
-    else:
-        body += "\n"
+    body += serialize_entries(entries)
     return text[: start.end()] + body + text[end.start() :]
 
 
