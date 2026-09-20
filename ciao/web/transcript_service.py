@@ -1288,15 +1288,22 @@ async def _assemble_chat_messages(
         # without incrementing user_idx — these aren't real user turns and the
         # image-ref index must only advance on human sends.
         if m.type == "user":
-            if _is_cli_internal_envelope(content):
+            opening_tag = cli_envelopes.opening_envelope_tag(content)
+            if opening_tag is not None:
                 # A task-notification envelope earns a status line; every
                 # other envelope is hidden outright. Asking the summariser
                 # first would have let a record that merely *opens* with a
                 # notification but carries anything after the closing tag
-                # fall through to the blanket hide.
-                task_summary = _summarize_task_notification(content)
-                if task_summary is not None:
-                    result.append({"role": "system", "content": task_summary})
+                # fall through to the blanket hide. Keyed on the *opening*
+                # tag, because the shared parser is unanchored: a
+                # <bash-stdout> record whose body happens to contain a
+                # notification (a command that printed a session JSONL) would
+                # otherwise render a fabricated "Subagent failed: ..." line
+                # built out of shell output.
+                if opening_tag == "task-notification":
+                    task_summary = _summarize_task_notification(content)
+                    if task_summary is not None:
+                        result.append({"role": "system", "content": task_summary})
                 continue
             # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
             # It's a server-injected prompt, not something the user typed, so

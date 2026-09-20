@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 /**
- * Transcript rendering must stay linear in transcript length.
+ * Transcript rendering must not rebuild the known-path rules per span.
  *
  * Measured in #494 and filed as #501: a 5x longer transcript took ~85x
  * longer to render. The dominant factor was rule-building in `linkifyHtml`.
  * `buildKnownPathRules` ran once per *text span* of every message, over a
  * known-path list that itself grows with the transcript, and the build was
  * quadratic in the size of that list. Three terms, all growing together.
+ *
+ * That factor is what these tests pin. They do NOT prove the render is
+ * linear: `knownPathMatches` still scans every rule per span, so an
+ * O(paths x spans) term survives. Removing it is an algorithm change, not a
+ * cache, and is deliberately not in this change.
  *
  * The guard here is a work count, not a stopwatch. A duration depends on the
  * machine and on what else the suite is running; "the rules were computed

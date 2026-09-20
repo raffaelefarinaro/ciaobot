@@ -221,6 +221,19 @@ async def test_a_non_notification_envelope_is_still_hidden(monkeypatch) -> None:
     assert rows == []
 
 
+@pytest.mark.asyncio
+async def test_shell_output_quoting_a_notification_stays_hidden(monkeypatch) -> None:
+    """The summariser is keyed on the *opening* tag, not on a body search.
+
+    The shared parser is unanchored, so a `<bash-stdout>` record from a
+    command that printed a session JSONL carries a notification in its body.
+    Summarising it would fabricate a "Subagent failed" status line out of
+    shell output and throw the rest of the record away.
+    """
+    rows = await _render(monkeypatch, [f"<bash-stdout>\n{TWO}\n</bash-stdout>"])
+    assert rows == []
+
+
 # -------------------------------------------- the two readers stay aligned
 @pytest.mark.parametrize(
     "content",

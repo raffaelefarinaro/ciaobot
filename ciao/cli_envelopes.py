@@ -53,8 +53,11 @@ CLI_ENVELOPE_TAGS = (
 # Start-anchored: a record counts as an envelope when it *opens* with one of
 # the tags. Text that merely mentions a tag further in is the human's own
 # prose and still renders as their bubble.
+# The tag is captured so callers can tell *which* envelope opened the record
+# (see ``opening_envelope_tag``): a record that merely mentions another
+# envelope's grammar inside its body is still that outer envelope.
 CLI_ENVELOPE_RE = re.compile(
-    r"^\s*<(?:" + "|".join(re.escape(t) for t in CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
+    r"^\s*<(" + "|".join(re.escape(t) for t in CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
 )
 
 # Unanchored and non-greedy, used with ``search``: a notification is
@@ -99,6 +102,19 @@ INTERRUPTED_REQUEST_RE = re.compile(r"\[Request interrupted by user[^\]]*\]")
 def is_cli_envelope(content: str) -> bool:
     """True when `content` opens with a CLI-synthesized user-message wrapper."""
     return bool(CLI_ENVELOPE_RE.match(content))
+
+
+def opening_envelope_tag(content: str) -> str | None:
+    """The envelope tag `content` opens with, or None when it opens with none.
+
+    Tells a ``<task-notification>`` record apart from another envelope that
+    merely carries that grammar in its body — ``<bash-stdout>`` of a command
+    that printed a session JSONL, for one. Without the distinction such a
+    record renders as a fabricated "Subagent failed: ..." status line built
+    out of shell output.
+    """
+    m = CLI_ENVELOPE_RE.match(content)
+    return m.group(1) if m else None
 
 
 def is_control_slash_command(content: str) -> bool:
