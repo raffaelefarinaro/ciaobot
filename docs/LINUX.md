@@ -62,11 +62,18 @@ and `ciaobot@localhost`). This does not change the administrator's Git settings.
 Generate and inspect the unit, then install it explicitly:
 
 ```sh
+# Stage under a root-owned private directory, never a fixed /tmp path: on a
+# multi-user VPS another local account could pre-create /tmp/ciaobot.service
+# and swap its content between verification and installation, and the
+# installed unit runs as root. mktemp -d creates the staging directory mode
+# 0700 owned by root, and tee creates the file root-owned inside it.
+stage=$(sudo mktemp -d)
 /opt/ciaobot/venv/bin/ciao linux-service \
   --workspace /srv/ciaobot --user ciaobot --home /var/lib/ciaobot \
-  --python /opt/ciaobot/venv/bin/python > /tmp/ciaobot.service
-sudo systemd-analyze verify /tmp/ciaobot.service
-sudo install -m 644 /tmp/ciaobot.service /etc/systemd/system/ciaobot.service
+  --python /opt/ciaobot/venv/bin/python | sudo tee "$stage/ciaobot.service" > /dev/null
+sudo systemd-analyze verify "$stage/ciaobot.service"
+sudo install -m 644 "$stage/ciaobot.service" /etc/systemd/system/ciaobot.service
+sudo rm -rf "$stage"
 sudo systemctl daemon-reload
 sudo systemctl enable --now ciaobot
 sudo systemctl status ciaobot
