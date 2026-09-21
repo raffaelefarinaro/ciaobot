@@ -394,10 +394,23 @@ def post(op: str, arguments: dict[str, Any], *, url: str, token: str, timeout_s:
     return parsed if isinstance(parsed, dict) else {"ok": True, "data": parsed}
 
 
+def _strip_json_flag(argv: list[str]) -> list[str]:
+    """Drop the compatibility ``--json`` from the ``ciao`` part of ``argv`` only.
+
+    Everything after the first bare ``--`` is the background command's own
+    argv (``ciao run start -- python report.py --json``) and is passed through
+    untouched, as the command contract promises.
+    """
+    try:
+        cut = argv.index("--")
+    except ValueError:
+        cut = len(argv)
+    return [token for token in argv[:cut] if token != "--json"] + argv[cut:]
+
+
 def main(argv: list[str]) -> int:
     parser = build_parser()
-    # ``--json`` is documented as accepted anywhere; output is JSON regardless.
-    args = parser.parse_args([token for token in argv if token != "--json"])
+    args = parser.parse_args(_strip_json_flag(argv))
     if args.noun is None:
         parser.print_help()
         return 2

@@ -331,3 +331,15 @@ def test_provider_reuse_key_changes_when_the_surface_flips() -> None:
     assert agent_control_token(mcp) == agent_control_token(cli) == "tok"
     assert provider_reuse_key(mcp) != provider_reuse_key(cli)
     assert provider_reuse_key(none) == ""
+
+
+def test_json_flag_is_not_stripped_from_the_run_command_payload() -> None:
+    from ciao.agent_cli import _strip_json_flag
+
+    assert _strip_json_flag(["--json", "vault", "search", "x", "--json"]) == ["vault", "search", "x"]
+    payload = ["run", "start", "--json", "--", "python", "report.py", "--json"]
+    assert _strip_json_flag(payload) == ["run", "start", "--", "python", "report.py", "--json"]
+    parser = agent_cli.build_parser()
+    op, arguments = agent_cli.resolve(parser.parse_args(_strip_json_flag(payload)))
+    assert op == "background_run_start"
+    assert arguments["cmd"] == ["python", "report.py", "--json"]
