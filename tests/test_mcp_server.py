@@ -257,10 +257,8 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
         "memory_status",
         "memory_update",
         "vault_search",
-        "chat_create",
         "schedule",
         "schedule_action",
-        "chat_handover",
     } <= names
 
     # The retired loop tools are gone for good; interval cadence lives on the
@@ -298,6 +296,19 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "project_get",
             "workspaces_list",
             "gws_status",
+            # Migrated to `ciao chat …` in S3 (chat lifecycle group): still
+            # control-plane operations, just no longer MCP tools.
+            "chats_list",
+            "chat_get",
+            "chat_create",
+            "chat_update",
+            "chat_send",
+            "chat_continue",
+            "chat_retry",
+            "chat_handover",
+            "chat_archive",
+            "chat_delete",
+            "chat_stop",
             # Moved to PWA Settings / skill / native Glob.
             "workspace_update",
             "workspace_delete",
@@ -340,7 +351,7 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
     assert by_tool["vault_search"]["errors"] == 1
     # Registered-but-never-called tools appear with zero counts.
-    assert by_tool["chat_create"]["calls"] == 0
+    assert by_tool["schedule"]["calls"] == 0
     # Sorted by call count descending, so the busiest tool is first.
     assert usage["tools"][0]["tool"] == "memory_read"
 

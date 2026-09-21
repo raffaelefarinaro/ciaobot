@@ -194,12 +194,14 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 
 # Ciaobot's control-plane mutations that must keep prompting even in the
 # permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
-# tools in ``ciao/mcp_server.py``: deletes, lifecycle teardown, and arbitrary
-# command starts. Everything else on the control plane is allow-listed.
+# tools in ``ciao/mcp_server.py`` for the groups still exposed as MCP tools:
+# the rare-admin and chat groups moved to the CLI (S2/S3), where their
+# destructive verbs are handled by the argv ask patterns in
+# ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What remains is
+# the schedule lifecycle, the background-run start/cancel pair, and
+# ``project_action``. Everything else on the control plane is allow-listed.
 _DESTRUCTIVE_MCP_TOOLS = (
-    "chat_delete",
     "project_action",
-    "chat_stop",
     "schedule_action",
     "background_run_start",
     "background_run_cancel",
