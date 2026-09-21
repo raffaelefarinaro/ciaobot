@@ -61,13 +61,16 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 
 Useful `.env` settings:
 
-- `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
+- `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default:
+  `opus,sonnet,haiku,fable`. Leave it unset unless you want to expose full
+  Anthropic model ids or change the default tier (the first entry): pinning
+  it freezes the picker, so a tier added in a later release stays hidden.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
 
 Each provider has its own default model and thinking level for new chats, set in
 Settings → Models, and its own default permission mode, set in
 Settings → Providers. A Claude model alias
-(`haiku`, `sonnet`, `opus`) is a real Claude model id; opencode resolves its
+(`haiku`, `sonnet`, `opus`, `fable`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
 (allow safe work, ask on risky actions), or bypass (allow everything).
