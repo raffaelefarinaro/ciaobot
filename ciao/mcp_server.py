@@ -388,17 +388,10 @@ class Operation:
 #: migrate to ``ciao <noun> <verb>``; deleted outright in S6.
 MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset(
     {
-        "context_get",
         "memory_status",
         "memory_update",
         "vault_search",
         "vault_review",
-        "gws_status",
-        "projects_list",
-        "project_get",
-        "project",
-        "project_action",
-        "workspaces_list",
         "chats_list",
         "chat_get",
         "chat_create",

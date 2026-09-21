@@ -172,25 +172,27 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
             client,
             token,
             "tools/call",
-            {"name": "context_get", "arguments": {}},
+            {"name": "schedule", "arguments": {"action": "preview", "prompt": "t", "frequency": "manual", "timezone": "UTC", "project_id": "project-1"}},
             request_id=2,
         )
 
     assert called.status_code == 200
     result = called.json()["result"]
     assert result["isError"] is False
-    # system_status_get is folded into context_get under the "system" key.
     assert result["structuredContent"] == {
         "ok": True,
         "data": {
-            "chat_id": "chat-1",
-            "workspace": "personal",
-            "system": {"server": "ok"},
+            "prompt": "t", "frequency": "manual",
+            "timezone": "UTC", "project_id": "project-1",
+            "daily_time": "09:00", "archive_policy": "manual",
+            "title": "", "description": "", "provider": "", "model": "",
+            "workspace": "", "interval_minutes": None, "days_of_week": None,
+            "day_of_month": None, "run_at_date": None, "chat_id": None,
         },
     }
     telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
     record = json.loads(telemetry[-1])
-    assert record["tool"] == "context_get"
+    assert record["tool"] == "schedule"
     assert record["chat_id"] == "chat-1"
     assert record["provider"] == "claude"
     assert record["status"] == "ok"
@@ -252,12 +254,9 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     names = set(service.status()["tools"])
 
     assert {
-        "context_get",
         "memory_status",
         "memory_update",
         "vault_search",
-        "project",
-        "project_action",
         "chat_create",
         "schedule",
         "schedule_action",
@@ -290,6 +289,15 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "project_complete",
             "project_restore",
             "project_delete",
+            # Migrated to `ciao <noun> <verb>` in S2 (rare admin group): still
+            # control-plane operations, just no longer MCP tools.
+            "context_get",
+            "project",
+            "project_action",
+            "projects_list",
+            "project_get",
+            "workspaces_list",
+            "gws_status",
             # Moved to PWA Settings / skill / native Glob.
             "workspace_update",
             "workspace_delete",
@@ -615,7 +623,7 @@ def test_tool_call_survives_a_telemetry_write_failure(tmp_path: Path) -> None:
     service._telemetry_path.mkdir(parents=True, exist_ok=True)
 
     with _client(service) as client:
-        called = _rpc(client, token, "tools/call", {"name": "context_get", "arguments": {}})
+        called = _rpc(client, token, "tools/call", {"name": "memory_status", "arguments": {}})
 
     assert called.status_code == 200
     assert called.json()["result"]["isError"] is False
