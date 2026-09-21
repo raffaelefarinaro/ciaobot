@@ -1918,7 +1918,7 @@ def _cli_aliases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mapping: dict[
 def test_cli_invocation_maps_to_its_operation_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _cli_aliases(monkeypatch, tmp_path, {"vault search": "vault_search", "chat delete": "chat_delete", "schedule enable": "schedule_action"})
+    _cli_aliases(monkeypatch, tmp_path, {"vault search": "vault_search", "chat delete": "chat_delete", "schedule enable": "schedule_action", "chat list": "chats_list", "project complete": "project_action"})
     try:
         assert be._bare_tool_name("ciao vault search --limit 5 'x'") == "vault_search"
         assert be._bare_tool_name("Bash(ciao chat delete --chat c1)") == "chat_delete"
@@ -1930,6 +1930,12 @@ def test_cli_invocation_maps_to_its_operation_name(
         # deferred mutating tool.
         assert be._bare_tool_name("ciao vault review list") == "vault_review_list"
         assert be._bare_tool_name("vault review show People/X.md") == "vault_review_inspect"
+        # A compound shell command is fail-closed: mapping only the first
+        # invocation would let a sibling destructive one escape the
+        # zero-tolerance detection, so the worst resolved operation wins.
+        assert be._bare_tool_name("Bash(ciao vault review list && ciao chat delete --chat c1)") == "chat_delete"
+        assert be._bare_tool_name("Bash(ciao chat list && ciao project complete p1)") == "project_action"
+        assert be._bare_tool_name("ciao vault search x; ciao chat delete --chat c2") == "chat_delete"
         # Unknown CLI commands and plain MCP names are untouched.
         assert be._bare_tool_name("ciao frobnicate now") == "ciao frobnicate now"
         assert be._bare_tool_name("Read") == "read"

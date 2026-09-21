@@ -1280,6 +1280,11 @@ def _bare_tool_name(name: str) -> str:
     zero-tolerance detection. A CLI invocation (``ciao vault search …``,
     ``Bash(ciao chat delete)``) maps through :func:`cli_command_operations`
     by its longest matching command prefix, for the same reason.
+
+    A compound shell command (``Bash(ciao vault review list && ciao chat
+    delete --chat c1)``) carries several ``ciao`` invocations; mapping only
+    the first would let a later destructive one escape the zero-tolerance
+    checks, so fail closed: surface the worst resolved operation.
     """
     value = name.strip().casefold()
     if value.startswith("mcp__") and "__" in value[5:]:
@@ -1289,6 +1294,32 @@ def _bare_tool_name(name: str) -> str:
         cli = cli[5:-1].strip()
     if cli.startswith("`") and cli.endswith("`"):
         cli = cli[1:-1].strip()
+    resolved = [_resolve_cli_command(part, cli) for part in _split_shell_commands(cli)]
+    if len(resolved) > 1:
+        # Compound: a read-only verb is never the answer if a sibling is
+        # destructive, and an unresolvable segment forces the fail-closed
+        # original back so nothing is scored benign.
+        return max(
+            (r for r in resolved if r != cli),
+            key=_destructive_rank,
+            default=value,
+        )
+    return _resolve_cli_command(cli, cli)
+
+
+#: Compound-shell separators that would join several ``ciao`` invocations into
+#: one Bash tool report. ``;`` and newline also appear in prose answers, so the
+#: split only applies once a ``Bash(...)``/``ciao`` command frame has been
+#: stripped above.
+_COMPOUND_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+
+
+def _split_shell_commands(cli: str) -> list[str]:
+    return [part.strip() for part in _COMPOUND_SPLIT_RE.split(cli) if part.strip()]
+
+
+def _resolve_cli_command(cli: str, original: str) -> str:
+    """Map one ``ciao …`` (or bare-command) invocation to its operation."""
     if cli.startswith("ciao "):
         cli = cli[5:]
     aliases = cli_command_operations()
@@ -1299,7 +1330,12 @@ def _bare_tool_name(name: str) -> str:
             return _CLI_READ_ONLY_VERBS[key]
         if key in aliases:
             return aliases[key]
-    return value
+    return original
+
+
+def _destructive_rank(operation: str) -> int:
+    """Order operations so a destructive one wins a compound-command tie."""
+    return 1 if operation in destructive_mcp_tool_names() else 0
 
 
 # Read-only verbs of an operation whose MCP tool is a single mutating name.

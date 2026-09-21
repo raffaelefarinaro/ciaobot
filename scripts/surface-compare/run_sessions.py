@@ -164,6 +164,11 @@ def memory_region(text: str) -> str:
     return m.group(1) if m else ""
 
 
+def _entries(body: str) -> list[str]:
+    """The ``§``-delimited entries of a memory region body, preserving order."""
+    return [e for e in body.split("§") if e.strip()]
+
+
 class Runner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -215,6 +220,7 @@ class Runner:
         check = prompt.check.replace("{run}", run)
 
         memory_before = self.memory_file.read_text(encoding="utf-8")
+        self._before_memory = memory_before
         schedules_before = self._schedule_ids()
         tele_pos, tools_pos = file_size(self.telemetry), file_size(self.agent_tools)
         target_chat = ""
@@ -352,13 +358,27 @@ class Runner:
             pass
 
     def _remove_memory_entries_containing(self, marker: str) -> None:
-        """Drop only the region entries this run added (they carry ``marker``)."""
+        """Drop only the region entries this run added.
+
+        ``marker`` is the ``memory_contains:`` completion marker, which the
+        prompt embeds in the fact it asks the agent to record, so the added
+        entry carries it. Removing every ``§``-entry that contains ``marker``
+        would also delete a pre-existing entry that happens to mention the same
+        text; instead remove only the entries that were not present in the
+        before snapshot.
+        """
+        before = memory_region(self._before_memory)
+        after = memory_region(self.memory_file.read_text(encoding="utf-8"))
+        added = set(_entries(after)) - set(_entries(before))
         text = self.memory_file.read_text(encoding="utf-8")
         m = re.search(r"(<!-- ciao:memory:start[^>]*-->)(.*?)(<!-- ciao:memory:end -->)", text, re.S)
         if not m:
             return
         body = m.group(2)
-        kept = [entry for entry in body.split("§") if marker not in entry]
+        kept = [
+            entry for entry in _entries(body)
+            if not (entry in added and marker in entry)
+        ]
         new_body = "§".join(kept)
         if new_body != body:
             self.memory_file.write_text(text[: m.start(2)] + new_body + text[m.end(2):], encoding="utf-8")
