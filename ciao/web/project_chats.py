@@ -6618,6 +6618,11 @@ class ProjectChatManager:
                     # synthetic result when the user force-stops the turn
                     # before the provider emits its terminal event.
                     turn_streamed_text = ""
+                    # Whether this turn already published a terminal `result`.
+                    # A user stop reaches us two ways -- an is_error ResultEvent
+                    # (published by the loop below) or a raised exception -- and
+                    # only the first leaves clients a frame to settle on.
+                    turn_result_published = False
                     question_paused = False
 
                     async def _run_turn() -> None:
@@ -6628,7 +6633,7 @@ class ProjectChatManager:
                         # forever in the event iterator.
                         nonlocal turn_assistant_text, turn_streamed_text
                         nonlocal question_paused, had_error
-                        nonlocal had_provider_progress
+                        nonlocal had_provider_progress, turn_result_published
                         async for event in self.stream_chat(
                             chat_id,
                             current_prompt,
@@ -6674,6 +6679,8 @@ class ProjectChatManager:
                                     payload["duration_ms"] = duration_ms
                             if payload:
                                 stream.publish(payload)
+                                if isinstance(event, ResultEvent):
+                                    turn_result_published = True
                             if isinstance(event, AssistantTextDelta):
                                 # Parent-turn prose only: subagent deltas are
                                 # attributed to their own agent in the UI.
@@ -6864,47 +6871,11 @@ class ProjectChatManager:
                             "Turn force-closed by user stop for chat %s", chat_id
                         )
                         turn_assistant_text = turn_streamed_text
-                        chat_now = self._chats.get(chat_id)
-                        completed_at = chat_service._now_iso()
-                        duration_ms = None
-                        sent_at_rec = ""
-                        if current_turn_index is not None:
-                            started_perf = self._turn_perf_started.pop(
-                                (chat_id, current_turn_index), None
-                            )
-                            if started_perf is not None:
-                                duration_ms = int(
-                                    (time.perf_counter() - started_perf) * 1000
-                                )
-                            if chat_now is not None:
-                                rec = chat_now.user_turn_timings.setdefault(
-                                    str(current_turn_index), {}
-                                )
-                                rec["completed_at"] = completed_at
-                                if duration_ms is not None:
-                                    rec["duration_ms"] = duration_ms
-                                sent_at_rec = rec.get("sent_at", "")
-                                self._save()
-                        stop_payload: dict = {
-                            "type": "result",
-                            "text": turn_streamed_text,
-                            "is_error": False,
-                            "stopped": True,
-                            "effective_model": (
-                                chat_now.model if chat_now else ""
-                            ),
-                            "usage": {},
-                            "quota": {},
-                            "session_id": (
-                                chat_now.session_id if chat_now else ""
-                            ) or "",
-                        }
-                        stop_payload["completed_at"] = completed_at
-                        if sent_at_rec:
-                            stop_payload["sent_at"] = sent_at_rec
-                        if duration_ms is not None:
-                            stop_payload["duration_ms"] = duration_ms
-                        stream.publish(stop_payload)
+                        stream.publish(self._stop_result_payload(
+                            chat_id,
+                            turn_index=current_turn_index,
+                            text=turn_streamed_text,
+                        ))
                     except Exception as exc:
                         # A user-initiated stop may surface here (if the SDK
                         # raises rather than yielding a terminal ResultEvent)
@@ -6914,6 +6885,27 @@ class ProjectChatManager:
                         # queued follow-ups should still be sent.
                         if stream.user_stopped:
                             logger.info("Stream stopped by user for chat %s", chat_id)
+                            if not turn_result_published:
+                                # The provider raised instead of yielding a
+                                # terminal ResultEvent, so no client ever saw
+                                # a frame for this turn: the composer kept its
+                                # spinner on a turn the server had already
+                                # ended, and only the *next* send cleared it.
+                                # Publish the same synthetic result the
+                                # force-close path uses.
+                                #
+                                # `turn_assistant_text` deliberately stays
+                                # empty: it feeds `last_assistant_text`, which
+                                # gates the result announce below. A turn the
+                                # user just cancelled must not raise an unread
+                                # badge, a toast and a push carrying the half
+                                # sentence they stopped. The partial text still
+                                # reaches the open client through the payload.
+                                stream.publish(self._stop_result_payload(
+                                    chat_id,
+                                    turn_index=current_turn_index,
+                                    text=turn_streamed_text,
+                                ))
                         elif (
                             isinstance(exc, ValueError)
                             and "archived chat" in str(exc)
@@ -8336,6 +8328,54 @@ class ProjectChatManager:
     # Long enough for a healthy CLI ack + terminal event, short enough that
     # Stop still feels instant when the provider is wedged.
     _STOP_GRACE_S = 2.0
+
+    def _stop_result_payload(
+        self, chat_id: str, *, turn_index: int | None, text: str
+    ) -> dict:
+        """Terminal `result` frame for a turn the user stopped.
+
+        A stop ends a turn in one of three ways: the provider yields an
+        is_error ResultEvent, it raises, or it never answers at all and the
+        turn is force-closed. Only the first carries a frame of its own, so
+        the other two publish this one — without it a client keeps its
+        streaming spinner on a turn the server has already finished.
+
+        Records the turn's completion timing as a real result would, so the
+        stopped turn still reports its duration.
+        """
+        chat_now = self._chats.get(chat_id)
+        completed_at = chat_service._now_iso()
+        duration_ms: int | None = None
+        sent_at_rec = ""
+        if turn_index is not None:
+            started_perf = self._turn_perf_started.pop(
+                (chat_id, turn_index), None
+            )
+            if started_perf is not None:
+                duration_ms = int((time.perf_counter() - started_perf) * 1000)
+            if chat_now is not None:
+                rec = chat_now.user_turn_timings.setdefault(str(turn_index), {})
+                rec["completed_at"] = completed_at
+                if duration_ms is not None:
+                    rec["duration_ms"] = duration_ms
+                sent_at_rec = rec.get("sent_at", "")
+                self._save()
+        payload: dict = {
+            "type": "result",
+            "text": text,
+            "is_error": False,
+            "stopped": True,
+            "effective_model": chat_now.model if chat_now else "",
+            "usage": {},
+            "quota": {},
+            "session_id": (chat_now.session_id if chat_now else "") or "",
+            "completed_at": completed_at,
+        }
+        if sent_at_rec:
+            payload["sent_at"] = sent_at_rec
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        return payload
 
     async def stop_chat(self, chat_id: str) -> bool:
         """Stop the chat's in-flight turn.

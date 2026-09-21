@@ -286,6 +286,8 @@
           :steps="item.steps"
           :subs="item.subs"
           :outputs="item.outputs"
+          :outputs-open="Boolean(openOutputs[i])"
+          :outputs-id="`outputs-${i}`"
           :open="Boolean(openTraces[i])"
           :chat-id="chat.chat_id"
           :thinking-expanded="thinkingExpanded"
@@ -294,6 +296,7 @@
           @toggle="toggleTrace(i)"
           @toggle-thinking="toggleThinking"
           @body-click="onTraceBodyClick(i, $event)"
+          @toggle-outputs="toggleOutputs(i)"
           @open-file="openFileCard"
           @expand-step="expandLazyStep"
         />
@@ -364,23 +367,35 @@
                 <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
                 <span>{{ classifyError(item.msg.content).copy }}</span>
               </div>
-              <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
-                <span class="answer-outputs-label">Outputs</span>
-                <div class="answer-output-files">
-                  <button
-                    v-for="(f, fi) in item.outputs"
-                    :key="fi"
-                    type="button"
-                    class="file-chip"
-                    @click.stop="openFileCard(f.file_path)"
-                    :title="f.file_path"
-                  >
-                    <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
-                    <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
-                    <span v-if="f.action === 'created'" class="file-chip-action">new</span>
-                    <span class="file-chip-open" aria-hidden="true">&#8599;</span>
-                  </button>
-                </div>
+              <!-- Outputs: collapsed by default, same disclosure shape as the
+                   Activity summary above (native button, chevron, aria-expanded). -->
+              <div v-if="item.outputs?.length" class="answer-outputs">
+                <button
+                  type="button"
+                  class="outputs-summary"
+                  :aria-expanded="Boolean(openOutputs[i])"
+                  :aria-controls="`outputs-${i}`"
+                  @click.stop="toggleOutputs(i)"
+                >
+                  <span class="outputs-chevron" aria-hidden="true">{{ openOutputs[i] ? '▾' : '▸' }}</span>
+                  <span class="outputs-label">Outputs</span>
+                  <span class="outputs-count">&middot; {{ item.outputs.length }} {{ item.outputs.length === 1 ? 'file' : 'files' }}</span>
+                  <span class="sr-only">, {{ openOutputs[i] ? 'expanded' : 'collapsed' }}</span>
+                </button>
+                <ul v-if="openOutputs[i]" :id="`outputs-${i}`" class="outputs-list">
+                  <li v-for="(f, fi) in item.outputs" :key="fi" class="outputs-row">
+                    <button
+                      type="button"
+                      class="outputs-link"
+                      @click.stop="openFileCard(f.file_path)"
+                      :title="f.file_path"
+                    >
+                      <span class="outputs-name">{{ fileCardBasename(f.file_path) }}</span>
+                      <span class="outputs-open" aria-hidden="true">&#8599;</span>
+                    </button>
+                    <span class="outputs-tag" :class="{ 'outputs-tag--new': outputActionTag(f.action) === 'new' }">{{ outputActionTag(f.action) }}</span>
+                  </li>
+                </ul>
               </div>
               <!-- One footer per turn, on its last bubble. A turn can produce
                    several assistant bubbles, and the fields are spread across
@@ -1162,6 +1177,7 @@ import {
   formatTokenUsage,
   isImageFilePath,
   isSubagentLine,
+  outputActionTag,
   traceSummaryMetaParts,
   type TraceOutput,
 } from '../lib/chatActivity'
@@ -1660,6 +1676,13 @@ const dockRunningAgents = computed(() =>
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
+  // Tell the app-level client-mode banner that this panel is on screen, so it
+  // does not repeat the host-outage notice the card below already carries.
+  store.chatPanelsMounted += 1
+})
+
+onBeforeUnmount(() => {
+  store.chatPanelsMounted = Math.max(0, store.chatPanelsMounted - 1)
 })
 
 // Lightweight 30-second tick powering the "next in Xm" countdown in the
@@ -1755,6 +1778,10 @@ const modelsResponse = ref<ModelsResponse | null>(null)
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
+// Outputs disclosure per render item. Collapsed by default: the file list is
+// a reference, not part of the reply, and a turn that touched many files used
+// to push the answer off screen behind a wall of pills.
+const openOutputs = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
 const forkLoadingKey = ref<string | null>(null)
@@ -1990,6 +2017,10 @@ function toggleTrace(i: number) {
   openTraces.value = { ...openTraces.value, [i]: !openTraces.value[i] }
 }
 
+function toggleOutputs(i: number) {
+  openOutputs.value = { ...openOutputs.value, [i]: !openOutputs.value[i] }
+}
+
 function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
 }
@@ -2003,7 +2034,7 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
-  if (target.closest('.file-card, .file-chip')) return true
+  if (target.closest('.file-card, .answer-outputs')) return true
   if (target.closest('.subagent-panel')) return true
   if (target.closest('code, pre, kbd')) return true
   return false

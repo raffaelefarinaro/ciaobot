@@ -19,6 +19,65 @@ function mountSelector(props: Record<string, unknown> = {}) {
   })
 }
 
+/** Give the host a real rect and the popover a real size, as jsdom reports 0. */
+function stubGeometry(
+  wrapper: ReturnType<typeof mountSelector>,
+  rect: { left: number; right: number; top: number; bottom: number },
+  size: { width: number; height: number },
+) {
+  const host = wrapper.find('.model-selector').element as HTMLElement
+  host.getBoundingClientRect = () => ({
+    ...rect,
+    width: rect.right - rect.left,
+    height: rect.bottom - rect.top,
+    x: rect.left,
+    y: rect.top,
+    toJSON: () => ({}),
+  }) as DOMRect
+  const pop = wrapper.find('.model-selector__popover').element as HTMLElement
+  Object.defineProperty(pop, 'offsetWidth', { value: size.width, configurable: true })
+  Object.defineProperty(pop, 'offsetHeight', { value: size.height, configurable: true })
+}
+
+describe('ModelSelector placement', () => {
+  // The popover used to be absolutely positioned inside the selector, so
+  // `.chat-panel`'s `overflow: hidden` sliced it off at the pane edge in a
+  // split view. It is viewport-positioned now, and clamped so it also cannot
+  // simply hang off-screen instead.
+  it('keeps a menu wider than its pane inside the viewport', async () => {
+    window.innerWidth = 1200
+    window.innerHeight = 800
+    const wrapper = mountSelector({ triggerless: true, placement: 'bottom-end' })
+    await flushPromises()
+    // Trigger sits 300px from the left edge; a 400px menu aligned to its right
+    // edge would start at -100.
+    stubGeometry(wrapper, { left: 280, right: 300, top: 40, bottom: 70 }, { width: 400, height: 200 })
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    const style = (wrapper.find('.model-selector__popover').element as HTMLElement).style
+    expect(style.position).toBe('')          // comes from the stylesheet
+    expect(parseFloat(style.left)).toBe(8)   // clamped to the viewport margin
+    expect(parseFloat(style.top)).toBe(74)   // just under the trigger
+    expect(wrapper.find('.model-selector__popover').classes())
+      .toContain('model-selector__popover--placed')
+  })
+
+  it('flips above the trigger when there is no room below', async () => {
+    window.innerWidth = 1200
+    window.innerHeight = 800
+    const wrapper = mountSelector({ triggerless: true, placement: 'bottom-end' })
+    await flushPromises()
+    stubGeometry(wrapper, { left: 600, right: 900, top: 600, bottom: 640 }, { width: 400, height: 300 })
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    const style = (wrapper.find('.model-selector__popover').element as HTMLElement).style
+    expect(parseFloat(style.top)).toBe(296)  // 600 - 300 - 4
+    expect(parseFloat(style.left)).toBe(500) // right-aligned: 900 - 400
+  })
+})
+
 describe('ModelSelector', () => {
   beforeEach(() => {
     document.body.innerHTML = ''

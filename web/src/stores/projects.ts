@@ -221,6 +221,12 @@ export const useProjectStore = defineStore('projects', () => {
   // enter chat history: reconnect attempts can repeat indefinitely and would
   // otherwise create one error bubble (and one "Fix this error" action) each.
   const hostConnectionUnavailable = ref(false)
+  // How many ChatPanels are on screen. ChatPanel renders its own
+  // host-connection-card from the flag above, so the global banner uses this
+  // to avoid announcing the same outage twice. A count, not a boolean: the
+  // layout declares ChatPanel twice (mobile and desktop branches) and a
+  // chat switch mounts the new panel before the old one unmounts.
+  const chatPanelsMounted = ref(0)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -2856,6 +2862,13 @@ export const useProjectStore = defineStore('projects', () => {
         return
       }
     }
+    // Retries exhausted with the transcript still ending in a user row or bare
+    // tool activity. That is exactly what a stopped turn looks like when it
+    // produced no reply, and the loop used to just give up -- leaving the
+    // spinner running over a turn the server had already finished, until the
+    // next send silently replaced it. The server says this chat is idle, so
+    // the turn is over whatever the last row is.
+    if (!projectStreaming.value[chatId]) clearStreamingState(chatId)
     void loadSubagents(chatId)
   }
 
@@ -3379,6 +3392,10 @@ export const useProjectStore = defineStore('projects', () => {
   // identically on every attempt, so a fixed 2s retry becomes a request
   // storm that fills the server log.
   let eventsWsFailureStreak = 0
+  // Separate from the handshake streak above: a client-mode proxy accepts
+  // the browser socket and only then discovers the host is down, so those
+  // retries must not feed the >=5 auth probe. Reset by the first real frame.
+  let eventsHostRetryAttempts = 0
 
   function connectEventsWs() {
     if (eventsSocket.value && eventsSocket.value.readyState <= WebSocket.OPEN) return
@@ -3387,6 +3404,12 @@ export const useProjectStore = defineStore('projects', () => {
     eventsSocket.value = ws
     lastEventsFrameAt = nowMs()
     let opened = false
+    // Set when the local proxy told us the host is down on THIS socket. The
+    // proxy accepts the browser's connection before it tries the host, so
+    // `opened` is true even for a dead host -- without this flag the close
+    // handler below would take the 50ms "healthy blip" path and reconnect
+    // twenty times a second for as long as the host stays away.
+    let hostUnreachable = false
 
     ws.onopen = () => {
       if (toRaw(eventsSocket.value) !== ws) return
@@ -3401,6 +3424,19 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
+      if (msg.type === 'host_unreachable') {
+        // In client mode this is the only connection-loss signal that exists
+        // outside a chat: the per-chat socket is open only while a chat is on
+        // screen, so the home screen used to look perfectly healthy while the
+        // host was unreachable.
+        hostUnreachable = true
+        hostConnectionUnavailable.value = true
+        return
+      }
+      // Any other frame -- the keepalive included -- travelled through the
+      // proxy from the host, which proves the host is back.
+      hostConnectionUnavailable.value = false
+      eventsHostRetryAttempts = 0
       if (msg.type === 'keepalive') return
       handleEventsMessage(msg)
     }
@@ -3413,6 +3449,17 @@ export const useProjectStore = defineStore('projects', () => {
       if (!isCurrent) return
 
       if (opened) {
+        if (hostUnreachable) {
+          // Retry on the chat socket's backoff curve (50ms -> 2s cap) so a
+          // host that comes back is noticed within a couple of seconds
+          // without hammering it while it is down.
+          eventsHostRetryAttempts += 1
+          const hostDelay = chatWsReconnectDelayMs(eventsHostRetryAttempts)
+          setTimeout(() => {
+            if (!eventsSocket.value) connectEventsWs()
+          }, hostDelay)
+          return
+        }
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
         // chat_streaming_done / result_ready are not delayed after a blip.
@@ -4918,7 +4965,12 @@ export const useProjectStore = defineStore('projects', () => {
           })
           const isActive = activeChatId.value === chatId &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
-          if (!isActive) {
+          // A turn the user stopped is not an answer. Its partial text still
+          // renders so the transcript matches what they watched arrive, but
+          // badging it would put an unread marker on the half sentence they
+          // just cancelled -- on their other devices too, since every client
+          // receives this frame.
+          if (!isActive && !event.stopped) {
             unread.value[chatId] = 1
             persistUnread()
           }
@@ -5072,7 +5124,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage, hostConnectionUnavailable,
+    serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,

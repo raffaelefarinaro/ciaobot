@@ -363,7 +363,10 @@ export type WsEvent =
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
-  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
+  // `stopped` marks the synthetic result a user Stop publishes: a real turn
+  // never carries it. The partial text still renders, but the turn is not an
+  // answer, so it must not raise an unread badge on a backgrounded tab.
+  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
@@ -431,6 +434,10 @@ export type EventsWsMessage =
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
+  // Client mode only: the local node proxy could not reach the host, so it
+  // emits this on the proxied socket and closes. Delivered on /ws/events too,
+  // which is the only socket open when no chat is on screen.
+  | { type: 'host_unreachable' }
 
 export interface InAppToast {
   id: number
