@@ -362,27 +362,6 @@
               </div>
             </div>
           </div>
-          <div v-if="appleModelAvailable" class="setting-row setting-row--inline setting-row--toggle">
-            <div class="routine-info">
-              <span class="routine-name">Re-entry summary</span>
-              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat. The summary stays visible while you scroll and clears the moment you send a new message.</span>
-            </div>
-            <label class="settings-checkbox-hit">
-              <input
-                type="checkbox"
-                class="settings-checkbox"
-                v-model="reentrySummaryEnabled"
-                @change="onReentrySummaryToggle"
-              />
-            </label>
-          </div>
-          <div v-else class="setting-row setting-row--inline">
-            <div class="routine-info">
-              <span class="routine-name">Re-entry summary</span>
-              <span class="routine-detail">Show a one-line Apple Intelligence orientation note when you reopen a quiet chat.</span>
-              <span class="hint hint--warn">Unavailable: {{ routines?.apple_model_unavailable_reason || 'Apple Intelligence is not supported on this machine' }}</span>
-            </div>
-          </div>
         </div>
 
         
@@ -1813,7 +1792,6 @@ import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
-import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
@@ -1892,18 +1870,6 @@ async function dismissStarNudge(): Promise<void> {
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
-
-const { reentrySummaryEnabled, setReentrySummaryEnabled } = useReentrySummaryPreference()
-function onReentrySummaryToggle() {
-  setReentrySummaryEnabled(reentrySummaryEnabled.value)
-  // The store action already evicts cached summaries when the toggle goes
-  // off. Persist to localStorage too so the choice survives reload.
-  if (reentrySummaryEnabled.value) {
-    notifySaved('Re-entry summary enabled.')
-  } else {
-    notifySaved('Re-entry summary disabled.')
-  }
-}
 
 async function createMcpViaChat() {
   const activeProj = projectStore.activeProject
