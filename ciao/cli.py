@@ -5091,19 +5091,17 @@ def _resolve_critique_paths(args: list[str]) -> list[str]:
     return out
 
 
-_AGENT_NOUNS = frozenset({"memory", "vault", "file", "chat", "schedule", "context", "help"})
-
-
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
-    if argv_list and argv_list[0] in _AGENT_NOUNS:
-        # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
-        # before building the operator parser so a call from a chat costs
-        # interpreter start-up, not this module's import graph.
-        from ciao.agent_cli import main as agent_main
+    # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
+    # before building the operator parser so a call from a chat costs
+    # interpreter start-up, not this module's import graph. ``ciao.agent_cli``
+    # owns which words route there (``ciao run`` alone stays the server).
+    from ciao.agent_cli import is_agent_invocation, main as agent_main
 
+    if is_agent_invocation(argv_list):
         return agent_main(argv_list)
     if argv_list[:1] == ["public-preflight"]:
         return public_release.main(argv_list[1:])

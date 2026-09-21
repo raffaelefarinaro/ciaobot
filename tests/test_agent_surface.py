@@ -112,7 +112,7 @@ def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
     assert surface_for_chat(tmp_path, "chat-2") == "mcp"
     assert surface_for_chat(tmp_path, "chat-3") == "mcp"
     (tmp_path / "agent_surface.json").write_text(json.dumps({"*": "cli"}), encoding="utf-8")
-    assert surface_for_chat(tmp_path, "anything") == "cli"
+    assert surface_for_chat(tmp_path, "anything") == "mcp"  # no wildcard on purpose
     (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
     assert surface_for_chat(tmp_path, "chat-1") == "mcp"
 
@@ -140,11 +140,86 @@ def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
         ),
         (["schedule", "update", "s1", "--title", "T"], ("schedule", {"action": "update", "schedule_id": "s1", "title": "T"})),
         (["schedule", "pause", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "pause"})),
+        (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
+        (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
+        (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
+        (["chat", "handover", "--provider", "opencode"], ("chat_handover", {"chat_id": "", "provider": "opencode", "model": ""})),
+        (["project", "list", "--include-completed"], ("projects_list", {"include_completed": True})),
+        (["project", "get"], ("project_get", {"project_id": ""})),
+        (["project", "create", "--name", "Q4", "--context", "ctx"], ("project", {"action": "create", "name": "Q4", "context": "ctx"})),
+        (["project", "update", "p1", "--vault-folder", "Projects/Q4"], ("project", {"action": "update", "project_id": "p1", "vault_folder": "Projects/Q4"})),
+        (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
+        (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
+        (
+            ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
+            ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
+        ),
+        (["run", "status", "run-1", "--lines", "20"], ("background_run_status", {"run_id": "run-1", "lines": 20})),
+        (["run", "cancel", "run-1"], ("background_run_cancel", {"run_id": "run-1"})),
+        (["gws", "status"], ("gws_status", {})),
+        (["workspace", "list"], ("workspaces_list", {})),
     ],
 )
 def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, dict]) -> None:
     parser = agent_cli.build_parser()
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
+
+
+def test_every_documented_command_parses() -> None:
+    """The skill's telemetry table is the contract: each row must be a real command."""
+    table = json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
+    parser = agent_cli.build_parser()
+    required = {
+        "memory update": ["--region", "memory", "--action", "add"],
+        "vault search": ["q"], "vault review show": ["p"],
+        "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
+        "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
+        "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
+        "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
+        "project complete": ["p"], "project delete": ["p"], "schedule update": ["s"], "schedule pause": ["s"],
+        "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
+        "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
+    }
+    for command, operation in table.items():
+        argv = command.split() + required.get(command, [])
+        assert agent_cli.is_agent_invocation(argv), command
+        op, _arguments = agent_cli.resolve(parser.parse_args(argv))
+        assert op == operation, command
+
+
+def test_shared_nouns_route_only_their_agent_verbs() -> None:
+    assert agent_cli.is_agent_invocation(["run", "start", "--", "true"])
+    assert agent_cli.is_agent_invocation(["run", "status", "r1"])
+    assert agent_cli.is_agent_invocation(["gws", "status"])
+    # `ciao run` is the operator's server launcher; `ciao gws <profile> …` the passthrough.
+    assert not agent_cli.is_agent_invocation(["run"])
+    assert not agent_cli.is_agent_invocation(["run", "--port", "8443"])
+    assert not agent_cli.is_agent_invocation(["gws", "status", "gmail"])
+    assert not agent_cli.is_agent_invocation(["gws", "work", "gmail", "list"])
+    assert not agent_cli.is_agent_invocation([])
+
+
+def test_cli_usage_errors_exit_2_before_any_request(capsys: pytest.CaptureFixture[str]) -> None:
+    # A noun without its verb is argparse's own usage error, not a misleading hint.
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["vault", "review"])
+    assert excinfo.value.code == 2
+    assert "<action>" in capsys.readouterr().err
+    assert agent_cli.main(["run", "start", "--label", "x"]) == 2
+    assert "needs a command" in capsys.readouterr().err
+    assert agent_cli.main(["run", "start", "--env", "NOEQUALS", "--", "true"]) == 2
+    assert "K=V" in capsys.readouterr().err
+    assert agent_cli.main(["chat", "handover", "--messages", "{not json"]) == 2
+    assert "--messages" in capsys.readouterr().err
+
+
+def test_cli_json_flag_is_accepted_anywhere(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    # Parsing succeeds (the run reaches the session check) with --json after the verb.
+    assert agent_cli.main(["vault", "search", "x", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"
 
 
 def test_cli_rejects_bad_enums_before_any_request(capsys: pytest.CaptureFixture[str]) -> None:
@@ -219,3 +294,40 @@ def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
     monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
     assert cli.main(["memory", "status"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"
+
+
+def test_ciao_cli_skill_is_not_synced_into_workspaces_yet(tmp_path: Path) -> None:
+    from ciao.sync_skills import TRANSITIONAL_SKILLS, _install_stock_skills
+
+    assert "ciao-cli" in TRANSITIONAL_SKILLS
+    _install_stock_skills(tmp_path, gws_profile="")
+    installed = {p.name for p in (tmp_path / ".claude" / "skills").iterdir()}
+    assert "ciao-cli" not in installed
+    assert "ciao-capabilities" in installed
+
+
+def test_dispatch_requires_the_ciaobot_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp.server.auth.provider import AccessToken
+
+    service, _ = _service(tmp_path)
+    token = _token(service)
+
+    async def scopeless(_token: str):
+        return AccessToken(token=_token, client_id="x", scopes=["other"], expires_at=None, claims={"token_id": "t", "chat_id": "chat-1", "workspace": "personal"})
+
+    monkeypatch.setattr(service.registry, "verify_token", scopeless)
+    with _client(service) as client:
+        response = _post(client, token, "context_get")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+def test_provider_reuse_key_changes_when_the_surface_flips() -> None:
+    from ciao.models import agent_control_token, provider_reuse_key
+
+    mcp = SimpleNamespace(mcp_token="tok", extra_env={}, agent_surface="mcp")
+    cli = SimpleNamespace(mcp_token="", extra_env={AGENT_TOKEN_ENV: "tok"}, agent_surface="cli")
+    none = SimpleNamespace(mcp_token="", extra_env={}, agent_surface="mcp")
+    assert agent_control_token(mcp) == agent_control_token(cli) == "tok"
+    assert provider_reuse_key(mcp) != provider_reuse_key(cli)
+    assert provider_reuse_key(none) == ""

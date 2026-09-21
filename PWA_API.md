@@ -17,6 +17,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - The agent-facing `/mcp/` mount uses a separate scoped bearer capability issued to Ciaobot-managed provider processes; it does not accept the browser session cookie. `GET /api/mcp/status` exposes only readiness and catalog metadata, never a token.
+- `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py`). It takes the same scoped bearer capability as `/mcp/` in an `Authorization: Bearer` header, runs the same registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
 
 ## Routes
 

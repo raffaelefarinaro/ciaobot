@@ -52,6 +52,7 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    provider_reuse_key,
 )
 from ciao.providers.base import (
     ActiveHandle,
@@ -937,7 +938,7 @@ class OpencodeProvider(BaseSDKProvider):
         re-pointed at a new token.
         """
         if self._client is not None and self._process is not None:
-            if self._process.returncode is None and request.mcp_token == self._mcp_token:
+            if self._process.returncode is None and provider_reuse_key(request) == self._mcp_token:
                 return self._client
             await self.disconnect()
 
@@ -988,7 +989,7 @@ class OpencodeProvider(BaseSDKProvider):
         # malicious workspace script) could steal the token and call `/mcp`
         # without going through provider permission prompts.
         env.pop("CIAO_MCP_SESSION_TOKEN", None)
-        self._mcp_token = request.mcp_token
+        self._mcp_token = provider_reuse_key(request)
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only

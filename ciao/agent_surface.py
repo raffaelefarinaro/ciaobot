@@ -28,7 +28,9 @@ AGENT_TOKEN_ENV = "CIAO_AGENT_TOKEN"
 #: Base URL the CLI posts to; ``{op}`` is appended.
 AGENT_URL_ENV = "CIAO_AGENT_URL"
 #: Per-chat surface selection for the MCP-versus-CLI comparison:
-#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``mcp``.
+#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``mcp``;
+#: there is deliberately no wildcard — the file lives in ``.runtime``, which
+#: the model's shell can write, so one entry must never flip every chat.
 SURFACE_FILE_NAME = "agent_surface.json"
 SURFACES = ("mcp", "cli")
 
@@ -41,7 +43,7 @@ def surface_for_chat(runtime_dir: Path, chat_id: str, default: str = "mcp") -> s
         return default
     if not isinstance(raw, dict):
         return default
-    value = str(raw.get(chat_id) or raw.get("*") or default)
+    value = str(raw.get(chat_id) or default)
     return value if value in SURFACES else default
 
 
@@ -73,6 +75,12 @@ class AgentDispatcher:
         access = await service.registry.verify_token(token)
         if access is None:
             return 401, _envelope_error("unauthorized", "The agent token is invalid or expired.")
+        # Same gate the MCP mount applies through RequireAuthMiddleware
+        # (``required_scopes=["ciaobot"]``); every token the registry mints
+        # carries it today, so this only matters if a second token type ever
+        # appears, and then it must not become a bypass.
+        if "ciaobot" not in (access.scopes or []):
+            return 403, _envelope_error("forbidden", "The agent token lacks the ciaobot scope.")
         tool = service.server._tool_manager.get_tool(op)
         if tool is None:
             return 404, _envelope_error("unknown_operation", f"Unknown Ciaobot operation '{op}'.")
@@ -96,7 +104,9 @@ class AgentDispatcher:
                 error_code="invalid_request",
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
-            logger.info("agent surface: %s rejected arguments: %s", op, exc)
+            # First line only: pydantic's full text echoes ``input_value=…``,
+            # which would put prompt or memory text into the server log.
+            logger.info("agent surface: %s rejected arguments: %s", op, _validation_message(exc))
             return 400, _envelope_error("invalid_request", _validation_message(exc))
         finally:
             service.surface_var.reset(surface_token)

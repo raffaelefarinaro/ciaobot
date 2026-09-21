@@ -296,10 +296,14 @@ def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path:
     assert cli_request.mcp_url == "" and cli_request.mcp_token == ""
     assert cli_request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
     assert cli_request.extra_env[AGENT_URL_ENV] == "http://127.0.0.1:8443/agent/v1/"
+    # Providers key process reuse on this: a rotated agent token must respawn
+    # the shell on the CLI surface exactly as a rotated MCP token does.
+    assert cli_request.control_token == "tok-test"
 
     mcp_request = manager.build_agent_request(mcp_chat, prompt="hi")
     assert mcp_request.agent_surface == "mcp"
     assert mcp_request.mcp_token == "tok-test"
+    assert mcp_request.control_token == "tok-test"
     assert AGENT_TOKEN_ENV not in mcp_request.extra_env
 
 

@@ -60,7 +60,8 @@ def rescore(path: Path) -> Path:
     out = path.with_suffix(".rescored.json")
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     ra = dims.get("routing_accuracy")
-    print(f"{path.name}: routing_accuracy {ra.mean:.3f} (n={ra.n}); violations {len(report['zero_tolerance_failures'])}")
+    routing = f"routing_accuracy {ra.mean:.3f} (n={ra.n})" if ra is not None else "routing_accuracy n/a (no scored outcomes)"
+    print(f"{path.name}: {routing}; violations {len(report['zero_tolerance_failures'])}")
     return out
 
 

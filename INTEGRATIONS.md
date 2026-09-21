@@ -251,6 +251,7 @@ a legacy install rather than removing it.
 
 - The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
 - `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
+- `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. On a chat switched to the agent CLI surface (`.runtime/agent_surface.json`, the MCP-versus-CLI comparison in `ciao/agent_surface.py`), Ciaobot hands the same scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane. Background runs strip the token. Operators must not configure or persist either.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).
 

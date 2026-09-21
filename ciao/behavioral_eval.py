@@ -1292,14 +1292,13 @@ def _bare_tool_name(name: str) -> str:
     if cli.startswith("ciao "):
         cli = cli[5:]
     aliases = cli_command_operations()
-    if aliases:
-        words = cli.split()
-        for width in (3, 2, 1):
-            key = " ".join(words[:width])
-            if key in _CLI_READ_ONLY_VERBS:
-                return _CLI_READ_ONLY_VERBS[key]
-            if key in aliases:
-                return aliases[key]
+    words = cli.split()
+    for width in (3, 2, 1):
+        key = " ".join(words[:width])
+        if key in _CLI_READ_ONLY_VERBS:
+            return _CLI_READ_ONLY_VERBS[key]
+        if key in aliases:
+            return aliases[key]
     return value
 
 

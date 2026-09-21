@@ -138,6 +138,45 @@ class AgentRequest:
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
 
+    @property
+    def control_token(self) -> str:
+        """See :func:`agent_control_token`."""
+        return agent_control_token(self)
+
+
+def agent_control_token(request: object) -> str:
+    """The bearer capability a turn hands the agent, whatever the surface.
+
+    MCP surface: ``mcp_token`` (a header on the attached server). CLI surface:
+    ``CIAO_AGENT_TOKEN`` in ``extra_env`` (the shell's env). Both are fixed
+    when the managed provider process starts, so providers key process reuse
+    on this value: a rotated token (expiry, ``new_session``, handover) must
+    respawn the process on either surface, not only when ``mcp_token`` happens
+    to change. A plain function so provider tests' duck-typed request stubs
+    keep working.
+    """
+    mcp_token = str(getattr(request, "mcp_token", "") or "")
+    if mcp_token:
+        return mcp_token
+    extra_env = getattr(request, "extra_env", None) or {}
+    return str(extra_env.get("CIAO_AGENT_TOKEN", "") or "")
+
+
+def provider_reuse_key(request: object) -> str:
+    """What must be unchanged for a managed provider process to be reused.
+
+    The control token *and* the surface it is delivered on: on an MCP<->CLI
+    switch the same token string moves from the MCP header configuration to
+    the shell environment, so comparing tokens alone would keep a process
+    whose shell has no token (or whose MCP server is still attached). Empty
+    when the turn carries no capability at all.
+    """
+    token = agent_control_token(request)
+    if not token:
+        return ""
+    surface = str(getattr(request, "agent_surface", "") or "mcp")
+    return f"{surface}:{token}"
+
 
 @dataclass(slots=True)
 class StreamEvent:

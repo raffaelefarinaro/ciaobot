@@ -175,6 +175,11 @@ def _iter_entries(path: Path) -> list[Path]:
     return sorted(path.iterdir(), key=lambda entry: entry.name)
 
 
+#: Stock skills held back from workspace sync until their surface is the
+#: default (see ``ciao/agent_surface.py`` and the MCP-to-CLI plan, slice S5).
+TRANSITIONAL_SKILLS: frozenset[str] = frozenset({"ciao-cli"})
+
+
 def _install_stock_skills(
     workspace: Path,
     *,
@@ -221,6 +226,14 @@ def _install_stock_skills(
         # value rather than recomputed here, so callers who already know the
         # workspace's effective profile do not read it twice.
         if entry.name.startswith("gws-") and gws_profile == "":
+            continue
+        if entry.name in TRANSITIONAL_SKILLS:
+            # Skills for a surface that is not yet the default. `ciao-cli`
+            # tells the model to run `ciao …`; in an MCP-surface chat those
+            # commands answer `no_agent_session`, so the skill would steer the
+            # model into a dead end. The CLI surface reaches the reference
+            # through `ciao help` and the CLI core prompt until the switch
+            # (plan S5), when this set empties.
             continue
         target = claude_skills / entry.name
         if target.is_symlink():

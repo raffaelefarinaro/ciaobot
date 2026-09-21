@@ -66,6 +66,7 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    provider_reuse_key,
 )
 from ciao.execution_modes import (
     CONTROL_PLANE_PREAPPROVED_MODES,
@@ -484,11 +485,12 @@ class ClaudeProvider(BaseSDKProvider):
         if (
             self._client is not None
             and self._connected
-            and request.mcp_token != self._mcp_token
+            and provider_reuse_key(request) != self._mcp_token
         ):
-            # MCP configuration is fixed when the managed CLI process starts.
-            # Reconnect when a chat switches surfaces or receives a refreshed
-            # ephemeral token; model/mode alone can still change in place.
+            # MCP configuration and the shell environment are fixed when the
+            # managed CLI process starts. Reconnect when a chat switches
+            # surfaces or receives a refreshed ephemeral token (on either
+            # surface); model/mode alone can still change in place.
             await self.disconnect()
         if (
             self._client is not None
@@ -648,7 +650,7 @@ class ClaudeProvider(BaseSDKProvider):
             options.session_id = str(uuid.uuid4())
 
         self._client = ClaudeSDKClient(options=options)
-        self._mcp_token = request.mcp_token
+        self._mcp_token = provider_reuse_key(request)
         self._remember_settings(request)
         return self._client
 
