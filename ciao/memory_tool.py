@@ -1,4 +1,4 @@
-"""Bounded agent memory stored as fenced regions inside the workspace ``CLAUDE.md``.
+"""Bounded agent memory stored as fenced regions inside the workspace guide.
 
 Two regions mirror the former ``~/.ciao/memory.md`` / ``user.md`` pair:
 
@@ -615,7 +615,7 @@ def update_region(
     workspace: str = "",
     vault_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Apply one bounded-memory edit while keeping storage in ``CLAUDE.md``.
+    """Apply one bounded-memory edit while keeping storage in the guide.
 
     Direct ``Edit`` remains supported. This helper is the typed control-plane
     equivalent for agents that cannot reliably express a file edit, and never

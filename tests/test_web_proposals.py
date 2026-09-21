@@ -116,7 +116,7 @@ def _corrupt_guide(config: CiaoConfig, workspace: str) -> None:
     order exists for. It replaced an over-cap region as the injection here: the
     cap is advisory now, so an over-cap write succeeds and no longer fails a batch.
     """
-    guide = config.agent_root(workspace) / "CLAUDE.md"
+    guide = config.agent_root(workspace) / "AGENTS.md"
     guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text(_DUPLICATED_REGION_GUIDE, encoding="utf-8")
 
@@ -331,7 +331,7 @@ def test_a_failed_move_keeps_the_bullet(tmp_path: Path) -> None:
 
 def test_dismiss_does_not_mutate_the_workspace_guide(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
-    guide = config.workspace_vault_root("personal") / "CLAUDE.md"
+    guide = config.workspace_vault_root("personal") / "AGENTS.md"
     guide.write_text("<!-- ciao:memory:start -->\n## Agent memory\n<!-- ciao:memory:end -->\n", encoding="utf-8")
     before = guide.read_text(encoding="utf-8")
     client = _client(config)
@@ -516,7 +516,7 @@ def _region_entries(config, workspace: str, region: str) -> list[str]:
     from ciao.memory_audit import strip_learned_stamp
     from ciao.memory_tool import read_region
 
-    guide = Path(config.agent_root(workspace)) / "CLAUDE.md"
+    guide = Path(config.agent_root(workspace)) / "AGENTS.md"
     entries, _diags = read_region(guide, region)
     return [strip_learned_stamp(entry) for entry in entries]
 
@@ -1697,7 +1697,7 @@ def _competing_vault(tmp_path: Path) -> CiaoConfig:
     _write_queue(config, "personal", _COMPETING_QUEUE)
     from ciao import memory_tool as mt
 
-    guide = config.agent_root("personal") / "CLAUDE.md"
+    guide = config.agent_root("personal") / "AGENTS.md"
     guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text("# Guide\n\n", encoding="utf-8")
     mt.ensure_regions(guide)
@@ -1708,7 +1708,7 @@ def _competing_vault(tmp_path: Path) -> CiaoConfig:
 def _memory_entries(config: CiaoConfig) -> list[str]:
     from ciao import memory_tool as mt
 
-    entries, _diags = mt.read_region(config.agent_root("personal") / "CLAUDE.md", "memory")
+    entries, _diags = mt.read_region(config.agent_root("personal") / "AGENTS.md", "memory")
     return entries
 
 

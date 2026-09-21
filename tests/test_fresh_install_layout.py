@@ -48,7 +48,7 @@ def test_a_fresh_setup_puts_the_agent_assets_in_the_workspace(tmp_path: Path) ->
     `.claude/`, `commands/` and a stock CLAUDE.md beside the nested vault."""
     _fresh(tmp_path)
 
-    for asset in ("CLAUDE.md", "commands", "subagents", ".claude"):
+    for asset in ("AGENTS.md", "commands", "subagents", ".claude"):
         assert (tmp_path / "personal" / asset).exists(), asset
         assert not (tmp_path / asset).exists(), f"litter at the install root: {asset}"
 

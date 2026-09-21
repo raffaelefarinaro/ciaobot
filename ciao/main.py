@@ -407,6 +407,23 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("sync_workspace", "git sync failed")
             logger.exception("Workspace sync failed")
 
+    # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
+    # discover AGENTS.md natively now, but Claude Code only falls back to it
+    # when no CLAUDE.md is present, so the old name has to go for the new one
+    # to take effect (ciao/workspace_guide.py). It runs before the re-root so
+    # the guide has its final name when the re-root moves and splits it, and it
+    # never raises — a guide it cannot move is still read through the legacy
+    # fallback in `guide_path`.
+    try:
+        from ciao.workspace_guide import migrate_if_needed as migrate_guides
+
+        guide_moves = await asyncio.to_thread(migrate_guides, config)
+        moved = {r: a for r, a in guide_moves.items() if a not in ("noop", "failed")}
+        if moved:
+            logger.info("workspace guide migrated in %d root(s)", len(moved))
+    except Exception:  # noqa: BLE001 — never block startup on the guide rename
+        logger.exception("workspace guide migration failed")
+
     # Re-root the install, once, before anything reads the vault. After the git
     # sync so the clean-tree gate judges the real tree; before the index refresh
     # so the indexes are rebuilt for the layout that now exists; and before the

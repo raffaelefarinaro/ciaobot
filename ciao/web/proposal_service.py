@@ -28,6 +28,7 @@ from ciao import proposal_kinds
 from ciao import proposal_tracking
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
+from ciao.workspace_guide import guide_path
 
 if TYPE_CHECKING:  # ``memory_proposals`` is imported lazily everywhere else here.
     from ciao.memory_proposals import ReconcileDecision
@@ -902,7 +903,7 @@ async def _promote_region_row(
     from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
 
     region = _resolve(row.get("region") or row["kind"])
-    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    guide = guide_path(config.agent_root(row["workspace"]))
     try:
         # A guide with no region markers yet is not a reason to refuse a
         # promotion — a workspace can be newer than its last skill sync. This is
@@ -1215,7 +1216,7 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
 
     out["separator"] = f"\n{SECTION_SEP}\n"
     out["destination"] = f"ciao:{region}"
-    guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+    guide = guide_path(config.agent_root(row["workspace"]))
     out["destination_path"] = str(guide)
     out["leak_warning"] = bool(row.get("leak_warning"))
     try:
@@ -1491,7 +1492,7 @@ def destination_revision(config, row: dict[str, Any]) -> str:
             )
 
             region = _resolve(row.get("region") or row["kind"])
-            guide = Path(config.agent_root(row["workspace"])) / "CLAUDE.md"
+            guide = guide_path(config.agent_root(row["workspace"]))
             ensure_regions(guide)
             entries, diags = read_region(guide, region)
             if diags:

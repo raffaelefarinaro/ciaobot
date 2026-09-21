@@ -2969,7 +2969,14 @@ async def workspace_file(request: Request) -> Response:
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
     roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    # `exact=1` turns the fuzzy fallback off. Fuzzy resolution ends in a bare
+    # filename match against the primary root, which is right for a link a
+    # model emitted with an approximate path and wrong for a caller naming one
+    # specific file: asking for `work/AGENTS.md` on a workspace that has none
+    # would otherwise serve `personal/AGENTS.md` with a 200, and the caller
+    # cannot tell. The sidebar's guide card probes with it for that reason.
+    exact = request.query_params.get("exact", "").strip().lower() in {"1", "true", "yes"}
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=not exact)
     if isinstance(result, Response):
         return result
     resolved = result

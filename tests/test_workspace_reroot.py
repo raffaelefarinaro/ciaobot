@@ -441,7 +441,7 @@ def test_a_failed_receipt_write_unwinds_the_whole_migration(
     # Everything moved is back: the vault, the stashed aggregates, the guide.
     assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
     assert (install / "memory-vault" / "INDEX.md").is_file()
-    assert (install / "CLAUDE.md").is_file()
+    assert (install / "AGENTS.md").is_file()
     assert not (install / "personal").exists()
     # The registry holds the pre-migration entries, not the rewritten ones.
     after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
@@ -1027,8 +1027,8 @@ def test_repair_recreates_a_missing_root(tmp_path: Path) -> None:
 
     assert "root_missing" in _drifts(result)
     assert (install / "work").is_dir()
-    assert (install / "work" / "CLAUDE.md").is_file()
-    assert (install / "work" / "AGENTS.md").is_symlink()
+    assert (install / "work" / "AGENTS.md").is_file()
+    assert not (install / "work" / "AGENTS.md").is_symlink()
 
 
 def test_a_root_with_no_vault_is_reported_and_never_invented(tmp_path: Path) -> None:
@@ -1045,21 +1045,24 @@ def test_a_root_with_no_vault_is_reported_and_never_invented(tmp_path: Path) -> 
     assert not (install / "work" / "memory-vault").exists()
 
 
-def test_repair_relinks_an_unlinked_agents_guide(tmp_path: Path) -> None:
+def test_repair_renames_a_surviving_legacy_guide(tmp_path: Path) -> None:
+    """A CLAUDE.md beside the guide means Claude Code reads it instead of
+    AGENTS.md, so repair renames it rather than re-linking anything."""
     install, runtime = _migrated(tmp_path)
     _repair(install, runtime)
-    agents = install / "work" / "AGENTS.md"
-    agents.unlink()
-    agents.write_text("a hand-written copy\n", encoding="utf-8")
+    (install / "work" / "AGENTS.md").unlink()
+    (install / "work" / "CLAUDE.md").write_text("remembered facts\n", encoding="utf-8")
 
     result = _repair(install, runtime)
 
-    assert "agents_unlinked" in _drifts(result)
+    assert "legacy_guide" in _drifts(result)
+    assert not (install / "work" / "CLAUDE.md").exists()
+    assert (install / "work" / "AGENTS.md").read_text(encoding="utf-8") == "remembered facts\n"
 
 
 def test_repair_leaves_a_user_authored_agents_file_alone(tmp_path: Path) -> None:
-    """`_ensure_linked_workspace_guides` only replaces a missing file or the
-    packaged stock copy, and repair must not reach past that."""
+    """`_ensure_workspace_guide` only seeds a workspace that has no guide at
+    all, and repair must not reach past that."""
     install, runtime = _migrated(tmp_path)
     _repair(install, runtime)
     agents = install / "work" / "AGENTS.md"
@@ -1250,7 +1253,7 @@ def _unsplit(install: Path) -> None:
     pre-migration one still at the install root.
     """
     for name in ("personal", "work"):
-        (install / name / "CLAUDE.md").unlink(missing_ok=True)
+        (install / name / "AGENTS.md").unlink(missing_ok=True)
         (install / name / "AGENTS.md").unlink(missing_ok=True)
     (install / "CLAUDE.md").write_text(
         "# The real guide\n\n<!-- ciao:memory:start -->\n- a fact\n"
@@ -1274,20 +1277,20 @@ def test_repair_refuses_to_seed_a_stock_guide_over_an_unsplit_one(tmp_path: Path
     result = _repair(install, runtime)
 
     assert "guide_unsplit" in _drifts(result, "reported")
-    assert not (install / "personal" / "CLAUDE.md").exists()
-    assert not (install / "work" / "CLAUDE.md").exists()
+    assert not (install / "personal" / "AGENTS.md").exists()
+    assert not (install / "work" / "AGENTS.md").exists()
 
 
-def test_repair_still_relinks_once_a_root_has_its_own_guide(tmp_path: Path) -> None:
+def test_repair_leaves_a_root_that_has_its_own_guide(tmp_path: Path) -> None:
     """The guard must not disable the repair it guards."""
     install, runtime = _migrated(tmp_path)
     _unsplit(install)
-    (install / "work" / "CLAUDE.md").write_text("# work's own guide\n", encoding="utf-8")
+    (install / "work" / "AGENTS.md").write_text("# work's own guide\n", encoding="utf-8")
 
     result = _repair(install, runtime)
 
     assert "guide_unsplit" in _drifts(result, "reported")  # personal still lacks one
-    assert (install / "work" / "AGENTS.md").is_symlink()
+    assert not (install / "work" / "AGENTS.md").is_symlink()
 
 
 # -- P10.4 applied: apply() gives every root its own guide -------------------
@@ -1317,10 +1320,14 @@ Standing directives that apply everywhere.
 
 
 def _with_guide(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """A committed install holding a real shared guide and a queue per workspace."""
+    """A committed install holding a real shared guide and a queue per workspace.
+
+    One guide, AGENTS.md: the startup guide migration runs before the re-root
+    (ciao/workspace_guide.py), so by the time any of this executes on a real
+    install there is no CLAUDE.md left to move.
+    """
     install, vault, runtime = _git_install(tmp_path)
-    (install / "CLAUDE.md").write_text(_REAL_GUIDE, encoding="utf-8")
-    (install / "AGENTS.md").symlink_to("CLAUDE.md")
+    (install / "AGENTS.md").write_text(_REAL_GUIDE, encoding="utf-8")
     for name in ("personal", "work"):
         queue = vault / name / "Workspace" / "Memory-Proposals.md"
         queue.parent.mkdir(parents=True, exist_ok=True)
@@ -1356,12 +1363,13 @@ def test_the_primary_inherits_the_real_guide_and_the_install_root_keeps_none(
     assert result["status"] == "migrated", result.get("refusals")
     assert not (install / "CLAUDE.md").exists()
     assert not (install / "AGENTS.md").exists()
-    assert (install / "personal" / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
-    assert (install / "personal" / "AGENTS.md").is_symlink()
+    assert (install / "personal" / "AGENTS.md").read_text(encoding="utf-8") == _REAL_GUIDE
+    # Carried over by `git mv` as a real file; no symlink is created now.
+    assert not (install / "personal" / "AGENTS.md").is_symlink()
     # `git mv` stages the rename; history follows only once it is committed.
     _git(install, "add", "-A")
     _git(install, "commit", "-m", "reroot")
-    history = _git(install, "log", "--follow", "--oneline", "--", "personal/CLAUDE.md")
+    history = _git(install, "log", "--follow", "--oneline", "--", "personal/AGENTS.md")
     assert "guide" in history, history
 
 
@@ -1370,7 +1378,7 @@ def test_a_secondary_root_gets_the_body_and_empty_regions(tmp_path: Path) -> Non
 
     apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
-    text = (install / "work" / "CLAUDE.md").read_text(encoding="utf-8")
+    text = (install / "work" / "AGENTS.md").read_text(encoding="utf-8")
     assert "Standing directives that apply everywhere." in text
     assert "releases go out on Thursdays" not in text
     assert "prefers terse replies" not in text
@@ -1411,8 +1419,9 @@ def test_every_root_is_usable_after_apply(tmp_path: Path) -> None:
 
     for name in ("personal", "work"):
         root = install / name
-        assert (root / "CLAUDE.md").is_file(), name
-        assert (root / "AGENTS.md").is_symlink(), name
+        assert (root / "AGENTS.md").is_file(), name
+        # One real guide per root; the CLAUDE.md symlink is gone.
+        assert not (root / "AGENTS.md").is_symlink(), name
         assert (root / ".claude" / "skills").is_dir(), name
         assert any((root / ".claude" / "skills").iterdir()), name
 
@@ -1454,18 +1463,18 @@ def test_apply_then_undo_restores_an_install_that_had_a_real_guide(
     assert _install_hashes(install) == before
     assert not (install / "personal").exists()
     assert not (install / "work").exists()
-    assert (install / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
+    assert (install / "AGENTS.md").read_text(encoding="utf-8") == _REAL_GUIDE
 
 
 def test_a_dirty_guide_refuses_before_anything_moves(tmp_path: Path) -> None:
     """The guide moves, so the clean-tree gate has to cover it too."""
     install, vault, runtime = _with_guide(tmp_path)
-    (install / "CLAUDE.md").write_text(_REAL_GUIDE + "\n- edited\n", encoding="utf-8")
+    (install / "AGENTS.md").write_text(_REAL_GUIDE + "\n- edited\n", encoding="utf-8")
 
     result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     assert result["status"] == "refused"
-    assert result["dirty_tracked"] == ["CLAUDE.md"]
+    assert result["dirty_tracked"] == ["AGENTS.md"]
     assert (install / "memory-vault").is_dir()
 
 
@@ -1708,7 +1717,7 @@ def test_undo_is_resumable_after_a_partial_reversal(tmp_path: Path) -> None:
 
     assert result["status"] == "undone", result
     assert "AGENTS.md" in result["already_reversed"]
-    assert (install / "CLAUDE.md").read_text(encoding="utf-8") == _REAL_GUIDE
+    assert (install / "AGENTS.md").read_text(encoding="utf-8") == _REAL_GUIDE
     assert (install / "memory-vault" / "personal").is_dir()
     assert not (install / "personal").exists()
 
@@ -2010,7 +2019,7 @@ def test_the_trigger_migrates_a_committed_install(tmp_path: Path) -> None:
 
     assert result["status"] == "migrated", result.get("refusals")
     assert (install / "personal" / "memory-vault").is_dir()
-    assert (install / "work" / "CLAUDE.md").is_file()
+    assert (install / "work" / "AGENTS.md").is_file()
     # Derived state rebuilt for the layout that now exists.
     assert result["indexes"]["rebuilt"], result["indexes"]
     assert (install / "personal" / "memory-vault" / "INDEX.md").is_file()

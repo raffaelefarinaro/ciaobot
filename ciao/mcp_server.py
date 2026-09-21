@@ -1138,7 +1138,7 @@ class CiaoMcpService:
 
             return await self._invoke("context_get", _op)
 
-        # Bounded memory remains in CLAUDE.md. These tools expose usage and a
+        # Bounded memory remains in the workspace guide. These tools expose usage and a
         # small typed edit path for providers that cannot reliably express an
         # in-file edit; they never create a second memory store.
         @tool(name="memory_status", annotations=_READ, structured_output=True)
@@ -1153,7 +1153,7 @@ class CiaoMcpService:
             entry: str = "",
             match: str = "",
         ) -> dict[str, Any]:
-            """Add, replace, or remove one entry in native CLAUDE.md memory.
+            """Add, replace, or remove one entry in the native guide's memory.
 
             ``region`` is ``memory`` or ``profile``. Use ``match`` for
             replace/remove; use ``entry`` for add/replace. The region cap is

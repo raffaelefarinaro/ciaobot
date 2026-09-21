@@ -44,6 +44,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from ciao import proposal_kinds
+from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -867,8 +868,8 @@ def _detect_workspace_assets_stale(context: DetectionContext) -> list[OperatorAc
             missing.append(".claude/commands")
         if (root / "subagents").is_dir() and not (root / ".claude" / "agents").exists():
             missing.append(".claude/agents")
-        if not (root / "CLAUDE.md").is_file():
-            missing.append("CLAUDE.md")
+        if not guide_path(root).is_file():
+            missing.append(GUIDE_NAME)
         if not missing:
             continue
         actions.append(

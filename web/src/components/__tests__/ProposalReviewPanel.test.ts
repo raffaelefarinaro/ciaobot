@@ -42,7 +42,7 @@ function preview(overrides: Partial<ProposalPreview> = {}): ProposalPreview {
     action: 'edit_region',
     operation: 'add',
     destination: 'ciao:memory',
-    destination_path: '/w/CLAUDE.md',
+    destination_path: '/w/AGENTS.md',
     revision: 'rev-1',
     before: '- An older fact.',
     after: '- An older fact.\n- Remember the thing [2026-09-19]',

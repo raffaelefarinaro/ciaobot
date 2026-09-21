@@ -20,33 +20,58 @@ def test_upstream_skills_removed(tmp_path: Path) -> None:
     assert not hasattr(sync_skills, "SKILLS_NPX_TIMEOUT")
 
 
-def test_sync_links_agents_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
+def test_sync_keeps_the_existing_guide_and_adds_the_regions(tmp_path: Path) -> None:
+    """One guide, AGENTS.md, and no symlink beside it."""
     workspace = tmp_path / "workspace"
-    claude_guide = workspace / "CLAUDE.md"
-    _write(claude_guide, "# Shared workspace instructions\n")
+    guide = workspace / "AGENTS.md"
+    _write(guide, "# Shared workspace instructions\n")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    agents_guide = workspace / "AGENTS.md"
-    assert agents_guide.is_symlink()
-    assert agents_guide.readlink() == Path("CLAUDE.md")
-    assert agents_guide.resolve() == claude_guide.resolve()
-    text = agents_guide.read_text(encoding="utf-8")
+    assert not guide.is_symlink()
+    assert not (workspace / "CLAUDE.md").exists()
+    text = guide.read_text(encoding="utf-8")
     assert text.startswith("# Shared workspace instructions\n")
     assert "<!-- ciao:memory:start" in text
     assert "<!-- ciao:profile:start" in text
 
 
-def test_sync_preserves_custom_agents_guide(tmp_path: Path) -> None:
+def test_sync_seeds_a_guide_only_when_the_workspace_has_none(tmp_path: Path) -> None:
+    """Seeding over an existing guide would discard the memory regions in it."""
     workspace = tmp_path / "workspace"
-    _write(workspace / "CLAUDE.md", "# Claude instructions\n")
-    agents_guide = workspace / "AGENTS.md"
-    _write(agents_guide, "# Custom workspace instructions\n")
+    workspace.mkdir()
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    assert not agents_guide.is_symlink()
-    assert agents_guide.read_text(encoding="utf-8") == "# Custom workspace instructions\n"
+    guide = workspace / "AGENTS.md"
+    assert guide.is_file() and not guide.is_symlink()
+    assert not (workspace / "CLAUDE.md").exists()
+    assert "<!-- ciao:memory:start" in guide.read_text(encoding="utf-8")
+
+
+def test_sync_preserves_a_custom_guide(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    guide = workspace / "AGENTS.md"
+    _write(guide, "# Custom workspace instructions\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not guide.is_symlink()
+    assert guide.read_text(encoding="utf-8").startswith("# Custom workspace instructions\n")
+
+
+def test_sync_adopts_a_pre_migration_guide_without_copying_it(tmp_path: Path) -> None:
+    """A legacy CLAUDE.md is the workspace's guide until the migration renames
+    it; sync must not write a second, empty AGENTS.md beside it."""
+    workspace = tmp_path / "workspace"
+    _write(workspace / "CLAUDE.md", "# Legacy instructions\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not (workspace / "AGENTS.md").exists()
+    assert (workspace / "CLAUDE.md").read_text(encoding="utf-8").startswith(
+        "# Legacy instructions\n"
+    )
 
 
 def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
@@ -70,7 +95,7 @@ def test_sync_restamps_stale_cap_markers(tmp_path: Path) -> None:
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    guide = workspace / "CLAUDE.md"
+    guide = workspace / "AGENTS.md"
     guide.write_text("# Guide\n\n", encoding="utf-8")
     ensure_regions(guide)
     stamped = re.sub(
@@ -109,7 +134,7 @@ def test_sync_honors_dotenv_cap_override_over_stale_stamp(
         "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
     )
     monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
-    guide = workspace / "CLAUDE.md"
+    guide = workspace / "AGENTS.md"
     guide.write_text("# Guide\n\n", encoding="utf-8")
     ensure_regions(guide)
     stamped = re.sub(
@@ -146,7 +171,7 @@ def test_sync_reads_install_dotenv_for_nested_agent_root(
         "export CIAO_MEMORY_CHAR_LIMIT=\"2200\"\n", encoding="utf-8"
     )
     monkeypatch.delenv("CIAO_MEMORY_CHAR_LIMIT", raising=False)
-    guide = workspace / "CLAUDE.md"
+    guide = workspace / "AGENTS.md"
     guide.write_text("# Guide\n\n", encoding="utf-8")
     ensure_regions(guide)
     # Fresh seeding stamped the shipped default; effective limit is 2200.

@@ -97,7 +97,7 @@ Act on these sections:
 
 `Workspace/Learnings.md` entries are structured: `- [key] [first-seen → last-seen] (xN) statement — sources: chat-a, chat-b`. The engine increments the count when the same statement recurs; your job is judgment:
 
-- **Promote** an entry at x3 or more into canonical guidance (the CLAUDE.md body or the relevant skill/doc), citing its sources, then move it under `## Promoted / Resolved` with the destination named.
+- **Promote** an entry at x3 or more into canonical guidance (the AGENTS.md body or the relevant skill/doc), citing its sources, then move it under `## Promoted / Resolved` with the destination named.
 - **Merge** entries that are semantically the same learning written differently: keep one, sum the counts, union the sources.
 - **Prune** x1 entries older than 30 days with no reuse value. Move anything pruned or resolved to `Workspace/Learnings-Archive.md` (create with `search: false` frontmatter) rather than deleting.
 

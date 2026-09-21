@@ -23,7 +23,7 @@ def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_pa
     assert not (tmp_path / "LaunchAgents").exists()
     assert not (tmp_path / "Library").exists()
     assert not (tmp_path / "Applications").exists()
-    assert (workspace / "personal" / "CLAUDE.md").is_file()
+    assert (workspace / "personal" / "AGENTS.md").is_file()
     assert "launchctl" not in capsys.readouterr().out
     assert cli.main(args[:-1] + ["9999"]) == 0
     assert (workspace / ".env").read_text() == config

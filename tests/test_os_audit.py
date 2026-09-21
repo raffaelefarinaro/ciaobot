@@ -72,11 +72,10 @@ def test_audit_skills_deduplicates_provider_projections(tmp_path: Path) -> None:
 
 
 def test_audit_rules_deduplicates_linked_workspace_guides(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text(
+    (tmp_path / "AGENTS.md").write_text(
         "- Keep code changes focused and covered by automated unit tests.\n",
         encoding="utf-8",
     )
-    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
 
     res = audit_rules(tmp_path)
     assert res["rule_clashes_found"] == 0
@@ -85,16 +84,29 @@ def test_audit_rules_deduplicates_linked_workspace_guides(tmp_path: Path) -> Non
 
 
 def test_audit_rules_separates_overlaps_from_conflicts(tmp_path: Path) -> None:
+    """Overlap and clash detection, between the guide and a vault MEMORY.md.
+
+    This used to compare CLAUDE.md against AGENTS.md. There is one guide now
+    (ciao/workspace_guide.py), so two guides can no longer disagree — which
+    was the point of removing the pair. The remaining sources still can.
+    """
+    def _guide(body: str, remembered: str) -> None:
+        (tmp_path / "AGENTS.md").write_text(
+            f"{body}\n\n"
+            "<!-- ciao:memory:start cap=3000 -->\n"
+            f"{remembered}\n"
+            "<!-- ciao:memory:end -->\n",
+            encoding="utf-8",
+        )
+
     same = "- Keep code changes focused and covered by automated unit tests."
-    (tmp_path / "CLAUDE.md").write_text(same, encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text(same, encoding="utf-8")
+    _guide(same, same)
 
     overlap = audit_rules(tmp_path)
     assert overlap["rule_overlaps_found"] == 1
     assert overlap["rule_clashes_found"] == 0
 
-    (tmp_path / "CLAUDE.md").write_text("- Always use rtk for shell commands.", encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text("- Never use rtk for shell commands.", encoding="utf-8")
+    _guide("- Always use rtk for shell commands.", "- Never use rtk for shell commands.")
 
     conflict = audit_rules(tmp_path)
     assert conflict["rule_overlaps_found"] == 0
@@ -104,7 +116,7 @@ def test_audit_rules_separates_overlaps_from_conflicts(tmp_path: Path) -> None:
 
 def test_audit_memory_hygiene(tmp_path: Path) -> None:
     guide = _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=["durable lesson", "old task [expires: 2020-01-01]"],
         profile=["bad date [expires: someday]"],
     )
@@ -117,7 +129,7 @@ def test_audit_memory_hygiene(tmp_path: Path) -> None:
 def test_audit_memory_reports_content_rot(tmp_path: Path) -> None:
     (tmp_path / "memory-vault").mkdir()
     guide = _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=[
             'User said: "do it" -> assistant bumped the default.',
             "Notes live in `memory-vault/absent.md` now.",
@@ -141,7 +153,7 @@ def test_run_os_audit_counts_rot_but_not_superseded_candidates(tmp_path: Path) -
     """
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=[
             "Set `ollama_haiku_model` to the old slug.",
             "Set `ollama_haiku_model` to the new slug.",
@@ -160,7 +172,7 @@ def test_run_os_audit_counts_rot_but_not_superseded_candidates(tmp_path: Path) -
         workspace_dir=tmp_path, vault_root=tmp_path / "memory-vault"
     )
     _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=['User said: "go" -> assistant changed it.'],
         profile=[],
     )
@@ -184,7 +196,7 @@ def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) 
     # A zero-width space is invisible Unicode: os-audit has always failed on it.
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=["Prefers concise​ answers."],
         profile=[],
     )
@@ -216,7 +228,7 @@ def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> No
     )
     old = _time.time() - 200 * 86400
     _os.utime(vault / "People" / "Mo.md", (old, old))
-    _seed_guide(tmp_path / "CLAUDE.md", memory=["durable lesson"], profile=[])
+    _seed_guide(tmp_path / "AGENTS.md", memory=["durable lesson"], profile=[])
 
     report = run_os_audit(workspace_dir=tmp_path, vault_root=vault)
     memory = report["memory_hygiene"]
@@ -240,7 +252,7 @@ def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> No
 def test_format_audit_markdown_renders_rot_findings(tmp_path: Path) -> None:
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=['User said: "go" -> assistant changed `timeout_s`.'],
         profile=[],
     )
@@ -261,7 +273,7 @@ def test_format_audit_markdown_over_cap_names_the_fix(tmp_path: Path) -> None:
     """
     (tmp_path / "memory-vault").mkdir()
     _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=[
             f"Durable lesson {index}: " + "x" * 500 for index in range(7)
         ],
@@ -281,7 +293,7 @@ def test_format_audit_markdown_over_cap_names_the_fix(tmp_path: Path) -> None:
 
 def test_audit_memory_reports_unclosed_expiration_tag(tmp_path: Path) -> None:
     guide = _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=["temporary note [expires: 2026-07-26"],
     )
     res = audit_memory(guide_path=guide, today=datetime.date(2026, 7, 26))
@@ -294,7 +306,7 @@ def test_audit_memory_rejects_noncanonical_and_multiple_expiration_tags(
     tmp_path: Path,
 ) -> None:
     guide = _seed_guide(
-        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
         memory=[
             "compact date [expires: 20260720]",
             "ambiguous [expires: 2026-07-20] [expires: someday]",
@@ -558,9 +570,8 @@ def test_audit_job_runs_rejects_unknown_and_contradictory_statuses(
 def _healthy_roots(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
-    _seed_guide(workspace / "CLAUDE.md")
-    (workspace / "AGENTS.md").symlink_to("CLAUDE.md")
+    (workspace / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    _seed_guide(workspace / "AGENTS.md")
     vault = workspace / "memory-vault"
     vault.mkdir()
     runtime = workspace / ".runtime"
@@ -579,7 +590,7 @@ def test_run_os_audit_missing_roots_is_error(tmp_path: Path) -> None:
     )
     assert report["status"] == "error"
     assert report["total_errors"] == 3
-    # Two region marker diagnostics (memory + profile) when CLAUDE.md is absent.
+    # Two region marker diagnostics (memory + profile) when AGENTS.md is absent.
     assert report["total_issues"] == 5
     assert {
         (item["type"], item["path"]) for item in report["scan_errors"]
@@ -597,8 +608,13 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     over_budget = workspace / "skills" / "over-budget"
     over_budget.mkdir()
     (over_budget / "SKILL.md").write_bytes(b"x" * (SKILL_MAX_BYTES + 1))
-    (workspace / "AGENTS.md").unlink()
-    (workspace / "AGENTS.md").write_text("- Never use rtk for shell commands.\n", encoding="utf-8")
+    # The clash is between the guide body and what was remembered into its
+    # memory region (seeded below). It used to be between CLAUDE.md and
+    # AGENTS.md; there is one guide now, so those are the two sources left
+    # that can disagree.
+    (workspace / "AGENTS.md").write_text(
+        "- Always use rtk for shell commands.\n\n", encoding="utf-8"
+    )
     ideas = vault / "personal" / "Ideas"
     ideas.mkdir(parents=True)
     (ideas / "same.md").write_text(
@@ -621,8 +637,11 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     _seed_guide(
-        workspace / "CLAUDE.md",
-        memory=["old task [expires: 2020-01-01]"],
+        workspace / "AGENTS.md",
+        memory=[
+            "old task [expires: 2020-01-01]",
+            "Never use rtk for shell commands.",
+        ],
         profile=["bad expiry [expires: someday]"],
     )
     (runtime / "job_runs_latest.json").write_text(

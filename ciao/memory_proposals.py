@@ -9,7 +9,7 @@ This module turns those facts into *destination-addressed* proposals. Each
 bullet may carry a trailing destination tag written by the extraction model:
 
 * ``[memory]``   — cross-project preference/environment/lesson → the
-  ``ciao:memory`` region of the workspace ``CLAUDE.md``.
+  ``ciao:memory`` region of the workspace ``AGENTS.md``.
 * ``[profile]``  — identity/communication style → the ``ciao:profile`` region.
 * ``[project]``  — true only within this project → the project's canonical
   doc (folded at archive time by :mod:`ciao.project_doc_update`; queued with
@@ -2259,13 +2259,13 @@ _STUB_HEADER = (
     "timestamped. Confident facts are applied automatically at archive time; "
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
-    "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
+    "`ciao:profile` regions of the workspace `AGENTS.md` (edit the region "
     "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
     "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
     "`Workspace/Learnings.md`; `[review]` has no known destination yet — "
-    "decide what it is first. Standing directives stay in the CLAUDE.md body "
+    "decide what it is first. Standing directives stay in the AGENTS.md body "
     "outside the fenced regions.\n"
 )
 

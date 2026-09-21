@@ -185,7 +185,7 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     assert not any(path.startswith(".runtime/") for path in tracked)
     assert not any(path.startswith(".claude/") for path in tracked)
     assert not any(path.startswith(".agents/") for path in tracked)
-    assert "personal/CLAUDE.md" in tracked
+    assert "personal/AGENTS.md" in tracked
     assert "personal/AGENTS.md" in tracked
     assert _git(ws, "status", "--porcelain").stdout.strip() == ""
 

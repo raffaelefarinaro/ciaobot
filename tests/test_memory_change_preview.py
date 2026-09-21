@@ -96,7 +96,7 @@ def _row(client: TestClient, kind: str, needle: str = "") -> dict:
 
 
 def _guide(config: CiaoConfig) -> Path:
-    return Path(config.agent_root("personal")) / "CLAUDE.md"
+    return Path(config.agent_root("personal")) / "AGENTS.md"
 
 
 # ── Preview ───────────────────────────────────────────────────────────────

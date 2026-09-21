@@ -47,6 +47,7 @@ from ciao.schedules import (
     stamp_fallback_project,
     wall_clock_time_error,
 )
+from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +492,7 @@ class CiaoControlPlane:
     def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
         workspace = self._workspace(principal)
-        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
+        guide = guide_path(self.config.agent_root(workspace))
         return _ok(memory_status_payload(
             guide,
             memory_char_limit=int(getattr(self.config, "memory_char_limit", 3000)),
@@ -507,7 +508,7 @@ class CiaoControlPlane:
         entry: str = "",
         match: str = "",
     ) -> dict[str, Any]:
-        """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        """Apply one bounded edit to the native guide's memory region."""
         from ciao.memory_tool import MemoryLockError
 
         workspace = self._workspace(principal)
@@ -519,7 +520,7 @@ class CiaoControlPlane:
             if canonical == "memory"
             else int(getattr(self.config, "user_char_limit", 1375))
         )
-        guide = Path(self.config.agent_root(workspace)) / "CLAUDE.md"
+        guide = guide_path(self.config.agent_root(workspace))
         try:
             vault_root = Path(self.config.workspace_vault_root(workspace))
         except (AttributeError, ValueError):

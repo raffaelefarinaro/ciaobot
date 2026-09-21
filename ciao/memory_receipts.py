@@ -1,6 +1,6 @@
 """Recoverable receipts for managed memory mutations.
 
-Bounded memory is stored as fenced regions inside a workspace ``CLAUDE.md``
+Bounded memory is stored as fenced regions inside a workspace ``AGENTS.md``
 (``ciao/memory_tool.py``) and the review queue is a Markdown file
 (``ciao/memory_proposals.py``). Neither is a database: a single managed
 operation can touch the guide, the queue and the decision sidecar, and a crash
@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -1729,7 +1730,7 @@ def receipt_journal_candidates(config: Any) -> list[Path]:
         roots = []
     for root, _name in roots:
         try:
-            fallback = journal_path(None, Path(root) / "CLAUDE.md")
+            fallback = journal_path(None, guide_path(root))
         except MemoryReceiptError:
             continue
         key = str(fallback)
