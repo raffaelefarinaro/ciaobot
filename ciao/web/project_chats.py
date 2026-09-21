@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -110,6 +110,13 @@ from ciao.web.chat_broker import (
     reorder_pending_list,
 )
 from ciao.web import chat_service
+from ciao.web.subagent_watchers import (
+    NUDGE_DECLINED,
+    NUDGE_SENT,
+    NUDGE_SUPERSEDED,
+    NudgeOutcome,
+    SubagentWatchers,
+)
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 
@@ -155,14 +162,10 @@ _NUDGE_ANNOUNCE_MIN_CHARS = 4
 # someone might act on the result.
 _PARKED_ANNOUNCE_DEADLINE_SECONDS = 300.0
 
-# Why the synthesis nudge did or did not go out. The caller has to tell
-# "nothing will ever announce for this turn" (release the parked announce)
-# apart from "a user turn took over" (say nothing — that turn announces for
-# itself, and pushing here would deliver the interim non-answer mid-turn).
-NudgeOutcome = Literal["sent", "superseded", "declined"]
-NUDGE_SENT: NudgeOutcome = "sent"
-NUDGE_SUPERSEDED: NudgeOutcome = "superseded"
-NUDGE_DECLINED: NudgeOutcome = "declined"
+# The synthesis nudge's outcome vocabulary is defined with its only caller,
+# ciao/web/subagent_watchers.py, and re-exported here: the nudge itself stays
+# in this class (it is assembled from provider and drain state this class
+# owns), and importers of these names do not move.
 # Patterns an unattended parent emits while still waiting on its background
 # subagents. A run that ended on one of these never synthesized its agents'
 # results — the follow-up turn died before producing a report — so the run is
@@ -205,11 +208,6 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
 _BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
-# The orphaned-CLI-task startup sweep only wakes chats active within this
-# window: the first upgrade after the sweep shipped must not wake every chat
-# that ever left a Monitor running months ago, and a Monitor worth checking
-# is one from this week.
-_ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # Log-tail budget per finished run in the wake prompt. The full log path is
 # always included, so this only has to be enough to decide whether to read it.
 _BACKGROUND_WAKE_TAIL_LINES = 50
@@ -691,10 +689,14 @@ class ProjectChatManager:
         # Callers currently holding or waiting on each archive lock, so
         # the lock is only dropped once the last one is done with it.
         self._archive_lock_users: dict[str, int] = {}
-        # Per-chat background subagent completion watchers. Each active turn
-        # may spawn subagents; we keep at most one watcher per chat so rapid
-        # successive turns do not accumulate overlapping pollers.
-        self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # Background subagent watching, and the CLI-task wake bookkeeping that
+        # comes with it, live in ciao/web/subagent_watchers.py. It owns the
+        # three dictionaries that used to sit here — the live watcher task per
+        # chat, the last count published per chat, and the wakes already sent —
+        # and reaches back into this class only through SubagentWatcherHost.
+        # `self` is that host; the properties further down keep the old
+        # attribute names pointing at its state.
+        self._subagents = SubagentWatchers(self)
         # Result announces parked while the synthesis nudge decides whether it
         # will speak instead. See `_park_result_announce`. chat_id ->
         # (token, project_id, title, snippet).
@@ -708,23 +710,10 @@ class ProjectChatManager:
         # cancel it: the deadline's whole premise is "the drain still owns this
         # and will never release it", and that premise dies with the drain.
         self._parked_announce_deadlines: dict[str, asyncio.Task] = {}
-        # CLI-task wakes already delivered this process, as (chat_id,
-        # task_id). Bounds redelivery to once per process lifetime: if the
-        # wake turn never reaches the JSONL (the CLI cannot reconnect, auth
-        # is down), nothing marks the tasks lost, and without this set the
-        # failed stream's cleanup would re-arm the watcher and the wake
-        # every two ticks forever. Across a restart the JSONL "lost" marker
-        # written by a persisted wake is the durable guard, so a wake that
-        # never persisted is retried at most once per restart.
-        self._cli_task_wakes_sent: set[tuple[str, str]] = set()
         # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
         # At most one per chat; cancelled before a new user turn starts so
         # the drain never competes with receive_response for SDK messages.
         self._between_turn_drains: dict[str, asyncio.Task] = {}
-        # Last announced running-background-subagent count per chat. Feeds
-        # the /ws/events connect snapshot so a fresh client can paint the
-        # "N agents running" indicator without waiting for the next change.
-        self._background_agents_last: dict[str, int] = {}
         # Finished background command runs waiting to wake the chat that
         # started them, keyed by chat id. Held for
         # _BACKGROUND_WAKE_WINDOW_SECONDS so a batch of scripts that finishes
@@ -3335,7 +3324,7 @@ class ProjectChatManager:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status
-            or self._background_agents_last.get(chat_id, 0) > 0
+            or self._subagents.running_count(chat_id) > 0
         ):
             return False
         try:
@@ -6081,11 +6070,7 @@ class ProjectChatManager:
         """
         ids = set(self.active_stream_chat_ids())
         ids.update(self.background_agent_counts)
-        ids.update(
-            chat_id
-            for chat_id, task in self._pending_subagent_watchers.items()
-            if not task.done()
-        )
+        ids.update(self._subagents.watching_chat_ids())
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:
@@ -6105,7 +6090,7 @@ class ProjectChatManager:
     @property
     def background_agent_counts(self) -> dict[str, int]:
         """Last announced running-background-subagent count per chat (>0 only)."""
-        return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
+        return self._subagents.running_counts()
 
     @property
     def background_run_counts(self) -> dict[str, int]:
@@ -7664,333 +7649,74 @@ class ProjectChatManager:
                 _PARKED_ANNOUNCE_DEADLINE_SECONDS,
             )
 
+    # ── background subagent watching ─────────────────────────────────────
+    # Owned by ciao/web/subagent_watchers.py. What stays here is the
+    # coordination the watcher asks for through SubagentWatcherHost: the
+    # synthesis nudge (assembled from provider and drain state this class
+    # owns), the CLI-liveness question, and wake delivery. The rest are thin
+    # delegates kept under their old names — they are the seams the suite
+    # patches, and the watcher calls them back through the host so a patch
+    # here is the patch it sees.
+
+    @property
+    def _pending_subagent_watchers(self) -> dict[str, asyncio.Task]:
+        return self._subagents.watchers
+
+    @_pending_subagent_watchers.setter
+    def _pending_subagent_watchers(self, value: dict[str, asyncio.Task]) -> None:
+        watchers = self._subagents.watchers
+        watchers.clear()
+        watchers.update(value)
+
+    @property
+    def _background_agents_last(self) -> dict[str, int]:
+        return self._subagents.last_counts
+
+    @_background_agents_last.setter
+    def _background_agents_last(self, value: dict[str, int]) -> None:
+        counts = self._subagents.last_counts
+        counts.clear()
+        counts.update(value)
+
+    @property
+    def _cli_task_wakes_sent(self) -> set[tuple[str, str]]:
+        return self._subagents.wakes_sent
+
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
         """Replace any existing subagent watcher for this chat with a new one."""
-        old = self._pending_subagent_watchers.get(chat_id)
-        if old is not None and not old.done():
-            old.cancel()
-        task = asyncio.create_task(self._watch_subagent_completion(chat_id, project_id))
-        self._pending_subagent_watchers[chat_id] = task
+        self._subagents.start(chat_id, project_id)
 
-    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int, nudged: bool = False) -> None:
-        self._background_agents_last[chat_id] = count
-        self._events.publish({
-            "type": "chat_subagents_ready",
-            "chat_id": chat_id,
-            "project_id": project_id,
-            "remaining": count,
-            "nudged": nudged,
-        })
+    def _publish_subagent_count(
+        self, chat_id: str, project_id: str, count: int, nudged: bool = False
+    ) -> None:
+        self._subagents.publish_count(chat_id, project_id, count, nudged=nudged)
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
-        """Watch the session JSONL until background subagents finish.
-
-        The SDK's ``list_subagents`` enumerates transcript *files*, which
-        persist after completion, so its count never drops. The parent
-        session JSONL carries the dispatches (``toolUseResult.isAsync``) and,
-        usually, a ``<task-notification>`` envelope per completion.
-
-        "Usually" is why every tick also consults the agents' own transcripts
-        (``subagent_tracking.running_background_agents``): the CLI can defer
-        that notification to the next turn boundary, so an agent that finished
-        while the parent turn was still running leaves the count pinned at N
-        with nothing left in the parent file to ever bring it down. Recheck on
-        every tick, not just when the parent file grows, for the same reason.
-
-        Emits ``chat_subagents_ready`` whenever the running count changes and
-        schedules a delayed push when the last one completes.
-        """
-        # Every `return` below is a path where no nudge will ever fire, so the
-        # parked announce has to go out or the chat completes in silence. The
-        # finally is the backstop for all of them, including an exception.
-        #
-        # Guarded on still being the registered watcher: `_start_subagent_watcher`
-        # cancels and replaces the previous one, and cancellation is delivered
-        # asynchronously, so a superseded watcher's finally can run *after* the
-        # next turn has parked its own announce. Flushing there would push a
-        # result while its synthesis nudge was still pending. The chat's newest
-        # watcher is the only one entitled to release the chat's parked entry;
-        # the superseded turn's entry was already overwritten by that park.
-        # A box rather than a return value: the handoff has to survive the
-        # inner watcher raising *after* the nudge landed (a publish callback
-        # that throws, a bad JSONL line on the next tick). A lost return value
-        # would send this finally down the flush path while the drain is still
-        # going to announce the synthesis reply — two pushes for one turn.
-        handed_to_drain: list[bool] = []
-        try:
-            await self._watch_subagent_completion_inner(
-                chat_id, project_id, handed_to_drain
-            )
-        finally:
-            # A non-empty box means a nudge landed and the between-turns
-            # drain now owns the release — it is the only code that learns
-            # whether a synthesis reply actually arrived and was worth
-            # announcing. Flushing here would push the interim non-answer
-            # alongside it.
-            #
-            # A live foreground turn owns it for the same reason: the nudge
-            # returning NUDGE_SUPERSEDED breaks the loop straight into this
-            # `finally`, so without the check the very flush that path
-            # declines to do happens here a moment later — the "I'll report
-            # back once the agents finish" push landing mid-turn. That turn's
-            # own turn-done handling discards this entry and announces for
-            # itself, so nothing is lost by staying quiet.
-            if not handed_to_drain:
-                current = self._pending_subagent_watchers.get(chat_id)
-                if current is None or current is asyncio.current_task():
-                    self._flush_result_announce(chat_id)
+        await self._subagents.watch(chat_id, project_id)
 
     async def _watch_subagent_completion_inner(
         self, chat_id: str, project_id: str, handed_to_drain: list[bool]
     ) -> None:
-        """Appends to ``handed_to_drain`` once the drain owns the parked announce."""
-        chat = self._chats.get(chat_id)
-        if chat is None or not chat.session_id:
-            return
-        if chat.provider == "opencode":
-            # opencode has no nudge path, so nothing can take the park from us.
-            await self._watch_opencode_subagent_completion(chat_id, project_id)
-            return
-        # This watcher looks the file up exactly once; a miss here is final
-        # (the loop below would never run), so force the cross-cwd fallback
-        # past the shared cache's rescan rate limit — see subagent_tracking.
-        path = subagent_tracking.find_parent_session_file(
-            chat.session_id,
-            self._config.workspace_root,
-            agent_root=self._agent_root_for_chat(chat_id),
-            force_refresh=True,
-        )
-        if path is None:
-            return
+        await self._subagents.watch_inner(chat_id, project_id, handed_to_drain)
 
-        last_count = -1
-        last_size = -1
-        # Pending-notification handling. The completion watcher delays the
-        # synthesis nudge while the CLI is still processing a
-        # <task-notification>: steering into that exact window is the race
-        # that killed the 2026-08-30 daily-log run (the two prompts crossed
-        # on the transport, the SDK read task was cancelled, and the run
-        # ended on an interim message with the agents' data never
-        # synthesized). The hold is bounded at two ticks (~6s): a CLI that
-        # died before answering — the other half of that same failure —
-        # must not leave the chat parked on the interim message until the
-        # deadline, and steer() queues on the persistent client, so firing
-        # after the grace still lands after whatever turn the CLI is
-        # running instead of interleaving with it. "Nudged" is reported to
-        # clients only once, with the zero-count publish it belongs to.
-        held_ticks = 0
-        nudged = False
-        # One attempt per watcher, outcome regardless. Every exit path but the
-        # CLI-task one breaks right after the nudge, so a *failed* nudge got a
-        # retry only there — and that retry was harmful twice over: the failed
-        # attempt already flushed the parked interim announce, so a later
-        # success handed the drain a turn that would announce again (two pushes
-        # for one turn, the interim non-answer among them), and while the nudge
-        # kept failing — a parent that ended on a question never stops failing —
-        # every 3s tick re-ran `last_activity_at = now` + `_save()` and another
-        # steer attempt for the watcher's full hour.
-        nudge_attempted = False
-        task_wake_sent = False
-        cli_gone_ticks = 0
-        state: subagent_tracking.SessionSubagentState | None = None
-        # Background agents can run for a long while; poll cheaply (a stat
-        # per tick, a re-parse only when the file grew) with a wide horizon.
-        deadline = time.perf_counter() + 3600
-        try:
-            while time.perf_counter() < deadline:
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    break
-                if size != last_size or state is None:
-                    last_size = size
-                    state = subagent_tracking.parse_session_subagents(path)
-                count = subagent_tracking.running_background_agents(path, state)
-                pending = state.notification_pending
-                # CLI-owned tasks (Monitor / background Bash): when the CLI
-                # subprocess that owns them is gone, their completion will
-                # never be delivered. Two consecutive disconnected ticks give
-                # a normal between-turns reconnect time to come back before
-                # the wake fires.
-                tasks = subagent_tracking.running_tasks(state)
-                if tasks and not task_wake_sent:
-                    if not self._unwoken_tasks(chat_id, tasks):
-                        # Already woken this process; a wake whose turn never
-                        # persisted is retried at most once per restart, not
-                        # every tick.
-                        task_wake_sent = True
-                    else:
-                        cli_gone_ticks = 0 if self._cli_owner_alive(chat_id) else cli_gone_ticks + 1
-                        if cli_gone_ticks >= 2:
-                            self._wake_for_dead_cli_tasks(chat, project_id, tasks)
-                            task_wake_sent = True
-                if pending:
-                    held_ticks += 1
-                else:
-                    # A closed window must not spend its grace on the next
-                    # one: an earlier notification leaves held_ticks at
-                    # whatever it climbed to, and without the reset a later
-                    # notification would inherit "grace expired" on its first
-                    # tick and steer into the CLI's processing window — the
-                    # exact prompt-crossing race the hold exists to prevent.
-                    held_ticks = 0
-                grace_expired = pending and held_ticks > 2
-                ready_to_nudge = (
-                    count == 0
-                    and not nudge_attempted
-                    and (not pending or grace_expired)
-                )
-                if count != last_count or ready_to_nudge:
-                    if ready_to_nudge:
-                        chat_now = self._chats.get(chat_id)
-                        if chat_now is not None:
-                            chat_now.last_activity_at = chat_service._now_iso()
-                            self._save()
-                        # Poke the parent to synthesize a final report. The
-                        # CLI won't auto-continue the turn on its own, so
-                        # without this the chat sits on the interim
-                        # "I'll report back" message forever. The
-                        # unprocessed-notification hold above decides *when*:
-                        # not inside the CLI's own window (the race that
-                        # killed the 2026-08-30 daily-log run), or, if the
-                        # window never closes, after the bounded grace. When
-                        # the nudge lands on the live client the between-turns
-                        # drain publishes the reply (and its own push); we
-                        # only fall back to a bare push if the nudge could
-                        # not be delivered. We intentionally do NOT send a
-                        # separate generic "Background agents finished" push
-                        # — it stacked a second, content-free notification
-                        # on top of the chat's own result push (user
-                        # feedback). The in-app subagent count below still
-                        # updates the UI.
-                        # The question hold stays absolute (inside the
-                        # nudge call); only the notification hold above
-                        # carries the bounded grace.
-                        nudge_attempted = True
-                        outcome = await self._nudge_synthesis_after_subagents(
-                            chat_id,
-                            awaiting_user_answer=state.awaiting_user_answer,
-                        )
-                        nudged = outcome == NUDGE_SENT
-                        if nudged:
-                            # Recorded on the caller's box immediately, so an
-                            # exception on a later tick cannot lose the handoff.
-                            handed_to_drain.append(True)
-                            # The drain releases the park on every way it can
-                            # END, but a live CLI that simply never answers the
-                            # nudge ends it in no way at all. Arm a deadline so
-                            # that chat cannot sit on the interim message
-                            # forever (issue #437).
-                            parked_token = self._parked_announce_token(chat_id)
-                            if parked_token is not None:
-                                self._arm_parked_announce_deadline(
-                                    chat_id, parked_token
-                                )
-                        elif outcome == NUDGE_DECLINED:
-                            # Nothing will ever announce for this turn — the
-                            # parent ended on a question, or there is no way to
-                            # steer it — so release the parked announce.
-                            # Token- and identity-scoped like the outer
-                            # `finally`: a superseded watcher must not release
-                            # an entry a newer turn parked in the same slot,
-                            # and a live foreground turn (the parent asked a
-                            # question, the user answered it) announces for
-                            # itself.
-                            current = self._pending_subagent_watchers.get(chat_id)
-                            if current is None or current is asyncio.current_task():
-                                self._flush_result_announce(
-                                    chat_id, self._parked_announce_token(chat_id)
-                                )
-                        # NUDGE_SUPERSEDED falls through deliberately: a user
-                        # turn took the chat over and will announce its own
-                        # result and clear the park when it ends. Flushing here
-                        # would push the interim non-answer mid-turn.
-                        #
-                        # A landed nudge does NOT discard the park: it only
-                        # hands ownership to the between-turns drain, which
-                        # announces the synthesis reply *if* one arrives and is
-                        # worth announcing. The drain discards it then, and
-                        # flushes it on every other outcome — an error result, a
-                        # banner-only stub, a CLI that never replies after the
-                        # steer, or a drain that raises. Discarding here instead
-                        # re-created the silent completion this whole handoff
-                        # exists to remove, just one step further along.
-                    if count != last_count or (ready_to_nudge and nudged):
-                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
-                    last_count = count
-                # Keep the watcher alive while tracked CLI tasks are still
-                # running and their wake has not gone out: once the owning
-                # CLI dies, nothing else would ever deliver the completion.
-                # After the wake (or once the tasks complete via
-                # notification) the normal exit rules apply — the CLI
-                # answers its own task-notifications on resume.
-                if count == 0 and tasks and not task_wake_sent:
-                    if self._restart_draining:
-                        # A restart must not wait an hour on this watcher:
-                        # active_chat_ids() counts it and the restart drain
-                        # has no timeout. sweep_orphaned_cli_tasks wakes the
-                        # chat after the restart, so there is nothing left
-                        # to guard here.
-                        break
-                    if time.perf_counter() >= deadline:
-                        break
-                    await asyncio.sleep(3)
-                    continue
-                if count == 0 and (not pending or nudged or grace_expired):
-                    break
-                await asyncio.sleep(3)
-        finally:
-            # Clean up our slot when the watcher exits.
-            current = self._pending_subagent_watchers.get(chat_id)
-            if current is asyncio.current_task():
-                self._pending_subagent_watchers.pop(chat_id, None)
-                if last_count > 0:
-                    # Exiting on the deadline, a vanished session file, or a
-                    # crash while the count is still positive would leave every
-                    # connected client showing a badge that can never clear
-                    # (the events snapshot only heals it on reconnect). We are
-                    # no longer watching, so announce zero. Cancellation by a
-                    # replacement watcher skips this: it already owns the slot
-                    # and will publish the real count on its first tick.
-                    self._publish_subagent_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
+    def _unwoken_tasks(
+        self, chat_id: str, tasks: list[SubagentInfo]
+    ) -> list[SubagentInfo]:
+        return self._subagents.unwoken_tasks(chat_id, tasks)
 
-    async def _watch_opencode_subagent_completion(
-        self, chat_id: str, project_id: str
+    def _wake_for_dead_cli_tasks(
+        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
     ) -> None:
-        """Poll the opencode session tree while background children run."""
-        last_count = -1
-        deadline = time.perf_counter() + 3600
-        try:
-            while time.perf_counter() < deadline:
-                chat = self._chats.get(chat_id)
-                if chat is None or chat.provider != "opencode" or not chat.session_id:
-                    break
-                tree = await OpencodeProvider.read_collab_tree(
-                    self._config.workspace_root, chat.session_id
-                )
-                count, had_subagents = opencode_collab_tree_counts(tree)
-                if count != last_count:
-                    if count == 0 and last_count > 0:
-                        chat.last_activity_at = chat_service._now_iso()
-                        self._save()
-                        # No separate "Background agents finished" push — the
-                        # chat's own result notification covers it; the extra
-                        # generic ping was redundant (user feedback).
-                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
-                    last_count = count
-                if not had_subagents or count == 0:
-                    break
-                await asyncio.sleep(3)
-        finally:
-            current = self._pending_subagent_watchers.get(chat_id)
-            if current is asyncio.current_task():
-                self._pending_subagent_watchers.pop(chat_id, None)
-                if last_count > 0:
-                    # See the Claude watcher: never leave clients holding a
-                    # count we have stopped maintaining.
-                    self._publish_subagent_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
+        self._subagents.wake_for_dead_cli_tasks(parent, project_id, tasks)
+
+    def sweep_orphaned_cli_tasks(self) -> int:
+        """Wake chats whose CLI tasks were still running when the server died."""
+        return self._subagents.sweep_orphaned_cli_tasks()
+
+    @staticmethod
+    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
+        return SubagentWatchers.build_cli_task_wake_prompt(tasks)
+
 
     async def _nudge_synthesis_after_subagents(
         self, chat_id: str, awaiting_user_answer: bool = False
@@ -8084,165 +7810,6 @@ class ProjectChatManager:
             return False
         return provider_service.cli_connected
 
-    def _unwoken_tasks(
-        self, chat_id: str, tasks: list[SubagentInfo]
-    ) -> list[SubagentInfo]:
-        """CLI tasks in *tasks* this process has not already woken for.
-
-        ``_cli_task_wakes_sent`` bounds redelivery to once per process
-        lifetime: a wake whose turn never reached the JSONL (CLI cannot
-        reconnect, auth down) would otherwise re-arm on every watcher tick
-        or restart sweep, because nothing marks the tasks lost. Across a
-        restart the JSONL "lost" marker from a persisted wake is the durable
-        guard, so a wake that never persisted is retried at most once per
-        restart.
-        """
-        return [
-            task
-            for task in tasks
-            if (chat_id, task.agent_id) not in self._cli_task_wakes_sent
-        ]
-
-    def _wake_for_dead_cli_tasks(
-        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
-    ) -> None:
-        """Deliver one wake turn for CLI tasks whose owning CLI is gone.
-
-        Tasks already woken this process are filtered out first; if none
-        remain, nothing is delivered and the (chat_id, task_id) pairs are
-        recorded *before* delivery so a failed wake is not re-armed.
-        """
-        tasks = self._unwoken_tasks(parent.chat_id, tasks)
-        if not tasks:
-            return
-        for task in tasks:
-            self._cli_task_wakes_sent.add((parent.chat_id, task.agent_id))
-        prompt = self._build_cli_task_wake_prompt(tasks)
-        self._deliver_wake(parent, prompt, count=len(tasks))
-
-    def sweep_orphaned_cli_tasks(self) -> int:
-        """After a restart, wake chats whose CLI tasks (Monitor / background Bash)
-        were still running: the CLI that owned them died with the old server.
-
-        No watcher survives a restart (one is only armed when a turn finishes),
-        so without this sweep a task that was running at shutdown would never
-        produce a wake. Only chats active within
-        ``_ORPHANED_CLI_TASK_SWEEP_MAX_AGE`` are woken: the first upgrade after
-        the sweep shipped must not wake every chat that ever left a Monitor
-        running months ago. An unparseable or empty ``last_activity_at`` never
-        skips a chat — the wake is worth more than the risk of missing one.
-        Delivery goes through the same deferred path as
-        ``queue_background_wake`` — a bounded coalescing sleep, then
-        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
-        raises into the caller. Tasks already woken this process
-        (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
-        "lost" marker from a persisted wake is the durable guard, so a wake
-        that never persisted is retried at most once per restart. Returns
-        the number of chats armed for a wake.
-        """
-        woken = 0
-        for chat in list(self._chats.values()):
-            try:
-                if chat.archived or not chat.session_id:
-                    continue
-                if chat.provider != "claude":
-                    continue
-                last_active = chat_service._parse_iso(chat.last_activity_at)
-                if (
-                    last_active is not None
-                    and datetime.now(UTC) - last_active
-                    > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE
-                ):
-                    continue
-                path = subagent_tracking.find_parent_session_file(
-                    chat.session_id,
-                    self._config.workspace_root,
-                    agent_root=self._agent_root_for_chat(chat.chat_id),
-                )
-                if path is None:
-                    continue
-                state = subagent_tracking.parse_session_subagents(path)
-                tasks = self._unwoken_tasks(
-                    chat.chat_id, subagent_tracking.running_tasks(state)
-                )
-                if not tasks:
-                    continue
-                woken += 1
-                try:
-                    asyncio.create_task(self._deferred_cli_task_wake(chat))
-                except RuntimeError:
-                    # No running loop (e.g. a sync startup path). Dropping the
-                    # wake beats raising into the caller; the tasks stay
-                    # "running" in the JSONL, so nothing is lost by trying
-                    # again on the next sweep.
-                    logger.debug(
-                        "No event loop for orphaned CLI task wake of %s",
-                        chat.chat_id,
-                    )
-            except Exception:  # noqa: BLE001 — a sweep failure must not kill startup
-                logger.exception(
-                    "Orphaned CLI task sweep failed for chat %s",
-                    getattr(chat, "chat_id", "?"),
-                )
-        return woken
-
-    async def _deferred_cli_task_wake(self, parent: ChatInfo) -> None:
-        """Wait out the startup coalescing window, then wake for dead-CLI tasks."""
-        try:
-            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
-            tasks = self._unwoken_tasks(
-                parent.chat_id,
-                subagent_tracking.running_tasks(
-                    subagent_tracking.parse_session_subagents(
-                        subagent_tracking.find_parent_session_file(
-                            parent.session_id,
-                            self._config.workspace_root,
-                            agent_root=self._agent_root_for_chat(parent.chat_id),
-                        )
-                        or Path("nonexistent")
-                    )
-                ),
-            )
-            if not tasks:
-                return
-            self._wake_for_dead_cli_tasks(parent, parent.project_id, tasks)
-        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
-            logger.exception(
-                "Orphaned CLI task wake failed for chat %s", parent.chat_id
-            )
-
-    @staticmethod
-    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
-        """Compose the wake turn for CLI tasks orphaned by a dead CLI.
-
-        Mirrors the background-run wake: name the log/output the command was
-        writing and tell the chat to verify rather than assume. The first line
-        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
-        recognise this prompt in the JSONL later and mark the tasks lost —
-        the wake must never be sent twice.
-        """
-        lines = [
-            f"{subagent_tracking.CLI_TASK_WAKE_PREFIX} {len(tasks)} CLI task"
-            f"{'s' if len(tasks) != 1 else ''} you started "
-            "(Monitor / background shell) were lost: the Claude CLI process "
-            "that owned them has exited, so their completion will never be "
-            "delivered to this chat."
-        ]
-        for task in tasks:
-            lines.append("")
-            lines.append(f"— {task.subagent_type}: {task.description} (task {task.agent_id})")
-            if task.command:
-                lines.append(f"command: {task.command}")
-        lines.append("")
-        lines.append(
-            "Check the real state yourself now: read the log or output file "
-            "the command was writing, and inspect the process (pgrep/ps) "
-            "rather than assuming it finished or that the last lines tell the "
-            "whole story. For future long-running commands use the "
-            "`background_run_start` MCP tool, which survives CLI restarts and "
-            "wakes this chat with the exit code, log tail and log path."
-        )
-        return "\n".join(lines)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
         """Deliver one background-run wake turn into *parent* and announce it.

@@ -124,6 +124,26 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   is pulled into both components with `<style scoped src>`; scoped rules in a
   parent do not reach a child's subtree, so moving markup into a component
   without moving its styles silently unstyles it.
+- **Transcript render cost.** The dominant superlinear term in transcript
+  rendering is gone, and `lib/renderScaling.test.ts` keeps it gone by counting
+  work rather than timing it: `knownPathRulesBuildCount()` says how often the
+  rules were actually computed, and rendering a 200-message transcript must
+  compute them exactly once. A duration would depend on the machine and on
+  what else the suite is running; this number does not. **A smaller
+  superlinear term remains and is not guarded:** `knownPathMatches` still
+  scans every rule for every text span, so cost still carries an
+  O(paths x spans) factor and the path list still grows with the transcript.
+  Removing it needs a real algorithm change — a trie, or one alternation
+  regex — not another cache, so it was left out rather than half-done. The
+  trap this section guards is `lib/filePaths.ts`: `renderMarkdown` linkifies known file paths, and
+  the known-path list grows with the transcript. Rules derived from that list
+  are memoised on the array's identity and built once per `linkifyHtml` call
+  rather than once per text span — before #501 a 5x longer transcript cost ~85x
+  the time. Two consequences for anyone touching that file: hand
+  `buildKnownPathRules` a **new** array when the path set changes (mutating one
+  in place is the shape the identity cache cannot see — `ChatPanel`'s
+  `knownFilePaths` computed already does this), and keep rule-building out of
+  any per-span or per-message loop.
 - **`stores/projects.ts` ownership boundary.** The store is being split in
   behaviour-preserving steps; put new work on the right side of the line.
   `stores/chatAnnotations.ts` owns everything the user stages against the *next*

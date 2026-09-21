@@ -112,7 +112,10 @@ def test_nothing_was_left_behind_or_duplicated() -> None:
     routes = _module_level_names(REPO_ROOT / "ciao" / "web" / "routes_api.py")
     service.discard("logger")
     assert service & routes == set()
-    assert len(service) >= 40
+    # Floor on what #498 actually moved out of routes_api. It dropped from 40
+    # when #500 lifted the six CLI-envelope constants one level up into
+    # ciao/cli_envelopes.py, which subagent_tracking shares.
+    assert len(service) >= 34
 
 
 # ------------------------------------------------------------------- fixtures

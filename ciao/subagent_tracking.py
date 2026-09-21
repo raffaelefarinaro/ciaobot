@@ -38,6 +38,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ciao.cli_envelopes import (
+    is_cli_envelope,
+    is_control_slash_command,
+    is_interrupted_request_sentinel,
+    envelope_notification_fields,
+    is_no_response_sentinel,
+)
+
 logger = logging.getLogger(__name__)
 
 _DISPATCH_TOOL_NAMES = {"Agent", "Task", "agent", "task"}
@@ -55,46 +63,6 @@ FINISHED_AGENT_IDLE_SECONDS = 60.0
 # Bytes read from the tail of an agent transcript to recover its last record.
 _TAIL_WINDOW_BYTES = 65536
 
-_TASK_NOTIFICATION_RE = re.compile(
-    r"<task-notification>(.*?)</task-notification>", re.DOTALL
-)
-_INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
-
-# User-turn skip rules mirrored from the /messages renderer
-# (ciao/web/transcript_service.py): records matching these never render as user
-# bubbles there, so they must not advance the turn counter here either or
-# `turn_index` anchoring drifts.
-_CONTROL_SLASH_PREFIXES = ("/model", "/mode")
-_NO_RESPONSE_SENTINEL = "No response requested."
-# Matches the Claude Agent SDK's _SKIP_FIRST_PROMPT_PATTERN
-# ([Request interrupted by user[^\]]*]) so we cover every CLI variant,
-# including "[Request interrupted by user for tool use]". Routes_api renders
-# the /messages endpoint on the same predicate; if it skips here but not
-# there, `turn_index` anchoring drifts.
-_INTERRUPTED_REQUEST_RE = re.compile(
-    r"\[Request interrupted by user[^\]]*\]"
-)
-_CLI_ENVELOPE_TAGS = (
-    "task-notification",
-    "bash-input",
-    "bash-stdout",
-    "bash-stderr",
-    "bash-exit-code",
-    "local-command-stdout",
-    "local-command-stderr",
-    "local-command-caveat",
-    "command-name",
-    "command-message",
-    "command-args",
-    "remote-review",
-    "remote-review-progress",
-    "teammate-message",
-    "cross-session-message",
-    "fork-boilerplate",
-)
-_CLI_ENVELOPE_RE = re.compile(
-    r"^\s*<(?:" + "|".join(re.escape(t) for t in _CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
-)
 
 # Prompt the server injects into the parent turn when its background subagents
 # all finish, so the chat doesn't sit on the interim "I'll report back" message
@@ -442,17 +410,20 @@ def _text_content(message: object) -> str:
 
 
 def _is_countable_user_turn(content: str) -> bool:
+    # User-turn skip rules shared with the /messages renderer
+    # (ciao/web/transcript_service.py) via ciao/cli_envelopes.py: records
+    # matching these never render as user bubbles there, so they must not
+    # advance the turn counter here either or `turn_index` anchoring drifts.
     text = content.strip()
     if not text:
         return False
-    head = text.split(None, 1)[0]
-    if head in _CONTROL_SLASH_PREFIXES:
+    if is_control_slash_command(text):
         return False
-    if text == _NO_RESPONSE_SENTINEL:
+    if is_no_response_sentinel(text):
         return False
-    if _INTERRUPTED_REQUEST_RE.fullmatch(text):
+    if is_interrupted_request_sentinel(text):
         return False
-    if _CLI_ENVELOPE_RE.match(text):
+    if is_cli_envelope(text):
         return False
     if is_synthesis_nudge(text):
         return False
@@ -460,10 +431,13 @@ def _is_countable_user_turn(content: str) -> bool:
 
 
 def _notification_fields(content: str) -> dict[str, str] | None:
-    m = _TASK_NOTIFICATION_RE.search(content)
-    if not m:
-        return None
-    return {tag: text.strip() for tag, text in _INNER_TAG_RE.findall(m.group(1))}
+    """Fields of the notification this record *is*, else None.
+
+    Shared with the /messages renderer (ciao/cli_envelopes.py) so the two
+    readers agree on which records are completions, and therefore on which
+    ones advance `turn_index`.
+    """
+    return envelope_notification_fields(content)
 
 
 def _normalize_agent_id(agent_id: str) -> str:
