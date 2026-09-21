@@ -169,26 +169,42 @@ def _rename(root: Path, source: Path, destination: Path) -> None:
 
 
 def _merge_bodies(agents_text: str, legacy_text: str) -> str:
-    """Fold `agents_text`'s unique lines under `legacy_text`.
+    """Fold `agents_text`'s unique **body** lines under `legacy_text`.
 
     Only reached when both files are real and differ, which means the user
     authored one of them by hand. Keeping both bodies beats picking a winner:
     the alternative loses whichever side the heuristic guesses against.
+
+    The incoming file's bounded regions are stripped before the line merge,
+    and the legacy file's are left exactly as they are. A line-level merge
+    over region contents is actively destructive: the fenced entries land
+    under a plain heading *outside* the fences, where nothing expires,
+    audits or caps them, and two files with different `cap=` values produce a
+    second `:start` marker whose matching `:end` is deduplicated away as a
+    duplicate line — leaving an unterminated region that later writes refuse.
+
+    Nothing is lost by stripping: the incoming file is copied verbatim to
+    ``AGENTS.md.bak`` before any of this, regions included, and the merged
+    guide points at it.
     """
+    from ciao.memory_tool import strip_region_blocks
+
     if not legacy_text.strip():
         return agents_text
+    agents_body = strip_region_blocks(agents_text)
     existing = {line.strip() for line in legacy_text.splitlines() if line.strip()}
     unique = [
-        line for line in agents_text.splitlines()
+        line for line in agents_body.splitlines()
         if line.strip() and line.strip() not in existing
     ]
     if not unique:
         return legacy_text
     return (
         legacy_text.rstrip()
-        + "\n\n## Merged from AGENTS.md\n\n"
+        + f"\n\n## Merged from {GUIDE_NAME}\n\n"
         + "\n".join(unique)
-        + "\n"
+        + f"\n\nIts bounded memory regions were not merged; the original file "
+          f"is kept verbatim as `{GUIDE_NAME}.bak`.\n"
     )
 
 

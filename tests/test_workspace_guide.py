@@ -320,3 +320,44 @@ def test_a_hanging_hook_reports_failed_instead_of_raising(tmp_path, monkeypatch)
     # And the guide is still readable under its old name, so nothing is lost.
     assert _remembered((tmp_path / "CLAUDE.md").read_text(encoding="utf-8"))
     assert wg.guide_path(tmp_path).name == "CLAUDE.md"
+
+
+def test_a_merge_never_breaks_the_bounded_regions(tmp_path: Path) -> None:
+    """Regression: the line merge treated fenced entries as ordinary lines.
+
+    Two real guides that each gained their own memory entries produced a
+    second `:start` marker with a different cap, while the matching `:end`
+    was deduplicated away as a duplicate line — an unterminated region that
+    later region writes refuse. The incoming entries also landed outside the
+    fences, where nothing expires, audits or caps them.
+    """
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Guide\n\n"
+        "<!-- ciao:memory:start cap=3000 -->\n- fact A\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text(
+        "# Guide\n- my own rule\n\n"
+        "<!-- ciao:memory:start cap=5000 -->\n- fact B\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    merged = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert merged.count("ciao:memory:start") == 1
+    assert merged.count("ciao:memory:end") == 1
+    assert "cap=5000" not in merged
+    assert "- fact A" in merged, "the managed region's entries stay"
+    assert "my own rule" in merged, "the user's own body survives"
+    assert "fact B" not in merged, "a fenced entry must not land outside the fences"
+    # Nothing is lost: the incoming file is kept verbatim, regions included.
+    assert "fact B" in (tmp_path / "AGENTS.md.bak").read_text(encoding="utf-8")
+    assert "AGENTS.md.bak" in merged, "the merged guide points at the backup"
+
+    # The result is a guide the region tooling still accepts.
+    from ciao.memory_tool import read_region
+
+    entries, diags = read_region(tmp_path / "AGENTS.md", "memory")
+    assert not diags
+    assert any("fact A" in entry for entry in entries)
