@@ -23,8 +23,6 @@ from ciao import vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
-    EXPAND_MAX_WINDOWS,
-    expand_note,
     get_db_path,
     index_vault,
     init_db,
@@ -50,12 +48,6 @@ from ciao.schedules import (
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
-
-# MCP needs to distinguish an omitted optional field from an explicit JSON
-# null. ``None`` is a meaningful reset for workspace denylist settings, so a
-# normal ``= None`` default loses information before the control plane sees
-# it.
-_UNSET = object()
 
 # A GWS health reading older than this is treated as stale: the monitor
 # preserves prior state when probes are unavailable or checks are disabled, so
@@ -277,6 +269,41 @@ class CiaoControlPlane:
             return principal.chat_id
         return value
 
+    def _workspace_chats(self, principal: McpPrincipal) -> list[Any]:
+        """Every chat whose owning project sits in the principal's workspace."""
+        lister = getattr(self.pcm, "list_chats", None)
+        if not callable(lister):
+            return []
+        rows: list[Any] = []
+        for chat in lister():
+            project = self.pcm.get_project(chat.project_id)
+            if project is not None and project.workspace == principal.workspace:
+                rows.append(chat)
+        return rows
+
+    def _chat_by_title(self, principal: McpPrincipal, ref: str) -> Any | None:
+        """Resolve an unambiguous active chat *title* inside this workspace.
+
+        The id is what the surface documents, but an agent that has just read a
+        chat list back reaches for the title it saw — the single most common
+        argument mistake on the CLI surface. Resolution is deliberately narrow:
+        case-insensitive, exact (no prefix or substring), archived chats
+        excluded, and scoped by ``_workspace_chats`` to the principal's own
+        workspace, so it can never name a chat the caller could not already
+        address by id. Anything else returns ``None`` and the caller raises the
+        same ``chat_not_found`` it raised before.
+        """
+        wanted = ref.strip().casefold()
+        if not wanted:
+            return None
+        matches = [
+            chat
+            for chat in self._workspace_chats(principal)
+            if not getattr(chat, "archived", False)
+            and str(getattr(chat, "title", "") or "").strip().casefold() == wanted
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _resolve_project_in_workspace(
         self, principal: McpPrincipal, ref: str, workspace: str
     ) -> Any:
@@ -316,6 +343,11 @@ class CiaoControlPlane:
         """
         resolved_id = self._resolve_chat_id(principal, chat_id)
         chat = self.pcm.get_chat(resolved_id)
+        if chat is None:
+            # Not an id: try an unambiguous active title in this workspace.
+            # Ambiguous or unknown stays ``chat_not_found`` so the error code
+            # the telemetry and the callers already know does not fork.
+            chat = self._chat_by_title(principal, resolved_id)
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{resolved_id}' was not found.")
         return chat, self._project(principal, chat.project_id)
@@ -564,41 +596,6 @@ class CiaoControlPlane:
             {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
         )
 
-    def workspace_create(
-        self,
-        principal: McpPrincipal,
-        *,
-        name: str,
-        default_provider: str = "claude",
-        gws_profile: str = "",
-        disallowed_tools: Any = _UNSET,
-        color: str = "",
-    ) -> dict[str, Any]:
-        """Register a new logical workspace under the standard vault folder."""
-        from ciao.workspaces import persist_workspaces, workspace_from_request, workspace_to_dict
-
-        data: dict[str, Any] = {
-            "name": name,
-            "default_provider": default_provider,
-            "gws_profile": gws_profile,
-        }
-        if disallowed_tools is not _UNSET:
-            data["disallowed_tools"] = disallowed_tools
-        if color:
-            data["color"] = color
-        workspace = workspace_from_request(data, config=self.config)
-        self.config.workspaces[workspace.name] = workspace
-        persist_workspaces(self.config)
-        self._refresh_workspace_registry()
-        return _ok(workspace_to_dict(workspace, self.config))
-
-
-    def _refresh_workspace_registry(self) -> None:
-        """Notify the project-chat manager after a registry mutation."""
-        refresh = getattr(self.pcm, "refresh_workspaces", None)
-        if callable(refresh):
-            refresh()
-
     # ---- vault ---------------------------------------------------------
 
     def _entity_index_root(self, principal: McpPrincipal) -> Path:
@@ -711,76 +708,6 @@ class CiaoControlPlane:
         key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
         rows = await run_read(key, _search)
         return _ok(rows)
-
-    async def vault_expand(
-        self,
-        principal: McpPrincipal,
-        path: str,
-        query: str = "",
-        windows: int = EXPAND_MAX_WINDOWS,
-    ) -> dict[str, Any]:
-        """Bounded extra context from ONE note ``vault_search`` already matched.
-
-        The scoped drill-down for the case the snippet rule cannot serve: a
-        32-token snippet that cut away the qualification, the negation, or the
-        paragraph naming the current value, leaving recall to answer from a
-        fragment that reverses the meaning of the note.
-
-        It refines that rule rather than replacing it, and the scope is the
-        same one ``vault_search`` answers under. ``path`` must be a key the FTS
-        index currently holds beneath this workspace's prefix, so it can only
-        ever name a note this principal's own search could have returned;
-        anything else — another workspace's note, a transcript, an opted-out
-        note, a traversal, an absolute path — is ``note_not_matched``, not a
-        smaller answer. What comes back is the markdown section around each
-        matched line, capped in windows, lines and characters, never the note.
-
-        There is no expiring result handle to go stale: the index pass and the
-        file read both happen here, so an edited note is answered at its
-        current revision and a removed one is refused.
-        """
-        root = self._vault_root(principal)
-        base = self._search_key_base()
-        bounded_windows = max(1, min(EXPAND_MAX_WINDOWS, int(windows)))
-        target = str(path or "").strip()
-        if not target:
-            raise ControlPlaneError(
-                "invalid_request",
-                "Pass the 'path' of a vault_search result to expand.",
-            )
-
-        def _expand() -> dict[str, Any] | None:
-            db_path = get_db_path(self._search_runtime_dir())
-            conn = sqlite3.connect(db_path)
-            try:
-                # Same write lock and incremental pass as vault_search: the
-                # expansion is validated against a current index, so a note
-                # edited or removed since the search is refreshed or refused
-                # rather than answered from a stale row.
-                with keyed_lock(f"fts-index:{db_path}"):
-                    init_db(conn)
-                    index_vault(conn, root, path_base=base)
-                return expand_note(
-                    conn,
-                    base,
-                    root,
-                    target,
-                    query,
-                    path_prefix=vault_key_prefix(root, base),
-                    max_windows=bounded_windows,
-                )
-            finally:
-                conn.close()
-
-        key = f"vault_expand:{root}:{base}:{target}:{query}:{bounded_windows}"
-        result = await run_read(key, _expand)
-        if result is None:
-            raise ControlPlaneError(
-                "note_not_matched",
-                "That path is not a current vault_search result in this "
-                "workspace. Run vault_search and expand a path it returned.",
-            )
-        return _ok(result)
 
     async def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.
@@ -973,14 +900,12 @@ class CiaoControlPlane:
 
     def chats_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
         if project_id:
-            self._project(principal, project_id)
-            chats = self.pcm.list_chats(project_id)
+            # Accept a project name as well as an id (same resolver
+            # `chat_create` uses), scoped to the principal's own workspace.
+            project = self._project(principal, self._resolve_project_id(principal, project_id))
+            chats = self.pcm.list_chats(project.project_id)
         else:
-            chats = [
-                chat for chat in self.pcm.list_chats()
-                if self.pcm.get_project(chat.project_id)
-                and self.pcm.get_project(chat.project_id).workspace == principal.workspace
-            ]
+            chats = self._workspace_chats(principal)
         return _ok([self._chat_review_dict(chat) for chat in chats])
 
     def chat_get(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
@@ -1050,6 +975,9 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
+            # A name resolves the same way it does on `chat_create`; the
+            # ownership check still runs against the resolved id.
+            project_id = self._resolve_project_id(principal, project_id)
             self._project(principal, project_id)
         requested_mode = mode
         if mode is not None:
@@ -1161,29 +1089,14 @@ class CiaoControlPlane:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
 
-    def chat_fork(
-        self,
-        principal: McpPrincipal,
-        chat_id: str,
-        *,
-        messages: list[dict[str, Any]],
-        turn_index: int,
-    ) -> dict[str, Any]:
-        chat_id = self._chat_id(principal, chat_id)
-        if turn_index < 0:
-            raise ControlPlaneError("invalid_turn", "turn_index must be non-negative.")
-        fork = self.pcm.fork_chat(
-            chat_id,
-            messages=[row for row in messages if isinstance(row, dict)],
-            turn_index=turn_index,
-        )
-        return _ok(fork.to_dict(local=True))
-
     async def chat_archive(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
         target_id = chat_id.strip()
         if not target_id or target_id.lower() in {"this", "this chat", "current", "self"}:
             target_id = principal.chat_id
         chat = self._chat(principal, target_id)
+        # `_chat` also accepts a title, so take the id back from the chat it
+        # resolved rather than from what the caller typed.
+        target_id = str(chat.chat_id)
         project = self._project(principal, chat.project_id)
 
         async def _archive() -> dict[str, Any]:

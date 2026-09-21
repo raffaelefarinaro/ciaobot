@@ -1,6 +1,7 @@
 """The agent CLI surface: dispatcher, route, CLI mapping and prompt variant."""
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -287,6 +288,22 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     assert "`AGENTS.md`" in cli
 
 
+def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
+    """D-12: the prompt is the reference, so it cannot drift from the CLI.
+
+    Every session on the CLI surface opened with a `ciao help` call (1.56 per
+    session on claude, 1.08 on opencode), which is most of the +4.5 s / +8.3 s
+    the surface cost per turn. The table is in the prompt so that call is not
+    needed; this test is what keeps it true when a command is added.
+    """
+    cli = system_prompt_payload("", surface="cli")["append"]
+    missing = [command for command in _commands() if command not in cli]
+    assert missing == []
+    # It has to stay cheap: this text is prepended to every turn of every
+    # CLI-surface chat.
+    assert len(cli) < 9000
+
+
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -374,3 +391,329 @@ def test_route_rejects_before_reading_an_unauthenticated_or_oversized_body(tmp_p
         assert huge.json()["error"]["code"] == "payload_too_large"
         ok = _post(client, token, "context_get")
         assert ok.status_code == 200
+
+
+# ── D-11: names and titles resolve like ids, inside the workspace ──────────
+#
+# The surface documents ids, but an agent that has just read a chat or project
+# list back reaches for the name it saw. On the CLI surface that was the most
+# common argument mistake of the S0.5 sessions, so the shared operation code
+# (the control plane, which both surfaces run) resolves a name or title the
+# same way `chat_create` already resolved a project name — and never outside
+# the principal's own workspace.
+
+
+class _NamesPcm:
+    """Projects and chats in two workspaces, with the fields recall needs."""
+
+    def __init__(self) -> None:
+        self.projects = {
+            "project-1": SimpleNamespace(project_id="project-1", name="Ciaobot Improvements", workspace="personal"),
+            "project-2": SimpleNamespace(project_id="project-2", name="Research", workspace="personal"),
+            "project-w": SimpleNamespace(project_id="project-w", name="Research", workspace="work"),
+        }
+        self.chats = {
+            "chat-1": self._chat("chat-1", "project-1", "Morning briefing"),
+            "chat-2": self._chat("chat-2", "project-2", "Weekly digest"),
+            "chat-3": self._chat("chat-3", "project-1", "Duplicate"),
+            "chat-4": self._chat("chat-4", "project-2", "Duplicate"),
+            "chat-5": self._chat("chat-5", "project-1", "Weekly digest", archived=True),
+            "chat-w": self._chat("chat-w", "project-w", "Work only"),
+        }
+        self.updated: list[tuple[str, dict]] = []
+
+    @staticmethod
+    def _chat(chat_id: str, project_id: str, title: str, *, archived: bool = False):
+        chat = SimpleNamespace(
+            chat_id=chat_id,
+            project_id=project_id,
+            title=title,
+            archived=archived,
+            mode="auto",
+            last_response="",
+            last_response_status="",
+        )
+        chat.to_dict = lambda local=True, _c=chat: {"chat_id": _c.chat_id, "title": _c.title}
+        return chat
+
+    def get_project(self, project_id: str):
+        return self.projects.get(project_id)
+
+    def list_projects(self, workspace: str | None = None):
+        return [p for p in self.projects.values() if workspace is None or p.workspace == workspace]
+
+    def get_chat(self, chat_id: str):
+        return self.chats.get(chat_id)
+
+    def list_chats(self, project_id: str | None = None):
+        return [c for c in self.chats.values() if project_id is None or c.project_id == project_id]
+
+    def is_session_local(self, _chat) -> bool:
+        return True
+
+    def get_active_stream(self, _chat_id):
+        return None
+
+    def update_chat(self, chat_id: str, **changes):
+        self.updated.append((chat_id, {k: v for k, v in changes.items() if v is not None}))
+        return self.chats[chat_id]
+
+    def chat_mode(self, _chat_id: str) -> str:
+        return "auto"
+
+
+def _names_service(tmp_path: Path):
+    """The real control plane over `_NamesPcm`, bound to a dispatcher service."""
+    from ciao.control_plane import CiaoControlPlane
+
+    service, _fake = _service(tmp_path)
+    pcm = _NamesPcm()
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object() if name in {"personal", "work"} else None),
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+    )
+    service.bind(plane)
+    return service, plane, pcm
+
+
+def test_chats_list_accepts_a_project_name(tmp_path: Path) -> None:
+    service, _plane, _pcm = _names_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        by_id = _post(client, token, "chats_list", {"project_id": "project-2"})
+        by_name = _post(client, token, "chats_list", {"project_id": "rEsEaRcH"})
+        unknown = _post(client, token, "chats_list", {"project_id": "nope"})
+    assert by_id.json() == by_name.json()
+    assert {row["chat_id"] for row in by_name.json()["data"]} == {"chat-2", "chat-4"}
+    assert unknown.json()["error"]["code"] == "project_not_found"
+
+
+def test_a_project_name_never_resolves_outside_the_workspace(tmp_path: Path) -> None:
+    """Two workspaces own a "Research" project; each principal sees only its own."""
+    service, _plane, _pcm = _names_service(tmp_path)
+    with _client(service) as client:
+        personal = _post(client, _token(service, "chat-1"), "chats_list", {"project_id": "Research"})
+        work = _post(client, _token(service, "chat-w", workspace="work"), "chats_list", {"project_id": "Research"})
+    assert {row["chat_id"] for row in personal.json()["data"]} == {"chat-2", "chat-4"}
+    assert {row["chat_id"] for row in work.json()["data"]} == {"chat-w"}
+
+
+def test_chat_arguments_accept_an_unambiguous_active_title(tmp_path: Path) -> None:
+    service, _plane, _pcm = _names_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        by_title = _post(client, token, "chat_get", {"chat_id": "morning briefing"})
+        # Two active chats share "Duplicate"; an archived chat shares the title
+        # of an active one, and only the active one may win.
+        ambiguous = _post(client, token, "chat_get", {"chat_id": "Duplicate"})
+        archived_twin = _post(client, token, "chat_get", {"chat_id": "Weekly digest"})
+        unknown = _post(client, token, "chat_get", {"chat_id": "no such chat"})
+    assert by_title.json()["data"]["chat_id"] == "chat-1"
+    assert ambiguous.json()["error"]["code"] == "chat_not_found"
+    assert archived_twin.json()["data"]["chat_id"] == "chat-2"
+    assert unknown.json()["error"]["code"] == "chat_not_found"
+
+
+def test_a_chat_title_never_resolves_outside_the_workspace(tmp_path: Path) -> None:
+    service, _plane, _pcm = _names_service(tmp_path)
+    with _client(service) as client:
+        response = _post(client, _token(service), "chat_get", {"chat_id": "Work only"})
+    assert response.json()["error"]["code"] == "chat_not_found"
+
+
+def test_chat_update_resolves_both_the_chat_title_and_the_project_name(tmp_path: Path) -> None:
+    service, _plane, pcm = _names_service(tmp_path)
+    with _client(service) as client:
+        response = _post(
+            client,
+            _token(service),
+            "chat_update",
+            {"chat_id": "Morning briefing", "project_id": "research", "title": "Renamed"},
+        )
+    assert response.status_code == 200
+    # The stored change carries the resolved id, not the name the agent typed.
+    assert pcm.updated == [("chat-1", {"title": "Renamed", "project_id": "project-2"})]
+
+
+def test_chat_archive_archives_the_chat_a_title_resolved_to(tmp_path: Path) -> None:
+    """`chat_archive` echoes and archives an id, so a title must be resolved first."""
+    from ciao.control_plane import McpPrincipal
+
+    _service_, plane, pcm = _names_service(tmp_path)
+    archived: list[str] = []
+
+    async def _archive(chat_id: str):
+        archived.append(chat_id)
+        return SimpleNamespace(path=Path("/tmp/chat.md"))
+
+    pcm.archive_chat = _archive
+    pcm.run_archive_postprocess = lambda *args: None
+    principal = McpPrincipal(
+        token_id="t", chat_id="chat-2", project_id="project-2", workspace="personal", provider="claude"
+    )
+    result = asyncio.run(plane.chat_archive(principal, "Morning briefing"))
+    assert result["data"]["chat_id"] == "chat-1"
+    assert archived == ["chat-1"]
+
+
+# ── D-13: the harness rules that replace the per-tool annotations ─────────
+
+
+def _commands() -> dict[str, str]:
+    return json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
+
+
+def _matching_patterns(command: str) -> list[tuple[str, str]]:
+    """Every (class, pattern) whose prefix covers ``ciao <command>``."""
+    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+
+    words = ("ciao " + command).split()
+    return [
+        (label, pattern)
+        for label, patterns in (("allow", AGENT_CLI_ALLOW_PATTERNS), ("ask", AGENT_CLI_ASK_PATTERNS))
+        for pattern in patterns
+        if words[: len(pattern.split())] == pattern.split()
+    ]
+
+
+def test_every_cli_command_falls_in_exactly_one_pattern_class() -> None:
+    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+
+    used: set[str] = set()
+    for command in _commands():
+        matches = _matching_patterns(command)
+        assert len(matches) == 1, f"{command}: {matches}"
+        used.add(matches[0][1])
+    # No dead pattern either. `ciao help` is the one entry with no operation
+    # behind it: it prints the bundled skill document locally.
+    unused = (set(AGENT_CLI_ALLOW_PATTERNS) | set(AGENT_CLI_ASK_PATTERNS)) - used
+    assert unused == {"ciao help"}
+
+
+def test_every_destructive_operation_is_in_the_ask_class() -> None:
+    """The cut is the `_DESTRUCTIVE` annotation, read from the MCP tool source."""
+    import re
+
+    from ciao import mcp_server
+
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    declared = dict(re.findall(r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source))
+    destructive = {name for name, ann in declared.items() if ann == "_DESTRUCTIVE"}
+    assert destructive, "no _DESTRUCTIVE tools found"
+
+    for command, operation in _commands().items():
+        label = _matching_patterns(command)[0][0]
+        if operation in destructive:
+            # `vault_review` is the one split operation: its list/inspect verbs
+            # are reads, the deciding verbs are not.
+            expected = "allow" if command in {"vault review list", "vault review show"} else "ask"
+        else:
+            expected = "allow"
+        assert label == expected, f"{command} ({operation})"
+    # The operations the plan names, spelled out so a rename cannot silently
+    # move one out of the ask class.
+    assert {command for command in _commands() if _matching_patterns(command)[0][0] == "ask"} == {
+        "vault review keep", "vault review trash", "vault review restore", "vault review delete",
+        "chat delete", "chat stop", "project complete", "project delete",
+        "schedule pause", "schedule resume", "schedule run", "schedule delete",
+        "run start", "run cancel",
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_surface_pre_approves_ciao_commands_not_mcp_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.models import AgentRequest
+    from ciao.providers.claude import ClaudeProvider
+
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(
+        tmp_path,
+        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
+    )
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+
+    await provider._ensure_connected(
+        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude", agent_surface="cli")
+    )
+    allowed = captured["options"].allowed_tools
+    assert "Bash(ciao memory status:*)" in allowed
+    # A bare `ciao memory` prefix would also cover the operator's
+    # `ciao memory-proposal-add`, a queue write.
+    assert not [entry for entry in allowed if entry.startswith("Bash(ciao memory:")]
+    assert "Bash(ciao vault review keep:*)" not in allowed  # destructive: still a card
+    assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
+    assert not captured["options"].mcp_servers  # no MCP server is attached on this surface
+
+
+@pytest.mark.asyncio
+async def test_claude_mcp_surface_rules_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.execution_modes import auto_approved_mcp_tool_names
+    from ciao.models import AgentRequest
+    from ciao.providers.claude import ClaudeProvider
+
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(
+        tmp_path,
+        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
+    )
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+
+    await provider._ensure_connected(
+        AgentRequest(
+            prompt="t", model="sonnet", mode="auto", provider="claude",
+            mcp_url="http://127.0.0.1:8443/mcp/", mcp_token="tok",
+        )
+    )
+    assert captured["options"].allowed_tools == auto_approved_mcp_tool_names()
+
+
+def test_opencode_cli_auto_rules_follow_the_generic_bash_ask() -> None:
+    """Last-match-wins: a rule that must win goes after the one it overrides."""
+    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+    from ciao.providers.opencode import mode_settings
+
+    _agent, rules = mode_settings("auto", agent_surface="cli")
+    bash = [rule for rule in rules if rule["permission"] == "bash"]
+    assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
+    assert bash[1:] == [
+        {"permission": "bash", "pattern": f"{pattern}*", "action": action}
+        for action, patterns in (("allow", AGENT_CLI_ALLOW_PATTERNS), ("ask", AGENT_CLI_ASK_PATTERNS))
+        for pattern in patterns
+    ]
+    # The credential denies still come last, after everything.
+    assert rules[-1]["action"] == "deny"
+
+
+@pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])
+def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
+    """`plan`/`normal` ask on purpose; `bypass` already allows everything, and a
+    trailing `ask` row would narrow it under last-match-wins."""
+    from ciao.providers.opencode import mode_settings
+
+    assert mode_settings(mode, agent_surface="cli") == mode_settings(mode)  # type: ignore[arg-type]
+
+
+def test_opencode_mcp_surface_rules_are_unchanged() -> None:
+    from ciao.providers.opencode import mode_settings
+
+    _agent, rules = mode_settings("auto")
+    assert [rule for rule in rules if rule["permission"] == "bash"] == [
+        {"permission": "bash", "pattern": "*", "action": "ask"}
+    ]

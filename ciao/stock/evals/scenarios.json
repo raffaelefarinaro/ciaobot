@@ -74,7 +74,7 @@
     {
       "id": "recall-truncated-snippet-expansion",
       "category": "recall",
-      "title": "A truncated snippet is widened with the scoped drill-down, not a note read",
+      "title": "A truncated snippet is widened with a narrower search, not a note read",
       "prompt": "What rate do I bill Northwind at for work I log this month?",
       "regions": {
         "memory": ["Northwind is a retainer client since 2025. [2026-01-10]"],
@@ -89,16 +89,16 @@
         },
         {
           "path": "projects/Northwind.md",
-          "snippet": "vault_expand(path=projects/Northwind.md) → section 'Billing': The Northwind retainer rate is 120 per hour. Superseded by the 2026-06 amendment: work logged since then is billed at 180.",
+          "snippet": "vault_search(query=Northwind retainer amendment billing) → The Northwind retainer rate is 120 per hour. Superseded by the 2026-06 amendment: work logged since then is billed at 180.",
           "workspace": "personal",
-          "expansion": "true"
+          "narrowed": "true"
         }
       ],
       "expect": {
         "answer_facts": ["180"],
         "current_fact": "180",
         "superseded_fact": "120",
-        "tools": ["vault_search", "vault_expand"],
+        "tools": ["vault_search"],
         "forbidden_tools": ["Read", "Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
@@ -108,7 +108,7 @@
     {
       "id": "recall-negated-claim-expansion",
       "category": "recall",
-      "title": "A snippet that keeps a claim and drops its denial is widened, not trusted",
+      "title": "A snippet that keeps a claim and drops its denial is re-searched, not trusted",
       "prompt": "Do my EU contractors need a work visa for the Zurich office?",
       "regions": {
         "memory": ["Contractors are onboarded through the Zurich office. [2026-02-04]"],
@@ -123,16 +123,16 @@
         },
         {
           "path": "projects/Onboarding.md",
-          "snippet": "vault_expand(path=projects/Onboarding.md, reason=matched) → section 'Visas': Contractors from the EU need a work visa for the Zurich office. That stopped being true after the 2026-03 bilateral update: no permit is required for them any more.",
+          "snippet": "vault_search(query=Zurich office EU contractors bilateral update permit) → Contractors from the EU need a work visa for the Zurich office. That stopped being true after the 2026-03 bilateral update: no permit is required for them any more.",
           "workspace": "personal",
-          "expansion": "true"
+          "narrowed": "true"
         }
       ],
       "expect": {
         "answer_facts": ["no permit is required"],
         "current_fact": "no permit is required",
         "superseded_fact": "need a work visa",
-        "tools": ["vault_search", "vault_expand"],
+        "tools": ["vault_search"],
         "forbidden_tools": ["Read", "Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
@@ -142,7 +142,7 @@
     {
       "id": "abstention-expansion-without-evidence",
       "category": "abstention",
-      "title": "A no_line_match drill-down is a signal to abstain, not a paragraph to answer from",
+      "title": "A narrower search that matches nothing is a signal to abstain, not a paragraph to answer from",
       "prompt": "What late-payment penalty percentage did I agree with Northwind?",
       "regions": {
         "memory": ["Northwind is a retainer client since 2025. [2026-01-10]"],
@@ -156,14 +156,14 @@
         },
         {
           "path": "projects/Northwind.md",
-          "snippet": "vault_expand(path=projects/Northwind.md, reason=no_line_match) → no line of this note matches the query; the block below is context, not evidence: section 'Billing': The Northwind retainer rate is 120 per hour.",
+          "snippet": "vault_search(query=Northwind late payment penalty percentage) → no snippet matches the question; the line below is the nearest context, not evidence: The Northwind retainer rate is 120 per hour.",
           "workspace": "personal",
-          "expansion": "true"
+          "narrowed": "true"
         }
       ],
       "expect": {
         "must_abstain": true,
-        "tools": ["vault_search", "vault_expand"],
+        "tools": ["vault_search"],
         "forbidden_tools": ["Read", "Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
@@ -469,7 +469,7 @@
       "expect": {
         "answer_facts": ["Villa Australis"],
         "tools": ["vault_search"],
-        "forbidden_tools": ["memory_update", "project", "workspace_create"],
+        "forbidden_tools": ["memory_update", "project", "chat_create"],
         "writes_forbidden": true,
         "unsupported_facts": ["Hotel Boreale is current", "cancelled", "outdoor"]
       }

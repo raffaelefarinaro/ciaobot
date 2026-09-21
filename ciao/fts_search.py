@@ -1042,10 +1042,9 @@ def expand_note(
         # `OSError`: a note rewritten as non-UTF-8 after it was indexed keeps
         # its FTS row — the incremental pass logs the decode failure and
         # leaves the previous row in place — so the lookup above still reaches
-        # the file and the read is what fails. Refusing here is the documented
-        # `note_not_matched` answer (ciao/control_plane.py::vault_expand);
-        # letting it escape would turn a read-only, fail-closed tool into an
-        # internal error.
+        # the file and the read is what fails. Refusing here keeps the
+        # fail-closed contract: letting it escape would turn a read-only
+        # lookup into an internal error.
         return None
 
     revision = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
