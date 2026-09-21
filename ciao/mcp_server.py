@@ -391,16 +391,9 @@ class Operation:
 
 
 #: Operations still exposed as MCP tools. Shrinks slice by slice as groups
-#: migrate to ``ciao <noun> <verb>``; deleted outright in S6.
-MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset(
-    {
-        "memory_status",
-        "memory_update",
-        "vault_search",
-        "vault_review",
-        "file_surface",
-    }
-)
+#: migrate to ``ciao <noun> <verb>``; deleted outright in S6. Empty since S5:
+#: every operation runs through the agent dispatcher as a ``ciao …`` command.
+MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset()
 
 
 async def _op_context_get(service: CiaoMcpService) -> dict[str, Any]:

@@ -101,10 +101,11 @@ def test_mcp_surface_telemetry_is_still_tagged_mcp(tmp_path: Path) -> None:
     token = _token(service)
     with _mcp_client(service) as client:
         _rpc(client, token, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
-        _rpc(client, token, "tools/call", {"name": "memory_status", "arguments": {}}, request_id=2)
-    record = json.loads(service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert record["surface"] == "mcp"
-    assert record["tool"] == "memory_status"
+        # Since S5 the MCP catalog is empty (every operation is a `ciao …`
+        # command), so there is no Ciaobot tool to call over the MCP transport.
+        listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
+    assert listed == set()
+    assert service._tool_names == set()
 
 
 def test_mcp_and_dispatcher_serve_identical_argument_schemas(tmp_path: Path) -> None:
@@ -123,6 +124,9 @@ def test_mcp_and_dispatcher_serve_identical_argument_schemas(tmp_path: Path) -> 
         assert mcp_tool is not None, name
         cli_tool = service.tool_for(mcp_server.OPERATIONS_BY_NAME[name])
         assert cli_tool.parameters == mcp_tool.parameters, name
+    # S5 emptied the MCP catalog: nothing to compare over MCP, and every
+    # operation is dispatched through the shared table instead.
+    assert mcp_server.MCP_EXPOSED_OPERATIONS == frozenset()
 
 
 def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
@@ -359,13 +363,13 @@ def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
-    mcp = system_prompt_payload("")["append"]
-    cli = system_prompt_payload("", surface="cli")["append"]
-    assert "MCP tools" in mcp and "`memory_update`" in mcp
-    assert "ciao help" in cli and "ciao memory update" in cli and "ciao vault search" in cli
+    # S5 collapsed the prompt variants: there is one `system_prompt.md` and it
+    # is the CLI wording for every surface.
+    append = system_prompt_payload("")["append"]
+    assert "ciao help" in append and "ciao memory update" in append and "ciao vault search" in append
     for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
-        assert name not in cli, name
-    assert "`AGENTS.md`" in cli
+        assert name not in append, name
+    assert "`AGENTS.md`" in append
 
 
 def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
@@ -376,7 +380,7 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     the surface cost per turn. The table is in the prompt so that call is not
     needed; this test is what keeps it true when a command is added.
     """
-    cli = system_prompt_payload("", surface="cli")["append"]
+    cli = system_prompt_payload("")["append"]
     missing = [command for command in _commands() if command not in cli]
     assert missing == []
     # It has to stay cheap: this text is prepended to every turn of every

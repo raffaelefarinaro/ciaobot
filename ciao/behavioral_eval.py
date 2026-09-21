@@ -2285,7 +2285,7 @@ def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
 def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractCheck]:
     """Destructive tools stay behind a card; unattended mutations are refused."""
     from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-    from ciao.mcp_server import CiaoMcpService
+    from ciao.mcp_server import CiaoMcpService, MCP_EXPOSED_OPERATIONS
 
     checks: list[ContractCheck] = []
     try:
@@ -2321,7 +2321,10 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
         ContractCheck(
             id="approval-catalog-covers-scenarios",
             category="approval_deferral",
-            passed=bool(tools),
+            # The MCP catalog is empty since S5 (every operation is a `ciao …`
+            # command), so there are no exposed MCP tools to cover. The shared
+            # operation table is what the approval policy must stay aligned to.
+            passed=bool(tools) or not MCP_EXPOSED_OPERATIONS,
             detail=f"{len(tools)} MCP tools enumerated",
         )
     )

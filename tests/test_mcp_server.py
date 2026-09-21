@@ -45,6 +45,11 @@ class _FakeControlPlane:
     def memory_status(self, _principal) -> dict:
         return {"ok": True, "data": {"region": "memory", "used_chars": 12, "char_limit": 2200}}
 
+    def memory_update(self, _principal, region, *, action, entry, match="") -> dict:
+        self.memory_updates = getattr(self, "memory_updates", [])
+        self.memory_updates.append({"region": region, "action": action, "entry": entry, "match": match})
+        return {"ok": True, "data": {"region": region, "action": action, "entry": entry, "over_cap": False}}
+
     def schedule_create(self, _principal, **values) -> dict:
         self.create_calls += 1
         self.schedule_create_values = values
@@ -171,6 +176,9 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
         assert initialized.status_code == 200
         assert initialized.json()["result"]["serverInfo"]["name"] == "ciaobot"
 
+        # Since S5 the MCP catalog is empty; the hot-loop operations run only
+        # through the agent dispatcher. Assert the transport still serves the
+        # empty catalog and its structured tool call rejects the now-removed op.
         called = _rpc(
             client,
             token,
@@ -181,38 +189,34 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
 
     assert called.status_code == 200
     result = called.json()["result"]
-    assert result["isError"] is False
-    assert result["structuredContent"] == {
-        "ok": True,
-        "data": {"region": "memory", "used_chars": 12, "char_limit": 2200},
-    }
-    telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
-    record = json.loads(telemetry[-1])
-    assert record["tool"] == "memory_status"
-    assert record["chat_id"] == "chat-1"
-    assert record["provider"] == "claude"
-    assert record["status"] == "ok"
+    assert result["isError"] is True
+
+
+def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S5 removed the hot-loop group from the MCP catalog but the dispatcher
+    must still run them as `ciao memory …` / `ciao vault …` / `ciao file …`."""
+    from ciao import mcp_server
+
+    hot_loop = {"memory_status", "memory_update", "vault_search", "vault_review", "file_surface"}
+    service, _ = _service(tmp_path)
+    # None of the hot-loop group is an MCP tool any more…
+    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
+    assert not (hot_loop & listed)
+    # …but each is still a dispatcher operation the CLI routes to.
+    assert hot_loop <= set(service.operation_table)
 
 
 def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path, mode="plan")
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="opencode",
+
+    result = _dispatcher_call(
+        service,
+        "memory_update",
+        {"region": "memory", "action": "add", "entry": "x"},
     )
 
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {"name": "memory_update", "arguments": {"region": "memory", "action": "add", "entry": "x"}},
-        )
-
-    assert called.status_code == 200
-    payload = called.json()["result"]["structuredContent"]
+    assert result["status"] == 422
+    payload = result["envelope"]
     assert payload["ok"] is False
     assert payload["error"]["code"] == "plan_mode_read_only"
     assert control_plane.create_calls == 0
@@ -248,12 +252,6 @@ def test_vault_search_telemetry_keeps_only_relative_result_paths(tmp_path: Path)
 def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     service, _control_plane = _service(tmp_path)
     names = set(service.status()["tools"])
-
-    assert {
-        "memory_status",
-        "memory_update",
-        "vault_search",
-    } <= names
 
     # The retired loop tools are gone for good; interval cadence lives on the
     # unified `schedule` tool.
@@ -312,6 +310,14 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "schedules_list",
             "schedule",
             "schedule_action",
+            # Migrated to `ciao memory …` / `ciao vault …` / `ciao file …` in
+            # S5 (hot loop): still control-plane operations, just no longer MCP
+            # tools. The MCP catalog is now empty.
+            "memory_status",
+            "memory_update",
+            "vault_search",
+            "vault_review",
+            "file_surface",
             # Moved to PWA Settings / skill / native Glob.
             "workspace_update",
             "workspace_delete",
@@ -353,8 +359,9 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     assert by_tool["memory_read"]["providers"] == ["claude", "opencode"]
     assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
     assert by_tool["vault_search"]["errors"] == 1
-    # Registered-but-never-called tools appear with zero counts.
-    assert by_tool["memory_status"]["calls"] == 0
+    # S5 emptied the MCP catalog, so there are no registered-but-never-called
+    # tools to appear with zero counts; the table reflects only telemetry.
+    assert "memory_status" not in by_tool
     # Sorted by call count descending, so the busiest tool is first.
     assert usage["tools"][0]["tool"] == "memory_read"
 
@@ -585,26 +592,15 @@ def test_usage_over_a_large_log_stays_cheap(
 
 def test_tool_arguments_never_reach_the_telemetry_log(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
     secret = "sk-live-NOTAREALSECRET-452"
 
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "memory_update",
-                "arguments": {"region": "memory", "action": "add", "entry": f"rotate {secret} tonight"},
-            },
-        )
+    result = _dispatcher_call(
+        service,
+        "memory_update",
+        {"region": "memory", "action": "add", "entry": f"rotate {secret} tonight"},
+    )
 
-    assert called.status_code == 200
+    assert result["envelope"]["ok"] is True
     assert control_plane.create_calls == 0
     log = service._telemetry_path.read_text(encoding="utf-8")
     assert secret not in log
@@ -626,21 +622,13 @@ def test_tool_arguments_never_reach_the_telemetry_log(tmp_path: Path) -> None:
 
 def test_tool_call_survives_a_telemetry_write_failure(tmp_path: Path) -> None:
     service, _control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
     # A directory where the log belongs makes every append raise OSError,
     # which stands in for a full disk or a read-only runtime directory.
     service._telemetry_path.mkdir(parents=True, exist_ok=True)
 
-    with _client(service) as client:
-        called = _rpc(client, token, "tools/call", {"name": "memory_status", "arguments": {}})
+    result = _dispatcher_call(service, "memory_status", {})
 
-    assert called.status_code == 200
-    assert called.json()["result"]["isError"] is False
+    assert result["envelope"]["ok"] is True
     # The reader tolerates it too, rather than turning it into a failed poll.
     assert service.usage()["total_calls"] == 0
 
@@ -2058,6 +2046,39 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True
     assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+
+
+def test_file_surface_suggests_nearest_paths_on_a_miss(tmp_path: Path) -> None:
+    """Q-08: a `file_not_found` miss carries up to three nearest paths.
+
+    The caller can offer a concrete correction instead of guessing, so the
+    18–32% `file_not_found` rate is not a dead end on either surface.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    root = plane.config.workspace_root
+    (root / "reports").mkdir(parents=True)
+    (root / "logs").mkdir(parents=True)
+    (root / "reports" / "october-final.md").write_text("b", encoding="utf-8")
+    (root / "reports" / "october-summary.md").write_text("e", encoding="utf-8")
+    (root / "logs" / "notes.md").write_text("c", encoding="utf-8")
+    (root / "logs" / "other.txt").write_text("d", encoding="utf-8")
+
+    principal = McpPrincipal(
+        token_id="t",
+        chat_id="chat-1",
+        project_id="p",
+        workspace="personal",
+        provider="opencode",
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.file_surface(principal, "reports/october.md")
+    assert excinfo.value.code == "file_not_found"
+    suggestions = excinfo.value.payload().get("suggestions")
+    # Up to three, ranked by basename similarity: the two october files first.
+    assert isinstance(suggestions, list) and len(suggestions) == 3
+    assert suggestions[0] == "reports/october-final.md"
+    assert "reports/october-summary.md" in suggestions
+    assert "logs/other.txt" not in suggestions
 
 
 def test_forged_role_claim_is_normalised_to_chat() -> None:
