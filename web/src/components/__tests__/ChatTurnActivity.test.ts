@@ -21,6 +21,7 @@ function mountRow(props: Record<string, unknown> = {}) {
       thinkingExpanded: false,
       renderMarkdown: (text: string) => `<p>${text}</p>`,
       renderActivityLine: (line: string) => line,
+      outputsId: 'outputs-0',
       ...props,
     },
     global: { stubs: { SubagentPanel: true } },
@@ -76,7 +77,7 @@ describe('ChatTurnActivity', () => {
     expect(wrapper.emitted('open-file')).toEqual([['notes/plan.md']])
   })
 
-  it('renders output chips, labels new files and reports clicks', async () => {
+  it('keeps the Outputs list collapsed and asks the parent to toggle it', async () => {
     const wrapper = mountRow({
       open: true,
       outputs: [
@@ -85,12 +86,34 @@ describe('ChatTurnActivity', () => {
       ],
     })
 
-    const chips = wrapper.findAll('.trace-files .file-chip')
-    expect(chips).toHaveLength(2)
-    expect(chips[0].text()).toContain('new')
-    expect(chips[1].text()).not.toContain('new')
+    const summary = wrapper.get('button.outputs-summary')
+    expect(summary.text()).toContain('Outputs')
+    expect(summary.text()).toContain('2 files')
+    expect(summary.attributes('aria-expanded')).toBe('false')
+    expect(summary.attributes('aria-controls')).toBe('outputs-0')
+    expect(wrapper.find('.outputs-list').exists()).toBe(false)
 
-    await chips[1].trigger('click')
+    await summary.trigger('click')
+    expect(wrapper.emitted('toggle-outputs')).toHaveLength(1)
+  })
+
+  it('lists each output once expanded, tags it and reports clicks', async () => {
+    const wrapper = mountRow({
+      open: true,
+      outputsOpen: true,
+      outputs: [
+        { file_path: 'a/report.md', action: 'created' },
+        { file_path: 'b/notes.md', action: 'edited' },
+      ],
+    })
+
+    const rows = wrapper.findAll('.outputs-list .outputs-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('report.md')
+    expect(rows[0].get('.outputs-tag').text()).toBe('new')
+    expect(rows[1].get('.outputs-tag').text()).toBe('edited')
+
+    await rows[1].get('button.outputs-link').trigger('click')
     expect(wrapper.emitted('open-file')).toEqual([['b/notes.md']])
   })
 

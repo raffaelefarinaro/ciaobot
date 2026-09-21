@@ -74,20 +74,33 @@
         <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
       </template>
       <SubagentPanel v-if="subs?.length" :subagents="subs" :chat-id="chatId" />
-      <div v-if="outputs?.length" class="trace-files">
+      <div v-if="outputs?.length" class="answer-outputs answer-outputs--trace">
         <button
-          v-for="(f, fi) in outputs"
-          :key="fi"
           type="button"
-          class="file-chip"
-          @click.stop="emit('open-file', f.file_path)"
-          :title="f.file_path"
+          class="outputs-summary"
+          :aria-expanded="outputsOpen"
+          :aria-controls="outputsId"
+          @click.stop="emit('toggle-outputs')"
         >
-          <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
-          <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
-          <span v-if="f.action === 'created'" class="file-chip-action">new</span>
-          <span class="file-chip-open" aria-hidden="true">&#8599;</span>
+          <span class="outputs-chevron" aria-hidden="true">{{ outputsOpen ? '▾' : '▸' }}</span>
+          <span class="outputs-label">Outputs</span>
+          <span class="outputs-count">&middot; {{ outputs.length }} {{ outputs.length === 1 ? 'file' : 'files' }}</span>
+          <span class="sr-only">, {{ outputsOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
+        <ul v-if="outputsOpen" :id="outputsId" class="outputs-list">
+          <li v-for="(f, fi) in outputs" :key="fi" class="outputs-row">
+            <button
+              type="button"
+              class="outputs-link"
+              @click.stop="emit('open-file', f.file_path)"
+              :title="f.file_path"
+            >
+              <span class="outputs-name">{{ fileCardBasename(f.file_path) }}</span>
+              <span class="outputs-open" aria-hidden="true">&#8599;</span>
+            </button>
+            <span class="outputs-tag" :class="{ 'outputs-tag--new': outputActionTag(f.action) === 'new' }">{{ outputActionTag(f.action) }}</span>
+          </li>
+        </ul>
       </div>
     </div>
   </div>
@@ -117,6 +130,7 @@ import {
   fileCardDirname,
   fileCardIcon,
   isSubagentLine,
+  outputActionTag,
   traceSummaryMetaParts,
   type TraceOutput,
 } from '../lib/chatActivity'
@@ -127,8 +141,12 @@ defineProps<{
   steps: ChatMessage[]
   /** Subagent transcripts dispatched by this turn, if any. */
   subs?: SubagentTranscript[]
-  /** Files the turn wrote, rendered as chips under the body. */
+  /** Files the turn wrote, listed in the collapsible Outputs disclosure. */
   outputs?: TraceOutput[]
+  /** Whether that disclosure is expanded. Owned by ChatPanel, like `open`. */
+  outputsOpen?: boolean
+  /** id for the disclosure's aria-controls; unique per rendered turn. */
+  outputsId: string
   /** Whether the body is expanded. Owned by ChatPanel. */
   open: boolean
   /** Chat the turn belongs to; SubagentPanel needs it to fetch transcripts. */
@@ -145,6 +163,7 @@ const emit = defineEmits<{
   toggle: []
   'toggle-thinking': []
   'body-click': [event: MouseEvent]
+  'toggle-outputs': []
   'open-file': [filePath: string]
   'expand-step': [step: ChatMessage]
 }>()
