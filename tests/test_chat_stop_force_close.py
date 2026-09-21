@@ -394,3 +394,67 @@ async def test_a_clean_turn_is_not_flagged_partial(tmp_path: Path) -> None:
     assert len(turns) == 1
     assert turns[0]["response"] == "whole answer"
     assert "is_partial" not in turns[0]
+
+
+async def test_stop_that_raises_still_publishes_a_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """Provider raises on the stop instead of yielding a terminal event.
+
+    Claude's SDK ends an interrupted turn this way. The drive loop treated the
+    raise as intentional and fell straight through to the queue drain without
+    publishing anything, so clients kept their streaming spinner on a turn the
+    server had already finished — it only went away when the *next* send
+    replaced it, which is exactly what the turn looked like from the composer.
+    """
+    pcm = _make_manager(tmp_path)
+    pcm._STOP_GRACE_S = 2.0
+    project = pcm.create_project("stop-raises", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="stop-raises", provider="claude")
+
+    acked = asyncio.Event()
+    disconnects: list[int] = []
+    pcm._providers[chat.chat_id] = _fake_provider_service(acked, disconnects)
+
+    abort_issued = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield AssistantTextDelta(type="text", text="partial answer")
+        await abort_issued.wait()
+        raise RuntimeError("request was aborted")
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "text_delta" for e in captured),
+    )
+
+    abort_issued.set()
+    await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0)
+
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    # A stop is not a failure: the frame must not paint an error bubble.
+    assert results[0].get("stopped") is True
+    assert results[0].get("is_error") is False
+    # The partial answer the user already saw streaming is what it carries.
+    assert results[0].get("text") == "partial answer"
+    assert results[0].get("completed_at")
+    await _wait_for(lambda: stream.done)
+
+    # A cancelled turn is not a result: it must not raise an unread badge, an
+    # in-app toast or a push carrying the half sentence the user just stopped.
+    assert pcm._chats[chat.chat_id].last_response_status == "empty"
+    assert pcm._chats[chat.chat_id].last_snippet == ""
+
+    consumer.cancel()
