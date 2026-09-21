@@ -100,7 +100,17 @@ const workspaceColor = computed(() => {
 })
 // True only in client mode: the local node proxy reports it cannot reach the
 // host (see the `host_unreachable` frame handling in the projects store).
-const hostUnreachable = computed(() => projectStore.hostConnectionUnavailable)
+//
+// An open chat renders its own `host-connection-card` from the same flag, with
+// a richer recovery action, so the banner stands down there rather than
+// announcing the same outage twice -- to the eye and to a screen reader. Every
+// other screen has no such card, which is the gap this banner exists to close.
+const onChatPage = computed(() =>
+  route.path === '/chat' || route.path.startsWith('/chat/'),
+)
+const hostUnreachable = computed(
+  () => projectStore.hostConnectionUnavailable && !onChatPage.value,
+)
 const clientHostLabel = computed(() => {
   const raw = clientHostUrl.value
   if (!raw) return 'remote host'

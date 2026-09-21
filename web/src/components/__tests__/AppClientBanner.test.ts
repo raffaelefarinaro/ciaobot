@@ -6,8 +6,9 @@ import { mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import App from '../../App.vue'
 
+let chatRoute = false
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ path: '/' }),
+  useRoute: () => ({ path: chatRoute ? '/chat/abc' : '/' }),
   useRouter: () => ({ push: vi.fn() }),
 }))
 
@@ -80,5 +81,23 @@ describe('client-mode banner connectivity state', () => {
     store.hostConnectionUnavailable = false
     await wrapper.vm.$nextTick()
     expect(wrapper.find('.client-mode-banner').classes()).not.toContain('is-offline')
+  })
+
+  it('stands down on a chat page, where the chat renders its own card', async () => {
+    // ChatPanel shows a host-connection-card from the same flag, with a richer
+    // recovery action. Two alerts for one outage is a duplicate announcement
+    // for a screen reader as much as a visual one.
+    chatRoute = true
+    try {
+      const { wrapper, store } = await mountApp()
+      store.hostConnectionUnavailable = true
+      await wrapper.vm.$nextTick()
+
+      const banner = wrapper.find('.client-mode-banner')
+      expect(banner.classes()).not.toContain('is-offline')
+      expect(banner.text()).toContain('Client mode')
+    } finally {
+      chatRoute = false
+    }
   })
 })

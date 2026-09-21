@@ -4959,7 +4959,12 @@ export const useProjectStore = defineStore('projects', () => {
           })
           const isActive = activeChatId.value === chatId &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
-          if (!isActive) {
+          // A turn the user stopped is not an answer. Its partial text still
+          // renders so the transcript matches what they watched arrive, but
+          // badging it would put an unread marker on the half sentence they
+          // just cancelled -- on their other devices too, since every client
+          // receives this frame.
+          if (!isActive && !event.stopped) {
             unread.value[chatId] = 1
             persistUnread()
           }

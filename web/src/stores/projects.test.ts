@@ -1078,6 +1078,53 @@ describe('client host connection failures', () => {
     expect(store.hostConnectionUnavailable).toBe(false)
   })
 
+  test('a stopped turn renders its partial text without badging the chat', () => {
+    // Every connected client gets this frame, so a backgrounded tab or a second
+    // device would otherwise show an unread marker for the half sentence the
+    // user just cancelled.
+    const store = useProjectStore()
+    const chatId = 'c-stopped-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Let me check the',
+        is_error: false,
+        stopped: true,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.messages[chatId].at(-1)?.content).toBe('Let me check the')
+    expect(store.unread[chatId]).toBeUndefined()
+  })
+
+  test('an ordinary result still badges a chat the user is not watching', () => {
+    const store = useProjectStore()
+    const chatId = 'c-normal-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Here is the answer.',
+        is_error: false,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.unread[chatId]).toBe(1)
+  })
+
   test('the awareness socket raises the banner with no chat open', () => {
     // The per-chat socket only exists while a chat is on screen, so on the
     // home screen nothing used to notice the host was gone -- the app looked
