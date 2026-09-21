@@ -209,6 +209,19 @@ def _status(root: Path) -> str:
     ).stdout.strip()
 
 
+def _tracked_status(root: Path) -> str:
+    """Only tracked changes — what the re-root's clean-tree gate judges on.
+
+    An untracked `AGENTS.md.bak` is expected after a merge and is ignored
+    there (`--untracked-files=no`), so it must not fail these assertions.
+    """
+    import subprocess
+    return subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
 def test_a_tracked_guide_is_renamed_without_dirtying_the_tree(tmp_path: Path) -> None:
     """Regression: a plain rename permanently blocked the workspace re-root.
 
@@ -361,3 +374,116 @@ def test_a_merge_never_breaks_the_bounded_regions(tmp_path: Path) -> None:
     entries, diags = read_region(tmp_path / "AGENTS.md", "memory")
     assert not diags
     assert any("fact A" in entry for entry in entries)
+
+
+def test_a_tracked_destination_is_committed_even_when_the_source_is_not(
+    tmp_path: Path,
+) -> None:
+    """Regression: the commit hung off the rename *source* being tracked.
+
+    A tracked AGENTS.md replaced by an untracked CLAUDE.md staged the
+    destination's removal and then renamed without committing, leaving
+    `D AGENTS.md` plus an untracked AGENTS.md — a dirty tracked tree, so the
+    re-root's clean-tree gate refused on every boot.
+    """
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "AGENTS.md").write_text("# Guide\n", encoding="utf-8")
+    _git(tmp_path, "add", "AGENTS.md")
+    _git(tmp_path, "commit", "-qm", "init")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")  # untracked
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    assert _tracked_status(tmp_path) == ""
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_a_region_only_difference_still_points_at_the_backup(tmp_path: Path) -> None:
+    """Regression: identical bodies left no unique lines, so the early return
+    skipped the notice and the incoming facts vanished with no pointer."""
+    body = (
+        "# Guide\n\n<!-- ciao:memory:start cap=3000 -->\n"
+        "- fact {fact}\n<!-- ciao:memory:end -->\n"
+    )
+    (tmp_path / "CLAUDE.md").write_text(body.format(fact="A"), encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(body.format(fact="B"), encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    merged = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "- fact A" in merged
+    assert f"{wg.GUIDE_NAME}.bak" in merged, "the only pointer to the unmerged facts"
+    assert "- fact B" in (tmp_path / "AGENTS.md.bak").read_text(encoding="utf-8")
+
+
+def test_a_legacy_symlink_to_an_external_guide_is_not_discarded(
+    tmp_path: Path,
+) -> None:
+    """Regression: any CLAUDE.md symlink was treated as Ciaobot's own alias.
+
+    One pointing at a shared or external guide is not an alias — it is the
+    instructions Claude has been loading. Unlinking it on the fast path
+    dropped them out of the canonical guide entirely.
+    """
+    (tmp_path / "shared.md").write_text("# Team instructions\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Local guide\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("shared.md")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    guide = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Team instructions" in guide, "the loaded instructions must survive"
+    assert (tmp_path / "shared.md").is_file(), "the external file is not ours to delete"
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_a_legacy_symlink_that_really_is_our_alias_is_just_dropped(
+    tmp_path: Path,
+) -> None:
+    """The fast path still applies when the link does alias this AGENTS.md."""
+    (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    assert wg.migrate_root(tmp_path) == "relinked"
+
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "AGENTS.md.bak").exists(), "nothing to back up"
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_a_symlinked_backup_path_is_refused_not_followed(tmp_path: Path) -> None:
+    """Security regression: the backup write followed a symlink.
+
+    `AGENTS.md.bak` sits in the workspace, so what is already at that name is
+    not necessarily a regular file. A link pointing at a dotfile received the
+    incoming guide's bytes through it — and the migration runs unattended at
+    startup, before the server binds, so nobody is watching.
+    """
+    victim = tmp_path / "victim.rc"
+    victim.write_text("# the user's real shell config\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# incoming\npayload\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md.bak").symlink_to("victim.rc")
+
+    assert wg.migrate_root(tmp_path) == "failed"
+
+    assert victim.read_text(encoding="utf-8") == "# the user's real shell config\n"
+    # Refusing leaves BOTH guides exactly as they were rather than
+    # half-migrating: the backup is the only copy of what the merge does not
+    # fold in, so there is no safe way to continue without it.
+    assert _remembered((tmp_path / "CLAUDE.md").read_text(encoding="utf-8"))
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == "# incoming\npayload\n"
+    assert (tmp_path / "AGENTS.md.bak").is_symlink(), "the link itself is left alone"
+
+
+def test_a_regular_backup_file_is_still_overwritten(tmp_path: Path) -> None:
+    """A stale backup from an earlier run is replaced, not appended to."""
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# mine\n- my rule\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md.bak").write_text("stale from last time\n", encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    backup = (tmp_path / "AGENTS.md.bak").read_text(encoding="utf-8")
+    assert "my rule" in backup
+    assert "stale from last time" not in backup

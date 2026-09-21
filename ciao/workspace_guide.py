@@ -31,6 +31,7 @@ all along.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -68,6 +69,14 @@ def guide_path(root: Path | str) -> Path:
 def legacy_guide_path(root: Path | str) -> Path:
     """The pre-migration guide path, whether or not it exists."""
     return Path(root) / LEGACY_GUIDE_NAME
+
+
+def _aliases(link: Path, target: Path) -> bool:
+    """Whether `link` is a symlink that resolves to `target`."""
+    try:
+        return link.is_symlink() and link.resolve() == target.resolve()
+    except OSError:
+        return False
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -108,11 +117,20 @@ def _commit_guide_change(root: Path, message: str, *paths: str) -> None:
         "-m", message,
         "--", *paths,
     )
-    if committed.returncode != 0:
+    if committed.returncode == 0:
+        return
+    # A non-zero exit is not automatically a problem: when the rename produced
+    # no net change against HEAD (the two guides held identical bytes), git
+    # exits 1 with "nothing to commit" and the tree is already clean, which is
+    # the outcome this function exists to produce. Judge by the tree, not the
+    # exit code — warning there sends an operator looking for a failure that
+    # did not happen.
+    left = _git(root, "status", "--porcelain", "--untracked-files=no", "--", *paths)
+    if left.returncode != 0 or left.stdout.strip():
         logger.warning(
             "could not commit the guide change in %s: %s",
             root,
-            committed.stderr.strip(),
+            committed.stderr.strip() or committed.stdout.strip(),
         )
 
 
@@ -133,7 +151,9 @@ def _unlink(root: Path, path: Path, *, commit: bool = False) -> None:
         _commit_guide_change(root, f"chore(workspace): drop {path.name}", path.name)
 
 
-def _rename(root: Path, source: Path, destination: Path) -> None:
+def _rename(
+    root: Path, source: Path, destination: Path, *, also_tracked: bool = False
+) -> None:
     """Move `source` onto `destination`, keeping the git tree clean.
 
     A plain ``Path.rename`` on a tracked guide leaves the workspace dirty —
@@ -151,6 +171,18 @@ def _rename(root: Path, source: Path, destination: Path) -> None:
     """
     if not _tracked(root, source.name):
         source.rename(destination)
+        if also_tracked:
+            # The destination was tracked even though the source was not — a
+            # tracked AGENTS.md replaced by an untracked CLAUDE.md. Its
+            # removal is already staged, so without this commit the tree keeps
+            # `D AGENTS.md` plus an untracked AGENTS.md and the re-root's
+            # clean-tree gate refuses on every boot.
+            _git(root, "add", "--", destination.name)
+            _commit_guide_change(
+                root,
+                f"chore(workspace): rename {source.name} to {destination.name}",
+                destination.name,
+            )
         return
     moved = _git(root, "mv", "-f", source.name, destination.name)
     if moved.returncode != 0:
@@ -166,6 +198,38 @@ def _rename(root: Path, source: Path, destination: Path) -> None:
         source.name,
         destination.name,
     )
+
+
+def _write_backup(path: Path, text: str) -> bool:
+    """Write `text` to `path` without ever following a symlink.
+
+    The backup name sits in the workspace, so whatever is already there is
+    not necessarily a regular file. A symlink at ``AGENTS.md.bak`` pointing
+    somewhere else — a dotfile, a shell rc — would otherwise receive the
+    incoming guide's bytes through the link, because ``write_text`` follows
+    it. The migration runs unattended at startup, before the server binds, so
+    nobody is watching when it happens.
+
+    ``O_NOFOLLOW`` refuses the open outright when the final component is a
+    link, and ``O_TRUNC`` is deliberate for the regular-file case: the backup
+    is rewritten, not appended. Returns whether the backup was written; a
+    refusal is reported by the caller rather than silently skipped, because
+    the backup is the only copy of what the merge does not fold in.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        logger.warning(
+            "refusing to write %s: it exists and is not a regular file", path
+        )
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except OSError:
+        logger.exception("could not write %s", path)
+        return False
+    return True
 
 
 def _merge_bodies(agents_text: str, legacy_text: str) -> str:
@@ -197,14 +261,22 @@ def _merge_bodies(agents_text: str, legacy_text: str) -> str:
         line for line in agents_body.splitlines()
         if line.strip() and line.strip() not in existing
     ]
+    backup_note = (
+        f"\n\nThe previous `{GUIDE_NAME}` was folded in here. Its bounded "
+        f"memory regions were **not** merged — they are kept verbatim in "
+        f"`{GUIDE_NAME}.bak`.\n"
+    )
     if not unique:
-        return legacy_text
+        # Identical bodies differing only inside the regions: there is nothing
+        # to fold, but the incoming entries are still not in this file and the
+        # operator has no other way to learn that. The notice is the only
+        # pointer to them.
+        return legacy_text.rstrip() + backup_note
     return (
         legacy_text.rstrip()
         + f"\n\n## Merged from {GUIDE_NAME}\n\n"
         + "\n".join(unique)
-        + f"\n\nIts bounded memory regions were not merged; the original file "
-          f"is kept verbatim as `{GUIDE_NAME}.bak`.\n"
+        + backup_note
     )
 
 
@@ -241,15 +313,28 @@ def migrate_root(root: Path | str) -> str:
         agents_is_link = agents.is_symlink()
         agents_is_file = agents.is_file() and not agents_is_link
         legacy_is_link = legacy.is_symlink()
-        legacy_is_file = legacy.is_file() and not legacy_is_link
+        # A symlink that resolves to a readable file still *has* content. Only
+        # an alias of this root's own AGENTS.md is safe to discard; every other
+        # one is treated as a real guide so its text is merged rather than
+        # thrown away.
+        legacy_is_file = legacy.is_file() and (
+            not legacy_is_link or not _aliases(legacy, agents)
+        )
 
         # Already done: AGENTS.md real, no CLAUDE.md of any kind.
         if agents_is_file and not legacy_is_link and not legacy_is_file:
             return "noop"
 
-        # CLAUDE.md is itself a symlink at AGENTS.md (this repo's own shape,
-        # and anything a user set up that way). Just drop it.
-        if legacy_is_link and agents_is_file:
+        # CLAUDE.md is itself a symlink AT this root's AGENTS.md (this repo's
+        # own shape, and anything a user set up that way). Dropping it loses
+        # nothing, because the file it names is the one being kept.
+        #
+        # Checked, not assumed: a CLAUDE.md symlinked to an external or shared
+        # guide is NOT an alias of AGENTS.md — it is the instructions Claude
+        # has been loading. Unlinking that on the "it's just our alias"
+        # fast path drops them out of the canonical guide entirely, so it
+        # falls through to the divergent-guide merge below instead.
+        if legacy_is_link and agents_is_file and _aliases(legacy, agents):
             _unlink(base, legacy, commit=True)
             return "relinked"
 
@@ -262,8 +347,9 @@ def migrate_root(root: Path | str) -> str:
 
         if agents_is_link:
             # The shape Ciaobot created: AGENTS.md -> CLAUDE.md.
+            agents_tracked = _tracked(base, agents.name)
             _unlink(base, agents)
-            _rename(base, legacy, agents)
+            _rename(base, legacy, agents, also_tracked=agents_tracked)
             return "relinked"
 
         if not agents_is_file:
@@ -274,14 +360,20 @@ def migrate_root(root: Path | str) -> str:
         agents_text = agents.read_text(encoding="utf-8")
         legacy_text = legacy.read_text(encoding="utf-8")
         if agents_text.strip() == legacy_text.strip():
+            agents_tracked = _tracked(base, agents.name)
             _unlink(base, agents)
-            _rename(base, legacy, agents)
+            _rename(base, legacy, agents, also_tracked=agents_tracked)
             return "renamed"
 
-        (base / f"{GUIDE_NAME}.bak").write_text(agents_text, encoding="utf-8")
+        # The backup is the only copy of what the merge does not fold in, so
+        # a refusal to write it stops the merge rather than proceeding without
+        # it. The guide stays readable under its old name either way.
+        if not _write_backup(base / f"{GUIDE_NAME}.bak", agents_text):
+            return "failed"
         legacy.write_text(_merge_bodies(agents_text, legacy_text), encoding="utf-8")
+        agents_tracked = _tracked(base, agents.name)
         _unlink(base, agents)
-        _rename(base, legacy, agents)
+        _rename(base, legacy, agents, also_tracked=agents_tracked)
         return "merged"
     except (OSError, subprocess.SubprocessError):
         # SubprocessError too: `_git` has a timeout, and TimeoutExpired is not
