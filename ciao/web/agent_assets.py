@@ -14,7 +14,6 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ciao.memory_tool import ensure_regions
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
 from ciao.workspace_guide import guide_path, legacy_guide_path, migrate_root

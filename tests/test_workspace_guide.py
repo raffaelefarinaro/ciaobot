@@ -190,3 +190,69 @@ def test_an_unreadable_registry_does_not_raise(tmp_path: Path) -> None:
 @pytest.mark.parametrize("action", ["relinked", "renamed", "merged"])
 def test_reported_actions_are_the_documented_ones(action: str) -> None:
     assert action in wg.migrate_root.__doc__
+
+
+# ------------------------------------------------------- the git-tracked case
+def _git(root: Path, *args: str) -> None:
+    import subprocess
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=root, check=True, capture_output=True,
+    )
+
+
+def _status(root: Path) -> str:
+    import subprocess
+    return subprocess.run(
+        ["git", "status", "--porcelain"], cwd=root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def test_a_tracked_guide_is_renamed_without_dirtying_the_tree(tmp_path: Path) -> None:
+    """Regression: a plain rename permanently blocked the workspace re-root.
+
+    `ciao setup` commits the guide, so `Path.rename` left `T AGENTS.md` /
+    `D CLAUDE.md` behind. `workspace_reroot.apply` refuses to run against
+    uncommitted tracked changes and nothing else commits them
+    (`auto_sync_on_start` is off by default), so the re-root was refused on
+    every later boot over a rename Ciaobot performed itself.
+    """
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "init")
+
+    assert wg.migrate_root(tmp_path) == "relinked"
+
+    assert _status(tmp_path) == "", "the workspace must be left committable"
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+    assert not (tmp_path / "AGENTS.md").is_symlink()
+
+
+def test_an_untracked_guide_still_migrates(tmp_path: Path) -> None:
+    """A workspace with no git repo at all is the other common shape."""
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "renamed"
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_history_follows_the_renamed_guide(tmp_path: Path) -> None:
+    """`git mv`, not add+rm: the guide's history has to survive the rename."""
+    import subprocess
+
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed the guide")
+
+    wg.migrate_root(tmp_path)
+
+    log = subprocess.run(
+        ["git", "log", "--follow", "--oneline", "--", "AGENTS.md"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "seed the guide" in log

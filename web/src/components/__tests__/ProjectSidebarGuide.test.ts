@@ -154,4 +154,23 @@ describe('ProjectSidebar workspace guide card', () => {
 
     expect(wrapper.find('.guide-card-regions').text()).not.toContain('malformed')
   })
+
+  it('never falls back to another workspace\'s guide after an error', async () => {
+    // Regression: a bare basename fuzzy-resolves to the primary root, so
+    // continuing past a transient error on the qualified probes could render
+    // `work/AGENTS.md` as `personal`'s guide, with Open/Discuss acting on it.
+    const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile("another workspace") })
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes(encodeURIComponent('work/'))) {
+        return { ok: false, status: 503, text: async () => '' } as unknown as Response
+      }
+      return original(input)
+    })
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).not.toContain('another workspace')
+    expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')
+  })
 })

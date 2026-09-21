@@ -31,6 +31,7 @@ all along.
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,78 @@ def guide_path(root: Path | str) -> Path:
 def legacy_guide_path(root: Path | str) -> Path:
     """The pre-migration guide path, whether or not it exists."""
     return Path(root) / LEGACY_GUIDE_NAME
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def _tracked(root: Path, name: str) -> bool:
+    """Whether git tracks `name` in `root`. False when this is not a repo."""
+    try:
+        proc = _git(root, "ls-files", "--error-unmatch", name)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _unlink(root: Path, path: Path) -> None:
+    """Remove `path`, telling git about it when the file is tracked."""
+    if _tracked(root, path.name):
+        removed = _git(root, "rm", "-q", "--cached", "--force", path.name)
+        if removed.returncode != 0:
+            logger.warning("git rm --cached failed for %s", path)
+    path.unlink()
+
+
+def _rename(root: Path, source: Path, destination: Path) -> None:
+    """Move `source` onto `destination`, keeping the git tree clean.
+
+    A plain ``Path.rename`` on a tracked guide leaves the workspace dirty —
+    ``T AGENTS.md`` / ``D CLAUDE.md`` — and `workspace_reroot.apply` refuses
+    to run against uncommitted tracked changes. Nothing else commits it
+    (`auto_sync_on_start` is off by default), so the re-root would be blocked
+    on every later boot by a rename Ciaobot performed itself, with the
+    housekeeping strip telling the operator to commit a file they never
+    touched.
+
+    So: ``git mv`` and commit the rename when the guide is tracked, and a
+    plain rename when it is not (no repo, or an untracked guide). The commit
+    is deliberately narrow — only the two guide paths are staged, never
+    whatever else the operator has in flight.
+    """
+    if not _tracked(root, source.name):
+        source.rename(destination)
+        return
+    moved = _git(root, "mv", "-f", source.name, destination.name)
+    if moved.returncode != 0:
+        # Fall back rather than refuse: a readable guide under the new name
+        # beats a migration that cannot proceed. The tree is left dirty and
+        # the re-root's gate will say so, which is the honest outcome.
+        logger.warning("git mv failed for %s: %s", source, moved.stderr.strip())
+        source.rename(destination)
+        return
+    committed = _git(
+        root,
+        "-c", "user.name=Ciaobot",
+        "-c", "user.email=ciaobot@localhost",
+        "commit", "-q",
+        "-m", f"chore(workspace): rename {source.name} to {destination.name}",
+        "--", source.name, destination.name,
+    )
+    if committed.returncode != 0:
+        logger.warning(
+            "could not commit the guide rename in %s: %s",
+            root,
+            committed.stderr.strip(),
+        )
 
 
 def _merge_bodies(agents_text: str, legacy_text: str) -> str:
@@ -135,7 +208,7 @@ def migrate_root(root: Path | str) -> str:
         # CLAUDE.md is itself a symlink at AGENTS.md (this repo's own shape,
         # and anything a user set up that way). Just drop it.
         if legacy_is_link and agents_is_file:
-            legacy.unlink()
+            _unlink(base, legacy)
             return "relinked"
 
         if not legacy_is_file:
@@ -147,26 +220,26 @@ def migrate_root(root: Path | str) -> str:
 
         if agents_is_link:
             # The shape Ciaobot created: AGENTS.md -> CLAUDE.md.
-            agents.unlink()
-            legacy.rename(agents)
+            _unlink(base, agents)
+            _rename(base, legacy, agents)
             return "relinked"
 
         if not agents_is_file:
-            legacy.rename(agents)
+            _rename(base, legacy, agents)
             return "renamed"
 
         # Both real. Compare before merging: identical copies need no backup.
         agents_text = agents.read_text(encoding="utf-8")
         legacy_text = legacy.read_text(encoding="utf-8")
         if agents_text.strip() == legacy_text.strip():
-            agents.unlink()
-            legacy.rename(agents)
+            _unlink(base, agents)
+            _rename(base, legacy, agents)
             return "renamed"
 
         (base / f"{GUIDE_NAME}.bak").write_text(agents_text, encoding="utf-8")
         legacy.write_text(_merge_bodies(agents_text, legacy_text), encoding="utf-8")
-        agents.unlink()
-        legacy.rename(agents)
+        _unlink(base, agents)
+        _rename(base, legacy, agents)
         return "merged"
     except OSError:
         logger.exception("workspace guide migration failed for %s", base)

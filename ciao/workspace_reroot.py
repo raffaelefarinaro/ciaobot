@@ -2425,7 +2425,10 @@ def _repair_one_root(
         legacy = legacy_guide_path(root)
         if legacy.exists() or legacy.is_symlink():
             action = migrate_root(root)
-            if action != "noop":
+            # "failed" means the legacy guide is still sitting there; reporting
+            # that as a completed repair would claim a drift was fixed when it
+            # was not. Matches repair_workspace_health's own guard.
+            if action in ("relinked", "renamed", "merged"):
                 record(
                     RepairItem(
                         workspace=name,

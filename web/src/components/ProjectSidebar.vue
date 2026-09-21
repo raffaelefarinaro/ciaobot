@@ -1363,12 +1363,19 @@ async function fetchGuide(): Promise<void> {
   // pin), then fall back to the bare basename for installs that have not
   // re-rooted (guide still at the install root).
   const ws = store.activeWorkspace
-  const candidates = [
-    `${ws}/AGENTS.md`, `${ws}/CLAUDE.md`,
-    'AGENTS.md', 'CLAUDE.md',
-  ]
+  const qualified = [`${ws}/AGENTS.md`, `${ws}/CLAUDE.md`]
+  const bare = ['AGENTS.md', 'CLAUDE.md']
   let lastError = ''
-  for (const candidate of candidates) {
+  let qualifiedErrored = false
+  for (const candidate of [...qualified, ...bare]) {
+    // A bare basename can fuzzy-resolve to a DIFFERENT workspace's guide
+    // (routes_helpers._resolve_workspace_path anchors relative paths to the
+    // primary root), so it is only a legitimate fallback when every
+    // workspace-qualified probe genuinely 404'd. If one of them errored we
+    // do not know whether this workspace has a guide, and showing another
+    // one's — with Open/Discuss/pin acting on it — is worse than showing
+    // nothing.
+    if (bare.includes(candidate) && qualifiedErrored) break
     try {
       const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
       if (seq !== guideFetchSeq) return
@@ -1377,7 +1384,11 @@ async function fetchGuide(): Promise<void> {
       // first non-404: a transient 503 (the engine restarting) on the first
       // name used to blank the card even though a later name would have
       // served it. The error is only shown if every candidate fails.
-      if (!resp.ok) { lastError = `Failed to load ${candidate} (HTTP ${resp.status})`; continue }
+      if (!resp.ok) {
+        lastError = `Failed to load ${candidate} (HTTP ${resp.status})`
+        if (qualified.includes(candidate)) qualifiedErrored = true
+        continue
+      }
       const text = await resp.text()
       if (seq !== guideFetchSeq) return
       guideContent.value = text
@@ -1385,7 +1396,10 @@ async function fetchGuide(): Promise<void> {
       guideError.value = ''
       guideLoading.value = false
       return
-    } catch (e) { if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) } }
+    } catch (e) {
+      if (qualified.includes(candidate)) qualifiedErrored = true
+      if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) }
+    }
   }
   if (seq !== guideFetchSeq) return
   guideContent.value = ''

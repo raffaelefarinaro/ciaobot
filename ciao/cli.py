@@ -2825,7 +2825,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
 
     Removing a proposal is a review decision, never a memory write: promotion
     into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
-    the workspace CLAUDE.md first, then this dismiss removes the resolved item
+    the workspace guide first, then this dismiss removes the resolved item
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
@@ -3167,7 +3167,11 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
         "--guide",
         type=Path,
         default=None,
-        help="Workspace CLAUDE.md holding the bounded regions. Defaults to <workspace>/CLAUDE.md.",
+        help=(
+            "Workspace guide holding the bounded regions. Defaults to the "
+            "workspace's AGENTS.md, or a legacy CLAUDE.md on an install that "
+            "has not run the guide migration."
+        ),
     )
     parser.add_argument(
         "--max-items",
@@ -4413,7 +4417,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit bounded memory for rot (events stored as state, dead paths).",
         description=(
             "Reads the ciao:memory and ciao:profile regions of the workspace "
-            "CLAUDE.md and reports entries that record a chat event instead of "
+            "guide and reports entries that record a chat event instead of "
             "current state, entries citing a path that no longer exists, and "
             "subjects carrying more than one value. With --with-vault, also "
             "reports vault notes whose facts have gone unverified past their "

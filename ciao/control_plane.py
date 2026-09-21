@@ -508,7 +508,7 @@ class CiaoControlPlane:
         entry: str = "",
         match: str = "",
     ) -> dict[str, Any]:
-        """Apply one bounded edit to the native ``CLAUDE.md`` memory region."""
+        """Apply one bounded edit to the native guide's memory region."""
         from ciao.memory_tool import MemoryLockError
 
         workspace = self._workspace(principal)

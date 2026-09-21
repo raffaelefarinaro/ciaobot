@@ -1,6 +1,6 @@
 """Recoverable receipts for managed memory mutations.
 
-Bounded memory is stored as fenced regions inside a workspace ``CLAUDE.md``
+Bounded memory is stored as fenced regions inside a workspace ``AGENTS.md``
 (``ciao/memory_tool.py``) and the review queue is a Markdown file
 (``ciao/memory_proposals.py``). Neither is a database: a single managed
 operation can touch the guide, the queue and the decision sidecar, and a crash
