@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 # default CIAO_GWS_HEALTH_INTERVAL (900s) plus a small grace period.
 _GWS_HEALTH_STALE_AFTER = 1200.0
 
+#: Heavy/hidden subtrees skipped by the ``file_surface`` suggestions walk so a
+#: missing-path miss does not scan the whole workspace (install root) or let a
+#: vendored file outrank a real workspace artifact.
+_SUGGESTION_SKIP_DIRS: frozenset[str] = frozenset(
+    {".git", ".runtime", ".venv", ".mypy_cache", ".pytest_cache", "node_modules", "Logs", "__pycache__"}
+)
+
 @dataclass(frozen=True, slots=True)
 class McpPrincipal:
     """Identity and scope attached to one managed provider process."""
@@ -1648,7 +1655,7 @@ class CiaoControlPlane:
         this chat, or ``"none"`` otherwise. It says nothing about whether a
         client is attached to that turn.
 
-        On a ``file_not_found`` miss the error carries ``data.suggestions`` —
+        On a ``file_not_found`` miss the error carries ``error.suggestions`` —
         up to three nearest existing paths under the workspace root, ranked by
         basename similarity to the requested path — so the caller can offer a
         correction instead of guessing.
@@ -1680,30 +1687,36 @@ class CiaoControlPlane:
         the requested path and returns the top three relative paths, so the
         caller can offer a concrete correction when a surfaced path did not exist.
         """
-        wanted = Path(requested).name
         wanted_stem = Path(requested).stem.lower()
         candidates: list[tuple[int, str]] = []
+        # The walk is bounded and lazy: `rglob` touches no filesystem until we
+        # iterate, so the `try` must wrap the iteration (and any OSError from
+        # `os.scandir` that pathlib does not swallow) to fall back gracefully
+        # instead of replacing the intended file_not_found with an unrelated
+        # error. Heavy and hidden subtrees (node_modules, .git, .runtime, Logs)
+        # are skipped to keep the scan bounded and the suggestions relevant.
         try:
-            files = root.rglob("*")
+            for candidate in root.rglob("*"):
+                if any(part in _SUGGESTION_SKIP_DIRS for part in candidate.parts):
+                    continue
+                if not candidate.is_file():
+                    continue
+                stem = candidate.stem.lower()
+                # Tiered by match kind, then by stem length so a shorter, closer
+                # name wins within a tier. A substring match (either direction)
+                # always outranks an unrelated name, which is the point of the
+                # suggestion.
+                if stem == wanted_stem:
+                    score = 0
+                elif wanted_stem and wanted_stem in stem:
+                    score = -1 - len(wanted_stem)
+                elif wanted_stem and stem in wanted_stem:
+                    score = -2 - len(stem)
+                else:
+                    score = -1000 - (len(stem) or 1)
+                candidates.append((score, candidate.relative_to(root).as_posix()))
         except OSError:
-            return []
-        for candidate in files:
-            if not candidate.is_file():
-                continue
-            stem = candidate.stem.lower()
-            # Tiered by match kind, then by stem length so a shorter, closer
-            # name wins within a tier. A substring match (either direction)
-            # always outranks an unrelated name, which is the point of the
-            # suggestion.
-            if stem == wanted_stem:
-                score = 0
-            elif wanted_stem and wanted_stem in stem:
-                score = -1 - len(wanted_stem)
-            elif wanted_stem and stem in wanted_stem:
-                score = -2 - len(stem)
-            else:
-                score = -1000 - (len(stem) or 1)
-            candidates.append((score, candidate.relative_to(root).as_posix()))
+            logger.debug("file_surface suggestions: workspace walk failed", exc_info=True)
         candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
         return [path for _score, path in candidates[:3]]
 

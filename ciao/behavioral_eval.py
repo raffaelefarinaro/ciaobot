@@ -2285,14 +2285,13 @@ def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
 def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractCheck]:
     """Destructive tools stay behind a card; unattended mutations are refused."""
     from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-    from ciao.mcp_server import CiaoMcpService, MCP_EXPOSED_OPERATIONS
+    from ciao.mcp_server import CiaoMcpService
 
     checks: list[ContractCheck] = []
     try:
         service = CiaoMcpService(
             _ns(state_path=tmp_root / "state.json", pwa_port=0)
         )
-        tools = set(service._tool_names)
     except Exception as exc:  # noqa: BLE001 — report, do not crash the check
         return [
             ContractCheck(
@@ -2323,9 +2322,16 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
             category="approval_deferral",
             # The MCP catalog is empty since S5 (every operation is a `ciao …`
             # command), so there are no exposed MCP tools to cover. The shared
-            # operation table is what the approval policy must stay aligned to.
-            passed=bool(tools) or not MCP_EXPOSED_OPERATIONS,
-            detail=f"{len(tools)} MCP tools enumerated",
+            # operation table is what the approval policy must stay aligned to:
+            # assert no destructive operation (whether MCP-exposed or CLI) is
+            # in the auto-approve list.
+            passed=not overlap,
+            detail=(
+                "no destructive operation is auto-approved"
+                if not overlap
+                else f"auto-approved destructive operations: {overlap}"
+            ),
+            zero_tolerance=True,
         )
     )
     checks.append(_check_unattended_forbidden(tmp_root, scenario_set))

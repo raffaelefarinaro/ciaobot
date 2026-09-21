@@ -919,7 +919,7 @@ class OpencodeProvider(BaseSDKProvider):
         """opencode has no between-turns event source to drain."""
         return False
 
-    def _chat_system_instructions(self, request: AgentRequest) -> str:
+    def _chat_system_instructions(self) -> str:
         """Return the compact core for normal chats, never bounded memory."""
         payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
@@ -1912,7 +1912,7 @@ class OpencodeProvider(BaseSDKProvider):
         if request.thinking_level:
             body["variant"] = request.thinking_level
         if self._developer_instructions is None:
-            instructions = self._chat_system_instructions(request)
+            instructions = self._chat_system_instructions()
             runtime = ""
         else:
             instructions = self._developer_instructions
