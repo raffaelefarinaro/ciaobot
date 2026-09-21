@@ -561,24 +561,23 @@ def extraction_prompt_sha256() -> str:
 
 
 def destructive_mcp_tool_names() -> frozenset[str]:
-    """Tool names annotated ``_DESTRUCTIVE`` in ``ciao/mcp_server.py``.
+    """Tool names annotated ``_DESTRUCTIVE`` in the shared operation table.
 
-    Parsed from the source rather than hardcoded so a new destructive tool is
-    picked up automatically and cannot drift from the catalog. Used by the
-    approval-bypass check: selecting one of these tools in an unattended run
-    with no deferral is a bypass even when the reply never names the action in
-    prose (``vault_review`` for a trash, for example). Mirrors the source scan
-    ``tests/test_mcp_server.py`` already uses for the same reason.
+    Read from ``ciao.mcp_server.OPERATIONS`` rather than hardcoded so a new
+    destructive tool is picked up automatically and cannot drift from the
+    catalog. Used by the approval-bypass check: selecting one of these tools in
+    an unattended run with no deferral is a bypass even when the reply never
+    names the action in prose (``vault_review`` for a trash, for example).
+    Mirrors ``tests/test_mcp_server.py``, which reads the same table.
     """
-    source_path = Path(__file__).resolve().parent / "mcp_server.py"
     try:
-        source = source_path.read_text(encoding="utf-8")
-    except OSError:
+        from ciao import mcp_server
+    except Exception:  # noqa: BLE001 — provenance must not require a full server
         return frozenset()
-    declared = re.findall(
-        r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source
+    destructive = mcp_server._DESTRUCTIVE
+    return frozenset(
+        op.name for op in mcp_server.OPERATIONS if op.annotations == destructive
     )
-    return frozenset(name for name, annotation in declared if annotation == "_DESTRUCTIVE")
 
 
 def mcp_tool_catalog() -> tuple[str, ...]:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1945,16 +1944,16 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     contract: every ``_READ``/``_WRITE`` tool is auto-approved, every
     ``_DESTRUCTIVE`` one still raises an approval card.
     """
-    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    # Matches both single-line decorators and multi-line ones that pass
-    # further keywords (structured_output=, description=) after annotations.
-    declared = re.findall(
-        r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source
-    )
-    assert declared, "no annotated @tool declarations found in ciao/mcp_server.py"
+    declared = [(op.name, op.annotations) for op in mcp_server.OPERATIONS]
+    assert declared, "no operations in the shared table"
 
-    expected = [name for name, ann in declared if ann in {"_READ", "_WRITE"}]
-    destructive = {name for name, ann in declared if ann == "_DESTRUCTIVE"}
+    expected = [
+        name for name, ann in declared
+        if ann == mcp_server._READ or ann == mcp_server._WRITE
+    ]
+    destructive = {
+        name for name, ann in declared if ann == mcp_server._DESTRUCTIVE
+    }
 
     assert list(AUTO_APPROVED_MCP_TOOLS) == expected
     assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)

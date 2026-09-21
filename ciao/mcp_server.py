@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import inspect
 import json
 import logging
@@ -12,16 +13,17 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Awaitable, Callable, cast
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools.base import Tool
 from mcp.types import ToolAnnotations
 
 from ciao.control_plane import (
@@ -340,6 +342,704 @@ class McpSessionRegistry:
             }
 
 
+# ── Module-level operation table ────────────────────────────────────────────
+# The control-plane operations are defined once here, shared by both surfaces.
+# ``_register_tools`` registers the names in ``MCP_EXPOSED_OPERATIONS`` as MCP
+# tools (the set shrinks slice by slice and is deleted in S6); the agent
+# dispatcher resolves the same table. Each operation is a function
+# ``(service, **kwargs) -> envelope`` that calls ``service._invoke`` with the
+# same scoping, mode gate, and telemetry the MCP tools always used. Binding the
+# first argument through ``Operation.bind`` (a ``functools.partial``) drops
+# ``service`` from the signature, so FastMCP's ``Tool.from_function`` builds the
+# exact same argument schema and pydantic validation for the MCP tool and the
+# dispatcher alike — argument validation stays identical by construction.
+
+
+class _NamedPartial(functools.partial):
+    """A bound operation carrying the source function's name and docstring."""
+
+    __name__: str
+    __doc__: str
+
+
+@dataclass(slots=True)
+class Operation:
+    """One control-plane operation shared by the MCP registry and agent CLI."""
+
+    name: str
+    annotations: ToolAnnotations
+    description: str
+    fn: Callable[..., Awaitable[dict[str, Any]]]
+
+    def bind(self, service: Any) -> _NamedPartial:
+        """A partial with ``service`` bound, so only the tool arguments remain.
+
+        FastMCP needs ``__name__`` (for the Arguments model) and ``__doc__``
+        (for the tool description) on the callable it inspects; ``partial``
+        exposes neither, so the subclass sets them from the source operation.
+        """
+        bound = _NamedPartial(self.fn, service)
+        bound.__name__ = self.name
+        bound.__doc__ = self.description
+        return bound
+
+
+#: Operations still exposed as MCP tools. Shrinks slice by slice as groups
+#: migrate to ``ciao <noun> <verb>``; deleted outright in S6.
+MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset(
+    {
+        "context_get",
+        "memory_status",
+        "memory_update",
+        "vault_search",
+        "vault_review",
+        "gws_status",
+        "projects_list",
+        "project_get",
+        "project",
+        "project_action",
+        "workspaces_list",
+        "chats_list",
+        "chat_get",
+        "chat_create",
+        "chat_update",
+        "chat_send",
+        "chat_continue",
+        "chat_retry",
+        "chat_handover",
+        "chat_archive",
+        "chat_delete",
+        "chat_stop",
+        "background_run_start",
+        "background_run_status",
+        "background_run_cancel",
+        "schedules_list",
+        "schedule",
+        "schedule_action",
+        "file_surface",
+    }
+)
+
+
+async def _op_context_get(service: CiaoMcpService) -> dict[str, Any]:
+    """Return the active Ciaobot workspace, project, chat, provider, and
+    control surface, plus local server/startup/active-chat status folded
+    in under the ``system`` key (the former system_status_get)."""
+
+    def _op(cp: CiaoControlPlane, p: McpPrincipal) -> dict[str, Any]:
+        result = cp.context_get(p)
+        status = cp.system_status_get(p)
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, dict):
+            data["system"] = (
+                status.get("data") if isinstance(status, dict) else status
+            )
+        return result
+
+    return await service._invoke("context_get", _op)
+
+
+async def _op_memory_status(service: CiaoMcpService) -> dict[str, Any]:
+    """Report bounded native-guide memory usage and diagnostics."""
+    return await service._invoke("memory_status", lambda cp, p: cp.memory_status(p))
+
+
+async def _op_memory_update(service: CiaoMcpService, region: str, action: str, entry: str = "", match: str = "") -> dict[str, Any]:
+    """Add, replace, or remove one entry in the native guide's memory.
+
+    ``region`` is ``memory`` or ``profile``. Use ``match`` for
+    replace/remove; use ``entry`` for add/replace. The region cap is
+    advisory: the write always goes through, and the result carries
+    ``over_cap`` with ``used_chars`` and ``char_limit`` when it exceeds
+    the configured limit. Consolidation, not refusal, is what bounds a
+    region.
+    """
+    return await service._invoke(
+        "memory_update",
+        lambda cp, p: cp.memory_update(
+            p,
+            region,
+            action=action,  # type: ignore[arg-type]
+            entry=entry,
+            match=match,
+        ),
+        mutating=True,
+    )
+
+
+async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10) -> dict[str, Any]:
+    """Full-text search the active workspace vault."""
+    return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
+
+
+async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
+                            disposition: str = "", confirm: str = "") -> dict[str, Any]:
+    """List and decide scoped vault-note review candidates.
+
+    The schedule may list candidates only. Trash, restore, and permanent
+    deletion require an explicit attended action; permanent deletion
+    additionally requires the candidate id as confirmation.
+    """
+    return await service._invoke(
+        "vault_review",
+        lambda cp, p: cp.vault_review(
+            p, action, path=path, candidate_id=candidate_id,
+            disposition=disposition, confirm=confirm,
+        ),
+        mutating=action != "list" and action != "inspect",
+    )
+
+
+async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
+    """Report whether the active workspace's Google Workspace account is
+    connected and its token is valid.
+
+    Returns the linked profile name, whether credentials are present,
+    the last health-monitor token reading, and whether a re-login is
+    needed. Read-only: never runs ``gws auth status``. Use this before
+    promising a Google call will work, and to tell the user their Google
+    login has expired."""
+    return await service._invoke("gws_status", lambda cp, p: cp.gws_status(p))
+
+
+async def _op_projects_list(service: CiaoMcpService, include_completed: bool = False) -> dict[str, Any]:
+    """List projects in the active workspace."""
+    return await service._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
+
+
+async def _op_project_get(service: CiaoMcpService, project_id: str = "") -> dict[str, Any]:
+    """Get one project by ID or name within the active workspace. Omit to get the active project."""
+    return await service._invoke("project_get", lambda cp, p: cp.project_get(p, project_id))
+
+
+async def _op_project(service: CiaoMcpService, action: str, name: str = "", context: str = "",
+                      vault_folder: str | None = None, project_id: str = "", stem: str = "") -> dict[str, Any]:
+    """Create, update, or restore a project in the active workspace.
+
+    action:
+        "create"  — create a project. name is the new project name;
+            context is optional. project_id is ignored.
+        "update"  — update project metadata or its safe vault-folder
+            binding. Omit project_id for the active project. Pass
+            name/context/vault_folder as overrides; None means "keep
+            current value" (the control plane skips None fields).
+        "restore" — restore a completed vault project into the active
+            workspace. stem is the completed-project stem to restore.
+
+    Args:
+        name: (create) The new project name. (update) The new name, or
+            empty to keep the current one.
+        context: (create/update) Optional project context string.
+        vault_folder: (update) Safe vault-folder binding, or None to
+            keep the current value.
+        project_id: (update) Project id or case-insensitive name. Omit
+            for the active project.
+        stem: (restore) The completed-project stem to restore.
+    """
+    if action == "create":
+        return await service._invoke(
+            "project",
+            lambda cp, p: cp.project_create(p, name, context),
+            mutating=True,
+        )
+    if action == "update":
+        return await service._invoke(
+            "project",
+            lambda cp, p: cp.project_update(
+                p, project_id, name=name or None, context=context or None,
+                vault_folder=vault_folder,
+            ),
+            mutating=True,
+        )
+    if action == "restore":
+        if not stem:
+            raise ControlPlaneError("invalid_action", "stem is required for restore.")
+        return await service._invoke(
+            "project",
+            lambda cp, p: cp.project_restore(p, stem),
+            mutating=True,
+        )
+    raise ControlPlaneError("invalid_action", "action must be create, update, or restore.")
+
+
+async def _op_project_action(service: CiaoMcpService, action: str, project_id: str = "") -> dict[str, Any]:
+    """Run one lifecycle action on a project.
+
+    action:
+        "complete" — move a vault-backed project to completed and
+            archive its active project record.
+        "delete"   — delete a non-vault-backed project and its chats.
+    """
+    if action == "complete":
+        return await service._invoke(
+            "project_action",
+            lambda cp, p: cp.project_complete(p, project_id),
+            mutating=True,
+        )
+    if action == "delete":
+        return await service._invoke(
+            "project_action",
+            lambda cp, p: cp.project_delete(p, project_id),
+            mutating=True,
+        )
+    raise ControlPlaneError("invalid_action", "action must be complete or delete.")
+
+
+async def _op_workspaces_list(service: CiaoMcpService) -> dict[str, Any]:
+    """List all configured logical workspaces — names, vault roots, and
+    defaults — not just the active one."""
+    return await service._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
+
+
+async def _op_chats_list(service: CiaoMcpService, project_id: str = "") -> dict[str, Any]:
+    """List active and archived chats in the active workspace or one project."""
+    return await service._invoke("chats_list", lambda cp, p: cp.chats_list(p, project_id))
+
+
+async def _op_chat_get(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Get one chat by ID within the active workspace. Omit to get the calling chat."""
+    return await service._invoke("chat_get", lambda cp, p: cp.chat_get(p, chat_id))
+
+
+async def _op_chat_create(service: CiaoMcpService, project_id: str | None = None, title: str = "New Chat",
+                          provider: str | None = None, model: str | None = None,
+                          mode: str | None = None, prompt: str | None = None) -> dict[str, Any]:
+    """Create a fresh chat, optionally sending its first prompt in the same call.
+
+    Args:
+        project_id: Project id or case-insensitive name. Omit to use the
+            calling chat's own project — you don't need to call
+            projects_list first for the common case of a sub-topic in
+            the current project.
+        provider: Provider override. Omit to inherit the target
+            project's workspace default.
+        model: Model override. Omit to inherit the target project's
+            workspace default.
+        prompt: If given, immediately starts the new chat's first turn
+            with this text — skips a separate chat_send call.
+    """
+    return await service._invoke(
+        "chat_create",
+        lambda cp, p: cp.chat_create(
+            p,
+            project_id,
+            title=title,
+            provider=provider,
+            model=model,
+            mode=mode,
+            prompt=prompt,
+        ),
+        mutating=True,
+    )
+
+
+async def _op_chat_update(service: CiaoMcpService, chat_id: str = "", title: str | None = None,
+                          provider: str | None = None, model: str | None = None,
+                          mode: str | None = None, thinking_level: str | None = None,
+                          project_id: str | None = None) -> dict[str, Any]:
+    """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
+    return await service._invoke(
+        "chat_update",
+        lambda cp, p: cp.chat_update(
+            p,
+            chat_id,
+            title=title,
+            provider=provider,
+            model=model,
+            mode=mode,
+            thinking_level=thinking_level,
+            project_id=project_id,
+        ),
+        mutating=True,
+    )
+
+
+async def _op_chat_send(service: CiaoMcpService, chat_id: str, prompt: str) -> dict[str, Any]:
+    """Start or queue a user turn in another Ciaobot chat."""
+    return await service._invoke("chat_send", lambda cp, p: cp.chat_send(p, chat_id, prompt), mutating=True)
+
+
+async def _op_chat_continue(service: CiaoMcpService, chat_id: str) -> dict[str, Any]:
+    """Continue an archived chat as a new active chat."""
+    return await service._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
+
+
+async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "") -> dict[str, Any]:
+    """Manage a deferred provider-limit retry: set, stop, or (default)
+    immediately try it now."""
+    return await service._invoke(
+        "chat_retry",
+        lambda cp, p: cp.chat_retry_update(
+            p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
+        ),
+        mutating=True,
+    )
+
+
+async def _op_chat_handover(service: CiaoMcpService, chat_id: str = "", provider: str = "", model: str = "",
+                            messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Continue a chat on a fresh provider session with optional visible
+    history. With provider and model both empty, this just clears the
+    current provider session in place (the former chat_new_session)."""
+
+    def _op(cp: CiaoControlPlane, p: McpPrincipal) -> Any:
+        if not provider and not model:
+            return cp.chat_new_session(p, chat_id)
+        return cp.chat_handover(
+            p,
+            chat_id,
+            provider=provider,
+            model=model,
+            messages=messages,
+        )
+
+    return await service._invoke("chat_handover", _op, mutating=True)
+
+
+async def _op_chat_archive(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Archive a chat to the vault and trigger normal post-archive processing.
+
+    Args:
+        chat_id: The ID of the chat to archive. Omit or pass empty to
+            archive the calling chat.
+    """
+    return await service._invoke(
+        "chat_archive", lambda cp, p: cp.chat_archive(p, chat_id), mutating=True
+    )
+
+
+async def _op_chat_delete(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Delete a chat; deleting the current caller is deferred until the turn finishes."""
+    return await service._invoke(
+        "chat_delete", lambda cp, p: cp.chat_delete(p, chat_id), mutating=True
+    )
+
+
+async def _op_chat_stop(service: CiaoMcpService, chat_id: str) -> dict[str, Any]:
+    """Stop another chat's active provider turn; the current caller cannot stop itself."""
+    return await service._invoke(
+        "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
+    )
+
+
+async def _op_background_run_start(service: CiaoMcpService, cmd: list[str], cwd: str = "",
+                                   env: dict[str, str] | None = None,
+                                   timeout_s: int = 1800, label: str = "") -> dict[str, Any]:
+    """Run one command in a tracked background subprocess and get woken
+    when it exits.
+
+    Sits between a plain `nohup` (survives the turn, but you lose track
+    of it) and a full agent loop. Use it
+    when the work is a single script that takes minutes: a fetch, a
+    build, a data enrichment pass. There is no model in the loop and no
+    tool access — it runs the command, nothing else.
+
+    This call does NOT block: it returns as soon as the process starts.
+    End your turn after starting one. Do not poll; Ciaobot sends you a
+    fresh turn with the status, exit code, log tail, and log path when
+    it finishes. background_run_status is for the rare case where you
+    need the state mid-turn.
+
+    Args:
+        cmd: Argv list, e.g. ["./scripts/report.sh", "--full"]. A
+            single string is rejected: there is no shell, so nothing
+            would split it. For shell features, run
+            ["bash", "-lc", "..."] explicitly and own that choice.
+        cwd: Directory for the run, relative to THIS chat's workspace
+            root — the same directory your own shell commands run in,
+            so a path that works in Bash works here unchanged.
+            Defaults to that root. Paths outside it are rejected.
+        env: Extra environment variables. Loader hooks (LD_PRELOAD and
+            friends) and Ciaobot's own session token are rejected.
+        timeout_s: Wall-clock ceiling; the process tree is terminated
+            past it and the run reports as failed. Default 1800.
+        label: Short name for the wake report, e.g. "adoption report".
+    """
+    return await service._invoke(
+        "background_run_start",
+        lambda cp, p: cp.background_run_start(
+            p, cmd=cmd, cwd=cwd, env=env, timeout_s=timeout_s, label=label
+        ),
+        mutating=True,
+    )
+
+
+async def _op_background_run_status(service: CiaoMcpService, run_id: str, lines: int = 50) -> dict[str, Any]:
+    """Status, exit code, and log tail for a background run this chat
+    started.
+
+    Prefer waiting for the wake turn. Only reach for this when you need
+    the state inside the current turn — a run started by another chat
+    reports as not found.
+    """
+    return await service._invoke(
+        "background_run_status",
+        lambda cp, p: cp.background_run_status(p, run_id, lines),
+    )
+
+
+async def _op_background_run_cancel(service: CiaoMcpService, run_id: str) -> dict[str, Any]:
+    """Stop a background run: SIGTERM to its process group, then
+    SIGKILL after a short grace period.
+
+    Idempotent — cancelling an already-finished run returns its final
+    state unchanged.
+    """
+    return await service._invoke(
+        "background_run_cancel",
+        lambda cp, p: cp.background_run_cancel(p, run_id),
+        mutating=True,
+    )
+
+
+async def _op_schedules_list(service: CiaoMcpService) -> dict[str, Any]:
+    """List schedules in the active workspace with their next run."""
+    return await service._invoke("schedules_list", lambda cp, p: cp.schedules_list(p))
+
+
+async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None = None,
+                       daily_time: str | None = None, timezone: str | None = None,
+                       frequency: str | None = None, interval_minutes: int | None = None,
+                       days_of_week: list[str] | None = None, day_of_month: int | None = None,
+                       run_at_date: str | None = None, project_id: str | None = None,
+                       chat_id: str | None = None, title: str | None = None,
+                       description: str | None = None, provider: str | None = None,
+                       model: str | None = None, archive_policy: str | None = None,
+                       workspace: str | None = None, schedule_id: str = "") -> dict[str, Any]:
+    """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
+
+    action:
+        "preview" — validate and compute next_run without saving. Call this
+            before "create" for a new recurring schedule and show the user
+            the resulting next_run, workspace, and project as part of the
+            draft. A missing or invalid next_run means the fields don't
+            validate as given — don't create it yet.
+        "create"  — create a validated schedule. Show the user a concise
+            draft and get confirmation before creating it, unless they
+            already explicitly asked you to apply it — call "preview"
+            first. The draft must include next_run, the target
+            workspace, and the target project. Ask if they want a
+            different workspace/project when that isn't obvious from
+            the request.
+        "update"  — update an existing schedule through validated fields.
+            Field semantics match "create". System schedules (scope=system)
+            only accept enabled/workspace changes — everything else raises
+            system_schedule_read_only. Pass schedule_id to target the
+            schedule; all other fields are optional overrides.
+
+    Every field but action is optional and unset by default:
+    preview/create fall back to the default noted below, update leaves
+    an unset field untouched. Pass a field (including "" to clear a
+    title, provider, or model) only when you mean to change it.
+
+    Field semantics (identical for preview/create; update treats all but
+    schedule_id as optional overrides):
+
+        prompt: The prompt dispatched each run. Start with the goal in
+            3-7 words (becomes the chat-title hint); keep only
+            schedule-specific logic — a fresh project run already
+            inherits canonical docs and skills. Aim for <=1000 chars
+            for a simple check, <=4000 for an aggregation/review. For
+            routine checks, have it exit early with a one-line no-op
+            when there's nothing to report. Supports two placeholders:
+            {{ERROR_LOG}} (sanitized server error tail) and
+            {{ISSUE_REPORT}} (server errors + failed background jobs);
+            Ciaobot clears the consumed error log after a clean run
+            that uses one.
+        daily_time: Local HH:MM in `timezone`, default "09:00"
+            (persisted as the legacy field daily_time_utc). Ignored for
+            frequency="interval", which has no time of day.
+        timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
+            the user's local timezone unless they ask for UTC.
+        frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
+            "interval"; default "weekly". Use "interval" for sub-day
+            recurrence ("every 30 minutes") — see interval_minutes.
+        interval_minutes: interval only — whole minutes between runs,
+            minimum 1, default 10. Combine with project_id for a fresh
+            chat per run. Give the prompt a short fixed no-change
+            response for a no-op run, so repeated runs stay cheap and
+            scannable. A run that comes due while its previous run is
+            still streaming is skipped and retried on the next tick,
+            not queued; intervals missed while the server was down are
+            not replayed.
+        days_of_week: weekly only — lowercase "mon".."sun".
+        day_of_month: 1-31, monthly only.
+        run_at_date: "YYYY-MM-DD", once only, must be in the future.
+        project_id: Project id or case-insensitive name — creates a
+            fresh chat in that project per run. When omitted, defaults
+            to this chat's project and stamps that project's workspace.
+            Preferred for vault-aware automation. Schedules bind to a
+            project and workspace, never to a chat: a chat-bound run
+            posts into one conversation forever (invisible unless you
+            watch that chat) and fails silently once the chat is
+            archived. There is no chat_id parameter.
+        model: Empty inherits the target workspace's default model at
+            dispatch time; override only when necessary.
+        provider: Empty inherits the target workspace's default
+            provider at dispatch time; override only when necessary.
+        archive_policy: "manual" (default) | "auto".
+        workspace: Omit in almost every case — the schedule is created
+            in this chat's workspace. Any other name is refused unless
+            it restates this chat's workspace: schedules are
+            auto-approved model input and their unattended runs execute
+            in bypass, so planting one in another workspace would run
+            there with that workspace's guide, integrations, and file
+            authority and no operator approval. To automate a second
+            workspace, work from a chat scoped to it or ask the
+            operator.
+        schedule_id: (update only) The schedule to update.
+
+    An enabled schedule with a missed latest occurrence (e.g. the
+    server was off, or a run stopped before it finished) runs once on
+    startup; older missed intervals are not replayed, a run that
+    completed is never repeated, and a slot gets one automatic
+    recovery. Interval schedules are excluded from that catch-up:
+    their cadence simply resumes.
+    """
+    # Snapshot the caller's arguments before any other local exists.
+    # Doing it first is what keeps helper locals out of the payload: a
+    # leaked `_defaults` dict once reached the control plane as
+    # `Unknown schedule fields: _defaults`.
+    supplied: dict[str, Any] = {
+        key: value for key, value in locals().items()
+        if key not in {"service", "action", "schedule_id"}
+    }
+    # Refuse chat bindings at the tool surface, before the control
+    # plane, so the caller learns the stance even on an update payload
+    # where the control plane would only see chat_id among many fields.
+    # The parameter stays in the signature (pydantic silently drops
+    # undeclared arguments, which would hide the refusal) but is
+    # documented as not existing.
+    if supplied.get("chat_id") is not None:
+        raise ControlPlaneError(
+            "chat_binding_unsupported",
+            "Schedules bind to a project, not a chat. Pass project_id "
+            "(each run then opens a fresh chat in it, visible in the "
+            "sidebar) — chat_id bindings fail silently once their target "
+            "chat is archived.",
+        )
+    if action in {"preview", "create"}:
+        values = {
+            key: _SCHEDULE_CREATE_DEFAULTS.get(key, value) if value is None else value
+            for key, value in supplied.items()
+        }
+        if action == "preview":
+            return await service._invoke("schedule", lambda cp, p: cp.schedule_preview(p, **values))
+        return await service._invoke("schedule", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
+    if action == "update":
+        if not schedule_id:
+            raise ControlPlaneError("invalid_action", "schedule_id is required for update.")
+        # update applies exactly the fields the caller passed. None (the
+        # signature default) is the only "not supplied" marker, so a
+        # value that happens to equal a create default still goes
+        # through. Filter here rather than leaning on schedule_update's
+        # own None-skipping: its system-schedule guard inspects every
+        # key it is handed, including ones it would later skip.
+        values = {key: value for key, value in supplied.items() if value is not None}
+        if not values:
+            raise ControlPlaneError(
+                "invalid_action",
+                "update needs at least one field to change besides schedule_id.",
+            )
+        # "" now reaches the control plane instead of being dropped,
+        # which is the point for title/provider/model. A schedule with
+        # no prompt dispatches nothing though, and neither
+        # schedule_update nor schedule_preview rejects a blank one, so
+        # an accidental prompt="" must fail here rather than quietly
+        # wipe a working routine.
+        if values.get("prompt") == "":
+            raise ControlPlaneError(
+                "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
+            )
+        return await service._invoke(
+            "schedule",
+            lambda cp, p: cp.schedule_update(p, schedule_id, **values),
+            mutating=True,
+        )
+    raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
+
+
+async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action: str) -> dict[str, Any]:
+    """Run one lifecycle action on a schedule.
+
+    action:
+        "pause"  — pause without deleting.
+        "resume" — resume a paused schedule.
+        "run"    — dispatch immediately through the normal chat pipeline.
+        "delete" — delete a removable user schedule (destructive). System
+            schedules (scope=system) cannot be deleted — this raises
+            schedule_not_removable instead.
+    """
+    dispatch = {
+        "pause": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=False),
+        "resume": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=True),
+        "run": lambda cp, p: cp.schedule_run(p, schedule_id),
+        "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
+    }
+    op = dispatch.get(action)
+    if op is None:
+        raise ControlPlaneError(
+            "invalid_action", "action must be pause, resume, run, or delete."
+        )
+    return await service._invoke("schedule_action", op, mutating=True)
+
+
+async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]:
+    """Deliberately open a workspace file in the user's pinned preview panel.
+
+    Use this to show the user a file you produced or want to highlight,
+    even one you only read, or one a subagent wrote, instead of relying on
+    them to notice it. Ordinary Write/Edit calls no longer auto-open the
+    panel; call this when a file is worth surfacing.
+
+    The pin happens in the browser: this call only validates the path and
+    reports two independent signals. ``viewers`` is how many open chat
+    sockets are watching this chat right now; it can be 0 right after a
+    successful pin, and nonzero even when the panel did not open.
+    ``stream_state`` is "active" or "none" and says whether a turn is
+    currently streaming for this chat, nothing about the panel. Never
+    read either field as proof the panel opened or failed to open: say
+    you called file_surface, and if the user reports nothing happened,
+    do not claim you already confirmed it failed."""
+    return await service._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
+
+
+#: Every operation, one entry per operation, keyed by the MCP-era tool name.
+OPERATIONS: tuple[Operation, ...] = (
+    Operation("context_get", _READ, _op_context_get.__doc__ or "", _op_context_get),
+    Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
+    Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
+    Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
+    Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
+    Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
+    Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
+    Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
+    Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),
+    Operation("project_action", _DESTRUCTIVE, _op_project_action.__doc__ or "", _op_project_action),
+    Operation("workspaces_list", _READ, _op_workspaces_list.__doc__ or "", _op_workspaces_list),
+    Operation("chats_list", _READ, _op_chats_list.__doc__ or "", _op_chats_list),
+    Operation("chat_get", _READ, _op_chat_get.__doc__ or "", _op_chat_get),
+    Operation("chat_create", _WRITE, _op_chat_create.__doc__ or "", _op_chat_create),
+    Operation("chat_update", _WRITE, _op_chat_update.__doc__ or "", _op_chat_update),
+    Operation("chat_send", _WRITE, _op_chat_send.__doc__ or "", _op_chat_send),
+    Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
+    Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
+    Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),
+    Operation("chat_archive", _WRITE, _op_chat_archive.__doc__ or "", _op_chat_archive),
+    Operation("chat_delete", _DESTRUCTIVE, _op_chat_delete.__doc__ or "", _op_chat_delete),
+    Operation("chat_stop", _DESTRUCTIVE, _op_chat_stop.__doc__ or "", _op_chat_stop),
+    Operation("background_run_start", _DESTRUCTIVE, _op_background_run_start.__doc__ or "", _op_background_run_start),
+    Operation("background_run_status", _READ, _op_background_run_status.__doc__ or "", _op_background_run_status),
+    Operation("background_run_cancel", _DESTRUCTIVE, _op_background_run_cancel.__doc__ or "", _op_background_run_cancel),
+    Operation("schedules_list", _READ, _op_schedules_list.__doc__ or "", _op_schedules_list),
+    Operation("schedule", _WRITE, _op_schedule.__doc__ or "", _op_schedule),
+    Operation("schedule_action", _DESTRUCTIVE, _op_schedule_action.__doc__ or "", _op_schedule_action),
+    Operation("file_surface", _READ, _op_file_surface.__doc__ or "", _op_file_surface),
+)
+
+OPERATIONS_BY_NAME: dict[str, Operation] = {operation.name: operation for operation in OPERATIONS}
+
+
 class CiaoMcpService:
     """Own the FastMCP server, authentication, tool catalog, and telemetry."""
 
@@ -348,6 +1048,7 @@ class CiaoMcpService:
         self.registry = McpSessionRegistry()
         self.control_plane: CiaoControlPlane | None = None
         self._tool_names: set[str] = set()
+        self.operation_table: dict[str, Operation] = dict(OPERATIONS_BY_NAME)
         self._last_error = ""
         self._telemetry_path = Path(config.state_path).parent / "mcp_tool_calls.jsonl"
         # Trimming drops detailed records, so their counters are folded into
@@ -390,6 +1091,22 @@ class CiaoMcpService:
 
     #: Exposed for ``ciao.agent_surface.AgentDispatcher``.
     surface_var = _SURFACE_VAR
+
+    def tool_for(self, operation: Operation) -> Tool:
+        """A FastMCP ``Tool`` for one operation, built the same way MCP registers it.
+
+        The dispatcher builds a fresh :class:`Tool` from the shared operation
+        entry (via :meth:`Operation.bind`) so its pydantic argument validation
+        is byte-for-byte the schema the MCP adapter serves for the same
+        operation — the two surfaces cannot drift apart.
+        """
+        return Tool.from_function(
+            operation.bind(self),
+            name=operation.name,
+            annotations=operation.annotations,
+            description=operation.description,
+            structured_output=True,
+        )
 
     @property
     def agent_url(self) -> str:
@@ -1131,677 +1848,26 @@ class CiaoMcpService:
             self._tool_names.add(name)
         return self.server.tool(*args, **kwargs)
 
-    def _register_tools(self) -> None:  # noqa: C901 - catalog is intentionally explicit
-        tool = self._tool
+    def _register_tools(self) -> None:
+        """Register exactly the operations in ``MCP_EXPOSED_OPERATIONS``.
 
-        @tool(name="context_get", annotations=_READ, structured_output=True)
-        async def context_get() -> dict[str, Any]:
-            """Return the active Ciaobot workspace, project, chat, provider, and
-            control surface, plus local server/startup/active-chat status folded
-            in under the ``system`` key (the former system_status_get)."""
-
-            def _op(cp: CiaoControlPlane, p: McpPrincipal) -> dict[str, Any]:
-                result = cp.context_get(p)
-                status = cp.system_status_get(p)
-                data = result.get("data") if isinstance(result, dict) else None
-                if isinstance(data, dict):
-                    data["system"] = (
-                        status.get("data") if isinstance(status, dict) else status
-                    )
-                return result
-
-            return await self._invoke("context_get", _op)
-
-        # Bounded memory remains in the workspace guide. These tools expose usage and a
-        # small typed edit path for providers that cannot reliably express an
-        # in-file edit; they never create a second memory store.
-        @tool(name="memory_status", annotations=_READ, structured_output=True)
-        async def memory_status() -> dict[str, Any]:
-            """Report bounded native-guide memory usage and diagnostics."""
-            return await self._invoke("memory_status", lambda cp, p: cp.memory_status(p))
-
-        @tool(name="memory_update", annotations=_WRITE, structured_output=True)
-        async def memory_update(
-            region: str,
-            action: str,
-            entry: str = "",
-            match: str = "",
-        ) -> dict[str, Any]:
-            """Add, replace, or remove one entry in the native guide's memory.
-
-            ``region`` is ``memory`` or ``profile``. Use ``match`` for
-            replace/remove; use ``entry`` for add/replace. The region cap is
-            advisory: the write always goes through, and the result carries
-            ``over_cap`` with ``used_chars`` and ``char_limit`` when it exceeds
-            the configured limit. Consolidation, not refusal, is what bounds a
-            region.
-            """
-            return await self._invoke(
-                "memory_update",
-                lambda cp, p: cp.memory_update(
-                    p,
-                    region,
-                    action=action,  # type: ignore[arg-type]
-                    entry=entry,
-                    match=match,
-                ),
-                mutating=True,
+        The operation bodies, annotations, and docstrings live in the
+        module-level :data:`OPERATIONS` table (shared with the agent
+        dispatcher) rather than here as closures. Each entry is bound to this
+        service and registered with the same ``Tool.from_function`` metadata
+        FastMCP builds for any tool, so the MCP schema and the dispatcher's
+        pydantic validation are identical by construction.
+        """
+        for name in sorted(MCP_EXPOSED_OPERATIONS):
+            operation = OPERATIONS_BY_NAME[name]
+            self._tool_names.add(name)
+            self.server.add_tool(
+                operation.bind(self),
+                name=name,
+                annotations=operation.annotations,
+                description=operation.description,
+                structured_output=True,
             )
-
-        @tool(name="vault_search", annotations=_READ, structured_output=True)
-        async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
-            """Full-text search the active workspace vault."""
-            return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
-
-        @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
-        async def vault_review(
-            action: str = "list", path: str = "", candidate_id: str = "",
-            disposition: str = "", confirm: str = "",
-        ) -> dict[str, Any]:
-            """List and decide scoped vault-note review candidates.
-
-            The schedule may list candidates only. Trash, restore, and permanent
-            deletion require an explicit attended action; permanent deletion
-            additionally requires the candidate id as confirmation.
-            """
-            return await self._invoke(
-                "vault_review",
-                lambda cp, p: cp.vault_review(
-                    p, action, path=path, candidate_id=candidate_id,
-                    disposition=disposition, confirm=confirm,
-                ),
-                mutating=action != "list" and action != "inspect",
-            )
-
-        @tool(name="gws_status", annotations=_READ, structured_output=True)
-        async def gws_status() -> dict[str, Any]:
-            """Report whether the active workspace's Google Workspace account is
-            connected and its token is valid.
-
-            Returns the linked profile name, whether credentials are present,
-            the last health-monitor token reading, and whether a re-login is
-            needed. Read-only: never runs ``gws auth status``. Use this before
-            promising a Google call will work, and to tell the user their Google
-            login has expired."""
-            return await self._invoke("gws_status", lambda cp, p: cp.gws_status(p))
-
-        # vault_index_refresh -> `ciao index`; vault_lint -> `ciao lint`.
-
-        @tool(name="projects_list", annotations=_READ, structured_output=True)
-        async def projects_list(include_completed: bool = False) -> dict[str, Any]:
-            """List projects in the active workspace."""
-            return await self._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
-
-        @tool(name="project_get", annotations=_READ, structured_output=True)
-        async def project_get(project_id: str = "") -> dict[str, Any]:
-            """Get one project by ID or name within the active workspace. Omit to get the active project."""
-            return await self._invoke("project_get", lambda cp, p: cp.project_get(p, project_id))
-
-        @tool(name="project", annotations=_WRITE, structured_output=True)
-        async def project(
-            action: str,
-            name: str = "",
-            context: str = "",
-            vault_folder: str | None = None,
-            project_id: str = "",
-            stem: str = "",
-        ) -> dict[str, Any]:
-            """Create, update, or restore a project in the active workspace.
-
-            action:
-                "create"  — create a project. name is the new project name;
-                    context is optional. project_id is ignored.
-                "update"  — update project metadata or its safe vault-folder
-                    binding. Omit project_id for the active project. Pass
-                    name/context/vault_folder as overrides; None means "keep
-                    current value" (the control plane skips None fields).
-                "restore" — restore a completed vault project into the active
-                    workspace. stem is the completed-project stem to restore.
-
-            Args:
-                name: (create) The new project name. (update) The new name, or
-                    empty to keep the current one.
-                context: (create/update) Optional project context string.
-                vault_folder: (update) Safe vault-folder binding, or None to
-                    keep the current value.
-                project_id: (update) Project id or case-insensitive name. Omit
-                    for the active project.
-                stem: (restore) The completed-project stem to restore.
-            """
-            if action == "create":
-                return await self._invoke(
-                    "project",
-                    lambda cp, p: cp.project_create(p, name, context),
-                    mutating=True,
-                )
-            if action == "update":
-                return await self._invoke(
-                    "project",
-                    lambda cp, p: cp.project_update(
-                        p, project_id, name=name or None, context=context or None,
-                        vault_folder=vault_folder,
-                    ),
-                    mutating=True,
-                )
-            if action == "restore":
-                if not stem:
-                    raise ControlPlaneError("invalid_action", "stem is required for restore.")
-                return await self._invoke(
-                    "project",
-                    lambda cp, p: cp.project_restore(p, stem),
-                    mutating=True,
-                )
-            raise ControlPlaneError("invalid_action", "action must be create, update, or restore.")
-
-        @tool(name="project_action", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_action(
-            action: str,
-            project_id: str = "",
-        ) -> dict[str, Any]:
-            """Run one lifecycle action on a project.
-
-            action:
-                "complete" — move a vault-backed project to completed and
-                    archive its active project record.
-                "delete"   — delete a non-vault-backed project and its chats.
-            """
-            if action == "complete":
-                return await self._invoke(
-                    "project_action",
-                    lambda cp, p: cp.project_complete(p, project_id),
-                    mutating=True,
-                )
-            if action == "delete":
-                return await self._invoke(
-                    "project_action",
-                    lambda cp, p: cp.project_delete(p, project_id),
-                    mutating=True,
-                )
-            raise ControlPlaneError("invalid_action", "action must be complete or delete.")
-
-        # project_files_list dropped — the agent has native Glob/Read to list
-        # files in a project's vault folder. The PWA REST route
-        # (GET /api/projects/{id}/files) remains for the UI.
-
-        @tool(name="workspaces_list", annotations=_READ, structured_output=True)
-        async def workspaces_list() -> dict[str, Any]:
-            """List all configured logical workspaces — names, vault roots, and
-            defaults — not just the active one."""
-            return await self._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
-
-        # workspace_update / workspace_delete moved to the PWA Settings UI
-        # (PATCH/DELETE /api/workspaces/{name}). Workspace config (provider
-        # keys, env vars, model defaults) is admin territory, not a
-        # conversational action.
-
-        @tool(name="chats_list", annotations=_READ, structured_output=True)
-        async def chats_list(project_id: str = "") -> dict[str, Any]:
-            """List active and archived chats in the active workspace or one project."""
-            return await self._invoke("chats_list", lambda cp, p: cp.chats_list(p, project_id))
-
-        @tool(name="chat_get", annotations=_READ, structured_output=True)
-        async def chat_get(chat_id: str = "") -> dict[str, Any]:
-            """Get one chat by ID within the active workspace. Omit to get the calling chat."""
-            return await self._invoke("chat_get", lambda cp, p: cp.chat_get(p, chat_id))
-
-        @tool(name="chat_create", annotations=_WRITE, structured_output=True)
-        async def chat_create(
-            project_id: str | None = None,
-            title: str = "New Chat",
-            provider: str | None = None,
-            model: str | None = None,
-            mode: str | None = None,
-            prompt: str | None = None,
-        ) -> dict[str, Any]:
-            """Create a fresh chat, optionally sending its first prompt in the same call.
-
-            Args:
-                project_id: Project id or case-insensitive name. Omit to use the
-                    calling chat's own project — you don't need to call
-                    projects_list first for the common case of a sub-topic in
-                    the current project.
-                provider: Provider override. Omit to inherit the target
-                    project's workspace default.
-                model: Model override. Omit to inherit the target project's
-                    workspace default.
-                prompt: If given, immediately starts the new chat's first turn
-                    with this text — skips a separate chat_send call.
-            """
-            return await self._invoke(
-                "chat_create",
-                lambda cp, p: cp.chat_create(
-                    p,
-                    project_id,
-                    title=title,
-                    provider=provider,
-                    model=model,
-                    mode=mode,
-                    prompt=prompt,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="chat_update", annotations=_WRITE, structured_output=True)
-        async def chat_update(
-            chat_id: str = "",
-            title: str | None = None,
-            provider: str | None = None,
-            model: str | None = None,
-            mode: str | None = None,
-            thinking_level: str | None = None,
-            project_id: str | None = None,
-        ) -> dict[str, Any]:
-            """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
-            return await self._invoke(
-                "chat_update",
-                lambda cp, p: cp.chat_update(
-                    p,
-                    chat_id,
-                    title=title,
-                    provider=provider,
-                    model=model,
-                    mode=mode,
-                    thinking_level=thinking_level,
-                    project_id=project_id,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="chat_send", annotations=_WRITE, structured_output=True)
-        async def chat_send(chat_id: str, prompt: str) -> dict[str, Any]:
-            """Start or queue a user turn in another Ciaobot chat."""
-            return await self._invoke("chat_send", lambda cp, p: cp.chat_send(p, chat_id, prompt), mutating=True)
-
-        @tool(name="chat_continue", annotations=_WRITE, structured_output=True)
-        async def chat_continue(chat_id: str) -> dict[str, Any]:
-            """Continue an archived chat as a new active chat."""
-            return await self._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
-
-        @tool(name="chat_retry", annotations=_WRITE, structured_output=True)
-        async def chat_retry(
-            chat_id: str = "",
-            action: str = "try_now",
-            prompt: str = "",
-        ) -> dict[str, Any]:
-            """Manage a deferred provider-limit retry: set, stop, or (default)
-            immediately try it now."""
-            return await self._invoke(
-                "chat_retry",
-                lambda cp, p: cp.chat_retry_update(
-                    p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
-                ),
-                mutating=True,
-            )
-
-        @tool(name="chat_handover", annotations=_WRITE, structured_output=True)
-        async def chat_handover(
-            chat_id: str = "",
-            provider: str = "",
-            model: str = "",
-            messages: list[dict[str, Any]] | None = None,
-        ) -> dict[str, Any]:
-            """Continue a chat on a fresh provider session with optional visible
-            history. With provider and model both empty, this just clears the
-            current provider session in place (the former chat_new_session)."""
-
-            def _op(cp: CiaoControlPlane, p: McpPrincipal) -> Any:
-                if not provider and not model:
-                    return cp.chat_new_session(p, chat_id)
-                return cp.chat_handover(
-                    p,
-                    chat_id,
-                    provider=provider,
-                    model=model,
-                    messages=messages,
-                )
-
-            return await self._invoke("chat_handover", _op, mutating=True)
-
-        @tool(name="chat_archive", annotations=_WRITE, structured_output=True)
-        async def chat_archive(chat_id: str = "") -> dict[str, Any]:
-            """Archive a chat to the vault and trigger normal post-archive processing.
-
-            Args:
-                chat_id: The ID of the chat to archive. Omit or pass empty to
-                    archive the calling chat.
-            """
-            return await self._invoke(
-                "chat_archive", lambda cp, p: cp.chat_archive(p, chat_id), mutating=True
-            )
-
-        @tool(name="chat_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def chat_delete(chat_id: str = "") -> dict[str, Any]:
-            """Delete a chat; deleting the current caller is deferred until the turn finishes."""
-            return await self._invoke(
-                "chat_delete", lambda cp, p: cp.chat_delete(p, chat_id), mutating=True
-            )
-
-        @tool(name="chat_stop", annotations=_DESTRUCTIVE, structured_output=True)
-        async def chat_stop(chat_id: str) -> dict[str, Any]:
-            """Stop another chat's active provider turn; the current caller cannot stop itself."""
-            return await self._invoke(
-                "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
-            )
-
-        # ── background command runs ──────────────────────────────────────
-        # Deliberately _DESTRUCTIVE rather than _WRITE (issue #282 proposed
-        # _WRITE, describing it as "Auto-mode approval required"). In this
-        # codebase _WRITE means the opposite: it puts the tool on
-        # AUTO_APPROVED_MCP_TOOLS, which bypasses the PermissionGate entirely.
-        # Since a Bash call in Auto mode still goes through the classifier, an
-        # auto-approved arbitrary-command tool would be a strictly wider hole
-        # than the shell it wraps. _DESTRUCTIVE is what actually delivers the
-        # approval the issue asked for.
-        @tool(name="background_run_start", annotations=_DESTRUCTIVE, structured_output=True)
-        async def background_run_start(
-            cmd: list[str],
-            cwd: str = "",
-            env: dict[str, str] | None = None,
-            timeout_s: int = 1800,
-            label: str = "",
-        ) -> dict[str, Any]:
-            """Run one command in a tracked background subprocess and get woken
-            when it exits.
-
-            Sits between a plain `nohup` (survives the turn, but you lose track
-            of it) and a full agent loop. Use it
-            when the work is a single script that takes minutes: a fetch, a
-            build, a data enrichment pass. There is no model in the loop and no
-            tool access — it runs the command, nothing else.
-
-            This call does NOT block: it returns as soon as the process starts.
-            End your turn after starting one. Do not poll; Ciaobot sends you a
-            fresh turn with the status, exit code, log tail, and log path when
-            it finishes. background_run_status is for the rare case where you
-            need the state mid-turn.
-
-            Args:
-                cmd: Argv list, e.g. ["./scripts/report.sh", "--full"]. A
-                    single string is rejected: there is no shell, so nothing
-                    would split it. For shell features, run
-                    ["bash", "-lc", "..."] explicitly and own that choice.
-                cwd: Directory for the run, relative to THIS chat's workspace
-                    root — the same directory your own shell commands run in,
-                    so a path that works in Bash works here unchanged.
-                    Defaults to that root. Paths outside it are rejected.
-                env: Extra environment variables. Loader hooks (LD_PRELOAD and
-                    friends) and Ciaobot's own session token are rejected.
-                timeout_s: Wall-clock ceiling; the process tree is terminated
-                    past it and the run reports as failed. Default 1800.
-                label: Short name for the wake report, e.g. "adoption report".
-            """
-            return await self._invoke(
-                "background_run_start",
-                lambda cp, p: cp.background_run_start(
-                    p, cmd=cmd, cwd=cwd, env=env, timeout_s=timeout_s, label=label
-                ),
-                mutating=True,
-            )
-
-        @tool(name="background_run_status", annotations=_READ, structured_output=True)
-        async def background_run_status(run_id: str, lines: int = 50) -> dict[str, Any]:
-            """Status, exit code, and log tail for a background run this chat
-            started.
-
-            Prefer waiting for the wake turn. Only reach for this when you need
-            the state inside the current turn — a run started by another chat
-            reports as not found.
-            """
-            return await self._invoke(
-                "background_run_status",
-                lambda cp, p: cp.background_run_status(p, run_id, lines),
-            )
-
-        @tool(name="background_run_cancel", annotations=_DESTRUCTIVE, structured_output=True)
-        async def background_run_cancel(run_id: str) -> dict[str, Any]:
-            """Stop a background run: SIGTERM to its process group, then
-            SIGKILL after a short grace period.
-
-            Idempotent — cancelling an already-finished run returns its final
-            state unchanged.
-            """
-            return await self._invoke(
-                "background_run_cancel",
-                lambda cp, p: cp.background_run_cancel(p, run_id),
-                mutating=True,
-            )
-
-        @tool(name="schedules_list", annotations=_READ, structured_output=True)
-        async def schedules_list() -> dict[str, Any]:
-            """List schedules in the active workspace with their next run."""
-            return await self._invoke("schedules_list", lambda cp, p: cp.schedules_list(p))
-
-        @tool(name="schedule", annotations=_WRITE, structured_output=True)
-        async def schedule(
-            action: str,
-            prompt: str | None = None,
-            daily_time: str | None = None,
-            timezone: str | None = None,
-            frequency: str | None = None,
-            interval_minutes: int | None = None,
-            days_of_week: list[str] | None = None,
-            day_of_month: int | None = None,
-            run_at_date: str | None = None,
-            project_id: str | None = None,
-            chat_id: str | None = None,
-            title: str | None = None,
-            description: str | None = None,
-            provider: str | None = None,
-            model: str | None = None,
-            archive_policy: str | None = None,
-            workspace: str | None = None,
-            schedule_id: str = "",
-        ) -> dict[str, Any]:
-            """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
-
-            action:
-                "preview" — validate and compute next_run without saving. Call this
-                    before "create" for a new recurring schedule and show the user
-                    the resulting next_run, workspace, and project as part of the
-                    draft. A missing or invalid next_run means the fields don't
-                    validate as given — don't create it yet.
-                "create"  — create a validated schedule. Show the user a concise
-                    draft and get confirmation before creating it, unless they
-                    already explicitly asked you to apply it — call "preview"
-                    first. The draft must include next_run, the target
-                    workspace, and the target project. Ask if they want a
-                    different workspace/project when that isn't obvious from
-                    the request.
-                "update"  — update an existing schedule through validated fields.
-                    Field semantics match "create". System schedules (scope=system)
-                    only accept enabled/workspace changes — everything else raises
-                    system_schedule_read_only. Pass schedule_id to target the
-                    schedule; all other fields are optional overrides.
-
-            Every field but action is optional and unset by default:
-            preview/create fall back to the default noted below, update leaves
-            an unset field untouched. Pass a field (including "" to clear a
-            title, provider, or model) only when you mean to change it.
-
-            Field semantics (identical for preview/create; update treats all but
-            schedule_id as optional overrides):
-
-                prompt: The prompt dispatched each run. Start with the goal in
-                    3-7 words (becomes the chat-title hint); keep only
-                    schedule-specific logic — a fresh project run already
-                    inherits canonical docs and skills. Aim for <=1000 chars
-                    for a simple check, <=4000 for an aggregation/review. For
-                    routine checks, have it exit early with a one-line no-op
-                    when there's nothing to report. Supports two placeholders:
-                    {{ERROR_LOG}} (sanitized server error tail) and
-                    {{ISSUE_REPORT}} (server errors + failed background jobs);
-                    Ciaobot clears the consumed error log after a clean run
-                    that uses one.
-                daily_time: Local HH:MM in `timezone`, default "09:00"
-                    (persisted as the legacy field daily_time_utc). Ignored for
-                    frequency="interval", which has no time of day.
-                timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
-                    the user's local timezone unless they ask for UTC.
-                frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
-                    "interval"; default "weekly". Use "interval" for sub-day
-                    recurrence ("every 30 minutes") — see interval_minutes.
-                interval_minutes: interval only — whole minutes between runs,
-                    minimum 1, default 10. Combine with project_id for a fresh
-                    chat per run. Give the prompt a short fixed no-change
-                    response for a no-op run, so repeated runs stay cheap and
-                    scannable. A run that comes due while its previous run is
-                    still streaming is skipped and retried on the next tick,
-                    not queued; intervals missed while the server was down are
-                    not replayed.
-                days_of_week: weekly only — lowercase "mon".."sun".
-                day_of_month: 1-31, monthly only.
-                run_at_date: "YYYY-MM-DD", once only, must be in the future.
-                project_id: Project id or case-insensitive name — creates a
-                    fresh chat in that project per run. When omitted, defaults
-                    to this chat's project and stamps that project's workspace.
-                    Preferred for vault-aware automation. Schedules bind to a
-                    project and workspace, never to a chat: a chat-bound run
-                    posts into one conversation forever (invisible unless you
-                    watch that chat) and fails silently once the chat is
-                    archived. There is no chat_id parameter.
-                model: Empty inherits the target workspace's default model at
-                    dispatch time; override only when necessary.
-                provider: Empty inherits the target workspace's default
-                    provider at dispatch time; override only when necessary.
-                archive_policy: "manual" (default) | "auto".
-                workspace: Omit in almost every case — the schedule is created
-                    in this chat's workspace. Any other name is refused unless
-                    it restates this chat's workspace: schedules are
-                    auto-approved model input and their unattended runs execute
-                    in bypass, so planting one in another workspace would run
-                    there with that workspace's guide, integrations, and file
-                    authority and no operator approval. To automate a second
-                    workspace, work from a chat scoped to it or ask the
-                    operator.
-                schedule_id: (update only) The schedule to update.
-
-            An enabled schedule with a missed latest occurrence (e.g. the
-            server was off, or a run stopped before it finished) runs once on
-            startup; older missed intervals are not replayed, a run that
-            completed is never repeated, and a slot gets one automatic
-            recovery. Interval schedules are excluded from that catch-up:
-            their cadence simply resumes.
-            """
-            # Snapshot the caller's arguments before any other local exists.
-            # Doing it first is what keeps helper locals out of the payload: a
-            # leaked `_defaults` dict once reached the control plane as
-            # `Unknown schedule fields: _defaults`.
-            supplied: dict[str, Any] = {
-                key: value for key, value in locals().items()
-                if key not in {"self", "action", "schedule_id"}
-            }
-            # Refuse chat bindings at the tool surface, before the control
-            # plane, so the caller learns the stance even on an update payload
-            # where the control plane would only see chat_id among many fields.
-            # The parameter stays in the signature (pydantic silently drops
-            # undeclared arguments, which would hide the refusal) but is
-            # documented as not existing.
-            if supplied.get("chat_id") is not None:
-                raise ControlPlaneError(
-                    "chat_binding_unsupported",
-                    "Schedules bind to a project, not a chat. Pass project_id "
-                    "(each run then opens a fresh chat in it, visible in the "
-                    "sidebar) — chat_id bindings fail silently once their target "
-                    "chat is archived.",
-                )
-            if action in {"preview", "create"}:
-                values = {
-                    key: _SCHEDULE_CREATE_DEFAULTS.get(key, value) if value is None else value
-                    for key, value in supplied.items()
-                }
-                if action == "preview":
-                    return await self._invoke("schedule", lambda cp, p: cp.schedule_preview(p, **values))
-                return await self._invoke("schedule", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
-            if action == "update":
-                if not schedule_id:
-                    raise ControlPlaneError("invalid_action", "schedule_id is required for update.")
-                # update applies exactly the fields the caller passed. None (the
-                # signature default) is the only "not supplied" marker, so a
-                # value that happens to equal a create default still goes
-                # through. Filter here rather than leaning on schedule_update's
-                # own None-skipping: its system-schedule guard inspects every
-                # key it is handed, including ones it would later skip.
-                values = {key: value for key, value in supplied.items() if value is not None}
-                if not values:
-                    raise ControlPlaneError(
-                        "invalid_action",
-                        "update needs at least one field to change besides schedule_id.",
-                    )
-                # "" now reaches the control plane instead of being dropped,
-                # which is the point for title/provider/model. A schedule with
-                # no prompt dispatches nothing though, and neither
-                # schedule_update nor schedule_preview rejects a blank one, so
-                # an accidental prompt="" must fail here rather than quietly
-                # wipe a working routine.
-                if values.get("prompt") == "":
-                    raise ControlPlaneError(
-                        "empty_prompt", "prompt cannot be cleared; pass the new prompt text."
-                    )
-                return await self._invoke(
-                    "schedule",
-                    lambda cp, p: cp.schedule_update(p, schedule_id, **values),
-                    mutating=True,
-                )
-            raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
-
-        @tool(name="schedule_action", annotations=_DESTRUCTIVE, structured_output=True)
-        async def schedule_action(schedule_id: str, action: str) -> dict[str, Any]:
-            """Run one lifecycle action on a schedule.
-
-            action:
-                "pause"  — pause without deleting.
-                "resume" — resume a paused schedule.
-                "run"    — dispatch immediately through the normal chat pipeline.
-                "delete" — delete a removable user schedule (destructive). System
-                    schedules (scope=system) cannot be deleted — this raises
-                    schedule_not_removable instead.
-            """
-            dispatch = {
-                "pause": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=False),
-                "resume": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=True),
-                "run": lambda cp, p: cp.schedule_run(p, schedule_id),
-                "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
-            }
-            op = dispatch.get(action)
-            if op is None:
-                raise ControlPlaneError(
-                    "invalid_action", "action must be pause, resume, run, or delete."
-                )
-            return await self._invoke("schedule_action", op, mutating=True)
-
-        # Workspace file read/write use the provider's native filesystem tools.
-        @tool(name="file_surface", annotations=_READ, structured_output=True)
-        async def file_surface(path: str) -> dict[str, Any]:
-            """Deliberately open a workspace file in the user's pinned preview panel.
-
-            Use this to show the user a file you produced or want to highlight,
-            even one you only read, or one a subagent wrote, instead of relying on
-            them to notice it. Ordinary Write/Edit calls no longer auto-open the
-            panel; call this when a file is worth surfacing.
-
-            The pin happens in the browser: this call only validates the path and
-            reports two independent signals. ``viewers`` is how many open chat
-            sockets are watching this chat right now; it can be 0 right after a
-            successful pin, and nonzero even when the panel did not open.
-            ``stream_state`` is "active" or "none" and says whether a turn is
-            currently streaming for this chat, nothing about the panel. Never
-            read either field as proof the panel opened or failed to open: say
-            you called file_surface, and if the user reports nothing happened,
-            do not claim you already confirmed it failed."""
-            return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
-
-        # adversarial_review dropped — the `ciao-command-critique` skill and
-        # `/code-review --fix` cover the same surface. The skill is the better
-        # mechanism: model-picked, not a flat tool call. The control-plane
-        # method remains for the CLI skill path.
-
-        # agent_context_get / workspace_health_* -> `ciao health get|fix`;
-        # skills_list -> `ciao skills list`; sync_skills -> `ciao sync-skills`.
-        # local_session_* (status/preflight/handback/resync) are dropped: shell
-        # agents commit/push with git directly, and the PWA "Sync to Remote"
-        # feature drives the control plane through its own REST route.
-        # package_status_get / lifecycle_* are host/PWA concerns, not agent tools.
-
 def _write_mcp_env_values(path: Path, updates: dict[str, str]) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
