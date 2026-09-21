@@ -17,7 +17,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/desktop-drop": "native app bridge; consumes a short-lived Finder-drop grant created outside HTTP",
     "/api/chats/{chat_id}/voice": "browser voice upload",
     "/api/chats/{chat_id}/speak": "browser read-aloud playback; returns audio bytes",
-    "/api/chats/{chat_id}/reentry-summary": "browser-only ephemeral Apple Intelligence orientation note",
     "/api/chats/{chat_id}/images": "browser image upload",
     "/api/chats/{chat_id}/attachments": "browser chat attachment upload",
     "/api/chats/{chat_id}/continue": "browser continuation of archived chat",

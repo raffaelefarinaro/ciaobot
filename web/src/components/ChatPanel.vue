@@ -545,22 +545,6 @@
       </template>
       </template>
 
-      <!-- Ephemeral orientation aid shown after reopening a chat. Keep it
-           after the rendered transcript so it reads as the latest message,
-           while the tag makes it clear that it is generated context rather
-           than a reply. -->
-      <div v-if="reentrySummary" class="message-wrap assistant reentry-summary-wrap">
-        <div class="message-row">
-          <div class="message assistant reentry-summary-message" role="status" aria-label="Apple Intelligence summary">
-            <div class="reentry-summary-header">
-              <span class="reentry-summary-badge">Summary</span>
-              <span class="reentry-summary-source">Apple Intelligence</span>
-            </div>
-            <div class="message-content" v-html="renderMarkdown(reentrySummary)"></div>
-          </div>
-        </div>
-      </div>
-
       <div
         v-if="store.hostConnectionUnavailable"
         class="host-connection-card"
@@ -1244,7 +1228,6 @@ import {
   type MentionProject,
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
-import { useReentrySummaryPreference } from '../composables/useReentrySummaryPreference'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -1320,7 +1303,6 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
-const { reentrySummaryEnabled } = useReentrySummaryPreference()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
 const inputRevision = ref(0)
@@ -1556,10 +1538,6 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
-const reentrySummary = computed(() => {
-  if (!reentrySummaryEnabled.value) return ''
-  return store.reentrySummaries[chat.value.chat_id] || ''
-})
 
 // Post-archive pipeline, reported in the archived-chat footer. Reads through the
 // chat record rather than a transient flag so the settled summary is still there
@@ -7512,44 +7490,6 @@ details[open] > .activity-summary::before {
   0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
   25%  { background: rgba(234, 179, 8, 0.7);  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.18); }
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
-}
-
-/* ── Ephemeral re-entry summary ── */
-.reentry-summary-message {
-  background: color-mix(in srgb, var(--accent2) 12%, var(--bg2));
-  border-color: color-mix(in srgb, var(--accent2) 45%, var(--border));
-  border-left-color: var(--accent2);
-}
-.reentry-summary-header {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.reentry-summary-badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  padding: 2px 8px;
-  border: 1px solid color-mix(in srgb, var(--accent2) 70%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent2) 18%, transparent);
-  color: var(--fg);
-  font-family: var(--font);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  line-height: 1.2;
-  text-transform: uppercase;
-}
-.reentry-summary-source {
-  color: var(--fg2);
-  font-family: var(--font);
-  font-size: var(--text-xs);
-}
-.reentry-summary-message .message-content {
-  color: var(--fg);
 }
 
 /* ── Automation banner ── */

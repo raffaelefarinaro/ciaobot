@@ -291,7 +291,7 @@ async def run_oneshot(
 
     # Apple's on-device model is not an upstream id — it is a sentinel meaning
     # "run this through the bundled helper". Dispatching it here means every
-    # caller (chat titles, session insights, the backfill, re-entry summaries)
+    # caller (chat titles, session insights, the backfill)
     # asks for a model and gets one, instead of each re-testing the sentinel and
     # branching. Before this, a caller that forgot the test sent the literal
     # string "apple" upstream and failed with "there's an issue with the

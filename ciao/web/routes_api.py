@@ -4241,24 +4241,6 @@ async def chat_speak(request: Request) -> Response:
     )
 
 
-async def chat_reentry_summary(request: Request) -> JSONResponse:
-    """Return an ephemeral Apple Intelligence summary for a reopened chat."""
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "chat not found"}, status_code=404)
-    if chat.archived:
-        return JSONResponse({"available": True, "summary": ""})
-
-    try:
-        summary = await pcm.generate_reentry_summary(chat_id)
-    except Exception as exc:  # noqa: BLE001 — orientation aid must never block chat use
-        logger.info("Re-entry summary failed for %s: %s", chat_id, exc)
-        return JSONResponse({"available": False, "summary": ""})
-    return JSONResponse({"available": bool(summary), "summary": summary})
-
-
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:

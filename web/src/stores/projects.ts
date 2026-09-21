@@ -7,7 +7,6 @@ import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
-import { readReentrySummaryEnabled } from '../composables/useReentrySummaryPreference'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
@@ -88,12 +87,6 @@ export const useProjectStore = defineStore('projects', () => {
   ])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
-  // Re-entry summaries are requested in the background whenever a non-empty
-  // chat is opened. They are deliberately ephemeral: the first new message
-  // clears the summary so it never becomes part of the conversation history.
-  const reentrySummaries = ref<Record<string, string>>({})
-  const reentrySummaryRequests = new Set<string>()
-  const reentrySummaryRevisions = ref<Record<string, number>>({})
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
@@ -1848,7 +1841,6 @@ export const useProjectStore = defineStore('projects', () => {
         void (async () => {
           await loadMessages(bootChatId, { waitForSettledReply: true })
           connectWs(bootChatId)
-          requestReentrySummaryIfUseful(bootChatId)
         })()
       }
       // Open the cross-chat awareness socket once per app session.
@@ -2410,9 +2402,6 @@ export const useProjectStore = defineStore('projects', () => {
     clearChatDraft(chatId)
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
-    delete reentrySummaries.value[chatId]
-    delete reentrySummaryRevisions.value[chatId]
-    reentrySummaryRequests.delete(chatId)
     persistMessages()
     if (options?.selectNext !== false && activeChatId.value === chatId) {
       await transitionToFirstChat()
@@ -2502,11 +2491,6 @@ export const useProjectStore = defineStore('projects', () => {
       }
       return
     }
-    // Warm the persistent per-chat summary cache while the user is away.
-    // The request is intentionally detached so closing the chat stays
-    // immediate; switchChat still requests it as a fallback if this call
-    // has not finished by the time the user returns.
-    void requestReentrySummary(chatId)
     disconnectWs(chatId)
     await leaveChatView(wasActive)
   }
@@ -2517,59 +2501,6 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     const { router } = await import('../router')
     await router.push('/')
-  }
-
-  function clearReentrySummary(chatId: string): void {
-    delete reentrySummaries.value[chatId]
-    reentrySummaryRevisions.value[chatId] = (reentrySummaryRevisions.value[chatId] || 0) + 1
-  }
-
-  async function requestReentrySummary(chatId: string): Promise<void> {
-    if (reentrySummaryRequests.has(chatId)) return
-    reentrySummaryRequests.add(chatId)
-    const revision = reentrySummaryRevisions.value[chatId] || 0
-    try {
-      const result = await api.post<{ summary?: string }>(`/api/chats/${chatId}/reentry-summary`, {})
-      const summary = typeof result?.summary === 'string' ? result.summary.trim() : ''
-      if (
-        summary
-        && revision === (reentrySummaryRevisions.value[chatId] || 0)
-        && chats.value.some(chat => chat.chat_id === chatId)
-      ) {
-        reentrySummaries.value[chatId] = summary
-      }
-    } catch {
-      // Apple Intelligence is optional. A failed/unavailable summary should
-      // never interfere with opening or using the chat.
-    } finally {
-      reentrySummaryRequests.delete(chatId)
-    }
-  }
-
-  function requestReentrySummaryIfUseful(chatId: string): void {
-    if (!readReentrySummaryEnabled()) return
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (!chat || chat.archived) return
-    // session_id covers chats whose history is still being hydrated; the
-    // message check covers providers/fixtures that do not expose one.
-    const hasHistory = Boolean(chat.session_id) || (messages.value[chatId] || []).some(
-      message => message.role === 'user' || message.role === 'assistant',
-    )
-    if (hasHistory && !reentrySummaries.value[chatId]) {
-      void requestReentrySummary(chatId)
-    }
-  }
-
-  // Toggling the preference off also evicts any cached summaries so the
-  // bubble disappears immediately rather than lingering for the rest of
-  // the session. Toggling on does nothing — the next chat open will fetch
-  // its own summary, no warm-up needed.
-  function setReentrySummaryEnabled(enabled: boolean): void {
-    if (!enabled) {
-      for (const chatId of Object.keys(reentrySummaries.value)) {
-        clearReentrySummary(chatId)
-      }
-    }
   }
 
   async function archiveChat(chatId: string) {
@@ -3216,7 +3147,6 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
-      const historyChanged = historySignature(normalizedServer) !== historySignature(normalizedLocal)
 
       // Heal orphaned optimistic user bubbles. A send queued behind a still
       // streaming turn can leave a turn_index-less copy that the live echo
@@ -3267,7 +3197,6 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizedLocal
         persistMessages()
       }
-      if (historyChanged) clearReentrySummary(chatId)
       if (
         streaming.value[chatId]
         && !projectStreaming.value[chatId]
@@ -3605,7 +3534,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
-    requestReentrySummaryIfUseful(chatId)
   }
 
   async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
@@ -4553,9 +4481,6 @@ export const useProjectStore = defineStore('projects', () => {
     onSent?: () => void,
     _deferredAttempt = 0,
   ): boolean {
-    // A re-entry summary is a transient orientation aid, not a new chat
-    // message. The first send is the user's signal that it has done its job.
-    clearReentrySummary(chatId)
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -5321,19 +5246,6 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEvent(chatId: string, event: WsEvent) {
     const msgs = messages.value[chatId] || []
 
-    // A summary belongs only to the moment the user re-enters a quiet chat.
-    // `queued` always represents new user activity (a new prompt is now
-    // waiting), so it always invalidates the summary.
-    //
-    // `user_echo` and `result` are handled inside their switch cases below:
-    // the broker replays them on every WS reconnect, and a no-op replay
-    // (turn already rendered, or no final text on a result) must NOT clear
-    // the summary. The user opens a chat, scrolls to re-orient, and the
-    // summary disappearing on a broker replay is the wrong behavior.
-    if (event.type === 'queued') {
-      clearReentrySummary(chatId)
-    }
-
     // Any event that implies an in-flight stream flips the flag, so a resumed
     // stream (WS reconnect with buffered-event replay from the server broker)
     // renders as "streaming" without the client having called sendMessage.
@@ -5383,10 +5295,6 @@ export const useProjectStore = defineStore('projects', () => {
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
             if (!streaming.value[chatId]) streaming.value[chatId] = true
-            // This is a broker replay, not a new send: leave the re-entry
-            // summary alone. The whole reason a user re-enters a chat is
-            // orientation, and the summary must survive the WS-resume echo
-            // storm until the user actually types or sends.
             break
           }
           // Look for an optimistic user message with matching content but no
@@ -5446,10 +5354,6 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
         if (!streaming.value[chatId]) streaming.value[chatId] = true
-        // Brand-new echo (not a replay) is the user actually starting a turn.
-        // Clear the summary here so it disappears when the user sends, not on
-        // an unrelated broker replay.
-        clearReentrySummary(chatId)
         break
       }
 
@@ -5645,7 +5549,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (isCompacting) {
           _pushStatusLine(chatId, message)
         } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
-          clearReentrySummary(chatId)
           msgs.push({
             role: 'system',
             content: message,
@@ -5767,12 +5670,6 @@ export const useProjectStore = defineStore('projects', () => {
           const chat = chats.value.find(c => c.chat_id === chatId)
           if (chat) chat.session_id = event.session_id
         }
-        // Clear the re-entry summary only when the result represents a turn
-        // that just finished while the user was watching. If `streaming` was
-        // already false, this is a broker replay for a turn the user has
-        // already been reading and the summary still applies. The summary
-        // also clears at user send (sendMessage / fresh user_echo).
-        const wasStreaming = streaming.value[chatId] === true
         if (text.trim() || event.is_error) {
           msgs.push({
             role: 'assistant',
@@ -5805,14 +5702,6 @@ export const useProjectStore = defineStore('projects', () => {
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
         persistMessages()
-        if (wasStreaming) {
-          // The result closed a turn that was actually in flight on this
-          // client. The re-entry summary no longer reflects the chat
-          // state, so drop it. Skipped on a broker replay (wasStreaming
-          // false) so a scroll-induced resume doesn't dismiss the summary
-          // for a turn the user is still re-reading.
-          clearReentrySummary(chatId)
-        }
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
         // where the SDK session file lags the result event (retries until the
@@ -5956,7 +5845,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
@@ -5973,7 +5862,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
@@ -5985,7 +5874,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled, setSubagentViewActive,
+    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,
