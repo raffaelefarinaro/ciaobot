@@ -117,6 +117,7 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
         cr.PASS_PROPOSALS,
         cr.PASS_LEARNINGS,
         cr.PASS_HYGIENE,
+        cr.PASS_GUIDE,
         cr.PASS_LOGS,
         cr.PASS_SKILL_PROPOSALS,
     }
@@ -127,9 +128,51 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
         cr.PASS_PROPOSALS,
         cr.PASS_LEARNINGS,
         cr.PASS_HYGIENE,
+        cr.PASS_GUIDE,
         cr.PASS_LOGS,
         cr.PASS_SKILL_PROPOSALS,
     ]
+
+
+def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guide-body pass rides the weekly marker, not the vault-hygiene gate.
+
+    The guide review is a model judgment that `curation-begin` cannot score
+    mechanically, so it shows up whenever the weekly pass is due. But it must
+    not be one of the two keys that gate `last_full_pass`: an over-budget run
+    that never reached the guide must not be told it completed the review it
+    skipped. Recording it should also keep next week's guide pass due.
+    """
+    from ciao.cli import _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+
+    by_pass = {
+        item.pass_id: item
+        for item in cr.build_worklist(
+            vault_root=vault,
+            guide_path=guide,
+            workspace_dir=tmp_path,
+            today=date(2026, 9, 19),
+        ).items
+    }
+    assert by_pass[cr.PASS_GUIDE].weekly is True
+    assert by_pass[cr.PASS_GUIDE].keys == (cr.item_key(cr.PASS_GUIDE, "guide-body"),)
+    guide_keys = {key for item in by_pass.values() if item.pass_id == cr.PASS_GUIDE for key in item.keys}
+    assert guide_keys.isdisjoint(cr.REQUIRED_HYGIENE_KEYS)
+    assert cr.PASS_GUIDE in cr.PASS_ORDER
+
+    cr.begin_run(vault, holder="nightly")
+    cr.record_done(vault, [cr.item_key(cr.PASS_GUIDE, "guide-body")])
+    _capture(monkeypatch)
+    _curation_end_command(_args(tmp_path, vault, guide, holder="nightly", status="ok"))
+
+    # Recording only the guide review never advances the weekly marker.
+    assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
 
 
 def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:

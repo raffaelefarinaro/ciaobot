@@ -73,6 +73,7 @@ PASS_REGIONS = "regions"
 PASS_AUDIT = "audit"
 PASS_LEARNINGS = "learnings"
 PASS_HYGIENE = "hygiene"
+PASS_GUIDE = "guide"
 PASS_LOGS = "logs"
 PASS_SKILL_PROPOSALS = "skill_proposals"
 
@@ -82,6 +83,7 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_AUDIT,
     PASS_LEARNINGS,
     PASS_HYGIENE,
+    PASS_GUIDE,
     PASS_LOGS,
     PASS_SKILL_PROPOSALS,
 )
@@ -403,6 +405,30 @@ def _hygiene_items(*, weekly_due: bool) -> list[WorklistItem]:
     ]
 
 
+def _guide_items(*, weekly_due: bool) -> list[WorklistItem]:
+    """Weekly review of the workspace guide body.
+
+    ``curation-begin`` cannot mechanically judge whether a sentence in the
+    guide body is misplaced, stale, or bloated, so this pass is a model-judged
+    weekly check rather than a deterministic finding. It is gated on the same
+    ``weekly_due`` rule as the vault-hygiene pass so a powered-off server does
+    not permanently miss its guide care, and it stays separate from the
+    required hygiene keys: an over-budget run that never reaches the guide must
+    not be told it completed a review it skipped.
+    """
+    if not weekly_due:
+        return []
+    return [
+        WorklistItem(
+            pass_id=PASS_GUIDE,
+            label="Review the workspace guide body for misplacement, drift, and bloat",
+            reason="the weekly pass is due",
+            keys=(item_key(PASS_GUIDE, "guide-body"),),
+            weekly=True,
+        )
+    ]
+
+
 def _log_items(vault_root: Path) -> list[WorklistItem]:
     oversized: list[str] = []
     for relative in (CURATION_LOG_RELATIVE, WEEKLY_REVIEW_LOG_RELATIVE):
@@ -489,6 +515,7 @@ def build_worklist(
     collected.extend(_audit_items(guide_path, workspace_dir=workspace_dir, today=today))
     collected.extend(_learning_items(vault_root, today=today))
     collected.extend(_hygiene_items(weekly_due=weekly_due))
+    collected.extend(_guide_items(weekly_due=weekly_due))
     collected.extend(_log_items(vault_root))
     collected.extend(_skill_proposal_items(vault_root))
 
