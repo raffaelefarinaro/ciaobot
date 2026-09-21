@@ -76,6 +76,7 @@ def is_agent_invocation(argv: list[str]) -> bool:
     <profile> <service>`` the gws passthrough; only ``run start|status|cancel``
     and a bare ``gws status`` belong to the agent surface.
     """
+    argv = _strip_json_flag(argv)
     if not argv:
         return False
     if argv[0] in AGENT_NOUNS:

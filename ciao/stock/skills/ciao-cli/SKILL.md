@@ -35,7 +35,7 @@ Not for:
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `memory status` | Report bounded native-guide (CLAUDE.md) memory usage and diagnostics. | — |
+| `memory status` | Report bounded native-guide (AGENTS.md) memory usage and diagnostics. | — |
 | `memory update --region {memory,profile} --action {add,replace,remove} [--entry TEXT] [--match TEXT]` | Add, replace, or remove one entry in native `memory`/`profile` memory. | `--match` targets replace/remove, `--entry` is the new text for add/replace. The region cap is advisory: the write always lands, and the reply carries `over_cap` with `used_chars`/`char_limit` when it exceeds the configured limit — consolidation, not refusal, is what bounds a region. |
 
 ### Vault

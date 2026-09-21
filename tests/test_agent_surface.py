@@ -282,8 +282,9 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     cli = system_prompt_payload("", surface="cli")["append"]
     assert "MCP tools" in mcp and "`memory_update`" in mcp
     assert "ciao help" in cli and "ciao memory update" in cli and "ciao vault search" in cli
-    for name in ("memory_update", "vault_search", "file_surface", "background_run_start", "MCP tools"):
+    for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
         assert name not in cli, name
+    assert "`AGENTS.md`" in cli
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
@@ -343,3 +344,14 @@ def test_json_flag_is_not_stripped_from_the_run_command_payload() -> None:
     op, arguments = agent_cli.resolve(parser.parse_args(_strip_json_flag(payload)))
     assert op == "background_run_start"
     assert arguments["cmd"] == ["python", "report.py", "--json"]
+
+
+def test_leading_json_flag_still_routes_to_the_agent_parser(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli
+
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    assert agent_cli.is_agent_invocation(["--json", "vault", "search", "x"])
+    assert cli.main(["--json", "vault", "search", "x"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"
