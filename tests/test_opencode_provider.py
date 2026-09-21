@@ -161,13 +161,7 @@ def test_compose_system_is_empty_when_both_halves_are():
 
 def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     provider = OpencodeProvider(tmp_path)
-    request = AgentRequest(
-        prompt="hello",
-        model="",
-        mode="auto",
-        provider="opencode",
-    )
-    instructions = provider._chat_system_instructions(request)
+    instructions = provider._chat_system_instructions()
     assert "Ciaobot core instructions" in instructions
     assert "native workspace guide" in instructions
     assert "MEMORY (your personal notes)" not in instructions
