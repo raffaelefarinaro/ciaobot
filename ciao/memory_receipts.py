@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -1729,7 +1730,7 @@ def receipt_journal_candidates(config: Any) -> list[Path]:
         roots = []
     for root, _name in roots:
         try:
-            fallback = journal_path(None, Path(root) / "CLAUDE.md")
+            fallback = journal_path(None, guide_path(root))
         except MemoryReceiptError:
             continue
         key = str(fallback)

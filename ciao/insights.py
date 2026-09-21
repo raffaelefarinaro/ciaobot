@@ -42,6 +42,7 @@ from ciao.memory_policy import UNATTENDED_MARKER as _UNATTENDED_MARKER
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
 from ciao.transcripts import _claude_projects_dir
+from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -2218,7 +2219,7 @@ async def backfill_insights_task(
                             else None
                         ),
                         guide_path=(
-                            Path(config.agent_root(workspace)) / "CLAUDE.md"
+                            guide_path(config.agent_root(workspace))
                             if workspace and config.workspace(workspace) is not None
                             else None
                         ),

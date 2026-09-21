@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from ciao.memory_tool import ensure_regions
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
+from ciao.workspace_guide import guide_path, legacy_guide_path, migrate_root
 
 logger = logging.getLogger(__name__)
 
@@ -387,8 +388,7 @@ def workspace_health(config: Any) -> dict:
         memory_paths = _workspace_memory_paths(config, root, vault, workspace=ws_name)
 
         check_paths = [
-            (root / "CLAUDE.md", "Project CLAUDE.md"),
-            (root / "AGENTS.md", "Project AGENTS.md"),
+            (guide_path(root), "Workspace guide"),
         ]
         check_paths.extend(memory_paths)
         check_paths.extend([
@@ -414,28 +414,30 @@ def workspace_health(config: Any) -> dict:
                 "Create it or run sync-skills." if not exists else "",
             )
 
-        claude_guide = root / "CLAUDE.md"
-        shared_guide = root / "AGENTS.md"
-        if claude_guide.is_file() and (shared_guide.exists() or shared_guide.is_symlink()):
-            try:
-                guides_linked = shared_guide.resolve() == claude_guide.resolve()
-            except OSError:
-                guides_linked = False
+        workspace_guide = guide_path(root)
+        legacy_guide = legacy_guide_path(root)
+        if legacy_guide.exists() or legacy_guide.is_symlink():
+            # Both providers read AGENTS.md now, and Claude Code only falls
+            # back to it when no CLAUDE.md is present — so a surviving
+            # CLAUDE.md keeps the old file winning and the rename never takes
+            # effect. See ciao/workspace_guide.py.
             add(
-                f"guides-linked{id_suffix}",
-                "Linked workspace guides" + suffix,
-                "ok" if guides_linked else "warn",
-                "AGENTS.md links to CLAUDE.md, so Claude Code and opencode share one workspace guide."
-                if guides_linked
-                else "AGENTS.md is a separate file, so Claude Code and opencode read different workspace instructions.",
-                shared_guide,
-                "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
+                f"legacy-guide{id_suffix}",
+                "Legacy CLAUDE.md" + suffix,
+                "warn",
+                "CLAUDE.md is still present, so Claude Code reads it instead of "
+                "AGENTS.md. The startup migration renames it; it has not run "
+                "here yet, or it could not move this one.",
+                legacy_guide,
+                "Restart Ciaobot to run the guide migration, or rename "
+                "CLAUDE.md to AGENTS.md yourself — never copy it, the bounded "
+                "memory regions live in it.",
             )
 
-        if claude_guide.is_file():
+        if workspace_guide.is_file():
             from ciao.memory_tool import diagnose_guide
 
-            region_diags = diagnose_guide(claude_guide)
+            region_diags = diagnose_guide(workspace_guide)
             add(
                 f"memory-regions{id_suffix}",
                 "Bounded memory regions" + suffix,
@@ -443,7 +445,7 @@ def workspace_health(config: Any) -> dict:
                 "The `ciao:memory` and `ciao:profile` regions are present and well-formed."
                 if not region_diags
                 else "; ".join(d.message for d in region_diags),
-                claude_guide,
+                workspace_guide,
                 "" if not region_diags else "Run sync-skills to add any missing region markers.",
             )
 
@@ -823,78 +825,6 @@ async def workspace_health_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "failed to scan workspace"}, status_code=500)
 
 
-def _merge_agents_into_claude(root: Path) -> bool:
-    """Fold a real, user-authored ``AGENTS.md`` into ``CLAUDE.md``, then symlink it.
-
-    A no-op unless ``AGENTS.md`` exists as a regular file (not a symlink) whose
-    content actually differs from ``CLAUDE.md`` (or ``CLAUDE.md`` is missing).
-    The prior ``AGENTS.md`` is preserved as ``AGENTS.md.bak`` before anything
-    is rewritten. Returns whether a merge happened.
-    """
-    claude = root / "CLAUDE.md"
-    agents = root / "AGENTS.md"
-    if not agents.is_file() or agents.is_symlink():
-        return False
-    try:
-        if claude.is_file() and agents.resolve() == claude.resolve():
-            return False
-    except OSError:
-        pass
-
-    try:
-        agents_text = agents.read_text(encoding="utf-8")
-    except OSError:
-        return False
-
-    if claude.is_file():
-        try:
-            claude_text = claude.read_text(encoding="utf-8")
-        except OSError:
-            return False
-        if claude_text.strip() == agents_text.strip():
-            return False
-    else:
-        claude_text = ""
-
-    try:
-        (root / "AGENTS.md.bak").write_text(agents_text, encoding="utf-8")
-    except OSError:
-        return False
-
-    if not claude_text:
-        merged_text = agents_text
-    else:
-        existing_lines = {line.strip() for line in claude_text.splitlines() if line.strip()}
-        unique_lines = [
-            line for line in agents_text.splitlines()
-            if line.strip() and line.strip() not in existing_lines
-        ]
-        if unique_lines:
-            merged_text = (
-                claude_text.rstrip()
-                + "\n\n## Merged from AGENTS.md\n\n"
-                + "\n".join(unique_lines)
-                + "\n"
-            )
-        else:
-            merged_text = claude_text
-
-    try:
-        claude.write_text(merged_text, encoding="utf-8")
-    except OSError:
-        return False
-
-    try:
-        ensure_regions(claude)
-    except OSError:
-        pass
-
-    try:
-        agents.unlink()
-        agents.symlink_to(claude.name)
-    except OSError:
-        return False
-    return True
 
 
 def repair_workspace_health(config: Any) -> dict:
@@ -902,10 +832,10 @@ def repair_workspace_health(config: Any) -> dict:
 
     Covers exactly the actions the checks suggest in prose: create the
     missing scaffold files/directories, merge a stray user-authored
-    ``AGENTS.md`` into ``CLAUDE.md``, then rebuild the Claude Code discovery
-    links (sync-skills, without the network-touching upstream refresh).
-    Returns the fresh health report, with ``merged_agents_guide: True`` added
-    when the ``AGENTS.md`` merge above actually ran.
+    legacy ``CLAUDE.md`` onto ``AGENTS.md``, then rebuild the provider
+    discovery assets (sync-skills, without the network-touching upstream
+    refresh). Returns the fresh health report, with ``merged_agents_guide:
+    True`` added when the guide migration actually moved something.
     """
     from ciao.cli import _copy_tree_if_missing, _write_if_missing
 
@@ -941,7 +871,11 @@ def repair_workspace_health(config: Any) -> dict:
             )
         for asset_dir in ("subagents", "commands"):
             (root / asset_dir).mkdir(parents=True, exist_ok=True)
-        merged_agents_guide = _merge_agents_into_claude(root) or merged_agents_guide
+        # The guide migration owns this now: it renames a legacy CLAUDE.md
+        # onto AGENTS.md (merging a hand-authored AGENTS.md first) without
+        # ever copying, so the bounded memory regions travel with the file.
+        if migrate_root(root) in ("relinked", "renamed", "merged"):
+            merged_agents_guide = True
         from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
 
         sync_workspace_skills(

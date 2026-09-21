@@ -564,7 +564,7 @@
             <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
           </div>
 
-          <!-- Workspace guide (CLAUDE.md / AGENTS.md) — the only file every chat loads.
+          <!-- Workspace guide (AGENTS.md; CLAUDE.md pre-migration) — the only file every chat loads.
                Surfaced here because the vault graph hides it (it is not a vault note)
                yet its bounded regions budget every session. -->
           <div class="guide-card" :class="{ 'guide-card--over': guideOverCap }">
@@ -576,7 +576,7 @@
                 <span v-else-if="guideLoading" class="guide-card-badge">loading…</span>
               </div>
               <div class="guide-card-actions">
-                <button type="button" class="guide-card-btn" :disabled="guideLoading || !!guideError" @click="openGuideFile" title="Open CLAUDE.md">Open</button>
+                <button type="button" class="guide-card-btn" :disabled="guideLoading || !!guideError" @click="openGuideFile" :title="`Open ${guidePathLabel}`">Open</button>
                 <button type="button" class="guide-card-btn guide-card-btn--primary" :disabled="!canDiscussGuide" @click="discussGuide" title="Start a chat about this guide">Discuss</button>
               </div>
             </div>
@@ -1272,7 +1272,7 @@ onMounted(() => {
 const orphanLimit = ref(8)
 const staleLimit = ref(8)
 
-// ---------- workspace guide card (CLAUDE.md / AGENTS.md) ----------
+// ---------- workspace guide card (AGENTS.md; CLAUDE.md pre-migration) ----------
 const GUIDE_DEFAULTS: Record<string, { label: string; limit: number }> = {
   memory: { label: 'Agent memory', limit: 3000 },
   profile: { label: 'User profile', limit: 1375 },
@@ -1280,8 +1280,8 @@ const GUIDE_DEFAULTS: Record<string, { label: string; limit: number }> = {
 const guideContent = ref('')
 const guideLoading = ref(false)
 const guideError = ref('')
-const guideResolvedPath = ref('') // actual file that existed: CLAUDE.md or AGENTS.md
-const guidePathLabel = computed(() => guideResolvedPath.value || 'CLAUDE.md')
+const guideResolvedPath = ref('') // actual file that existed: AGENTS.md, or a legacy CLAUDE.md
+const guidePathLabel = computed(() => guideResolvedPath.value || 'AGENTS.md')
 const GUIDE_REGION_RE: Record<string, RegExp> = {
   memory: /<!--\s*ciao:memory:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:memory:end\s*-->/i,
   profile: /<!--\s*ciao:profile:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:profile:end\s*-->/i,
@@ -1352,23 +1352,32 @@ async function fetchGuide(): Promise<void> {
   const seq = ++guideFetchSeq
   guideLoading.value = true
   guideError.value = ''
+  // AGENTS.md is the workspace guide; CLAUDE.md is only what an install that
+  // has not run the guide migration still has (ciao/workspace_guide.py), so it
+  // is tried second and will stop appearing once installs have upgraded.
+  //
   // After the workspace re-root migration each guide lives under
-  // `<workspace>/CLAUDE.md`, so a bare basename would let /api/workspace-file's
+  // `<workspace>/AGENTS.md`, so a bare basename would let /api/workspace-file's
   // fuzzy lookup silently resolve to the lexicographically-first workspace's
   // guide. Try the workspace-qualified path first (retained for Open/Discuss/
   // pin), then fall back to the bare basename for installs that have not
   // re-rooted (guide still at the install root).
   const ws = store.activeWorkspace
   const candidates = [
-    `${ws}/CLAUDE.md`, `${ws}/AGENTS.md`,
-    'CLAUDE.md', 'AGENTS.md',
+    `${ws}/AGENTS.md`, `${ws}/CLAUDE.md`,
+    'AGENTS.md', 'CLAUDE.md',
   ]
+  let lastError = ''
   for (const candidate of candidates) {
     try {
       const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
       if (seq !== guideFetchSeq) return
       if (resp.status === 404) continue
-      if (!resp.ok) { guideError.value = `Failed to load ${candidate} (HTTP ${resp.status})`; guideContent.value = ''; guideResolvedPath.value=''; break }
+      // Keep trying the remaining candidates rather than giving up on the
+      // first non-404: a transient 503 (the engine restarting) on the first
+      // name used to blank the card even though a later name would have
+      // served it. The error is only shown if every candidate fails.
+      if (!resp.ok) { lastError = `Failed to load ${candidate} (HTTP ${resp.status})`; continue }
       const text = await resp.text()
       if (seq !== guideFetchSeq) return
       guideContent.value = text
@@ -1380,7 +1389,10 @@ async function fetchGuide(): Promise<void> {
   }
   if (seq !== guideFetchSeq) return
   guideContent.value = ''
-  if (!guideError.value) guideError.value = ''
+  // Every candidate 404'd (no guide yet) or errored. Surface the last real
+  // error if there was one; a plain "not found" stays silent, because a
+  // workspace with no guide yet is an ordinary state, not a failure.
+  if (!guideError.value) guideError.value = lastError
   guideResolvedPath.value = ''
   guideLoading.value = false
 }
@@ -3437,7 +3449,7 @@ async function confirmDeleteChat(chatId: string) {
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
 
-/* Workspace guide card (CLAUDE.md / AGENTS.md) — bounded memory health, always visible */
+/* Workspace guide card (AGENTS.md; CLAUDE.md pre-migration) — bounded memory health, always visible */
 .guide-card {
   margin-top: var(--space-3);
   padding: 10px 10px 8px;

@@ -119,6 +119,7 @@ from ciao.web.subagent_watchers import (
 )
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.document_conversion import convert_document, is_anydoc_document
+from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -3834,7 +3835,7 @@ class ProjectChatManager:
             self._workspace_vault_root(workspace) if workspace else None
         )
         guide_path = (
-            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            workspace_guide_path(config.agent_root(workspace))
             if workspace and config.workspace(workspace) is not None
             else None
         )
@@ -3901,7 +3902,7 @@ class ProjectChatManager:
             workspace = project.workspace
         config = self._config
         guide_path = (
-            Path(config.agent_root(workspace)) / "CLAUDE.md"
+            workspace_guide_path(config.agent_root(workspace))
             if workspace and config.workspace(workspace) is not None
             else None
         )

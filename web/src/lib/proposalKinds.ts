@@ -130,7 +130,7 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
   return (
     `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
-    `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
+    `Read \`${row.workspace}/AGENTS.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
     `After the region is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss --text-file <file> --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
   )
 }

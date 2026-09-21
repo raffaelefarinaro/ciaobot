@@ -121,11 +121,11 @@ def test_fix_issues_scaffolds_the_agent_roots_and_leaves_the_install_root_bare(
     repair_workspace_health(config)
 
     for name in ("personal", "work"):
-        assert (tmp_path / name / "CLAUDE.md").exists()
+        assert (tmp_path / name / "AGENTS.md").exists()
         assert (tmp_path / name / "subagents").is_dir()
         assert (tmp_path / name / "commands").is_dir()
     # The debris the migration exists to remove must not come back.
-    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / "subagents").exists()
     assert not (tmp_path / "commands").exists()
 
@@ -135,5 +135,5 @@ def test_fix_issues_still_scaffolds_the_install_root_before_migrating(tmp_path: 
 
     repair_workspace_health(config)
 
-    assert (tmp_path / "CLAUDE.md").exists()
+    assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / "subagents").is_dir()

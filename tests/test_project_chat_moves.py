@@ -292,7 +292,7 @@ async def test_archive_postprocess_names_the_guide_promotion_writes(
     assert calls, "the insights pipeline never started"
     guide = calls[0]["guide_path"]
     assert guide is not None, "no guide means every durable fact stays queued"
-    assert guide == Path(pcm._config.agent_root("work")) / "CLAUDE.md"
+    assert guide == Path(pcm._config.agent_root("work")) / "AGENTS.md"
 
 
 @pytest.mark.asyncio

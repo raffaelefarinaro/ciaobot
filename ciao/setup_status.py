@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Mapping, Any
 
 from ciao import provider_registry
+from ciao.workspace_guide import guide_path
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
@@ -967,21 +968,27 @@ def claude_auth_status(
     return result
 
 
-def _workspace_guides_linked(workspace_root: Path) -> bool:
-    """True when AGENTS.md resolves to CLAUDE.md for shared guide loading."""
-    claude_guide = workspace_root / "CLAUDE.md"
-    shared_guide = workspace_root / "AGENTS.md"
+def _workspace_guide_present(workspace_root: Path) -> bool:
+    """True when the workspace has a guide both providers will discover.
+
+    ``AGENTS.md`` is that guide. It used to be a symlink at ``CLAUDE.md``,
+    because Claude Code read only the latter; since 2.1.277 it reads
+    ``AGENTS.md`` natively whenever no ``CLAUDE.md`` is present, so the pair is
+    gone (see ciao/workspace_guide.py). A pre-migration install still passes
+    this check on its legacy ``CLAUDE.md`` — the guide is there, it just has
+    not been renamed yet.
+    """
     try:
-        return claude_guide.is_file() and shared_guide.resolve() == claude_guide.resolve()
+        return guide_path(workspace_root).is_file()
     except OSError:
         return False
 
 
 def _memory_regions_well_formed(workspace_root: Path) -> bool:
-    """True when both bounded memory regions are present and well-formed in CLAUDE.md."""
+    """True when both bounded memory regions are present and well-formed in the guide."""
     from ciao.memory_tool import diagnose_guide
 
-    guide = workspace_root / "CLAUDE.md"
+    guide = guide_path(workspace_root)
     return guide.is_file() and not diagnose_guide(guide)
 
 
@@ -1029,12 +1036,12 @@ def setup_status(
         ),
         _check(
             check_id="workspace_guides",
-            label="Linked workspace guides",
-            ok=_workspace_guides_linked(workspace_root),
-            # Optional: a custom AGENTS.md is preserved on purpose, but then
-            # the provider guides are no longer shared.
+            label="Workspace guide",
+            ok=_workspace_guide_present(workspace_root),
+            # Optional: sync-skills seeds the guide on the next startup, and a
+            # pre-migration install still passes on its legacy CLAUDE.md.
             required=False,
-            detail=str(workspace_root / "AGENTS.md"),
+            detail=str(guide_path(workspace_root)),
         ),
         _check(
             check_id="memory_regions",
@@ -1043,7 +1050,7 @@ def setup_status(
             # Optional: sync-skills self-heals missing regions on the next
             # startup, so this is informational rather than blocking.
             required=False,
-            detail=str(workspace_root / "CLAUDE.md"),
+            detail=str(guide_path(workspace_root)),
         ),
         _check(
             check_id="pwa_auth_token",
