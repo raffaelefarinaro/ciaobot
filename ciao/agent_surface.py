@@ -29,15 +29,18 @@ logger = logging.getLogger(__name__)
 AGENT_TOKEN_ENV = "CIAO_AGENT_TOKEN"
 #: Base URL the CLI posts to; ``{op}`` is appended.
 AGENT_URL_ENV = "CIAO_AGENT_URL"
-#: Per-chat surface selection for the MCP-versus-CLI comparison:
-#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``mcp``;
-#: there is deliberately no wildcard — the file lives in ``.runtime``, which
-#: the model's shell can write, so one entry must never flip every chat.
+#: Per-chat surface selection for the MCP-versus-CLI migration:
+#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``cli``:
+#: the default surface is the CLI, because slices migrate whole groups off MCP
+#: (a group must never be unreachable on both surfaces), and there is
+#: deliberately no wildcard — the file lives in ``.runtime``, which the model's
+#: shell can write, so one entry must never flip every chat. ``mcp`` remains
+#: selectable per-chat until the ``/mcp`` mount is removed in S6.
 SURFACE_FILE_NAME = "agent_surface.json"
 SURFACES = ("mcp", "cli")
 
 
-def surface_for_chat(runtime_dir: Path, chat_id: str, default: str = "mcp") -> str:
+def surface_for_chat(runtime_dir: Path, chat_id: str, default: str = "cli") -> str:
     """Return ``"cli"`` or ``"mcp"`` for ``chat_id`` from the surface file."""
     try:
         raw = json.loads((runtime_dir / SURFACE_FILE_NAME).read_text(encoding="utf-8"))

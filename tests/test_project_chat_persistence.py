@@ -270,9 +270,16 @@ def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> Non
 
 
 def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
+    from ciao.agent_surface import SURFACE_FILE_NAME
+
     manager = _make_manager(tmp_path)
     project = manager.create_project("Attached", workspace="work")
     chat = manager.create_chat(project.project_id)
+    # Default surface is CLI since S2; pin this chat to MCP so it still
+    # verifies MCP credential attachment for an MCP-surface chat.
+    (tmp_path / ".runtime" / SURFACE_FILE_NAME).write_text(
+        json.dumps({chat.chat_id: "mcp"}), encoding="utf-8"
+    )
 
     request = manager.build_agent_request(chat, prompt="hi")
     assert request.mcp_url == "http://127.0.0.1:8443/mcp/"
@@ -288,7 +295,7 @@ def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path:
     cli_chat = manager.create_chat(project.project_id)
     mcp_chat = manager.create_chat(project.project_id)
     (tmp_path / ".runtime" / SURFACE_FILE_NAME).write_text(
-        json.dumps({cli_chat.chat_id: "cli"}), encoding="utf-8"
+        json.dumps({cli_chat.chat_id: "cli", mcp_chat.chat_id: "mcp"}), encoding="utf-8"
     )
 
     cli_request = manager.build_agent_request(cli_chat, prompt="hi")
