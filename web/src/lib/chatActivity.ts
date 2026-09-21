@@ -3,18 +3,104 @@ import { isPlausibleFilePath } from './filePaths'
 
 export type TraceOutput = { file_path: string; action?: string }
 
+/** Canonical spelling used to compare two file-card paths.
+ *
+ * The backend canonicalises a file touch per *tool call*
+ * (`chat_broker.normalize_file_touch_paths`), never across a turn, and its
+ * canonical form falls back to the raw string whenever the resolved path
+ * escapes the workspace root. So one file touched by several calls in one
+ * turn can reach the client under several spellings — an absolute Write
+ * followed by a workspace-relative Edit, a `./` prefixed shell target, a
+ * doubled separator. Keying the Outputs dedup on the raw string let every
+ * spelling through, and since the row shows only the basename they rendered
+ * as identical duplicate entries (the reported bug).
+ */
+export function normalizeOutputPath(filePath: string): string {
+  let path = (filePath || '').trim().replace(/\\/g, '/')
+  path = path.replace(/\/{2,}/g, '/')
+  path = path.replace(/^\.\//, '')
+  while (path.includes('/./')) path = path.replace(/\/\.\//g, '/')
+  return path.replace(/\/+$/, '')
+}
+
+/** True when two normalised paths name the same file.
+ *
+ * Beyond an exact match this accepts exactly one pair: an absolute path and
+ * the workspace-relative path it ends with, on a segment boundary. That is
+ * the divergence the backend can produce for a single file. Two relative
+ * paths are never folded together — `src/a.md` and `docs/src/a.md` are
+ * genuinely different files.
+ */
+function isSameOutputFile(a: string, b: string): boolean {
+  if (a === b) return true
+  if (a.startsWith('/') === b.startsWith('/')) return false
+  const [abs, rel] = a.startsWith('/') ? [a, b] : [b, a]
+  return rel.length > 0 && abs.endsWith('/' + rel)
+}
+
+/** How much a touch says about what the turn *produced*. The Outputs list
+ *  answers "what came out of this turn", so when one file was created and
+ *  then edited again the creation is the truthful summary. A rank also keeps
+ *  the label stable: the same turn replays in a different order from the live
+ *  stream and from reloaded history, so "last touch wins" would flip the
+ *  label between the two. */
+const OUTPUT_ACTION_RANK: Record<string, number> = {
+  created: 3,
+  generated: 3,
+  written: 2,
+  edited: 2,
+  surfaced: 1,
+  touched: 1,
+}
+
+function outputActionRank(action?: string): number {
+  if (!action) return 0
+  return OUTPUT_ACTION_RANK[action.trim().toLowerCase()] ?? 1
+}
+
+/** Short tag rendered next to an output row. Maps the action values the
+ *  backend actually emits (`chat_broker._FILE_TOUCH_ACTIONS` plus the
+ *  `created` upgrade in `refine_file_touch_actions`); an unknown value falls
+ *  through unchanged rather than being invented away. */
+const OUTPUT_ACTION_TAGS: Record<string, string> = {
+  created: 'new',
+  generated: 'new',
+  written: 'edited',
+  edited: 'edited',
+  surfaced: 'shown',
+}
+
+export function outputActionTag(action?: string): string {
+  const key = (action || '').trim().toLowerCase()
+  if (!key) return 'touched'
+  return OUTPUT_ACTION_TAGS[key] || key
+}
+
 export function collectTraceOutputs(
   steps: Pick<ChatMessage, 'tool_name' | 'file_path' | 'content' | 'action'>[] | undefined,
 ): TraceOutput[] {
-  const seen = new Set<string>()
+  const keys: string[] = []
   const outputs: TraceOutput[] = []
   for (const step of steps || []) {
     if (step.tool_name !== '_filecard') continue
     const filePath = step.file_path || step.content
-    if (!filePath || seen.has(filePath)) continue
+    if (!filePath) continue
     // Drop shell false positives like "There" that are not real paths.
     if (!isPlausibleFilePath(filePath)) continue
-    seen.add(filePath)
+    const key = normalizeOutputPath(filePath)
+    if (!key) continue
+    const at = keys.findIndex(k => isSameOutputFile(k, key))
+    if (at >= 0) {
+      // Same file again. Keep the first spelling — that is the path the
+      // reader would have clicked — and upgrade the action if this touch
+      // says more about the file than the one already recorded.
+      const existing = outputs[at]
+      if (step.action && outputActionRank(step.action) > outputActionRank(existing.action)) {
+        existing.action = step.action
+      }
+      continue
+    }
+    keys.push(key)
     outputs.push({
       file_path: filePath,
       ...(step.action ? { action: step.action } : {}),
@@ -267,3 +353,58 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
   return parts
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Presentation helpers for one trace row.
+ *
+ * These were private to `ChatPanel.vue` until the completed-turn Activity
+ * row moved into `ChatTurnActivity.vue`; both the live trace and the
+ * completed trace render the same rows, so the helpers live here rather
+ * than being duplicated or passed down as props.
+ * ------------------------------------------------------------------ */
+
+/** Split an `_activity` step's body into the non-empty lines it renders as. */
+export function activityLines(content: string): string[] {
+  return content.split('\n').map(line => line.trim()).filter(Boolean)
+}
+
+/** A trace line a subagent produced: the server prefixes those with `↳`. */
+export function isSubagentLine(line: string): boolean {
+  return line.trimStart().startsWith('↳')  // ↳
+}
+
+/** Images open in the image viewer; everything else (markdown, code, config,
+ *  plain text) goes through `open`. Binary formats the viewer doesn't render
+ *  (PDF, docx, xlsx, pptx, zip) fall through to `open`, which will 415 and
+ *  show a clear error. */
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|tiff?)$/i
+
+export function isImageFilePath(filePath: string): boolean {
+  return IMAGE_EXT_RE.test(filePath)
+}
+
+export function fileCardBasename(filePath: string): string {
+  if (!filePath) return ''
+  const cleaned = filePath.replace(/[/\\]+$/, '')
+  const slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'))
+  return slash >= 0 ? cleaned.slice(slash + 1) : cleaned
+}
+
+export function fileCardDirname(filePath: string): string {
+  if (!filePath) return ''
+  const slash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  return slash > 0 ? filePath.slice(0, slash) : ''
+}
+
+/** Subset of `AppIconName` a file card can use. Kept as a literal union so
+ *  `lib/` stays free of Vue imports; `AppIcon` accepts all three. */
+export type FileCardIcon = 'image' | 'doc' | 'file'
+
+// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
+// docs/DESIGN_SYSTEM.md rule S4.
+export function fileCardIcon(filePath: string): FileCardIcon {
+  if (isImageFilePath(filePath)) return 'image'
+  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
+  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
+  return 'file'
+}

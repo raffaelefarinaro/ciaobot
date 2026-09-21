@@ -22,7 +22,7 @@ def store(tmp_path: Path) -> ScheduleStore:
     return ScheduleStore(tmp_path)
 
 
-async def _make_manager(store: ScheduleStore):
+async def _make_manager(store: ScheduleStore, *, is_node_active=None):
     dispatched: list[str] = []
 
     async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
@@ -31,6 +31,7 @@ async def _make_manager(store: ScheduleStore):
     mgr = ScheduleManager(
         store=store,
         dispatch_to_web=dispatch,
+        is_node_active=is_node_active,
     )
     return mgr, dispatched
 
@@ -1120,3 +1121,941 @@ def test_packaged_definitions_are_read_once(
         store.list_entries()
 
     assert reads["n"] == 1
+
+
+# ── Interrupted runs (issue #486) ───────────────────────────────────────
+# `last_triggered_on` and `last_dispatched_at` are both stamped at dispatch,
+# before the turn's outcome is known, so a run that died mid-turn (a server
+# restart, a killed provider subprocess) used to read as an attended slot: the
+# Missed list excluded it and `catch_up` skipped it, and the day's work was
+# silently lost. The run's recorded outcome is what tells the two apart — and
+# only a *failed* outcome, so a run that completed can never be replayed.
+
+
+def _interrupted_entry(**overrides):
+    """A daily entry whose 08:00 slot dispatched today and then failed."""
+    base = dict(
+        daily_time_utc="08:00",
+        frequency="daily",
+        timezone_name="UTC",
+        last_triggered_on="2026-06-15",
+        last_dispatched_at="2026-06-15T08:00:00+00:00",
+        last_status="error",
+    )
+    base.update(overrides)
+    return _entry(**base)
+
+
+# Noon UTC on the stamped day: past the 08:00 slot and well past the 5-minute
+# grace window, so only the outcome decides whether the slot reads as missed.
+_AFTER_THE_SLOT = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+
+
+def test_enrich_schedule_flags_an_interrupted_run_as_missed():
+    from ciao.web.routes_api import _enrich_schedule
+
+    enriched = _enrich_schedule(_interrupted_entry(), now=_AFTER_THE_SLOT)
+
+    assert enriched["last_expected_run"][:10] == "2026-06-15"
+    assert enriched["missed"] is True
+
+
+def test_enrich_schedule_flags_an_interrupted_weekly_run_as_missed():
+    """Weekly is the costly case: the lost work waits a whole week."""
+    from ciao.web.routes_api import _enrich_schedule
+
+    # 2026-06-15 is a Monday, and the entry only fires on Mondays.
+    entry = _interrupted_entry(frequency="weekly", days_of_week=["mon"])
+    enriched = _enrich_schedule(entry, now=_AFTER_THE_SLOT)
+
+    assert enriched["last_expected_run"][:10] == "2026-06-15"
+    assert enriched["missed"] is True
+
+
+def test_enrich_schedule_does_not_flag_a_completed_run_as_missed():
+    """The double-fire guard, stated as the UI sees it: a run that finished
+    cleanly must never reappear in the Missed list, where "Run all" would
+    dispatch it a second time.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    for status in ("ok", "running", "skipped", ""):
+        enriched = _enrich_schedule(
+            _interrupted_entry(last_status=status), now=_AFTER_THE_SLOT
+        )
+        assert enriched["missed"] is False, status
+
+
+def test_enrich_schedule_flags_yesterdays_failed_run_before_todays_slot():
+    """The failure is attached to the dispatch it came from, so it reports the
+    slot that dispatch was serving — not whichever slot happens to be current.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _interrupted_entry(
+        last_triggered_on="2026-06-14",
+        last_dispatched_at="2026-06-14T08:00:00+00:00",
+    )
+    # 07:00 on the 15th: today's 08:00 has not come round yet, so the most
+    # recent expected fire is yesterday's — the one that failed.
+    enriched = _enrich_schedule(entry, now=datetime(2026, 6, 15, 7, 0, tzinfo=UTC))
+
+    assert enriched["last_expected_run"][:10] == "2026-06-14"
+    assert enriched["missed"] is True
+
+
+def test_enrich_schedule_does_not_flag_a_run_in_flight_after_an_earlier_failure():
+    """Yesterday's failure must not brand today's long-running turn as missed.
+    The in-flight stamp written at dispatch is what scopes the outcome to the
+    run it describes; without it, any run still streaming five minutes after
+    its slot inherited the previous day's error.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _interrupted_entry(last_status="running")
+    enriched = _enrich_schedule(entry, now=_AFTER_THE_SLOT)
+
+    assert enriched["last_expected_run"][:10] == "2026-06-15"
+    assert enriched["missed"] is False
+
+
+async def test_interrupted_run_is_recoverable_with_run_now(store: ScheduleStore):
+    """The minimum bar: the slot shows up as missed, and the "Run all" path
+    (`dispatch_now`) both dispatches it and clears the flag.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "error"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store)
+
+    assert _enrich_schedule(store.get(entry.schedule_id), now=_AFTER_THE_SLOT)["missed"]
+
+    await mgr.dispatch_now(entry.schedule_id)
+    await asyncio.sleep(0.05)
+
+    assert dispatched == [entry.schedule_id]
+    reloaded = store.get(entry.schedule_id)
+    # The re-run is in flight, so the slot stops offering itself for another
+    # "Run all" while it streams.
+    assert reloaded.last_status == "running"
+    assert _enrich_schedule(reloaded, now=_AFTER_THE_SLOT)["missed"] is False
+
+
+async def test_catch_up_recovers_an_interrupted_run(store: ScheduleStore):
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "error"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_recovered_on == "2026-06-15"
+
+
+async def test_catch_up_recovers_an_interrupted_weekly_run(store: ScheduleStore):
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="weekly review",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="weekly",
+        days_of_week=["mon"],
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"  # Monday
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "error"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+
+
+async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
+    """The double-fire guard. A run that reached a clean terminal state — or
+    one that is only waiting on the user or the provider — is served, and no
+    restart may dispatch it again. ("running" is deliberately absent: after a
+    restart that stamp can only belong to a turn that never finished, which
+    `test_restart_turns_an_unfinished_run_into_a_recoverable_miss` covers.)
+    """
+    for status in ("ok", "skipped", ""):
+        store_dir = store  # one store per status keeps the ids distinct
+        entry = store_dir.create(
+            daily_time_utc="08:00",
+            prompt=f"daily summary {status}",
+            model="sonnet",
+            mode="bypass",
+            chat_id=0,
+            frequency="daily",
+            timezone_name="UTC",
+        )
+        _set_created_at(store_dir, entry)
+        entry.last_triggered_on = "2026-06-15"
+        entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+        entry.last_status = status
+        store_dir.replace(entry)
+        mgr, dispatched = await _make_manager(store_dir)
+
+        fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+        await asyncio.sleep(0.05)
+
+        assert fired == [], status
+        assert dispatched == [], status
+        store_dir.delete(entry.schedule_id)
+
+
+async def test_catch_up_recovers_an_interrupted_run_only_once(
+    store: ScheduleStore,
+):
+    """A recovery that fails again must not make every subsequent restart
+    dispatch the same slot: the entry stays flagged missed for the operator
+    instead. Each `catch_up` here is a separate manager, i.e. a fresh process.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "error"
+    store.replace(entry)
+
+    first_mgr, first_dispatched = await _make_manager(store)
+    assert await first_mgr.catch_up(now=_AFTER_THE_SLOT) == [entry.schedule_id]
+    await asyncio.sleep(0.05)
+    # The recovery run failed too.
+    failed = store.get(entry.schedule_id)
+    failed.last_status = "error"
+    store.replace(failed)
+
+    second_mgr, second_dispatched = await _make_manager(store)
+    assert await second_mgr.catch_up(now=_AFTER_THE_SLOT) == []
+    await asyncio.sleep(0.05)
+
+    assert first_dispatched == [entry.schedule_id]
+    assert second_dispatched == []
+    from ciao.web.routes_api import _enrich_schedule
+
+    assert _enrich_schedule(store.get(entry.schedule_id), now=_AFTER_THE_SLOT)["missed"]
+
+
+async def test_tick_marks_a_wall_clock_run_in_flight(store: ScheduleStore):
+    """The cron path stamps the run as in flight, so a turn that never reports
+    back is still recognisable after a restart.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+
+    await mgr.tick(now=datetime(2026, 6, 15, 8, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+
+    assert dispatched == [entry.schedule_id]
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_triggered_on == "2026-06-15"
+    assert reloaded.last_status == "running"
+
+
+async def test_restart_turns_an_unfinished_run_into_a_recoverable_miss(
+    store: ScheduleStore,
+):
+    """A hard stop leaves the row stamped "running" with nobody left to report
+    the outcome. The next process records that as a failure, which puts the
+    slot back in the Missed list and lets the catch-up pass recover it.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    dying_mgr, dying_dispatched = await _make_manager(store)
+    await dying_mgr.tick(now=datetime(2026, 6, 15, 8, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+    assert dying_dispatched == [entry.schedule_id]
+    assert store.get(entry.schedule_id).last_status == "running"
+    # ...and the process stops here, so nothing ever writes the outcome back.
+
+    restarted_mgr, restarted_dispatched = await _make_manager(store)
+    assert restarted_mgr.reconcile_interrupted_runs() == [entry.schedule_id]
+    assert store.get(entry.schedule_id).last_status == "error"
+    assert _enrich_schedule(store.get(entry.schedule_id), now=_AFTER_THE_SLOT)["missed"]
+
+    fired = await restarted_mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+    assert fired == [entry.schedule_id]
+    assert restarted_dispatched == [entry.schedule_id]
+
+
+async def test_reconcile_leaves_this_process_runs_alone(store: ScheduleStore):
+    """The guard against the startup race: the boot tick and the catch-up pass
+    run concurrently, and a run this process just started must never be
+    recorded as interrupted (which would dispatch it a second time).
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+
+    await mgr.tick(now=datetime(2026, 6, 15, 8, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+
+    assert mgr.reconcile_interrupted_runs() == []
+    assert store.get(entry.schedule_id).last_status == "running"
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+    assert fired == []
+    assert dispatched == [entry.schedule_id]
+
+
+async def test_catch_up_fires_nothing_on_a_client_node(store: ScheduleStore):
+    """Automatic firing belongs to the host. A second machine in client mode
+    must not dispatch the missed slots the host owns — the startup catch-up
+    pass is an automation, not a person asking for a run.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: False)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == []
+    assert dispatched == []
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_triggered_on is None or reloaded.last_triggered_on == ""
+    assert reloaded.last_status in ("", None)
+
+
+async def test_catch_up_on_a_client_node_leaves_persisted_run_state_alone(
+    store: ScheduleStore,
+):
+    """The guard sits ahead of `reconcile_interrupted_runs`: a client must not
+    rewrite the host's run state either. The "running" stamp it would find
+    belongs to a turn on the host, and converting it to "error" would both
+    mislabel it and make it look recoverable.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "running"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: False)
+
+    assert await mgr.catch_up(now=_AFTER_THE_SLOT) == []
+    await asyncio.sleep(0.05)
+
+    assert dispatched == []
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_triggered_on == "2026-06-15"
+    assert reloaded.last_dispatched_at == "2026-06-15T08:00:00+00:00"
+    assert reloaded.last_recovered_on in ("", None)
+
+
+async def test_catch_up_recovers_an_interrupted_run_on_a_host_node(
+    store: ScheduleStore,
+):
+    """The host side of the same guard: an explicitly active node still
+    reconciles and recovers exactly as it did without the callback.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_triggered_on = "2026-06-15"
+    entry.last_dispatched_at = "2026-06-15T08:00:00+00:00"
+    entry.last_status = "running"
+    store.replace(entry)
+    mgr, dispatched = await _make_manager(store, is_node_active=lambda: True)
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_recovered_on == "2026-06-15"
+
+
+async def test_catch_up_without_a_node_callback_still_runs(store: ScheduleStore):
+    """Most callers (and every other test) build the manager without the node
+    callback; `is not None` is what keeps them catching up.
+    """
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+    assert mgr._is_node_active is None
+
+    fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+
+
+def test_system_schedule_state_persists_the_recovery_marker(tmp_path: Path):
+    """The observed occurrence was four packaged system routines, whose mutable
+    state lives in its own overlay file — a field missing from
+    SYSTEM_STATE_FIELDS is written and then silently dropped on the next read.
+    """
+    from ciao.schedules import system_schedule_id
+
+    store = ScheduleStore(
+        tmp_path, include_system=True, workspace_names=lambda: ["personal"]
+    )
+    schedule_id = system_schedule_id("system-memory-curation", "personal")
+    entry = store.get(schedule_id)
+    assert entry is not None
+
+    entry.last_status = "error"
+    entry.last_recovered_on = "2026-06-15"
+    store.replace(entry)
+
+    reloaded = ScheduleStore(
+        tmp_path, include_system=True, workspace_names=lambda: ["personal"]
+    ).get(schedule_id)
+    assert reloaded is not None
+    assert reloaded.last_status == "error"
+    assert reloaded.last_recovered_on == "2026-06-15"
+
+
+# ── Dispatch identity: one outcome per dispatch (issue #490) ────────────
+#
+# `last_dispatched_at` and `last_status` are separate fields, so two
+# non-interval dispatches that overlap (a manual "Run now" started shortly
+# before the cron slot) used to pair the newer timestamp with whichever run
+# happened to finish last. Every test below is an ordering of that overlap.
+
+
+async def _make_identified_manager(store: ScheduleStore, *, is_node_active=None):
+    """A manager whose dispatcher records the identity each run carries.
+
+    This is exactly how the real pipeline learns it: `dispatch_schedule` reads
+    `entry.last_dispatch_id` off the entry object it is handed, so recording it
+    from inside the dispatch also asserts the id is stamped *before* the run
+    starts rather than after it.
+    """
+    dispatched: list[tuple[str, str]] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append((entry.schedule_id, entry.last_dispatch_id))
+
+    mgr = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch,
+        is_node_active=is_node_active,
+    )
+    return mgr, dispatched
+
+
+def _finish_run(
+    store: ScheduleStore, schedule_id: str, dispatch_id: str, status: str
+) -> None:
+    """Replay what the dispatch pipeline does when a run ends.
+
+    `ProjectChatManager.dispatch_schedule` re-reads the stored row and hands it
+    to `stamp_run_outcome` with the dispatch id its entry snapshot carried;
+    this is that call with the model round trip left out. The real seam is
+    covered end to end in `tests/test_schedule_dead_target.py`.
+    """
+    from ciao.schedules import stamp_run_outcome
+
+    latest = store.get(schedule_id)
+    assert latest is not None
+    if stamp_run_outcome(latest, dispatch_id, status):
+        store.replace(latest)
+
+
+def _daily_entry(store: ScheduleStore, prompt: str = "daily summary"):
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt=prompt,
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    return _set_created_at(store, entry)
+
+
+# The overlap: a manual run started two minutes before the 08:00 slot, and the
+# cron dispatch for that slot.
+_JUST_BEFORE_THE_SLOT = datetime(2026, 6, 15, 7, 58, tzinfo=UTC)
+_AT_THE_SLOT = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+
+
+async def test_each_overlapping_dispatch_gets_its_own_identity(
+    store: ScheduleStore,
+):
+    """The precondition for everything else: two dispatches are two records."""
+    from ciao.schedules import dispatch_slot
+
+    entry = _daily_entry(store)
+    mgr, dispatched = await _make_identified_manager(store)
+
+    await mgr.dispatch_now(entry.schedule_id, now=_JUST_BEFORE_THE_SLOT)
+    await mgr.tick(now=_AT_THE_SLOT)
+    await asyncio.sleep(0.05)
+
+    (_, manual_id), (_, cron_id) = dispatched
+    assert manual_id != cron_id
+    # Each is credited to the occurrence it was dispatched for. 07:58 is before
+    # today's slot, so the manual run serves yesterday's; the tick serves the
+    # slot it matched.
+    assert dispatch_slot(manual_id) == "2026-06-14"
+    assert dispatch_slot(cron_id) == "2026-06-15"
+    # The row names the dispatch it is currently describing.
+    assert store.get(entry.schedule_id).last_dispatch_id == cron_id
+
+
+async def test_an_overlapping_manual_run_and_cron_slot_keep_their_own_results(
+    store: ScheduleStore,
+):
+    """The reported defect. The manual run finishes first and cleanly; the cron
+    run that superseded it then fails. Before this, the manual "ok" landed on
+    the cron dispatch's record and the failed slot vanished.
+    """
+    entry = _daily_entry(store)
+    mgr, dispatched = await _make_identified_manager(store)
+
+    await mgr.dispatch_now(entry.schedule_id, now=_JUST_BEFORE_THE_SLOT)
+    await mgr.tick(now=_AT_THE_SLOT)
+    await asyncio.sleep(0.05)
+    (_, manual_id), (_, cron_id) = dispatched
+
+    # The manual run completes while the cron run is still streaming.
+    _finish_run(store, entry.schedule_id, manual_id, "ok")
+    mid = store.get(entry.schedule_id)
+    # Its success is recorded against the occurrence it ran for...
+    assert mid.last_completed_on == "2026-06-14"
+    # ...and says nothing about the run that is now the entry's latest.
+    assert mid.last_status == "running"
+
+    # Then the cron run fails.
+    _finish_run(store, entry.schedule_id, cron_id, "error")
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "error"
+    assert reloaded.last_completed_on == "2026-06-14"
+
+    from ciao.web.routes_api import _enrich_schedule
+
+    assert _enrich_schedule(reloaded, now=_AFTER_THE_SLOT)["missed"] is True
+
+
+async def test_an_overlapping_success_does_not_hide_an_interrupted_run(
+    store: ScheduleStore,
+):
+    """Acceptance criterion: the cron run is interrupted rather than reporting
+    a failure, and the manual run that overlapped it succeeded. The slot must
+    still be missed and still be recoverable.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _daily_entry(store)
+    dying_mgr, dispatched = await _make_identified_manager(store)
+
+    await dying_mgr.dispatch_now(entry.schedule_id, now=_JUST_BEFORE_THE_SLOT)
+    await dying_mgr.tick(now=_AT_THE_SLOT)
+    await asyncio.sleep(0.05)
+    (_, manual_id), _cron = dispatched
+    # The manual run reports "ok"; the cron run never reports at all, because
+    # the process stops here.
+    _finish_run(store, entry.schedule_id, manual_id, "ok")
+
+    restarted, restarted_dispatched = await _make_identified_manager(store)
+    assert restarted.reconcile_interrupted_runs() == [entry.schedule_id]
+    assert store.get(entry.schedule_id).last_status == "error"
+    assert _enrich_schedule(store.get(entry.schedule_id), now=_AFTER_THE_SLOT)["missed"]
+
+    fired = await restarted.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+    assert fired == [entry.schedule_id]
+    assert [sid for sid, _ in restarted_dispatched] == [entry.schedule_id]
+
+
+async def test_a_completed_slot_is_not_refired_when_a_later_run_fails(
+    store: ScheduleStore,
+):
+    """The other completion order, and the double-fire guard under overlap: the
+    cron run for the slot completed, so a manual re-run that fails afterwards
+    must not put an already-served occurrence back in the recovery path.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _daily_entry(store)
+    mgr, dispatched = await _make_identified_manager(store)
+
+    await mgr.tick(now=_AT_THE_SLOT)
+    # "Run now" a minute later, while the cron run is still streaming.
+    await mgr.dispatch_now(
+        entry.schedule_id, now=datetime(2026, 6, 15, 8, 1, tzinfo=UTC)
+    )
+    await asyncio.sleep(0.05)
+    (_, cron_id), (_, manual_id) = dispatched
+
+    # The cron run finishes the work for the 08:00 slot...
+    _finish_run(store, entry.schedule_id, cron_id, "ok")
+    assert store.get(entry.schedule_id).last_completed_on == "2026-06-15"
+    # ...and the manual re-run afterwards fails.
+    _finish_run(store, entry.schedule_id, manual_id, "error")
+
+    reloaded = store.get(entry.schedule_id)
+    # The operator still sees that the latest run failed...
+    assert reloaded.last_status == "error"
+    # ...but the slot it already served is not offered for recovery again.
+    assert _enrich_schedule(reloaded, now=_AFTER_THE_SLOT)["missed"] is False
+    assert await mgr.catch_up(now=_AFTER_THE_SLOT) == []
+    await asyncio.sleep(0.05)
+    assert [sid for sid, _ in dispatched] == [entry.schedule_id] * 2
+
+
+async def test_an_interrupted_manual_rerun_does_not_replay_a_completed_slot(
+    store: ScheduleStore,
+):
+    """Same guard through the harshest path: the second run is not merely
+    failed, it is interrupted, so reconciliation writes the "error" itself and
+    a fresh process is the one deciding. A restart must still not re-run work
+    that a previous run completed for that slot.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _daily_entry(store)
+    dying, dispatched = await _make_identified_manager(store)
+
+    await dying.tick(now=_AT_THE_SLOT)
+    await dying.dispatch_now(
+        entry.schedule_id, now=datetime(2026, 6, 15, 8, 1, tzinfo=UTC)
+    )
+    await asyncio.sleep(0.05)
+    (_, cron_id), _manual = dispatched
+    _finish_run(store, entry.schedule_id, cron_id, "ok")
+    # ...and the process dies with the manual re-run still streaming.
+
+    restarted, restarted_dispatched = await _make_identified_manager(store)
+    assert restarted.reconcile_interrupted_runs() == [entry.schedule_id]
+    assert store.get(entry.schedule_id).last_status == "error"
+
+    fired = await restarted.catch_up(now=_AFTER_THE_SLOT)
+    await asyncio.sleep(0.05)
+    assert fired == []
+    assert restarted_dispatched == []
+    assert (
+        _enrich_schedule(store.get(entry.schedule_id), now=_AFTER_THE_SLOT)["missed"]
+        is False
+    )
+
+
+async def test_a_failed_manual_rerun_after_a_completed_slot_is_not_recovered(
+    store: ScheduleStore,
+):
+    """The limitation #488 documented from the other direction, sequential
+    rather than overlapping: a manual re-run an hour after the scheduled run
+    for the same slot succeeded used to read as an unsatisfied slot.
+    """
+    from ciao.web.routes_api import _enrich_schedule
+
+    entry = _daily_entry(store)
+    mgr, dispatched = await _make_identified_manager(store)
+
+    await mgr.tick(now=_AT_THE_SLOT)
+    await asyncio.sleep(0.05)
+    _finish_run(store, entry.schedule_id, dispatched[0][1], "ok")
+
+    await mgr.dispatch_now(
+        entry.schedule_id, now=datetime(2026, 6, 15, 9, 0, tzinfo=UTC)
+    )
+    await asyncio.sleep(0.05)
+    _finish_run(store, entry.schedule_id, dispatched[1][1], "error")
+
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "error"
+    assert _enrich_schedule(reloaded, now=_AFTER_THE_SLOT)["missed"] is False
+    assert await mgr.catch_up(now=_AFTER_THE_SLOT) == []
+
+
+async def test_a_run_crossing_midnight_belongs_to_the_slot_it_was_dispatched_for(
+    store: ScheduleStore,
+):
+    """The midnight rule, fixed so it cannot drift: a run dispatched at 23:55
+    for the 23:55 slot belongs to *that* slot however long past midnight it
+    streams. Attribution is decided at dispatch, never re-derived from the
+    clock at completion — the same rule `last_triggered_on` already followed.
+    """
+    from ciao.schedules import dispatch_slot
+
+    entry = store.create(
+        daily_time_utc="23:55",
+        prompt="late night log",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_identified_manager(store)
+
+    await mgr.tick(now=datetime(2026, 6, 15, 23, 55, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+    _, dispatch_id = dispatched[0]
+    assert dispatch_slot(dispatch_id) == "2026-06-15"
+    assert store.get(entry.schedule_id).last_triggered_on == "2026-06-15"
+
+    # The turn finishes eight minutes later, on the following day.
+    _finish_run(store, entry.schedule_id, dispatch_id, "ok")
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_completed_on == "2026-06-15"
+    assert reloaded.last_triggered_on == "2026-06-15"
+
+    # And the next day starts clean: nothing is owed at 00:03, and the 16th's
+    # own 23:55 slot is untouched by the run that crossed into it.
+    after_midnight = datetime(2026, 6, 16, 0, 3, tzinfo=UTC)
+    assert await mgr.catch_up(now=after_midnight) == []
+    await asyncio.sleep(0.05)
+    assert len(dispatched) == 1
+
+
+async def test_a_midnight_run_that_was_interrupted_recovers_its_own_slot(
+    store: ScheduleStore,
+):
+    """The same rule where it costs something: the interrupted run is recovered
+    for the 23:55 slot it was dispatched for, and the recovery is stamped to
+    that day — not to the day the restart happens to land on.
+    """
+    from ciao.schedules import dispatch_slot
+
+    entry = store.create(
+        daily_time_utc="23:55",
+        prompt="late night log",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    dying, _dying_dispatched = await _make_identified_manager(store)
+    await dying.tick(now=datetime(2026, 6, 15, 23, 55, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+    # ...the process stops mid-turn, and comes back after midnight.
+
+    restarted, restarted_dispatched = await _make_identified_manager(store)
+    after_midnight = datetime(2026, 6, 16, 0, 3, tzinfo=UTC)
+    assert restarted.reconcile_interrupted_runs() == [entry.schedule_id]
+
+    fired = await restarted.catch_up(now=after_midnight)
+    await asyncio.sleep(0.05)
+    assert fired == [entry.schedule_id]
+    _, recovery_id = restarted_dispatched[0]
+    assert dispatch_slot(recovery_id) == "2026-06-15"
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_triggered_on == "2026-06-15"
+    assert reloaded.last_recovered_on == "2026-06-15"
+
+    # The recovery completes on the 16th and is still credited to the 15th.
+    _finish_run(store, entry.schedule_id, recovery_id, "ok")
+    assert store.get(entry.schedule_id).last_completed_on == "2026-06-15"
+
+
+async def test_a_superseded_interval_run_does_not_restamp_the_entry(
+    store: ScheduleStore,
+):
+    """Interval entries have no slot, so the identity does only one job for
+    them: keep a finished run from describing a newer one. Overlap protection
+    makes this rare, not impossible.
+    """
+    entry = store.create(
+        daily_time_utc="",
+        prompt="poll",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="interval",
+        interval_minutes=15,
+        timezone_name="UTC",
+    )
+    _set_created_at(store, entry)
+    entry.last_dispatch_id = "-#superseded00"
+    entry.last_status = "running"
+    store.replace(entry)
+
+    _finish_run(store, entry.schedule_id, "-#stale0000000", "ok")
+
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded.last_status == "running"
+    assert reloaded.last_completed_on == ""
+
+
+def test_system_schedule_state_persists_the_dispatch_identity(tmp_path: Path):
+    """The trap the previous change hit: mutable state for a packaged system
+    routine lives in its own overlay file, and a field missing from
+    SYSTEM_STATE_FIELDS is written and then silently dropped on the next read.
+    The reported occurrence in #486 was four system routines, so these two
+    fields have to survive that round trip or the fix does not exist where it
+    was needed.
+    """
+    from ciao.schedules import system_schedule_id
+
+    store = ScheduleStore(
+        tmp_path, include_system=True, workspace_names=lambda: ["personal"]
+    )
+    schedule_id = system_schedule_id("system-memory-curation", "personal")
+    entry = store.get(schedule_id)
+    assert entry is not None
+
+    entry.last_dispatch_id = "2026-06-15#0123456789ab"
+    entry.last_completed_on = "2026-06-15"
+    store.replace(entry)
+
+    reloaded = ScheduleStore(
+        tmp_path, include_system=True, workspace_names=lambda: ["personal"]
+    ).get(schedule_id)
+    assert reloaded is not None
+    assert reloaded.last_dispatch_id == "2026-06-15#0123456789ab"
+    assert reloaded.last_completed_on == "2026-06-15"
+
+
+def test_user_schedule_dispatch_identity_round_trips(tmp_path: Path) -> None:
+    """The same round trip through `schedules.json`, where user routines live."""
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+    )
+    entry.last_dispatch_id = "2026-06-15#0123456789ab"
+    entry.last_completed_on = "2026-06-15"
+    store.replace(entry)
+
+    reloaded = ScheduleStore(tmp_path).get(entry.schedule_id)
+    assert reloaded is not None
+    assert reloaded.last_dispatch_id == "2026-06-15#0123456789ab"
+    assert reloaded.last_completed_on == "2026-06-15"
+
+
+def test_an_outcome_without_an_identity_still_applies():
+    """Backwards compatibility: a run started before this field existed (an
+    upgrade with a turn in flight) carries no id, and last-writer-wins is
+    exactly what the entry did for it before. Nothing regresses into silence.
+    """
+    from ciao.schedules import stamp_run_outcome
+
+    entry = _entry(last_status="running", last_dispatch_id="2026-06-15#abc")
+    assert stamp_run_outcome(entry, "", "ok") is True
+    assert entry.last_status == "ok"
+    # It cannot credit a slot, though: nobody recorded which one it served.
+    assert entry.last_completed_on == ""
+
+
+def test_a_completed_slot_marker_only_moves_forward():
+    """A late write from an older run must not un-serve a newer occurrence."""
+    from ciao.schedules import stamp_run_outcome
+
+    entry = _entry(
+        last_completed_on="2026-06-15",
+        last_dispatch_id="2026-06-16#b",
+        last_status="running",
+    )
+    # The 14th's run reports in long after the 16th's dispatch took over.
+    assert stamp_run_outcome(entry, "2026-06-14#a", "ok") is False
+    assert entry.last_completed_on == "2026-06-15"
+    assert entry.last_status == "running"

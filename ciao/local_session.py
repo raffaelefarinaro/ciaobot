@@ -595,8 +595,12 @@ class LocalSessionManager:
         if _BEGIN in content and _PEM_TAIL in content:
             blockers.append(f"Blocked file '{p.name}': High-confidence private key structure detected.")
 
-        # OpenAI key check
-        openai_keys = re.findall(r"sk-[a-zA-Z0-9-]{40,}", content)
+        # OpenAI key check. Require a token boundary before `sk-` and
+        # alphanumerics only after it (real keys have no interior dashes
+        # except the `sk-proj-` / `sk-svcacct-` prefix). The old pattern
+        # `sk-[A-Za-z0-9-]{40,}` false-positived on slugs like
+        # `zendesk-121654-...-transcript` inside the generated vault INDEX.md.
+        openai_keys = re.findall(r"(?<![A-Za-z0-9_-])sk-(?:proj-|svcacct-)?[A-Za-z0-9]{40,}", content)
         if openai_keys:
             blockers.append(f"Blocked file '{p.name}': High-confidence OpenAI API key detected.")
 

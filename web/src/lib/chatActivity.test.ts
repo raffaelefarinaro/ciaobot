@@ -6,6 +6,8 @@ import {
   formatTokenUsage,
   isAnswerBubble,
   isProgressCommentary,
+  normalizeOutputPath,
+  outputActionTag,
   traceSummaryMeta,
 } from './chatActivity'
 import type { ChatMessage } from './types'
@@ -55,6 +57,92 @@ describe('collectTraceOutputs', () => {
       { tool_name: '_filecard', file_path: 'There', content: '', action: 'created' },
       { tool_name: '_filecard', file_path: 'guests.csv', content: '', action: 'created' },
     ])).toEqual([{ file_path: 'guests.csv', action: 'created' }])
+  })
+
+  it('folds an absolute and a workspace-relative spelling of one file', () => {
+    // The reported bug: one file listed twice because two tool calls in the
+    // same turn spelled its path differently. Both rows render the basename,
+    // so the reader saw two identical entries.
+    expect(collectTraceOutputs([
+      {
+        tool_name: '_filecard',
+        file_path: '/Users/me/vault/Workspace/Resume 2026-09.md',
+        content: '',
+        action: 'created',
+      },
+      {
+        tool_name: '_filecard',
+        file_path: 'Workspace/Resume 2026-09.md',
+        content: '',
+        action: 'edited',
+      },
+    ])).toEqual([
+      { file_path: '/Users/me/vault/Workspace/Resume 2026-09.md', action: 'created' },
+    ])
+  })
+
+  it('folds ./, doubled-separator and trailing-slash spellings', () => {
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'docs/notes.md', content: '', action: 'written' },
+      { tool_name: '_filecard', file_path: './docs/notes.md', content: '', action: 'edited' },
+      { tool_name: '_filecard', file_path: 'docs//notes.md', content: '', action: 'edited' },
+      { tool_name: '_filecard', file_path: 'docs/./notes.md', content: '', action: 'edited' },
+    ])).toEqual([{ file_path: 'docs/notes.md', action: 'written' }])
+  })
+
+  it('keeps distinct files that only share a basename', () => {
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'src/index.ts', content: '', action: 'edited' },
+      { tool_name: '_filecard', file_path: 'docs/src/index.ts', content: '', action: 'edited' },
+    ])).toEqual([
+      { file_path: 'src/index.ts', action: 'edited' },
+      { file_path: 'docs/src/index.ts', action: 'edited' },
+    ])
+  })
+
+  it('keeps the strongest action when one file is touched repeatedly', () => {
+    // Created-then-edited is still "new" for this turn, and the label must not
+    // depend on the order the touches arrive in (live stream vs reload).
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'created' },
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'edited' },
+    ])).toEqual([{ file_path: 'plan.md', action: 'created' }])
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'edited' },
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'created' },
+    ])).toEqual([{ file_path: 'plan.md', action: 'created' }])
+    // A weaker later touch never downgrades the label.
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'edited' },
+      { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'surfaced' },
+    ])).toEqual([{ file_path: 'plan.md', action: 'edited' }])
+  })
+})
+
+describe('normalizeOutputPath', () => {
+  it('canonicalises the spellings the backend can emit for one file', () => {
+    expect(normalizeOutputPath('  ./docs//notes.md  ')).toBe('docs/notes.md')
+    expect(normalizeOutputPath('docs/./notes.md')).toBe('docs/notes.md')
+    expect(normalizeOutputPath('docs/notes.md/')).toBe('docs/notes.md')
+    expect(normalizeOutputPath('/abs/docs/notes.md')).toBe('/abs/docs/notes.md')
+    expect(normalizeOutputPath('')).toBe('')
+  })
+})
+
+describe('outputActionTag', () => {
+  it('maps the action values the backend emits onto short tags', () => {
+    expect(outputActionTag('created')).toBe('new')
+    expect(outputActionTag('generated')).toBe('new')
+    expect(outputActionTag('written')).toBe('edited')
+    expect(outputActionTag('edited')).toBe('edited')
+    expect(outputActionTag('surfaced')).toBe('shown')
+    expect(outputActionTag('touched')).toBe('touched')
+  })
+
+  it('falls back rather than inventing a label', () => {
+    expect(outputActionTag(undefined)).toBe('touched')
+    expect(outputActionTag('')).toBe('touched')
+    expect(outputActionTag('renamed')).toBe('renamed')
   })
 })
 

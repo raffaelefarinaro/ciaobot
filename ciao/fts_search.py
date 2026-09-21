@@ -884,16 +884,48 @@ def _redact_secrets(line: str) -> str:
     return _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[redacted]", line)
 
 
+# Function words carry no lexical signal, and inside this function they are
+# actively harmful. The terms below do not decide WHICH note is expanded — the
+# index already did that — they decide which LINES of it come back, and a line
+# is admitted if it contains any one term. A query phrased as a sentence
+# therefore anchored a window on whatever block happened to contain "for" or
+# "the": "penalty percentage for late payment" pulled back an Access block
+# holding a door code, which is neither purpose-driven nor bounded by anything
+# the caller asked for. Only words >= 3 characters are candidates at all, so the
+# list only needs the longer function words.
+_EXPAND_STOPWORDS = frozenset(
+    {
+        "about", "after", "again", "all", "and", "any", "are", "before", "being",
+        "but", "can", "did", "does", "doing", "done", "for", "from", "had", "has",
+        "have", "her", "here", "hers", "him", "his", "how", "its", "into", "just",
+        "many", "may", "might", "more", "most", "much", "must", "not", "now",
+        "off", "one", "only", "our", "ours", "out", "over", "own", "same",
+        "should", "since", "some", "still", "such", "than", "that", "the",
+        "their", "them", "then", "there", "these", "they", "this", "those",
+        "through", "too", "under", "until", "very", "was", "were", "what",
+        "when", "where", "which", "while", "who", "whom", "whose", "why",
+        "will", "with", "would", "you", "your", "yours",
+    }
+)
+
+
 def _expand_terms(query: str) -> list[str]:
     """Lexical stems used to locate the lines worth expanding around.
 
     A light singular stem, not the Porter stemmer FTS5 indexes with: this only
     has to find the line the snippet came from inside one already-matched note,
     and a lenient match costs at most one extra bounded window.
+
+    Function words are dropped (see ``_EXPAND_STOPWORDS``). A query with nothing
+    else left returns no terms at all, which is the honest answer: the caller
+    gets the ``no_line_match`` fallback — one block, flagged as context rather
+    than evidence — instead of a window chosen by the word "the".
     """
     terms: list[str] = []
     for word in re.findall(r"\w+", query.casefold()):
         if len(word) < 3 and not word.isdigit():
+            continue
+        if word in _EXPAND_STOPWORDS:
             continue
         stem = word[:-1] if len(word) >= 5 and word.endswith("s") else word
         if stem not in terms:

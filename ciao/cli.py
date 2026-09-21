@@ -454,6 +454,7 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
 # Shared with the startup-sync repair path so a workspace created here and a
 # workspace repaired there ignore exactly the same paths (see git_sync).
 from ciao.git_sync import WORKSPACE_GITIGNORE_ENTRIES as _WORKSPACE_GITIGNORE_ENTRIES
+from ciao.workspace_guide import guide_path
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
@@ -697,7 +698,8 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    if not confirm_repoint:
+    write_launchd = sys.platform == "darwin" or launch_agents_dir is not None
+    if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
             "true",
@@ -787,12 +789,14 @@ def setup_workspace(
         ("CIAO_VAULT_ROOT", vault_value),
         ("CIAO_VAULT_MODE", vault_mode),
         ("CIAO_RUNTIME_ROOT", ".runtime"),
+        ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
         env_path.write_text(
             "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
             encoding="utf-8",
         )
+        env_path.chmod(0o600)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -883,7 +887,7 @@ def setup_workspace(
     # the Workspace Health checks warning-free on a fresh or adopted setup.
     from ciao.config import agent_roots_for
     from ciao.sync_skills import (
-        _ensure_linked_workspace_guides,
+        _ensure_workspace_guide,
         _install_stock_agents,
         _seed_stock_commands,
         sync_workspace_skills,
@@ -904,7 +908,7 @@ def setup_workspace(
         _seed_stock_commands(asset_root)
         written.append(asset_root / "commands")
         written.extend(_copy_tree_if_missing(stock_workspace, asset_root))
-        _ensure_linked_workspace_guides(asset_root)
+        _ensure_workspace_guide(asset_root)
         # Build the generated catalogs too, so setup leaves a HEALTHY install
         # rather than one that only becomes healthy after its first boot. Without
         # this a brand-new install showed nine Workspace Health warnings and an
@@ -1062,20 +1066,20 @@ def setup_workspace(
     # launch. It used to be created as a side effect of writing the launcher
     # bundle, which no longer exists.
     _ensure_setup_token(root)
-    written.append(_write_launchd_plist(
-        workspace=root,
-        launch_agents_dir=launch_dir,
-        engine_path=resolved_engine,
-        runtime_root=runtime_root,
-        port=port,
-        path=os.environ.get("PATH", ""),
-        plist_name="com.ciao.server.plist",
-        confirm_repoint=confirm_repoint,
-    ))
-    # Existing installs may still carry the launcher bundle and its agent from
-    # a previous version; remove them rather than leaving orphans behind.
-    _remove_legacy_app_shortcuts(app_root_dir)
-    _disable_legacy_menubar_agent(launch_dir)
+    if write_launchd:
+        written.append(_write_launchd_plist(
+            workspace=root,
+            launch_agents_dir=launch_dir,
+            engine_path=resolved_engine,
+            runtime_root=runtime_root,
+            port=port,
+            path=os.environ.get("PATH", ""),
+            plist_name="com.ciao.server.plist",
+            confirm_repoint=confirm_repoint,
+        ))
+        # Explicit --launch-agents-dir also permits offline plist generation.
+        _remove_legacy_app_shortcuts(app_root_dir)
+        _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1120,6 +1124,15 @@ def _plist_workspace(launch_agents_dir: Path) -> Path | None:
 
 def _setup_command(args: argparse.Namespace) -> int:
     root = Path(args.workspace).expanduser().resolve()
+    if args.load_launchd and sys.platform != "darwin":
+        print(
+            "Error: --load-launchd requires macOS. On Linux use `ciao linux-service`.",
+            file=sys.stderr,
+        )
+        return 2
+    launch_dir = args.launch_agents_dir
+    if launch_dir is None and sys.platform == "darwin":
+        launch_dir = default_launch_agents_dir()
 
     # Guard against the two ways `ciao setup` silently hijacks the workspace:
     # running it inside the source checkout, or re-pointing an already
@@ -1147,7 +1160,7 @@ def _setup_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        existing = _plist_workspace(Path(args.launch_agents_dir))
+        existing = _plist_workspace(Path(launch_dir)) if launch_dir is not None else None
         if existing is not None and existing != root:
             allow_env = os.environ.get(
                 "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
@@ -1195,8 +1208,11 @@ def _setup_command(args: argparse.Namespace) -> int:
         )
     # One agent now: setup deletes the retired com.ciao.menubar plist rather
     # than writing it, so there is nothing else here to load.
-    server_plist = Path(args.launch_agents_dir).expanduser() / "com.ciao.server.plist"
-    plists = [server_plist] if server_plist.is_file() else []
+    server_plist = (
+        Path(launch_dir).expanduser() / "com.ciao.server.plist"
+        if launch_dir is not None else None
+    )
+    plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -1217,11 +1233,16 @@ def _setup_command(args: argparse.Namespace) -> int:
                 ["launchctl", "load", "-w", str(plist)],
                 check=False,
             ).returncode or rc
-        _print_setup_summary(root, args.port)
+        _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
     for plist in plists:
         print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
-    _print_setup_summary(root, args.port)
+    if sys.platform.startswith("linux") and not plists:
+        print(
+            "Workspace ready. Run `ciao run` from the workspace, or use "
+            "`ciao linux-service` to render a systemd unit."
+        )
+    _print_setup_summary(root, _pwa_port_from_env(root, args.port))
     return 0
 
 
@@ -2804,15 +2825,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
 
     Removing a proposal is a review decision, never a memory write: promotion
     into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
-    the workspace CLAUDE.md first, then this dismiss removes the resolved item
+    the workspace guide first, then this dismiss removes the resolved item
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
+    from ciao import proposal_actions
     from ciao import proposal_outcomes
     from ciao.memory_proposals import (
         find_proposal_matches,
-        record_dismissal,
-        record_promotion,
         remove_proposal_by_substring,
     )
 
@@ -2948,17 +2968,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         )
         return 1
     kind, removed_text = removed
-    # Preserve what was decided, not just that something was: append-time
-    # dedupe consults this history, so without it the next curator pass that
-    # re-reads the same transcript re-files the fact the user just rejected.
-    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
-    # under `dismissed_at` used to make `was_promoted()` false for anything
-    # the agent filed itself, and hid it from the review page's History tab
-    # as an accepted row.
-    if args.promoted:
-        record_promotion(path, text=removed_text, kind=kind, via="agent")
-    else:
-        record_dismissal(path, text=removed_text, kind=kind, via="agent")
     # Pin the outcome log to the same .runtime the server uses before
     # recording: a CLI run from an arbitrary cwd must not scatter events into
     # a .runtime beside the shell. Precedence: explicit --runtime-root, then
@@ -2970,19 +2979,31 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             or workspace / ".runtime"
         )
     )
-    # The curator files a fact first and dismisses second, so that flow is a
-    # PROMOTION; only a bare rejection is a dismissal. The logical workspace
-    # name rides in CIAO_ACTIVE_WORKSPACE on scheduled runs (same convention
-    # as os-audit --workspace-name); a manual run without it lands in the
-    # shared bucket rather than recording a filesystem path as a name.
-    # Rehome rows are vault-hygiene decisions, not extraction outcomes.
-    if proposal_outcomes.is_extraction_kind(kind):
-        proposal_outcomes.record(
-            kind=kind,
-            action="promoted" if args.promoted else "dismissed",
-            workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
-            via="agent",
-        )
+    # One handler for both ledgers, shared with the PWA's accept/dismiss
+    # routes (`ciao/proposal_actions.py`). Preserve what was decided, not just
+    # that something was: append-time dedupe consults the decision history, so
+    # without it the next curator pass that re-reads the same transcript
+    # re-files the fact the user just rejected.
+    #
+    # A curator-promoted fact is a PROMOTION, not a dismissal: recording it
+    # under `dismissed_at` used to make `was_promoted()` false for anything
+    # the agent filed itself, and hid it from the review page's History tab
+    # as an accepted row. The curator files a fact first and dismisses second,
+    # so that flow is a promotion; only a bare rejection is a dismissal.
+    #
+    # The logical workspace name rides in CIAO_ACTIVE_WORKSPACE on scheduled
+    # runs (same convention as os-audit --workspace-name); a manual run
+    # without it lands in the shared bucket rather than recording a filesystem
+    # path as a name. Rehome rows are vault-hygiene decisions, not extraction
+    # outcomes, and the handler keeps them out of the tally.
+    proposal_actions.record_decision(
+        path,
+        action="accept" if args.promoted else "dismiss",
+        text=removed_text,
+        kind=kind,
+        via="agent",
+        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+    )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
         # dismissed by a disambiguating fragment (`(from: Alpha)`), and handing
@@ -3146,7 +3167,11 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
         "--guide",
         type=Path,
         default=None,
-        help="Workspace CLAUDE.md holding the bounded regions. Defaults to <workspace>/CLAUDE.md.",
+        help=(
+            "Workspace guide holding the bounded regions. Defaults to the "
+            "workspace's AGENTS.md, or a legacy CLAUDE.md on an install that "
+            "has not run the guide migration."
+        ),
     )
     parser.add_argument(
         "--max-items",
@@ -3167,7 +3192,7 @@ def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any]:
     from ciao.curation_run import RunBudget
 
     workspace, vault = _resolve_workspace_and_vault(args)
-    guide = Path(args.guide).expanduser().resolve() if args.guide else workspace / "CLAUDE.md"
+    guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
@@ -3654,6 +3679,20 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=bool(args.as_json))
 
 
+def _linux_service_command(args: argparse.Namespace) -> int:
+    from ciao.linux_service import render_service
+
+    try:
+        unit = render_service(
+            workspace=args.workspace, user=args.user, home=args.home, python=args.python,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(unit, end="")
+    return 0
+
+
 def _desktop_command(args: argparse.Namespace) -> int:
     from ciao import desktop_install
 
@@ -3762,6 +3801,24 @@ def build_parser() -> argparse.ArgumentParser:
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
 
+    linux_service_parser = subparsers.add_parser(
+        "linux-service",
+        help="Print a systemd service unit for a Linux host (does not install it).",
+    )
+    linux_service_parser.add_argument("--workspace", type=Path, required=True)
+    linux_service_parser.add_argument(
+        "--user", required=True, help="Unprivileged Linux service account.",
+    )
+    linux_service_parser.add_argument(
+        "--home", type=Path, required=True,
+        help="Service account home (provider credentials live here).",
+    )
+    linux_service_parser.add_argument(
+        "--python", type=Path, default=Path(sys.executable),
+        help="Absolute path to the installed virtualenv Python.",
+    )
+    linux_service_parser.set_defaults(func=_linux_service_command)
+
     setup_parser = subparsers.add_parser(
         "setup",
         help="Scaffold a local Ciaobot workspace from packaged stock assets.",
@@ -3809,13 +3866,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=8443,
-        help="Localhost port used by the LaunchAgent and app shortcut.",
+        help="Server port to record in a new workspace configuration.",
     )
     setup_parser.add_argument(
         "--launch-agents-dir",
         type=Path,
-        default=default_launch_agents_dir(),
-        help="Directory where com.ciao.server.plist is written.",
+        default=None,
+        help="Directory for an explicit launchd plist export (generated by default only on macOS).",
     )
     setup_parser.add_argument(
         "--app-dir",
@@ -4360,7 +4417,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit bounded memory for rot (events stored as state, dead paths).",
         description=(
             "Reads the ciao:memory and ciao:profile regions of the workspace "
-            "CLAUDE.md and reports entries that record a chat event instead of "
+            "guide and reports entries that record a chat event instead of "
             "current state, entries citing a path that no longer exists, and "
             "subjects carrying more than one value. With --with-vault, also "
             "reports vault notes whose facts have gone unverified past their "

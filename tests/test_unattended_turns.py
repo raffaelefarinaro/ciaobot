@@ -17,7 +17,7 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
 from tests.conftest import attach_stub_mcp
-from ciao.web.routes_api import _extract_assistant_blocks, _failed_tool_use_ids
+from ciao.web.transcript_service import _extract_assistant_blocks, _failed_tool_use_ids
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:

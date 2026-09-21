@@ -154,16 +154,16 @@ def test_env_example_is_exported_but_real_dotenv_files_are_forbidden(tmp_path: P
     assert ".env.example" not in flagged
 
 
-def test_export_public_tree_uses_generic_claude_overlay(tmp_path: Path) -> None:
+def test_export_public_tree_uses_the_generic_guide_overlay(tmp_path: Path) -> None:
     source = tmp_path / "source"
     dest = tmp_path / "dest"
-    _write(source / "CLAUDE.md", "PrivateCo assistant prompt\n")
-    _write(source / "ciao" / "stock" / "public" / "CLAUDE.md", "Generic public contributor prompt\n")
+    _write(source / "AGENTS.md", "PrivateCo assistant prompt\n")
+    _write(source / "ciao" / "stock" / "public" / "AGENTS.md", "Generic public contributor prompt\n")
 
     copied = export_public_tree(source, dest)
 
-    assert "CLAUDE.md" in copied
-    assert (dest / "CLAUDE.md").read_text(encoding="utf-8") == "Generic public contributor prompt\n"
+    assert "AGENTS.md" in copied
+    assert (dest / "AGENTS.md").read_text(encoding="utf-8") == "Generic public contributor prompt\n"
 
 
 def test_export_public_tree_refuses_non_empty_destination(tmp_path: Path) -> None:

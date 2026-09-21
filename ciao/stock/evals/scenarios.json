@@ -106,6 +106,71 @@
       }
     },
     {
+      "id": "recall-negated-claim-expansion",
+      "category": "recall",
+      "title": "A snippet that keeps a claim and drops its denial is widened, not trusted",
+      "prompt": "Do my EU contractors need a work visa for the Zurich office?",
+      "regions": {
+        "memory": ["Contractors are onboarded through the Zurich office. [2026-02-04]"],
+        "profile": ["Operator runs a contracting practice."]
+      },
+      "retrieved": [
+        {
+          "path": "projects/Onboarding.md",
+          "snippet": "Contractors from the EU need a work visa for the Zurich office. …[snippet truncated at the 32-token budget]",
+          "workspace": "personal",
+          "truncated": "true"
+        },
+        {
+          "path": "projects/Onboarding.md",
+          "snippet": "vault_expand(path=projects/Onboarding.md, reason=matched) → section 'Visas': Contractors from the EU need a work visa for the Zurich office. That stopped being true after the 2026-03 bilateral update: no permit is required for them any more.",
+          "workspace": "personal",
+          "expansion": "true"
+        }
+      ],
+      "expect": {
+        "answer_facts": ["no permit is required"],
+        "current_fact": "no permit is required",
+        "superseded_fact": "need a work visa",
+        "tools": ["vault_search", "vault_expand"],
+        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "writes": [],
+        "writes_forbidden": true,
+        "unsupported_facts": ["8891", "safe combination", "residence permit", "90 days"]
+      }
+    },
+    {
+      "id": "abstention-expansion-without-evidence",
+      "category": "abstention",
+      "title": "A no_line_match drill-down is a signal to abstain, not a paragraph to answer from",
+      "prompt": "What late-payment penalty percentage did I agree with Northwind?",
+      "regions": {
+        "memory": ["Northwind is a retainer client since 2025. [2026-01-10]"],
+        "profile": ["Operator works in EUR."]
+      },
+      "retrieved": [
+        {
+          "path": "projects/Northwind.md",
+          "snippet": "The Northwind retainer rate is 120 per hour.",
+          "workspace": "personal"
+        },
+        {
+          "path": "projects/Northwind.md",
+          "snippet": "vault_expand(path=projects/Northwind.md, reason=no_line_match) → no line of this note matches the query; the block below is context, not evidence: section 'Billing': The Northwind retainer rate is 120 per hour.",
+          "workspace": "personal",
+          "expansion": "true"
+        }
+      ],
+      "expect": {
+        "must_abstain": true,
+        "tools": ["vault_search", "vault_expand"],
+        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "writes": [],
+        "writes_forbidden": true,
+        "unsupported_facts": ["120 percent", "5%", "10%", "2 percent", "no penalty applies"]
+      }
+    },
+    {
       "id": "abstention-unknown-topic",
       "category": "abstention",
       "title": "An unknown topic returns no answer and no write",

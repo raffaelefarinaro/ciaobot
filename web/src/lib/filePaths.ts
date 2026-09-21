@@ -131,11 +131,12 @@ export function isPlausibleFilePath(filePath: string): boolean {
 type KnownPathRule = { match: string; path: string; basenameOnly: boolean }
 
 /** Build longest-first literal match rules from agent-touched file paths. */
-export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
-  const deduped = [...new Set(
+function computeKnownPathRules(knownPaths: string[]): KnownPathRule[] {
+  const dedupedSet = new Set(
     knownPaths.map(p => p.trim()).filter(p => p && isPlausibleFilePath(p)),
-  )]
-  if (!deduped.length) return []
+  )
+  if (!dedupedSet.size) return []
+  const deduped = [...dedupedSet]
 
   const basenameOwners = new Map<string, string>()
   for (const p of deduped) {
@@ -152,13 +153,45 @@ export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
   }
   for (const [base, p] of basenameOwners) {
     if (!p) continue
-    // Skip basename rule when it duplicates a full-path rule entry.
-    if (deduped.includes(base)) continue
+    // Skip basename rule when it duplicates a full-path rule entry. Set
+    // membership, not Array.includes: this loop runs once per distinct
+    // basename, and a linear scan per iteration made rule-building
+    // quadratic in the number of touched files (issue #501).
+    if (dedupedSet.has(base)) continue
     // Never linkify bare words like "There" even if a bad _filecard exists.
     if (!isPlausibleFilePath(base)) continue
     rules.push({ match: base, path: p, basenameOnly: true })
   }
   rules.sort((a, b) => b.match.length - a.match.length)
+  return rules
+}
+
+// Rules are derived purely from the path list, and the whole transcript
+// renders against one list, so building them once per list instead of once
+// per text span is the difference between linear and quadratic growth in a
+// long chat: the list grows with the transcript and every message paid for a
+// full rebuild. Keyed on array identity — the caller (`ChatPanel`'s
+// `knownFilePaths`) is a computed that yields a fresh array whenever the set
+// changes, so a mutated-in-place array is the one shape this would not
+// notice; callers must hand over a new array rather than push into an old one.
+const rulesCache = new WeakMap<readonly string[], KnownPathRule[]>()
+
+// How many times the rules were actually computed rather than served from
+// the cache. Exported so `renderScaling.test.ts` can pin the work a render
+// does instead of timing it: a duration is machine- and load-dependent, this
+// number is not, and "one build per path list" is the whole invariant.
+let rulesBuildCount = 0
+
+export function knownPathRulesBuildCount(): number {
+  return rulesBuildCount
+}
+
+export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
+  const cached = rulesCache.get(knownPaths)
+  if (cached) return cached
+  rulesBuildCount++
+  const rules = computeKnownPathRules(knownPaths)
+  rulesCache.set(knownPaths, rules)
   return rules
 }
 
@@ -204,16 +237,15 @@ function knownPathMatches(text: string, rules: KnownPathRule[], taken: SpanMatch
   return out
 }
 
-function mergeMatches(text: string, knownPaths: string[]): SpanMatch[] {
+function mergeMatches(text: string, rules: KnownPathRule[]): SpanMatch[] {
   const regex = regexMatches(text)
-  const rules = buildKnownPathRules(knownPaths)
   const known = rules.length ? knownPathMatches(text, rules, regex) : []
   return [...regex, ...known].sort((a, b) => a.index - b.index || b.length - a.length)
 }
 
-function linkifySpan(text: string, knownPaths: string[] = [], escape: boolean): string {
+function linkifySpan(text: string, rules: KnownPathRule[], escape: boolean): string {
   if (!text) return ''
-  const matches = mergeMatches(text, knownPaths)
+  const matches = mergeMatches(text, rules)
   if (!matches.length) return escape ? escapeHtml(text) : text
 
   let out = ''
@@ -236,7 +268,7 @@ function linkifySpan(text: string, knownPaths: string[] = [], escape: boolean): 
  * Safe to feed into v-html: input is HTML-escaped before wrapping.
  */
 export function linkifyText(text: string, knownPaths: string[] = []): string {
-  return linkifySpan(text, knownPaths, true)
+  return linkifySpan(text, buildKnownPathRules(knownPaths), true)
 }
 
 /**
@@ -251,6 +283,8 @@ export function linkifyText(text: string, knownPaths: string[] = []): string {
  */
 export function linkifyHtml(html: string, knownPaths: string[] = []): string {
   if (!html) return ''
+  // One rule set for every span in this document, not one per span.
+  const rules = buildKnownPathRules(knownPaths)
   let out = ''
   let i = 0
   const lower = html.toLowerCase()
@@ -269,11 +303,11 @@ export function linkifyHtml(html: string, knownPaths: string[] = []): string {
     // Advance to the next tag boundary; linkify the text span we skip over.
     const nextTag = html.indexOf('<', i)
     if (nextTag === -1) {
-      out += linkifySpan(html.slice(i), knownPaths, false)
+      out += linkifySpan(html.slice(i), rules, false)
       break
     }
     if (nextTag > i) {
-      out += linkifySpan(html.slice(i, nextTag), knownPaths, false)
+      out += linkifySpan(html.slice(i, nextTag), rules, false)
     }
     // Copy the tag itself verbatim (both opening and closing tags).
     const tagEnd = html.indexOf('>', nextTag)

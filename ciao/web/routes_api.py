@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
@@ -58,12 +59,7 @@ from ciao.workspaces import (
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import login_shell_path, resolve_tool
-from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.opencode import (
-    OpencodeProvider,
-    _file_touches as _opencode_file_touches,
-    _summarize_tool_input as _summarize_opencode_tool_input,
-)
+from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
@@ -76,6 +72,7 @@ from ciao.schedules import (
     normalize_archive_policy,
     normalize_interval_minutes,
     publish_automations_changed,
+    run_failed_since,
     stamp_fallback_project,
     wall_clock_time_error,
     wall_clock_time_value_error,
@@ -83,7 +80,6 @@ from ciao.schedules import (
 )
 from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
-from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
     _build_graph,
@@ -93,7 +89,6 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
-from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import _ALLOWED_IMAGE_EXTENSIONS
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -110,6 +105,10 @@ from ciao.web import proposal_service
 # trimming, title derivation, scheduled-run grading), which ProjectChatManager
 # and these handlers share.
 from ciao.web import chat_service
+# And again for the transcript read path: everything that turns a provider's
+# stored messages into the rows the PWA renders. The handlers below keep the
+# query params, the pagination envelope and the part cache.
+from ciao.web import transcript_service
 
 logger = logging.getLogger(__name__)
 
@@ -137,22 +136,6 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
 
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
-
-_CONTEXT_BLOCK_RE = re.compile(
-    r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
-    re.DOTALL,
-)
-
-# `build_prompt()` in ciao/providers/base.py appends an image manifest block
-# (`[INCOMING IMAGES]\n1. filename.png\n2. other.jpg - caption: ...`) to the
-# user's text before sending to the Claude SDK, so the SDK has filenames and
-# captions alongside the native image blocks. The SDK persists that text
-# verbatim in the session file. On replay we re-emit the images separately
-# from `chat.user_turn_images`, so the manifest is redundant in the UI and
-# shows up as literal text in the user bubble. Strip it here.
-_IMAGE_MANIFEST_RE = re.compile(
-    r"\n{0,2}\[INCOMING IMAGES\]\n(?:\d+\. [^\n]*(?:\n|$))+\s*$",
-)
 
 # Provider API keys editable from Settings. Empty: every provider authenticates
 # through its own CLI (`ciao auth <provider>`), so there is no key to type here.
@@ -218,642 +201,6 @@ def _workspace_provider_options(config) -> list[dict[str, str]]:
 
 def _workspace_provider_values(config) -> set[str]:
     return workspace_provider_values(config)
-
-
-def _extract_text_content(raw: object) -> str:
-    content = ""
-    if isinstance(raw, dict):
-        content_blocks = raw.get("content", "")
-        if isinstance(content_blocks, str):
-            content = content_blocks
-        elif isinstance(content_blocks, list):
-            parts = []
-            for block in content_blocks:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    parts.append(block)
-            content = "\n".join(parts)
-    return content
-
-
-def _extract_inline_images(raw: object) -> list[str]:
-    """Extract inline base64 images from SDK message content blocks.
-
-    Returns a list of data URIs (``data:<mime>;base64,<data>``).
-    """
-    images: list[str] = []
-    if not isinstance(raw, dict):
-        return images
-    content_blocks = raw.get("content", "")
-    if not isinstance(content_blocks, list):
-        return images
-    for block in content_blocks:
-        if not isinstance(block, dict) or block.get("type") != "image":
-            continue
-        source = block.get("source", {})
-        if source.get("type") == "base64":
-            media_type = source.get("media_type", "image/jpeg")
-            data = source.get("data", "")
-            if data:
-                images.append(f"data:{media_type};base64,{data}")
-    return images
-
-
-_TOOL_ICONS = {
-    "Read": "\U0001F4D6",
-    "Edit": "\u270F\uFE0F",
-    "Write": "\U0001F4DD",
-    "Bash": "$",
-    "Grep": "\U0001F50D",
-    "Glob": "\U0001F4C2",
-    "Agent": "\U0001F916",
-    "Skill": "\u26A1",
-    "WebSearch": "\U0001F310",
-    "WebFetch": "\U0001F310",
-    "TaskCreate": "\u2611\uFE0F",
-    "TaskUpdate": "\u2611\uFE0F",
-    "grep_search": "\U0001F50D",
-    "view_file": "\U0001F4D6",
-    "run_command": "$",
-    "list_dir": "\U0001F4C2",
-    "exec_command": "$",
-}
-
-
-def _tool_icon(name: str) -> str:
-    return _TOOL_ICONS.get(name, "\u2699\uFE0F")
-
-
-# Tools whose failure invalidates their file card. A refused or errored `Write`
-# either wrote the file or did not run at all; a failed `file_surface` did not
-# select an artifact. A `Bash` non-zero exit says no such thing — `printf x > f
-# && exit 1` leaves the file behind — so its card stands, or history would hide
-# a file the agent really created.
-_FAILURE_DROPS_FILE_CARD_TOOLS = frozenset({
-    "Write",
-    "Edit",
-    "MultiEdit",
-    "NotebookEdit",
-    "mcp__ciaobot__file_surface",
-})
-
-
-def _touches_survive_failure(tool_name: str) -> bool:
-    """Whether a failed call's file cards should still render."""
-    return tool_name not in _FAILURE_DROPS_FILE_CARD_TOOLS
-
-
-def _failed_tool_use_ids(msgs: list) -> set[str]:
-    """Tool-call ids whose ``tool_result`` came back as an error.
-
-    A denied or failed ``Write``/``Edit`` never touched the file, but the file
-    card is emitted from the *request*, so history would show an Outputs chip
-    for a file that was never created (this is what made a permission-denied
-    `skills-monitor.md` look written). Results live on the following user
-    message, so they can only be matched in a pre-pass over the whole session.
-
-    Which ids actually suppress a card is decided per tool — see
-    ``_touches_survive_failure``.
-    """
-    failed: set[str] = set()
-    for m in msgs:
-        # Both SDK objects and raw JSONL dicts flow through here (the subagent
-        # renderer accepts either).
-        mtype = m.get("type") if isinstance(m, dict) else getattr(m, "type", None)
-        if mtype != "user":
-            continue
-        message = m.get("message") if isinstance(m, dict) else getattr(m, "message", None)
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
-                continue
-            failed_result = bool(block.get("is_error"))
-            content = block.get("content")
-            if not failed_result and isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except (TypeError, ValueError):
-                    content = None
-            if (
-                not failed_result
-                and isinstance(content, dict)
-                and content.get("ok") is False
-            ):
-                # MCP tools return structured envelopes. Claude records these
-                # as a successful transport-level tool_result even when the
-                # application operation failed, e.g. file_surface returning
-                # {"ok": false, "error": ...}.
-                failed_result = True
-            if failed_result and block.get("tool_use_id"):
-                failed.add(str(block["tool_use_id"]))
-    return failed
-
-
-def _extract_assistant_blocks(
-    raw: object,
-    workspace_root: Path | None = None,
-) -> list[dict]:
-    """Return ordered text/tool_use blocks for an assistant message.
-
-    Items: {"kind": "text", "text": str},
-           {"kind": "thinking", "text": str}, or
-           {"kind": "tool_use", "name": str, "summary": str,
-            "file_touch": {file_path, action} | None}.
-    ``file_touch`` is populated when the tool mutates a file on disk so the
-    PWA can render an inline file card on reload instead of the generic
-    activity row. ``thinking`` mirrors the live stream's ThinkingEvent so
-    reasoning is tagged as reasoning on reload instead of being dropped or
-    (for providers that persist reasoning as a text block) promoted into the
-    final answer bubble.
-    """
-    items: list[dict] = []
-    if not isinstance(raw, dict):
-        return items
-    content_blocks = raw.get("content", "")
-    if isinstance(content_blocks, str):
-        if content_blocks.strip():
-            items.append({"kind": "text", "text": content_blocks})
-        return items
-    if not isinstance(content_blocks, list):
-        return items
-    for block in content_blocks:
-        if isinstance(block, str):
-            if block.strip():
-                items.append({"kind": "text", "text": block})
-            continue
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            text = block.get("text", "")
-            if text.strip():
-                items.append({"kind": "text", "text": text})
-        elif btype in ("thinking", "redacted_thinking"):
-            # Extended-thinking / reasoning blocks. Anthropic stores these as
-            # {"type": "thinking", "thinking": "..."}; the redacted variant is
-            # encrypted and carries no readable text (skip it). Surfacing them
-            # as their own kind lets the history renderer tag them `_thinking`
-            # — matching the live path — so reasoning stays collapsed in the
-            # Activity trace instead of rendering as a normal answer bubble.
-            thought = block.get("thinking") or block.get("text") or ""
-            if isinstance(thought, str) and thought.strip():
-                items.append({"kind": "thinking", "text": thought})
-        elif btype == "tool_use":
-            name = block.get("name", "")
-            tinput = block.get("input") or {}
-            if not isinstance(tinput, dict):
-                tinput = {}
-            summary = _summarize_tool_input(name, tinput)
-            touches = normalize_file_touch_paths(
-                extract_file_touches(name, tinput),
-                workspace_root,
-            )
-            entry = {"kind": "tool_use", "name": name, "summary": summary}
-            # Kept so the history builder can match this call against its
-            # tool_result and drop the file card when the call failed.
-            if block.get("id"):
-                entry["id"] = str(block["id"])
-            if touches:
-                entry["file_touch"] = touches[0]
-                if len(touches) > 1:
-                    entry["file_touches"] = touches
-            items.append(entry)
-    return items
-
-
-def _strip_legacy_context_prefix(content: str) -> str:
-    lines = content.splitlines()
-    idx = 0
-    seen_context = False
-
-    while idx < len(lines):
-        line = lines[idx]
-        if not line.strip():
-            if seen_context:
-                remainder = "\n".join(lines[idx + 1 :]).strip()
-                return remainder or content
-            idx += 1
-            continue
-        if line.startswith("[CONTEXT: ") or line.startswith("[Project context: ") or line.startswith('[Project: "') or line.startswith('[Chat: "'):
-            seen_context = True
-            idx += 1
-            continue
-        if line.startswith("[PWA interface: "):
-            seen_context = True
-            idx += 1
-            while idx < len(lines):
-                if lines[idx].endswith("space.]"):
-                    idx += 1
-                    break
-                idx += 1
-            continue
-        break
-
-    if seen_context:
-        while idx < len(lines) and not lines[idx].strip():
-            idx += 1
-        remainder = "\n".join(lines[idx:]).strip()
-        return remainder or content
-
-    return content
-
-
-def _strip_image_manifest(content: str) -> str:
-    stripped = _IMAGE_MANIFEST_RE.sub("", content)
-    return stripped if stripped else content
-
-
-def _strip_injected_context(content: str) -> str:
-    # A continuation / handover turn can stack two [CIAO_CONTEXT_BEGIN] blocks
-    # (e.g. stable context + today). Strip them all, not just the first one.
-    stripped = content
-    while True:
-        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
-        if nxt == stripped:
-            break
-        stripped = nxt
-    if stripped != content:
-        return _strip_image_manifest(stripped).strip() or content
-    legacy = _strip_legacy_context_prefix(content)
-    legacy = _strip_image_manifest(legacy)
-    return legacy.strip() or content
-
-
-# Slash commands the Claude Agent SDK injects as user turns when the PWA
-# changes model or mode mid-session (via ClaudeSDKClient.set_model /
-# set_permission_mode). They end up in the session JSONL and would otherwise
-# render as user bubbles the user didn't type. The assistant acknowledgement
-# ("Set model to ..." / "Set mode to ...") gets collapsed into a single
-# system bubble in _classify_control_ack below.
-_CONTROL_SLASH_PREFIXES = ("/model", "/mode")
-
-
-def _is_control_slash_command(content: str) -> bool:
-    head = content.strip().split(None, 1)[0] if content.strip() else ""
-    return head in _CONTROL_SLASH_PREFIXES
-
-
-# Sentinel that the Claude Code CLI writes into the session JSONL when a turn
-# is interrupted (steer/queue mid-stream) or hits an empty rate-limit error.
-# It's the `UXH` constant in claude_agent_sdk/_bundled/claude. Claude Code's
-# own UI hides these (`case UXH: return null`); we mirror that here so reloads
-# don't render a literal "No response requested." bubble after every interrupt.
-_NO_RESPONSE_SENTINEL = "No response requested."
-
-# Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
-# ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
-# just the bare form. Steer/queue interrupts an in-flight tool call produce
-# "[Request interrupted by user for tool use]" — without this wildcard that
-# variant survives as a synthetic user record and renders as a quoted bubble
-# that looks like an error reply to a question.
-_INTERRUPTED_REQUEST_RE = re.compile(
-    r"\[Request interrupted by user[^\]]*\]"
-)
-
-
-def _is_no_response_sentinel(text: str) -> bool:
-    return text.strip() == _NO_RESPONSE_SENTINEL
-
-
-def _is_interrupted_request_sentinel(text: str) -> bool:
-    return bool(_INTERRUPTED_REQUEST_RE.fullmatch(text.strip()))
-
-
-def _classify_control_ack(text: str) -> str | None:
-    """Return a user-facing label if `text` is an SDK control ack, else None."""
-    t = text.strip()
-    if t.startswith("Set model to "):
-        return f"\U0001F504 {t}"  # 🔄
-    if t.startswith("Set mode to "):
-        return f"\U0001F504 {t}"
-    return None
-
-
-# CLI-internal user-message envelopes. The Claude Code CLI synthesizes
-# user-role messages wrapped in these XML tags to feed the parent agent
-# subagent completion, bash output, slash-command invocations, etc. They
-# are NOT from the human; they're the CLI talking to its own model. The
-# tag names come from the constant table in
-# claude_agent_sdk/_bundled/claude (IO="task-notification",
-# EtH="bash-input", WV="command-name", and so on).
-#
-# Without this filter the envelopes leak into chat history as user bubbles:
-# the browser strips the unknown tags and lays out only the inner text,
-# producing the "task_id  toolu_id  /tmp/.../output completed\nAgent ..."
-# blocks visible in chats with parallel subagents.
-_CLI_ENVELOPE_TAGS = (
-    "task-notification",
-    "bash-input",
-    "bash-stdout",
-    "bash-stderr",
-    "bash-exit-code",
-    "local-command-stdout",
-    "local-command-stderr",
-    "local-command-caveat",
-    "command-name",
-    "command-message",
-    "command-args",
-    "remote-review",
-    "remote-review-progress",
-    "teammate-message",
-    "cross-session-message",
-    "fork-boilerplate",
-)
-
-_CLI_ENVELOPE_RE = re.compile(
-    r"^\s*<(?:" + "|".join(re.escape(t) for t in _CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
-)
-
-_TASK_NOTIFICATION_RE = re.compile(
-    r"^\s*<task-notification>(.*)</task-notification>\s*$",
-    re.DOTALL,
-)
-
-# Pulls <tag>content</tag> pairs out of a task-notification body. Names match
-# the schema fields the CLI emits (task-id, tool-use-id, output-file, status,
-# summary, plus an optional task-type).
-_INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
-
-# The subagent's own final message often self-reports its sign-off ("Agent
-# "X" completed", "...finished", "...done", ...) rather than a fixed CLI
-# string, so the "already shaped, pass through as-is" check has to tolerate
-# whatever terminal-status verb the model picked instead of matching only
-# "completed" — otherwise it doubles up with the generic wrapper below (e.g.
-# "Subagent completed: Agent "X" finished").
-_AGENT_SELF_STATUS_RE = re.compile(
-    r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
-)
-
-
-def _is_cli_internal_envelope(content: str) -> bool:
-    """True if `content` starts with a CLI-synthesized user-message wrapper."""
-    return bool(_CLI_ENVELOPE_RE.match(content))
-
-
-# Stands in for the injected subagent-synthesis nudge in the transcript. Same
-# icon as the subagent-completion lines above so the pair reads as one story.
-_SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a consolidated report"
-
-
-def _summarize_task_notification(content: str) -> str | None:
-    """Render a <task-notification> envelope as a one-line system bubble.
-
-    Returns None if `content` isn't a task-notification. The CLI emits this
-    XML as a user-role message after a Task subagent finishes. We surface it
-    as a system status bubble so the user retains visibility into subagent
-    completions without seeing the raw envelope.
-    """
-    m = _TASK_NOTIFICATION_RE.match(content)
-    if not m:
-        return None
-    fields = {tag: text.strip() for tag, text in _INNER_TAG_RE.findall(m.group(1))}
-    status = fields.get("status", "completed")
-    summary = fields.get("summary", "")
-    first_line = summary.splitlines()[0].strip() if summary else ""
-    icon = "\U0001F916"  # 🤖
-    if _AGENT_SELF_STATUS_RE.match(first_line):
-        # Already shaped like 'Agent "X" completed'; pass it through.
-        return f"{icon} {first_line}"
-    if first_line:
-        # Trim aggressively so the bubble stays one line; full output lives in
-        # the subagent transcript fetchable via /api/chats/{id}/subagents.
-        snippet = first_line if len(first_line) <= 120 else first_line[:117] + "..."
-        return f"{icon} Subagent {status}: {snippet}"
-    return f"{icon} Subagent {status}"
-
-
-def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
-    """Render SDK or JSONL message objects for the subagent transcript UI."""
-    rendered: list[dict] = []
-    # Materialised because the failed-tool pre-pass has to see the results,
-    # which arrive after the calls they belong to.
-    msgs = list(msgs)
-    failed_tool_ids = _failed_tool_use_ids(msgs)
-    for m in msgs:
-        mtype = getattr(m, "type", None)
-        message = getattr(m, "message", None)
-        if isinstance(m, dict):
-            mtype = m.get("type", mtype)
-            message = m.get("message", message)
-        if mtype == "assistant":
-            blocks = _extract_assistant_blocks(message)
-            blocks = [
-                b for b in blocks
-                if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
-            ]
-            if not blocks:
-                continue
-            pending_tools: list[str] = []
-
-            def flush_tools() -> None:
-                if pending_tools:
-                    rendered.append({
-                        "role": "system",
-                        "content": "\n".join(pending_tools),
-                        "tool_name": "_activity",
-                    })
-                    pending_tools.clear()
-
-            for blk in blocks:
-                if blk["kind"] == "tool_use":
-                    name = blk["name"] or "tool"
-                    summary = blk.get("summary") or ""
-                    touches = blk.get("file_touches")
-                    if not isinstance(touches, list) or not touches:
-                        touch = blk.get("file_touch")
-                        touches = [touch] if touch else []
-                    if (
-                        touches
-                        and blk.get("id") in failed_tool_ids
-                        and not _touches_survive_failure(name)
-                    ):
-                        # Denied or errored write: nothing reached disk, so
-                        # render a plain activity row instead of a file card
-                        # that implies the write happened.
-                        touches = []
-                    if touches:
-                        flush_tools()
-                        for touch in touches:
-                            if not isinstance(touch, dict) or not touch.get("file_path"):
-                                continue
-                            rendered.append({
-                                "role": "system",
-                                "tool_name": "_filecard",
-                                "content": touch["file_path"],
-                                "file_path": touch["file_path"],
-                                "action": touch.get("action") or "touched",
-                                "tool": name,
-                            })
-                        continue
-                    line = f"{_tool_icon(name)} {name}"
-                    if summary:
-                        line += f" {summary}"
-                    pending_tools.append(line)
-                elif blk["kind"] == "thinking":
-                    # Subagent reasoning is not surfaced in the transcript
-                    # panel (it was dropped before thinking blocks were
-                    # extracted; skip to keep that behavior).
-                    continue
-                else:
-                    flush_tools()
-                    text = blk["text"].strip()
-                    if text:
-                        rendered.append({"role": "assistant", "content": text})
-            flush_tools()
-            continue
-
-        content = _extract_text_content(message).strip()
-        if not content:
-            continue
-        if _is_no_response_sentinel(content):
-            continue
-        rendered.append({"role": str(mtype or "system"), "content": content})
-    return rendered
-
-
-def _local_session_jsonl_paths(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[Path]:
-    """Find local Claude Code JSONL files for ``session_id``."""
-    try:
-        from ciao.transcripts import (
-            _claude_projects_dir,
-            _global_session_matches,
-        )
-    except ImportError:
-        return []
-    paths: list[Path] = []
-    root = agent_root if agent_root is not None else workspace_root
-    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
-    if preferred.exists():
-        paths.append(preferred)
-    # When an agent root is supplied, the preferred path already scopes to
-    # that root's own projects dir, so a session under another root stays
-    # invisible (the re-rooting isolation). Without a root, keep the global
-    # scan so callers that supply nothing behave exactly as today.
-    if agent_root is not None:
-        return paths
-    # Sweep every cross-cwd match, not just the first: a session resumed or
-    # copied under another cwd can have subagent progress records spread
-    # across the files, and _local_subagent_transcripts reads them all. The
-    # listing is cached (transcripts._global_session_matches) so this costs
-    # one walk per TTL window, not one per poll — and a miss re-scans
-    # (rate-limited) so a session created mid-window is not missed.
-    try:
-        for path in _global_session_matches(session_id):
-            if path not in paths:
-                paths.append(path)
-    except OSError:
-        pass
-    return paths
-
-
-def _jsonl_message_from_entry(entry: dict) -> dict | None:
-    etype = entry.get("type")
-    message = entry.get("message")
-    if etype in {"assistant", "user"} and isinstance(message, dict):
-        return {"type": etype, "message": message}
-    if etype == "progress":
-        nested = entry.get("data", {}).get("message")
-        if isinstance(nested, dict):
-            ntype = nested.get("type")
-            nmessage = nested.get("message")
-            if ntype in {"assistant", "user"} and isinstance(nmessage, dict):
-                return {"type": ntype, "message": nmessage}
-    return None
-
-
-def _read_jsonl_messages(path: Path) -> list[dict]:
-    messages: list[dict] = []
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                msg = _jsonl_message_from_entry(entry)
-                if msg is not None:
-                    messages.append(msg)
-    except OSError:
-        return []
-    return messages
-
-
-def _local_subagent_transcripts(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[dict]:
-    """Fallback parser for nested subagent JSONL files and progress entries."""
-    projects_root = Path.home() / ".claude" / "projects"
-    grouped: dict[str, list[dict]] = {}
-
-    try:
-        # The projects dir holds one slug folder per cwd; a bare glob over
-        # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
-        # dirs the cached listing already knows, so a stale-slug pileup
-        # cannot turn this fallback into a multi-second scandir storm.
-        candidate_dirs = [
-            entry
-            for entry in projects_root.iterdir()
-            if entry.is_dir() and (entry / session_id / "subagents").is_dir()
-        ]
-    except OSError:
-        candidate_dirs = []
-    nested_paths: list[Path] = []
-    for entry in candidate_dirs:
-        subagents_dir = entry / session_id / "subagents"
-        try:
-            nested_paths.extend(sorted(subagents_dir.glob("*.jsonl")))
-        except OSError:
-            continue
-    for path in nested_paths:
-        msgs = _read_jsonl_messages(path)
-        if msgs:
-            grouped.setdefault(path.stem, []).extend(msgs)
-
-    for path in _local_session_jsonl_paths(session_id, workspace_root, agent_root=agent_root):
-        try:
-            with path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(entry, dict) or entry.get("type") != "progress":
-                        continue
-                    msg = _jsonl_message_from_entry(entry)
-                    if msg is None:
-                        continue
-                    data = entry.get("data", {})
-                    agent_id = (
-                        data.get("agent_id")
-                        or data.get("subagent_id")
-                        or data.get("task_id")
-                        or data.get("parent_tool_use_id")
-                        or "progress"
-                    )
-                    grouped.setdefault(str(agent_id), []).append(msg)
-        except OSError:
-            continue
-
-    return [
-        {"agent_id": agent_id, "messages": _render_subagent_messages(messages)}
-        for agent_id, messages in sorted(grouped.items())
-        if messages
-    ]
 
 
 # ── Auth ────────────────────────────────────────────────────────────────
@@ -2942,361 +2289,11 @@ async def chat_archive_job(request: Request) -> JSONResponse:
     return JSONResponse({"job": pcm.archive_job_view(chat_id)})
 
 
-
-def _overlay_assistant_timings(
-    entries: list[dict], timings: dict
-) -> None:
-    """Attach sent_at + duration_ms to the LAST assistant text per turn.
-
-    ``timings`` is ``ChatInfo.user_turn_timings`` keyed by turn_index (as str).
-    Walks the chronological message list, tracks which turn each assistant
-    text belongs to (the most recent user msg's turn_index), then overlays
-    timings from the corresponding record. The user entries themselves get
-    their own ``sent_at`` set inline at append time; this helper only handles
-    the assistant side, where multiple text/tool blocks share a single turn.
-    """
-    if not timings:
-        return
-    current_turn: int | None = None
-    last_assistant_idx_in_turn: dict[int, int] = {}
-    for i, entry in enumerate(entries):
-        role = entry.get("role")
-        if role == "user":
-            ti = entry.get("turn_index")
-            current_turn = ti if isinstance(ti, int) else None
-        elif role == "assistant" and current_turn is not None:
-            last_assistant_idx_in_turn[current_turn] = i
-    for turn, idx in last_assistant_idx_in_turn.items():
-        rec = timings.get(str(turn)) or timings.get(turn)
-        if not isinstance(rec, dict):
-            continue
-        completed = rec.get("completed_at")
-        if completed:
-            entries[idx]["sent_at"] = completed
-        duration = rec.get("duration_ms")
-        if isinstance(duration, (int, float)):
-            entries[idx]["duration_ms"] = int(duration)
-
-
-def _render_opencode_thread(
-    thread: dict, chat, *, metadata: bool = True, start_user_idx: int = 0
-) -> list[dict]:
-    """Render opencode session messages into the provider-neutral PWA row shape.
-
-    ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
-    payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
-
-    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended flags
-    onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
-    turn numbering restarts at 0, so the parent chat's turn metadata does not
-    apply to it.
-
-    ``start_user_idx`` offsets per-session user numbering when stitching
-    ``previous_session_ids``.
-    """
-    messages = thread.get("messages")
-    if not isinstance(messages, list):
-        messages = []
-    result: list[dict] = []
-    user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
-    pending_tools: list[str] = []
-
-    def flush_tools() -> None:
-        if pending_tools:
-            result.append({
-                "role": "system",
-                "content": "\n".join(pending_tools),
-                "tool_name": "_activity",
-            })
-            pending_tools.clear()
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        info = message.get("info")
-        info = info if isinstance(info, dict) else {}
-        role = str(info.get("role") or "")
-        parts = message.get("parts")
-        parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
-        if role == "user":
-            flush_tools()
-            # A prompt can span several text parts; synthetic ones are
-            # opencode's own injections (compaction summaries), not something
-            # the user typed.
-            texts = [
-                str(part.get("text") or "")
-                for part in parts
-                if part.get("type") == "text" and not part.get("synthetic")
-            ]
-            content = _strip_injected_context("\n".join(texts)).strip()
-            if not content:
-                continue
-            entry: dict = {
-                "role": "user",
-                "content": content,
-                "turn_index": user_idx,
-            }
-            if metadata:
-                refs = chat.user_turn_images.get(str(user_idx))
-                if refs:
-                    entry["images"] = list(refs)
-                timing = chat.user_turn_timings.get(str(user_idx)) or {}
-                if timing.get("sent_at"):
-                    entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
-                    entry["unattended"] = True
-            result.append(entry)
-            user_idx += 1
-            continue
-        if role != "assistant":
-            continue
-        for part in parts:
-            kind = str(part.get("type") or "")
-            if kind == "text":
-                flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
-                    result.append({"role": "assistant", "content": text})
-                continue
-            if kind == "reasoning":
-                # Same `_thinking` tag as the Claude replay path: the PWA
-                # folds it into the collapsed Activity trace.
-                flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
-                    result.append({
-                        "role": "system",
-                        "content": text,
-                        "tool_name": "_thinking",
-                    })
-                continue
-            if kind == "tool":
-                tool = str(part.get("tool") or "tool")
-                state = part.get("state")
-                state = state if isinstance(state, dict) else {}
-                raw_input = state.get("input")
-                touches = _opencode_file_touches(tool, raw_input)
-                if str(state.get("status") or "") == "error":
-                    # A failed/denied write or edit reached nothing on disk:
-                    # match the live path (and the Claude replay path) by
-                    # rendering a plain activity row instead of a file card.
-                    touches = []
-                if touches:
-                    flush_tools()
-                    for touch in touches:
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch.get("action") or "touched",
-                            "tool": tool,
-                        })
-                    continue
-                summary = _summarize_opencode_tool_input(tool, raw_input)
-                line = f"{_tool_icon(tool)} {tool}"
-                if summary:
-                    line += f" {summary}"
-                pending_tools.append(line)
-        flush_tools()
-    if metadata:
-        _overlay_assistant_timings(result, chat.user_turn_timings)
-    return result
-
-
-def _opencode_child_status(messages: list) -> str:
-    """A child session's lifecycle state, read from its own messages.
-
-    opencode's session objects carry no status field, but the last assistant
-    message does: an ``error`` payload marks a failure, and a ``time`` record
-    without ``completed`` marks a turn still in flight.
-    """
-    last: dict | None = None
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        info = message.get("info")
-        if isinstance(info, dict) and info.get("role") == "assistant":
-            last = info
-    if last is None:
-        return "completed"
-    if last.get("error"):
-        return "failed"
-    time_info = last.get("time")
-    if (
-        isinstance(time_info, dict)
-        and time_info.get("created")
-        and not time_info.get("completed")
-    ):
-        return "running"
-    return "completed"
-
-
-def _opencode_child_turn_index(info: dict, chat) -> int:
-    """The parent turn a child belongs to: the last one sent before it began."""
-    time_info = info.get("time")
-    created_ms = time_info.get("created") if isinstance(time_info, dict) else None
-    if not isinstance(created_ms, (int, float)) or isinstance(created_ms, bool):
-        return 0
-    best = 0
-    for key, timing in (chat.user_turn_timings or {}).items():
-        sent_at = (timing or {}).get("sent_at")
-        if not sent_at:
-            continue
-        try:
-            idx = int(key)
-            sent_ms = datetime.fromisoformat(
-                str(sent_at).replace("Z", "+00:00")
-            ).timestamp() * 1000
-        except (TypeError, ValueError):
-            continue
-        if sent_ms <= created_ms and idx > best:
-            best = idx
-    return best
-
-
-def _overlay_transcript_metadata(
-    entries: list[dict], transcript_rows: list[dict]
-) -> None:
-    metadata = [
-        row for row in transcript_rows
-        if row.get("role") == "assistant"
-    ]
-    targets: list[int] = []
-    last: int | None = None
-    for index, row in enumerate(entries):
-        if row.get("role") == "user":
-            if last is not None:
-                targets.append(last)
-            last = None
-        elif row.get("role") == "assistant":
-            last = index
-    if last is not None:
-        targets.append(last)
-    # The two lists cover different spans, and which end they disagree at
-    # decides how to pair them:
-    #
-    #   fewer session rows than transcript turns — a resumed or handed-over
-    #     chat, whose JSONL starts at the resume point while the transcript
-    #     store holds every turn. The rows they share are the NEWEST ones, so
-    #     match the tails; the unmatched head gets no metadata.
-    #
-    #   more session rows than transcript turns — a turn is in flight. The
-    #     session already carries the live assistant text while the transcript
-    #     still ends at the last completed turn, because `record_turn` only
-    #     runs once a turn finishes. The surplus is at the NEWEST end, so match
-    #     the heads and leave the live reply without metadata. Matching tails
-    #     here would shift every usage record forward by one and hang the
-    #     previous turn's token count on the reply still being written.
-    #
-    # Zipping from the front unconditionally (the original) got the first case
-    # wrong from its very first row; right-aligning unconditionally gets the
-    # second wrong the same way.
-    pairs = min(len(targets), len(metadata))
-    if not pairs:
-        return
-    if len(targets) <= len(metadata):
-        targets, metadata = targets[-pairs:], metadata[-pairs:]
-    else:
-        targets, metadata = targets[:pairs], metadata[:pairs]
-    for index, source in zip(targets, metadata):
-        for key in ("usage", "quota", "effective_model"):
-            if source.get(key):
-                entries[index][key] = source[key]
-
-
-def _messages_from_archived_transcript(
-    pcm,
-    config,
-    chat,
-) -> list[dict] | None:
-    """Parse vault markdown for an archived chat, or None when unavailable."""
-    if not getattr(chat, "archived", False) or not getattr(chat, "archive_path", ""):
-        return None
-    archive_path = Path(chat.archive_path)
-    if not archive_path.is_absolute():
-        archive_path = config.workspace_root / archive_path
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        logger.warning(
-            "Failed to read archived transcript for %s at %s",
-            getattr(chat, "chat_id", ""),
-            archive_path,
-        )
-        return None
-    parsed = pcm._parse_transcript_messages(text)
-    parsed = chat_service._normalize_handover_messages(parsed)
-    # Map transcript timestamp field to the frontend's sent_at key.
-    for parsed_entry in parsed:
-        if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
-            parsed_entry["sent_at"] = parsed_entry["timestamp"]
-    _overlay_assistant_timings(parsed, chat.user_turn_timings)
-    return parsed
-
-
-def _read_session_segment(session_id: str, directories: list[str]) -> list:
-    """One session's messages, from whichever root recorded it.
-
-    The projects directory is slugged from the cwd the session ran in, so a chat's
-    own agent root is where to look first and the install root second — the latter
-    holds every session from before the re-rooting.
-
-    An EMPTY result counts as "not in this root", not as success. That is not a
-    detail: asked for a session it does not have, `get_session_messages_full`
-    returns `[]` rather than raising — which is exactly how the original bug hid.
-    Stopping at the first empty answer would have fixed today's chats by blanking
-    every chat from before the migration instead.
-
-    Raises when no root has it, so the caller's "skip this segment" path still
-    works and the archived-transcript fallback still gets its turn.
-    """
-    from ciao.transcripts import get_session_messages_full
-
-    for directory in directories:
-        try:
-            segment = get_session_messages_full(session_id, directory=directory)
-        except (FileNotFoundError, ValueError):
-            continue
-        if segment:
-            return segment
-    raise FileNotFoundError(
-        f"no session {session_id!r} under any of: {', '.join(directories)}"
-    )
-
-
 _MSG_PAGE_DEFAULT_LIMIT = 50
 _MSG_PAGE_MAX_LIMIT = 200
-_THINKING_KEEP_CHARS = 512
 _PART_CACHE_TTL_SECONDS = 1.2
 _PART_CACHE_MAX_ENTRIES = 256
 _PART_CACHE: dict[str, tuple[float, list[dict]]] = {}
-
-
-def _prune_rows_for_wire(rows: list[dict]) -> list[dict]:
-    """Annotate every row with its absolute index and prune oversized rows.
-
-    Only ``_thinking`` rows are truncated today (head+tail with a lazy marker);
-    the collapsed ``_activity`` / ``_filecard`` summaries are already small.
-    The unpruned row stays fetchable via the part endpoint using index ``i``.
-    """
-    out: list[dict] = []
-    for idx, row in enumerate(rows):
-        item = dict(row)
-        item["i"] = idx
-        if item.get("tool_name") == "_thinking":
-            text = item.get("content") or ""
-            gap = len(text) - 2 * _THINKING_KEEP_CHARS
-            if gap > 64:
-                item["content"] = (
-                    text[:_THINKING_KEEP_CHARS]
-                    + f"\n… ({gap} chars hidden, expand to load)\n"
-                    + text[-_THINKING_KEEP_CHARS:]
-                )
-                item["lazy"] = True
-                item["full_length"] = len(text)
-        out.append(item)
-    return out
 
 
 def _request_params(request: Request) -> dict[str, str]:
@@ -3334,7 +2331,7 @@ def _messages_json_response(request: Request, rows: list[dict]) -> JSONResponse:
         offset = 0
     offset = max(0, offset)
 
-    wire = _prune_rows_for_wire(rows)
+    wire = transcript_service._prune_rows_for_wire(rows)
     end = max(0, total - offset)
     start = max(0, end - limit)
     items = wire[start:end]
@@ -3347,379 +2344,6 @@ def _messages_json_response(request: Request, rows: list[dict]) -> JSONResponse:
         "hasMore": has_more,
         "nextOffset": offset + limit if has_more else None,
     })
-
-
-async def _assemble_chat_messages(
-    pcm: Any, config: Any, chat: Any
-) -> list[dict]:
-    """Build the full chronological history row list for one chat.
-
-    This is the expensive part of ``GET /api/chats/{id}/messages`` — provider
-    session reads plus rendering — split out so the pagination envelope and
-    the per-part endpoint can share one assembly path.
-    """
-    chat_id = chat.chat_id
-    handover_messages = list(getattr(chat, "handover_messages", []) or [])
-    if not chat.session_id:
-        # A provider may fail before creating its session (for example while
-        # opencode is starting). The durable transcript still contains the
-        # user turn and the persisted error, so do not hide it behind the
-        # session-less handover fast path.
-        current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), getattr(chat, "provider", "claude")
-        )
-        if current:
-            return [*handover_messages, *current]
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return [*handover_messages, *current]
-
-    provider = getattr(chat, "provider", "claude")
-    # Every provider stores its sessions per-cwd, and a chat's cwd is its agent
-    # root. Reading with the install root found nothing for any chat created since
-    # the re-rooting — for Claude and opencode alike.
-    _resolver = getattr(pcm, "_agent_root_for_chat", None)
-    session_root = Path(
-        _resolver(chat_id) if _resolver is not None else config.workspace_root
-    )
-    if provider not in {"claude", "opencode"}:
-        current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), provider
-        )
-        if current:
-            _overlay_assistant_timings(current, chat.user_turn_timings)
-            return [*handover_messages, *current]
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return list(handover_messages)
-    if provider == "opencode":
-        if getattr(chat, "archived", False):
-            # An archived chat is read-only and its provider-side session may
-            # be gone; serve the vault markdown without paying a provider
-            # session read (for opencode, a throwaway server spawn) first.
-            archived = _messages_from_archived_transcript(pcm, config, chat)
-            if archived is not None:
-                return [*handover_messages, *archived]
-        # Stitch the same lineage Claude uses: each provider keeps its turns
-        # only in the session that wrote them, and ciaobot rotates via
-        # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
-        # Reading only ``chat.session_id`` blanked every chat that had rotated
-        # — exactly the bug that hid the first turn of chat-a495fc8f.
-        session_ids: list[str] = []
-        seen: set[str] = set()
-        for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
-            sid_str = str(sid or "").strip()
-            if not sid_str or sid_str in seen:
-                continue
-            seen.add(sid_str)
-            session_ids.append(sid_str)
-        rendered: list[dict] = []
-        start_user_idx = 0
-        for sid in session_ids:
-            try:
-                opencode_thread = await OpencodeProvider.read_thread(
-                    session_root, sid
-                )
-                if not opencode_thread:
-                    continue
-                segment = _render_opencode_thread(
-                    opencode_thread, chat, start_user_idx=start_user_idx
-                )
-            except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
-                continue
-            if segment:
-                # Advance the global turn offset by the user-bubble count in
-                # this segment so the next segment's ``turn_index`` + timings
-                # stay aligned with ``chat.user_turn_timings``.
-                user_count = sum(1 for row in segment if row.get("role") == "user")
-                rendered.extend(segment)
-                start_user_idx += user_count
-        current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), provider
-        )
-        if rendered:
-            if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
-                has_error_in_rendered = False
-                for row in reversed(rendered):
-                    if row.get("role") == "assistant":
-                        if row.get("is_error") or row.get("content") == current[-1].get("content"):
-                            has_error_in_rendered = True
-                        break
-                if not has_error_in_rendered:
-                    err_msg = dict(current[-1])
-                    rendered.append(err_msg)
-            _overlay_transcript_metadata(
-                rendered,
-                current,
-            )
-            return [*handover_messages, *rendered]
-        if current:
-            _overlay_assistant_timings(current, chat.user_turn_timings)
-            return [*handover_messages, *current]
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return list(handover_messages)
-
-
-    result: list[dict] = []
-    # A chat can rotate through more than one SDK session file within the
-    # same conversation (autocompact, or a resume-failure fallback) — each
-    # file only holds the turns written after it started. Walk the full
-    # lineage (oldest first) so history renders continuously across the
-    # rotation instead of only showing the newest segment.
-    session_ids = [*chat.previous_session_ids, chat.session_id]
-    # A session's JSONL lives in a directory slugged from the CWD it was started
-    # in, and that is the chat's AGENT ROOT — `~/repos/ciao/work`, not the install
-    # root. Passing the install root looked up
-    # `~/.claude/projects/-Users-me-repos-ciao/<session>.jsonl`, which does not
-    # exist for any chat created since the re-rooting; the FileNotFoundError was
-    # swallowed as "this segment is missing" and every such chat rendered EMPTY.
-    #
-    # The install root is still tried, second: chats from before the migration
-    # have their transcripts under exactly that slug, and they must keep
-    # rendering.
-    session_dirs: list[str] = []
-    for candidate in (session_root, Path(config.workspace_root)):
-        text = str(candidate)
-        if text not in session_dirs:
-            session_dirs.append(text)
-    msgs: list | None = None
-    for sid in session_ids:
-        if not sid:
-            continue
-        try:
-            # Reading and stitching a session's JSONL is unbounded synchronous
-            # work (it grows with the conversation), and this route is re-hit
-            # by every client's 15s poll. Left on the event loop it stalled
-            # every other request on the node, including the 5s chat-socket
-            # keepalives whose absence trips the PWA's half-open watchdog.
-            segment = await asyncio.to_thread(
-                _read_session_segment, sid, session_dirs
-            )
-        except (FileNotFoundError, ValueError):
-            # This segment's file doesn't exist on this machine (remote chat,
-            # or pruned after rotating away). Skip it rather than blanking
-            # the whole history — the other segments may still be intact.
-            continue
-        if msgs is None:
-            msgs = []
-        msgs.extend(segment)
-
-    # An SDK session can still exist while containing no renderable messages
-    # (for example after an archived session was compacted or partially
-    # cleaned up). Archived chats have a durable Markdown copy; use it in that
-    # case as well as when the provider-side session is missing entirely.
-    if msgs is None or (not msgs and chat.archived):
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return list(handover_messages)
-
-    user_idx = 0
-    failed_tool_ids = _failed_tool_use_ids(msgs)
-    for m in msgs:
-        if m.type == "assistant":
-            blocks = _extract_assistant_blocks(
-                m.message,
-                workspace_root=config.workspace_root,
-            )
-            # Drop the CLI's "No response requested." sentinel that marks
-            # interrupted turns. If the message contained ONLY that sentinel
-            # (no tools, no other text), skip the whole entry.
-            blocks = [
-                b for b in blocks
-                if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
-            ]
-            if not blocks:
-                continue
-            # Collapse a pure control ack ("Set model to ..." / "Set mode to
-            # ...") into a single system bubble. These follow the SDK-injected
-            # /model or /mode user turn that we skip below.
-            text_blocks = [b for b in blocks if b["kind"] == "text"]
-            tool_blocks = [b for b in blocks if b["kind"] == "tool_use"]
-            thinking_blocks = [b for b in blocks if b["kind"] == "thinking"]
-            if not tool_blocks and not thinking_blocks and len(text_blocks) == 1:
-                label = _classify_control_ack(text_blocks[0]["text"])
-                if label:
-                    result.append({"role": "system", "content": label})
-                    continue
-            # Merge contiguous non-file tool_use blocks into a single _activity
-            # entry so the frontend renders one collapsible group per cluster.
-            # File-mutating tool calls (Write/Edit/MultiEdit/NotebookEdit) break
-            # that group and emit a standalone _filecard so the PWA can render
-            # a clickable preview card inline with the message.
-            pending_tools: list[str] = []
-
-            def flush_tools():
-                if pending_tools:
-                    result.append({
-                        "role": "system",
-                        "content": "\n".join(pending_tools),
-                        "tool_name": "_activity",
-                    })
-                    pending_tools.clear()
-
-            for blk in blocks:
-                if blk["kind"] == "tool_use":
-                    name = blk["name"] or "tool"
-                    summary = blk.get("summary") or ""
-                    touches = blk.get("file_touches")
-                    if not isinstance(touches, list) or not touches:
-                        touch = blk.get("file_touch")
-                        touches = [touch] if touch else []
-                    if (
-                        touches
-                        and blk.get("id") in failed_tool_ids
-                        and not _touches_survive_failure(name)
-                    ):
-                        # Denied or errored write: nothing reached disk, so
-                        # render a plain activity row instead of a file card
-                        # that implies the write happened.
-                        touches = []
-                    if touches:
-                        flush_tools()
-                        for touch in touches:
-                            if not isinstance(touch, dict) or not touch.get("file_path"):
-                                continue
-                            result.append({
-                                "role": "system",
-                                "tool_name": "_filecard",
-                                "content": touch["file_path"],
-                                "file_path": touch["file_path"],
-                                "action": touch.get("action") or "touched",
-                                "tool": name,
-                            })
-                        continue
-                    line = f"{_tool_icon(name)} {name}"
-                    if summary:
-                        line += f" {summary}"
-                    pending_tools.append(line)
-                elif blk["kind"] == "thinking":
-                    # Reasoning: tag as `_thinking` so the PWA folds it into the
-                    # collapsed Activity trace (never the final answer bubble),
-                    # matching the live stream. Emit in order relative to tools
-                    # and text by flushing any pending tool group first.
-                    flush_tools()
-                    text = blk["text"].strip()
-                    if text:
-                        result.append({
-                            "role": "system",
-                            "content": text,
-                            "tool_name": "_thinking",
-                        })
-                else:
-                    flush_tools()
-                    text = blk["text"].strip()
-                    if text:
-                        result.append({"role": "assistant", "content": text})
-            flush_tools()
-            continue
-
-        content = _extract_text_content(m.message)
-        if m.type == "user":
-            content = _strip_injected_context(content)
-        content = content.strip()
-        if not content:
-            continue
-        # Drop rate limit telemetry status events (allowed, rejected, warnings)
-        # so transient usage telemetry does not pollute the chat history. A hard
-        # "Rate limit exceeded" carries no "Rate limit:" prefix and still surfaces.
-        if m.type == "system" and is_rate_limit_telemetry(content):
-            continue
-        # Drop SDK-injected control slash commands (/model, /mode). Skipping
-        # without incrementing user_idx keeps chat.user_turn_images aligned
-        # with real user sends, which would otherwise shift by one per model
-        # change.
-        if m.type == "user" and _is_control_slash_command(content):
-            continue
-        # Claude Code writes interrupt markers as synthetic user turns. Hide
-        # them and, critically, do not increment user_idx: the next real queued
-        # user turn owns the next image bucket.
-        if m.type == "user" and _is_interrupted_request_sentinel(content):
-            continue
-        # Drop the CLI's interrupted-turn sentinel on the user side too: when
-        # a turn is steered, the CLI splices a synthetic user message with
-        # this exact content to keep the parent-uuid chain valid.
-        if m.type == "user" and _is_no_response_sentinel(content):
-            continue
-        # CLI-synthesized user envelopes (subagent completions, bash output,
-        # slash-command echoes). Promote <task-notification> to a clean system
-        # bubble so subagent completions stay visible; hide the rest. Skip
-        # without incrementing user_idx — these aren't real user turns and the
-        # image-ref index must only advance on human sends.
-        if m.type == "user":
-            task_summary = _summarize_task_notification(content)
-            if task_summary is not None:
-                result.append({"role": "system", "content": task_summary})
-                continue
-            if _is_cli_internal_envelope(content):
-                continue
-            # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
-            # It's a server-injected prompt, not something the user typed, so
-            # showing the paragraph verbatim reads as words they never wrote.
-            # Collapse it to a status line, and skip without incrementing
-            # user_idx — subagent_tracking._is_countable_user_turn applies the
-            # same rule, so the two turn counters stay aligned.
-            if subagent_tracking.is_synthesis_nudge(content):
-                result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
-                continue
-            is_compact = (
-                isinstance(m.message, dict) and bool(m.message.get("isCompactSummary"))
-            ) or content.startswith("This session is being continued from a previous conversation")
-            if is_compact:
-                result.append({"role": "system", "content": content})
-                continue
-        entry: dict = {
-            "role": m.type,
-            "content": content,
-        }
-        if m.type == "user":
-            # Image refs are recorded per user-turn index at send time. JSON
-            # keys are strings, but tolerate int lookups too in case the map
-            # has been mutated in-memory since the last save.
-            refs = chat.user_turn_images.get(str(user_idx))
-            if refs is None:
-                refs = chat.user_turn_images.get(user_idx)
-            if refs:
-                entry["images"] = list(refs)
-            else:
-                # Fall back to inline base64 images from the SDK session.
-                # This handles sessions that were context-compacted: the
-                # user_turn_images index map becomes stale after compaction
-                # shifts the turn numbering, but inline images survive.
-                inline = _extract_inline_images(m.message)
-                if inline:
-                    entry["images"] = inline
-            # Surface the user-turn index so the client can dedup replayed
-            # user_echo events against history it already loaded.
-            entry["turn_index"] = user_idx
-            # Attach the persisted send time so the UI footer can show it on
-            # reload. Missing for pre-feature chats: the frontend treats an
-            # empty string as "no timestamp".
-            timing = chat.user_turn_timings.get(str(user_idx)) or chat.user_turn_timings.get(user_idx)
-            if timing and timing.get("sent_at"):
-                entry["sent_at"] = timing["sent_at"]
-            # Loop/schedule ticks are user turns in the session file too, so the
-            # flag has to come from our own per-turn record.
-            if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
-                entry["unattended"] = True
-            user_idx += 1
-        result.append(entry)
-    # Stitch the durable transcript's per-turn metadata (token usage with the
-    # context %, quota, effective model) onto the rendered rows — the session
-    # JSONL carries none of it, so without this the turn footer showed only
-    # the completion time and duration. The opencode branch has made the same
-    # overlay since the transcript store gained these fields.
-    current = pcm._transcripts.current_messages(
-        ChatContext.for_web(chat_id), provider
-    )
-    if current and result:
-        _overlay_transcript_metadata(result, current)
-    _overlay_assistant_timings(result, chat.user_turn_timings)
-    return [*handover_messages, *result]
 
 
 async def chat_messages(request: Request) -> JSONResponse:
@@ -3746,7 +2370,7 @@ async def chat_messages(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    rows = await _assemble_chat_messages(
+    rows = await transcript_service._assemble_chat_messages(
         pcm, request.app.state.config, chat
     )
     return _messages_json_response(request, rows)
@@ -3764,7 +2388,7 @@ async def _cached_assembled_messages(pcm: Any, config: Any, chat: Any) -> list[d
     hit = _PART_CACHE.get(chat_id)
     if hit is not None and now - hit[0] < _PART_CACHE_TTL_SECONDS:
         return hit[1]
-    rows = await _assemble_chat_messages(pcm, config, chat)
+    rows = await transcript_service._assemble_chat_messages(pcm, config, chat)
     if len(_PART_CACHE) >= _PART_CACHE_MAX_ENTRIES:
         oldest = min(_PART_CACHE, key=lambda k: _PART_CACHE[k][0])
         _PART_CACHE.pop(oldest, None)
@@ -3892,7 +2516,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
             opencode_entries.append({
                 "agent_id": agent_id,
                 "parent_agent_id": str(info.get("parentID") or ""),
-                "messages": _render_opencode_thread(item, chat, metadata=False),
+                "messages": transcript_service._render_opencode_thread(item, chat, metadata=False),
                 "tool_use_id": "",
                 "description": str(info.get("title") or ""),
                 "subagent_type": "opencode",
@@ -3901,8 +2525,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 # endpoint is polled every few seconds while a turn streams —
                 # derive the lifecycle from the child's own messages and anchor
                 # it to the parent turn sent before the child was created.
-                "status": _opencode_child_status(messages),
-                "turn_index": _opencode_child_turn_index(info, chat),
+                "status": transcript_service._opencode_child_status(messages),
+                "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
         return JSONResponse(opencode_entries)
 
@@ -3943,7 +2567,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
         return await _finalize(
-            _local_subagent_transcripts(
+            transcript_service._local_subagent_transcripts(
                 chat.session_id, Path(config.workspace_root), agent_root=agent_root
             )
         )
@@ -3957,13 +2581,13 @@ async def chat_subagents(request: Request) -> JSONResponse:
             agent_ids = list_subagents(chat.session_id, directory=workspace)
         except (FileNotFoundError, ValueError):
             return await _finalize(
-                _local_subagent_transcripts(
+                transcript_service._local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
             )
         except Exception:  # noqa: BLE001 — defensive against SDK surprises
             return await _finalize(
-                _local_subagent_transcripts(
+                transcript_service._local_subagent_transcripts(
                     chat.session_id, Path(config.workspace_root), agent_root=agent_root
                 )
             )
@@ -3981,7 +2605,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
         except Exception:  # noqa: BLE001 — defensive
             continue
 
-        rendered = _render_subagent_messages(msgs)
+        rendered = transcript_service._render_subagent_messages(msgs)
         if not rendered and wanted_agent_id:
             # An empty read is a miss, not an empty transcript. On installs
             # whose CLI writes the nested "<session>/subagents/*.jsonl" layout,
@@ -4003,7 +2627,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
         result.append({"agent_id": agent_id, "messages": rendered})
 
     if not result:
-        result = _local_subagent_transcripts(
+        result = transcript_service._local_subagent_transcripts(
             chat.session_id, Path(config.workspace_root), agent_root=agent_root
         )
 
@@ -4094,7 +2718,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
-            if _opencode_child_status(messages) != "running":
+            if transcript_service._opencode_child_status(messages) != "running":
                 continue
             rows.append({
                 "agent_id": agent_id,
@@ -4102,7 +2726,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 "subagent_type": "opencode",
                 "is_async": True,
                 "status": "running",
-                "turn_index": _opencode_child_turn_index(info, chat),
+                "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
         return rows
 
@@ -4327,7 +2951,14 @@ async def workspace_file(request: Request) -> Response:
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
     roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    # `exact=1` turns the fuzzy fallback off. Fuzzy resolution ends in a bare
+    # filename match against the primary root, which is right for a link a
+    # model emitted with an approximate path and wrong for a caller naming one
+    # specific file: asking for `work/AGENTS.md` on a workspace that has none
+    # would otherwise serve `personal/AGENTS.md` with a 200, and the caller
+    # cannot tell. The sidebar's guide card probes with it for that reason.
+    exact = request.query_params.get("exact", "").strip().lower() in {"1", "true", "yes"}
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=not exact)
     if isinstance(result, Response):
         return result
     resolved = result
@@ -5543,7 +4174,8 @@ def _enrich_schedule(
     next_run = compute_next_run(entry)
     entry_dict["next_run"] = next_run.isoformat() if next_run is not None else None
     # "Missed" detection: a schedule whose last expected fire has passed but
-    # which never recorded a trigger for that day. The 5-minute grace avoids
+    # which never recorded a trigger for that day, or whose run for that day
+    # ended in failure instead of finishing. The 5-minute grace avoids
     # flagging a schedule during the brief window between its fire time and the
     # next poll tick (or the startup catch-up pass).
     last_expected = compute_last_expected_run(entry, now=now)
@@ -5562,9 +4194,19 @@ def _enrich_schedule(
         # attended to (even a late manual run the next morning), regardless of
         # whether the auto tick stamped the daily-idempotency key.
         dispatched_since_expected = was_dispatched_since(entry, last_expected)
-        not_triggered = (
-            not entry.last_triggered_on or expected_day > entry.last_triggered_on
-        ) and not dispatched_since_expected
+        # ...unless the run that dispatch started never finished. Both stamps
+        # are written at dispatch, before the outcome is known, so a turn that
+        # died mid-flight (server restart, provider subprocess killed) marked
+        # the slot as served and the work vanished with only a `last_status`
+        # on the detail page to show for it (issue #486). A failed run leaves
+        # its slot unsatisfied, so it belongs in the Missed list where "Run
+        # all" can recover it. A run that completed — or one still waiting on
+        # the user or the provider ("skipped") — never lands here.
+        failed_since_expected = run_failed_since(entry, last_expected)
+        not_triggered = failed_since_expected or (
+            (not entry.last_triggered_on or expected_day > entry.last_triggered_on)
+            and not dispatched_since_expected
+        )
         overdue = ((now or datetime.now(UTC)) - last_expected) > timedelta(minutes=5)
         missed = not_triggered and overdue
     entry_dict["missed"] = missed
@@ -6884,6 +5526,23 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
+async def admin_restart(request: Request) -> JSONResponse:
+    """Restart the installed engine after draining work, without updating code."""
+    from starlette.background import BackgroundTask
+
+    restart = getattr(request.app.state, "request_restart", None)
+    if not callable(restart):
+        return JSONResponse({"ok": False, "error": "restart unavailable"}, status_code=503)
+
+    async def after_response() -> None:
+        restart(request.app.state.config.restart_exit_code)
+
+    return JSONResponse(
+        {"ok": True, "steps": [{"step": "restart", "ok": True, "output": "Waiting for active chat work to drain"}]},
+        background=BackgroundTask(after_response),
+    )
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
     mgr = getattr(request.app.state, "local_session_manager", None)
@@ -6997,7 +5656,10 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # every restart.
 
     relaunch_desktop = False
-    if getattr(config, "dev_mode", False):
+    # The desktop shell is a macOS Tauri bundle: attempting its rebuild on
+    # Linux fails after git/pip/npm have already mutated the install, and the
+    # resulting 500 aborts before the restart. Linux dev deploys skip it.
+    if getattr(config, "dev_mode", False) and sys.platform == "darwin":
         needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
         if not needed:
             steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
@@ -7013,6 +5675,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
                     {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
                     status_code=500,
                 )
+    elif getattr(config, "dev_mode", False):
+        steps.append({"step": "desktop app", "ok": True, "output": "skipped: the desktop shell builds on macOS only"})
 
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
@@ -7363,7 +6027,9 @@ async def local_status(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "local session manager not initialised"}, status_code=500
         )
-    return JSONResponse(mgr.status())
+    status = dict(mgr.status())
+    status["restart_only"] = sys.platform.startswith("linux") and not status.get("dev_mode", False)
+    return JSONResponse(status)
 
 
 async def local_handback(request: Request) -> JSONResponse:
@@ -7500,6 +6166,198 @@ async def list_proposals(request: Request) -> JSONResponse:
 _HISTORY_DEFAULT_LIMIT = 200
 _HISTORY_MAX_LIMIT = 1000
 
+# Receipts are read newest-first and only the newest slice can plausibly match
+# a page of decisions, so the join never walks a whole long-lived journal.
+_HISTORY_RECEIPT_WINDOW = 1000
+
+
+def _history_norm(text: str) -> str:
+    """Comparison form for joining a decision to the receipt that performed it."""
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _receipt_for_row(
+    row: dict[str, Any], candidates: list[dict[str, Any]], claimed: set[str]
+) -> dict[str, Any] | None:
+    """The receipt that recorded one decision, or None.
+
+    Text-matching fallback, used only for ledger rows written before the
+    decision carried its receipt's id. A row that names one is resolved by id
+    and never reaches here.
+
+    The two sides are written by different functions and do not share an id:
+    the sidecar records the bullet's text, the receipt records the *promotable*
+    text, which for an event-shaped bullet is only its trailing durable-rule
+    clause. So an exact match is tried first and a contained one second.
+
+    Each receipt is claimed by at most one decision. Accepting the same fact
+    twice (accept, undo, accept) writes two of each, and without the claim both
+    decisions pointed at the newest receipt — offering an undo on a row whose
+    change had already been reversed.
+    """
+    target = _history_norm(row.get("text", ""))
+    if not target:
+        return None
+    ts = str(row.get("ts", ""))
+
+    def _pick(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+        free = [r for r in pool if str(r.get("id", "")) not in claimed]
+        if not free:
+            return None
+        # Nearest in time, on the ISO strings both sides write. A receipt is
+        # recorded just before the decision it belongs to, so the closest one
+        # is the right one even when the same fact was decided twice.
+        return min(free, key=lambda r: abs_ts_gap(str(r.get("ts", "")), ts))
+
+    exact = [r for r in candidates if _history_norm(r.get("fact_text", "")) == target]
+    chosen = _pick(exact)
+    if chosen is not None:
+        return chosen
+    partial = [
+        r
+        for r in candidates
+        if (fact := _history_norm(r.get("fact_text", "")))
+        and fact != target
+        and fact in target
+    ]
+    return _pick(partial)
+
+
+def abs_ts_gap(left: str, right: str) -> float:
+    """Seconds between two ISO timestamps; a huge gap when either is unparseable."""
+    try:
+        return abs(
+            (datetime.fromisoformat(left) - datetime.fromisoformat(right)).total_seconds()
+        )
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
+    """The `change` pointer one decision row carries, from its receipt."""
+    from ciao.memory_receipts import is_undoable
+
+    return {
+        "receipt_id": str(receipt.get("id", "")),
+        "kind": str(receipt.get("kind", "")),
+        "status": str(receipt.get("status", "")),
+        "destination": str(receipt.get("destination", ""))
+        or str(receipt.get("region", "")),
+        "undoable": is_undoable(receipt),
+        "changed": bool(receipt.get("changed", True)),
+        "ts": str(receipt.get("ts", "")),
+    }
+
+
+def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
+    """Point each decision at the receipt that performed it, where one exists.
+
+    A decision written since the ledger started carrying ``receipt_id`` names
+    its receipt outright, and that is the only reliable join: the ledger records
+    the ORIGINAL bullet — append-time dedupe compares a re-extracted fact
+    against it — while the receipt records what was actually written, so an
+    accept of an operator-edited wording shares no text with its own receipt.
+
+    Rows with no receipt keep no ``change`` key at all, which is what the
+    History surface renders as "No change snapshot available" — every decision
+    recorded before the receipt protocol landed, and every one made outside it.
+    Claiming an undo affordance for those would be a lie about what can be
+    reversed.
+    """
+    from ciao.memory_receipts import (
+        MemoryReceiptError,
+        journal_path,
+        read_receipts,
+    )
+
+    try:
+        receipts = read_receipts(journal_path(vault, None))
+    except (MemoryReceiptError, OSError, ValueError):
+        return
+    receipts.sort(key=lambda r: str(r.get("ts", "")), reverse=True)
+    by_id = {str(r.get("id", "")): r for r in receipts if r.get("id")}
+    claimed: set[str] = set()
+    # Explicit references first, over the WHOLE journal rather than the window
+    # the heuristic scans: a named receipt is right however old it is, and
+    # claiming it here also keeps the text-matching pass below from handing the
+    # same receipt to some other decision that merely reads alike.
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        rid = str(row.pop("receipt_id", "") or "")
+        found = by_id.get(rid) if rid else None
+        if found is not None:
+            claimed.add(rid)
+            row["change"] = _change_payload(found)
+        elif rid:
+            # The ledger names a receipt this journal does not hold (a vault
+            # restored without its journal, a trimmed archive). Recording it
+            # was still a decision; it just has no snapshot to show, which is
+            # the honest "No change snapshot available" state. Do NOT fall back
+            # to text matching here: the id was written precisely because the
+            # text cannot identify the write.
+            continue
+        else:
+            pending.append(row)
+    rows = pending
+    receipts = receipts[:_HISTORY_RECEIPT_WINDOW]
+    # Fallback for rows the ledger wrote before it carried a receipt id.
+    #
+    # A promotion writes the destination AND removes the bullet, so two
+    # receipts describe it. Each action is matched against exactly one pool,
+    # with no cross-fallback:
+    #
+    # * An ACCEPT means "what did this do to my memory", which is the
+    #   destination write. Falling back to that accept's queue receipt would
+    #   describe the bullet's removal instead, and its undo would re-queue a
+    #   fact the destination still holds — a duplicate wearing an Undo button.
+    #   A legacy accept whose destination receipt cannot be identified by text
+    #   stays snapshot-less, which is the honest answer.
+    # * A DISMISS touches nothing but the queue, so its queue receipt IS the
+    #   change, and undoing it restores the bullet.
+    region_rows = [r for r in receipts if str(r.get("kind", "")).startswith("region_")]
+    queue_rows = [r for r in receipts if str(r.get("kind", "")) == "queue_resolve"]
+    # Newest decision first, so the newest receipt is claimed by the decision it
+    # actually belongs to rather than by an older one that merely matched.
+    for row in sorted(rows, key=lambda r: str(r.get("ts", "")), reverse=True):
+        pool = region_rows if row.get("action") == "accepted" else queue_rows
+        found = _receipt_for_row(row, pool, claimed)
+        if found is None:
+            continue
+        claimed.add(str(found.get("id", "")))
+        row["change"] = _change_payload(found)
+
+
+# The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
+# proposal's `source` is that stem. Resolving it means listing that fixed depth,
+# which is why the result is cached: a History page asks for up to 1000 rows and
+# would otherwise re-list the tree for each one.
+_SOURCE_INDEX: dict[str, tuple[float, dict[str, str]]] = {}
+_SOURCE_INDEX_TTL_S = 60.0
+
+
+def _source_index(config: Any) -> dict[str, str]:
+    """Archive stem → absolute transcript path, cached briefly."""
+    root = Path(config.logs_root) / "Chats"
+    key = str(root)
+    cached = _SOURCE_INDEX.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _SOURCE_INDEX_TTL_S:
+        return cached[1]
+    index: dict[str, str] = {}
+    try:
+        for chat_dir in root.iterdir():
+            if not chat_dir.is_dir():
+                continue
+            for provider_dir in chat_dir.iterdir():
+                if not provider_dir.is_dir():
+                    continue
+                for transcript in provider_dir.glob("*.md"):
+                    index.setdefault(transcript.stem, str(transcript))
+    except OSError:
+        index = {}
+    _SOURCE_INDEX[key] = (now, index)
+    return index
+
 
 async def proposals_history(request: Request) -> JSONResponse:
     """Every recorded proposal decision across workspaces, newest first.
@@ -7546,6 +6404,7 @@ async def proposals_history(request: Request) -> JSONResponse:
         if key in seen:
             continue
         seen.add(key)
+        workspace_rows: list[dict[str, Any]] = []
         for entry in read_decisions(queue):
             if action_filter and entry["action"] != action_filter:
                 continue
@@ -7555,7 +6414,19 @@ async def proposals_history(request: Request) -> JSONResponse:
             # Read-side disambiguators for the id only; not part of the contract.
             row.pop("seq", None)
             row.pop("log", None)
-            rows.append(row)
+            workspace_rows.append(row)
+        # Join this workspace's decisions to the receipts that performed them,
+        # so History can show what each one actually changed and offer an undo
+        # exactly where one is safe. The journal is per vault, so the join has
+        # to happen inside the workspace loop rather than over the merged list.
+        try:
+            vault_for_receipts = Path(config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):
+            vault_for_receipts = queue.parent.parent
+        await asyncio.to_thread(
+            _attach_change_receipts, vault_for_receipts, workspace_rows
+        )
+        rows.extend(workspace_rows)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
     rows.sort(key=lambda r: r["ts"], reverse=True)
@@ -7567,15 +6438,54 @@ async def proposals_history(request: Request) -> JSONResponse:
     # did nothing forever. It keys off the served limit reaching the cap, not
     # ``requested > limit`` — a request for exactly the cap is already at it,
     # and reporting False there bought one pointless full-page refetch.
+    served = rows[:limit]
+    # Resolve the archive each served decision came from, so History can link to
+    # it instead of printing a bare filename stem. Only the served page is
+    # resolved, and only once per request. Off the event loop: it lists a
+    # directory tree.
+    index = await asyncio.to_thread(_source_index, config)
+    for row in served:
+        path = index.get(str(row.get("source", "")))
+        if path:
+            row["source_path"] = path
     return JSONResponse(
         {
-            "rows": rows[:limit],
+            "rows": served,
             "total": total,
             "truncated": total > limit,
             "limit": limit,
             "at_max": limit >= _HISTORY_MAX_LIMIT,
         }
     )
+
+
+async def proposal_preview(request: Request) -> JSONResponse:
+    """Exactly what accepting one queued proposal would write, without writing.
+
+    The queued bullet says what was noticed; the promotion reconciles against
+    whatever the destination holds now, so the bullet's own text is not the
+    change. This returns the destination, the Add/Update operation and the
+    before/after body the accept would produce, plus the ``revision`` that
+    body was computed against.
+
+    That revision is the contract with :func:`proposal_action`: hand it back on
+    the accept and a destination that moved in between is refused with a
+    conflict and a refreshed preview, rather than silently overwritten.
+
+    ``?text=`` previews an edited wording (the review card's "edit suggestion")
+    against the same current destination.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    text = request.query_params.get("text", "")
+    # Off the event loop: the preview reads a guide (taking no lock) and a
+    # learnings file, and a slow filesystem must not stall every other request.
+    preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx, text)
+    return JSONResponse({"ok": True, "preview": preview})
 
 
 async def memory_receipts(request: Request) -> JSONResponse:
@@ -7616,6 +6526,156 @@ async def memory_receipts(request: Request) -> JSONResponse:
             rows.append(row)
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
     return JSONResponse({"rows": rows[: max(1, requested)], "total": len(rows)})
+
+
+def _receipt_units(text: str, separator: str) -> list[str]:
+    """One body as the diffable units it is actually made of.
+
+    Two conventions have to be stripped before a diff means anything:
+
+    * The terminating newline a serialized region (or a markdown file) ends
+      with is a file convention, not content. Splitting on it yields a trailing
+      empty line, which surfaced as a blank added/removed row under every real
+      change.
+    * A bounded region's entries are joined by a ``\n§\n`` separator. Diffed
+      as lines, appending one entry showed the separator as a second added row
+      reading "§", and a multi-line entry was torn into unrelated rows. The
+      unit of a region is the entry, so that is what gets compared.
+    """
+    if not text:
+        return []
+    body = text[:-1] if text.endswith("\n") else text
+    return body.split(separator)
+
+
+def _receipt_separator(kind: str) -> str:
+    """What joins one destination's units; ``\n`` for an ordinary file."""
+    from ciao.memory_tool import SECTION_SEP
+
+    return f"\n{SECTION_SEP}\n" if kind.startswith("region_") else "\n"
+
+
+# How much of a receipt's before/after image the detail view ships. The list
+# surface strips the images entirely (see `list_receipts`); this is the one
+# place they are served, and only for the row the operator opened.
+_RECEIPT_IMAGE_MAX = 20_000
+# Diff rows past this point are dropped with a flag. A region diff is a handful
+# of lines; a queue-file receipt can carry a whole markdown queue.
+_RECEIPT_DIFF_MAX = 400
+
+
+def _receipt_diff(
+    before: str, after: str, separator: str = "\n"
+) -> tuple[list[dict[str, Any]], bool]:
+    """A diff of one receipt's before/after, for the History card.
+
+    Context is dropped: what a History row has to answer is *what changed*, and
+    a region body reprinted in full buries the one entry that did.
+    """
+    import difflib
+
+    old = _receipt_units(before, separator)
+    new = _receipt_units(after, separator)
+    rows: list[dict[str, Any]] = []
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for line in old[i1:i2]:
+            rows.append({"op": "removed", "text": line})
+        for line in new[j1:j2]:
+            rows.append({"op": "added", "text": line})
+    if len(rows) > _RECEIPT_DIFF_MAX:
+        return rows[:_RECEIPT_DIFF_MAX], True
+    return rows, False
+
+
+def _find_receipt_in_workspaces(
+    config: Any, rid: str, workspace: str
+) -> tuple[dict[str, Any] | None, str]:
+    """One receipt by id, searching every workspace journal when none is named."""
+    from ciao.memory_receipts import find_receipt, journal_path
+
+    names = [workspace] if workspace else list(config.workspace_names())
+    for name in names:
+        try:
+            vault = Path(config.workspace_vault_root(name))
+        except (AttributeError, ValueError):
+            continue
+        found = find_receipt(journal_path(vault, None), rid)
+        if found is not None:
+            return found, name
+    return None, ""
+
+
+async def memory_receipt_detail(request: Request) -> JSONResponse:
+    """One receipt with its before/after images and a line diff.
+
+    The list endpoint deliberately strips the images, so this is what the
+    History row's Changes section reads when it is opened. A receipt with no
+    image — a legacy row, a failure, an operation this protocol cannot reverse
+    — comes back with ``has_snapshot: false``, which the UI renders as "No
+    change snapshot available" rather than as an empty diff.
+    """
+    from ciao.memory_receipts import is_undoable
+
+    config = request.app.state.config
+    rid = request.path_params["id"]
+    workspace = request.query_params.get("workspace", "").strip()
+    receipt, found_in = await asyncio.to_thread(
+        _find_receipt_in_workspaces, config, rid, workspace
+    )
+    if receipt is None:
+        return JSONResponse({"error": f"unknown receipt: {rid}"}, status_code=404)
+    before = receipt.get("before_text")
+    after = receipt.get("after_text")
+    has_snapshot = isinstance(before, str) and isinstance(after, str)
+    payload: dict[str, Any] = {
+        "id": rid,
+        "workspace": found_in or str(receipt.get("workspace", "")),
+        "kind": str(receipt.get("kind", "")),
+        "status": str(receipt.get("status", "")),
+        "ts": str(receipt.get("ts", "")),
+        "actor": str(receipt.get("actor", "")),
+        "source": str(receipt.get("source", "")),
+        "destination": str(receipt.get("destination", "")) or str(receipt.get("region", "")),
+        "fact_text": str(receipt.get("fact_text", "")),
+        "undoable": is_undoable(receipt),
+        "has_snapshot": has_snapshot,
+        "changed": bool(receipt.get("changed", True)),
+        "error": str(receipt.get("error", "")),
+    }
+    if not has_snapshot:
+        payload["reason"] = (
+            "this operation was recorded before change snapshots existed, or it "
+            "is not one the receipt protocol can reverse"
+        )
+        return JSONResponse(payload)
+    diff, diff_truncated = _receipt_diff(
+        str(before), str(after), _receipt_separator(str(receipt.get("kind", "")))
+    )
+    payload["before"] = str(before)[:_RECEIPT_IMAGE_MAX]
+    payload["after"] = str(after)[:_RECEIPT_IMAGE_MAX]
+    payload["truncated"] = (
+        len(str(before)) > _RECEIPT_IMAGE_MAX or len(str(after)) > _RECEIPT_IMAGE_MAX
+    )
+    payload["diff"] = diff
+    payload["diff_truncated"] = diff_truncated
+    if not payload["undoable"]:
+        # Say which of the reasons applies rather than only hiding the button:
+        # a row that simply belongs to a multi-row batch is not "legacy".
+        if receipt.get("undoable") is False:
+            payload["reason"] = (
+                "this row is part of a batch whose single transaction receipt "
+                "carries the undo; undoing it alone would restore the other rows too"
+            )
+        elif str(receipt.get("status", "")) != "applied":
+            payload["reason"] = f"this operation is {receipt.get('status', 'unsettled')}"
+        elif receipt.get("undo_of"):
+            payload["reason"] = "this is itself an undo"
+        else:
+            payload["reason"] = "this operation is not one the protocol can reverse"
+    return JSONResponse(payload)
 
 
 async def memory_receipt_undo(request: Request) -> JSONResponse:
@@ -7711,27 +6771,23 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
             )
         removed += result["removed"]
         if result["changed"]:
-            from ciao.memory_proposals import record_dismissal
-
             for swept_kind, swept_text, swept_source in zip(
                 result["kinds"], result["texts"], result["sources"]
             ):
                 # Expiry is a decision too: without the text in the dedupe
                 # history, a curator pass that re-reads the same transcript
-                # re-files the fact the operator just let expire.
-                record_dismissal(
+                # re-files the fact the operator just let expire. Same handler
+                # as an explicit dismiss, so both land in both ledgers.
+                proposal_actions.record_decision(
                     queue,
+                    action="dismiss",
                     text=swept_text,
                     kind=swept_kind,
                     via="pwa",
+                    workspace=workspace,
                     source=swept_source,
                     outcome="swept",
                 )
-            for kind in result["kinds"]:
-                if proposal_outcomes.is_extraction_kind(kind):
-                    proposal_outcomes.record(
-                        kind=kind, action="dismissed", workspace=workspace, via="pwa",
-                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
@@ -7756,6 +6812,19 @@ async def proposals_batch(request: Request) -> JSONResponse:
         return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
     ids = [str(pid).strip() for pid in raw_ids]
     requested_workspace = str(body.get("workspace", "") or "").strip()
+    # Per-row revisions from the review cards the operator actually read, the
+    # same contract the single-row accept uses. A row whose destination moved
+    # since its preview fails on its own and stays queued; the rest of the
+    # batch still runs, because one stale card is not a reason to refuse a
+    # selection of twenty.
+    raw_revisions = body.get("revisions")
+    revisions: dict[str, str] = {}
+    if isinstance(raw_revisions, dict):
+        revisions = {
+            str(key): str(value or "").strip()
+            for key, value in raw_revisions.items()
+            if str(value or "").strip()
+        }
     resolved, error = proposal_service._resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
@@ -7825,25 +6894,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
             row = ctx["row"]
             target, target_error = proposal_service._rehome_target(row, requested_workspace)
             if target_error:
-                results_moves.append({
-                    "id": row["id"], "action": "move_file", "dismissed": False,
-                    "error": target_error,
-                })
+                results_moves.append(proposal_actions.ProposalActionResult(
+                    id=row["id"], action="move_file", dismissed=False,
+                    error=target_error,
+                ).as_dict())
                 continue
             outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
             if not outcome.get("ok"):
-                results_moves.append({
-                    "id": row["id"], "action": "move_file", "dismissed": False,
-                    "error": outcome["error"],
-                })
+                results_moves.append(proposal_actions.ProposalActionResult(
+                    id=row["id"], action="move_file", dismissed=False,
+                    error=outcome["error"],
+                ).as_dict())
                 continue
             moved_ids.add(row["id"])
             moved_destinations[row["id"]] = str(outcome.get("destination", ""))
-            results_moves.append({
-                "id": row["id"], "action": "move_file", "dismissed": True,
-                "destination": outcome.get("destination", ""),
-                "already_moved": outcome.get("already_moved", False),
-            })
+            results_moves.append(proposal_actions.ProposalActionResult(
+                id=row["id"], action="move_file", dismissed=True,
+                destination=str(outcome.get("destination", "")),
+                already_moved=bool(outcome.get("already_moved", False)),
+            ).as_dict())
         # Only the rows whose move landed may have their bullet dropped; a failed move
         # keeps its row so the note is not left somewhere nobody asked for with
         # nothing recording it.
@@ -7857,12 +6926,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
         # skill row has no line in any queue.
         results = list(results_moves)
         for contested_id in contested:
-            results.append({
-                "id": contested_id,
-                "action": action,
-                "dismissed": False,
-                "error": "this proposal is already being resolved",
-            })
+            results.append(proposal_actions.ProposalActionResult(
+                id=contested_id,
+                action=action,
+                dismissed=False,
+                error="this proposal is already being resolved",
+            ).as_dict())
         file_rows = [ctx for ctx in resolved if ctx.get("file")]
         resolved = [ctx for ctx in resolved if not ctx.get("file")]
         for ctx in file_rows:
@@ -7870,32 +6939,38 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # Same result shape a bullet dismiss returns, so the client needs no
             # second contract for a row it renders identically.
             if action != "dismiss":
-                results.append({
-                    "id": row["id"],
-                    "action": action,
-                    "dismissed": False,
-                    "error": "a skill proposal is a file; there is nothing to promote",
-                })
+                results.append(proposal_actions.ProposalActionResult(
+                    id=row["id"],
+                    action=action,
+                    dismissed=False,
+                    error="a skill proposal is a file; there is nothing to promote",
+                ).as_dict())
                 continue
             outcome = proposal_service._dismiss_skill_proposal(ctx)
-            entry = {"id": row["id"], "action": "dismiss", "dismissed": bool(outcome.get("ok"))}
-            if not outcome.get("ok"):
-                entry["error"] = outcome["error"]
-            elif ctx["workspace"]:
-                from ciao.memory_proposals import record_dismissal
-
+            skill_result = proposal_actions.ProposalActionResult(
+                id=row["id"],
+                action="dismiss",
+                dismissed=bool(outcome.get("ok")),
+                error=None if outcome.get("ok") else outcome["error"],
+            )
+            if outcome.get("ok") and ctx["workspace"]:
                 # The file is already unlinked; a sidecar write failure must not
                 # fail a dismiss that happened.
                 try:
-                    record_dismissal(
+                    proposal_actions.record_decision(
                         proposal_service._proposals_file(config, ctx["workspace"]),
-                        text=row["text"], kind="skill", via="pwa", proposal_id=row["id"],
+                        action="dismiss",
+                        text=row["text"],
+                        kind="skill",
+                        via="pwa",
+                        workspace=ctx["workspace"],
+                        proposal_id=row["id"],
                     )
                 except OSError:
                     logger.info(
                         "proposals: could not record skill dismissal for %s", row["id"]
                     )
-            results.append(entry)
+            results.append(skill_result.as_dict())
 
         # Group by file so each affected file is rewritten exactly once.
         by_file: dict[str, dict[str, Any]] = {}
@@ -7916,7 +6991,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # Write every promotion BEFORE dropping any bullet, and only drop the
             # ones that landed. A batch that removed the lines first would lose every
             # fact whose region was over cap, silently and in bulk.
-            promoted: dict[str, dict[str, Any]] = {}
+            promoted: dict[str, proposal_service.AcceptOutcome] = {}
             keep_lines: set[int] = set()
             if action == "accept":
                 # The claim above only covers this process. Another resolver
@@ -7940,27 +7015,48 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # nothing to write here, only result shaping below.
                         continue
                     if int(row["line"]) not in present:
-                        promoted[row["id"]] = {
-                            "ok": False,
-                            "error": "this proposal was already resolved",
-                        }
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(
+                            ok=False, error="this proposal was already resolved"
+                        )
                         keep_lines.add(int(row["line"]))
                         continue
+                    expected = revisions.get(row["id"], "")
+                    if expected:
+                        current = await asyncio.to_thread(
+                            proposal_service.destination_revision, config, row
+                        )
+                        if current and current != expected:
+                            promoted[row["id"]] = proposal_service.AcceptOutcome(
+                                ok=False,
+                                conflict=True,
+                                error="the destination changed since this "
+                                "preview; nothing was written",
+                            )
+                            keep_lines.add(int(row["line"]))
+                            continue
+                    promotion: proposal_service.AcceptOutcome
                     if accept.action == "edit_region":
-                        outcome = proposal_service._promote_region_row(config, row)
+                        # No reconcile in the batch path: it is one model call
+                        # per row, and a large selection would spend a timeout
+                        # on each. A row that needs it is retried singly.
+                        promotion = await proposal_service._promote_region_row(
+                            config, row
+                        )
                     elif accept.action == "fold_doc":
                         # A fold is a model call, so a large selection folds
                         # sequentially; write-then-dismiss still holds per row.
-                        outcome = await proposal_service._accept_project_row(config, row)
+                        promotion = await proposal_service._accept_project_row(config, row)
                     elif accept.action == "write_people_note":
-                        outcome = proposal_service._accept_people_row(config, row)
+                        promotion = proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
-                        outcome = proposal_service._accept_learnings_row(config, row)
+                        promotion = proposal_service._accept_learnings_row(config, row)
                     else:
                         # route_manually: nothing to perform, and the row stays.
-                        outcome = {"ok": False, "error": "no destination yet"}
-                    promoted[row["id"]] = outcome
-                    if not outcome.get("ok"):
+                        promotion = proposal_service.AcceptOutcome(
+                            ok=False, error="no destination yet"
+                        )
+                    promoted[row["id"]] = promotion
+                    if not promotion.ok:
                         keep_lines.add(int(row["line"]))
 
             # The batch is one atomic file rewrite: a single transaction-level
@@ -8013,87 +7109,152 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 if pid not in removed_here or pid in recorded:
                     continue
                 recorded.add(pid)
-                if action == "dismiss":
-                    # Same contract as the single-row route: the decision's text
-                    # must outlive the row, or the nightly curator re-files it.
-                    from ciao.memory_proposals import record_dismissal
-
-                    record_dismissal(
-                        queue,
-                        text=str(row.get("text") or ""),
-                        kind=str(row.get("kind") or ""),
-                        via="pwa",
-                        source=str(row.get("source") or ""),
-                        proposal_id=pid,
-                    )
-                elif action == "accept":
-                    from ciao.memory_proposals import record_promotion
-
+                # Same contract as the single-row route, through the same
+                # handler: the decision's text must outlive the row or the
+                # nightly curator re-files it, and only the extraction kinds
+                # reach the outcomes tally (skill rows come from skill
+                # evolution, rehome rows from vault hygiene).
+                destination = ""
+                # An outcome with nothing set is how a row this request did not
+                # promote reports: no ``ok`` at all, which the builders read as
+                # "nothing was written here", not as a failure.
+                row_outcome = proposal_service.AcceptOutcome()
+                if action == "accept":
                     accept_here = proposal_kinds.accept_for(row["kind"])
                     if accept_here.action == "move_file":
-                        row_outcome = {"destination": moved_destinations.get(pid, "")}
+                        # The move ran above the grouping; only where the note
+                        # landed matters to the decision record.
+                        row_outcome = proposal_service.AcceptOutcome(
+                            destination=moved_destinations.get(pid, "")
+                        )
                     else:
-                        row_outcome = promoted.get(pid, {})
-                    record_promotion(
-                        queue,
-                        text=str(row.get("text") or ""),
-                        kind=str(row.get("kind") or ""),
-                        via="pwa",
-                        source=str(row.get("source") or ""),
-                        destination=proposal_service._decision_destination(accept_here.action, row, row_outcome),
-                        outcome="duplicate" if row_outcome.get("duplicate") else "written",
-                        proposal_id=pid,
+                        row_outcome = promoted.get(pid, proposal_service.AcceptOutcome())
+                    destination = proposal_service._decision_destination(
+                        accept_here.action, row, row_outcome
                     )
-                if not proposal_outcomes.is_extraction_kind(row["kind"]):
-                    # Not recorded: this ledger measures the MEMORY extraction
-                    # pipeline. Skill proposals come from skill evolution and
-                    # rehome rows from vault hygiene.
-                    continue
-                proposal_outcomes.record(
-                    kind=row["kind"],
-                    action="promoted" if action == "accept" else "dismissed",
-                    workspace=entry["workspace"],
+                proposal_actions.record_decision(
+                    queue,
+                    action=action,
+                    text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""),
                     via="pwa",
+                    workspace=entry["workspace"],
+                    source=str(row.get("source") or ""),
+                    destination=destination,
+                    outcome=(
+                        ("duplicate" if row_outcome.duplicate else "written")
+                        if action == "accept"
+                        else ""
+                    ),
+                    proposal_id=pid,
+                    # The ledger keeps the ORIGINAL bullet as ``text``
+                    # (append-time dedupe compares against it), so an edited
+                    # accept is unmatchable by text. The write hands its
+                    # receipt back here instead. A dismiss has no outcome and
+                    # so no receipt, which is the empty default.
+                    receipt_id=row_outcome.receipt_id or "",
                 )
             for row in entry["rows"]:
                 if action == "accept":
                     accept = proposal_kinds.accept_for(row["kind"])
-                    outcome = promoted.get(row["id"], {})
                     # An absent outcome means nothing was written here (a rehome
                     # move performed above the grouping), which is a success.
-                    failed = "ok" in outcome and not outcome["ok"]
-                    result = {
-                        "id": row["id"],
-                        "action": accept.action,
-                        "dismissed": not failed,
-                    }
-                    if accept.action == "edit_region":
-                        result["region"] = outcome.get("region", accept.region)
-                        result["promoted"] = bool(outcome.get("ok"))
-                        result["leak_warning"] = row.get("leak_warning", False)
-                        # What actually landed, which is not always the row's text:
-                        # the event-shape guard can promote only a bullet's trailing
-                        # "Durable rule:" clause. `duplicate` says the fact was
-                        # already there and nothing was written.
-                        if outcome.get("written"):
-                            result["written"] = outcome["written"]
-                        if outcome.get("duplicate"):
-                            result["duplicate"] = True
-                        if failed:
-                            result["error"] = outcome.get("error", "could not write the region")
-                    elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
-                        result["promoted"] = bool(outcome.get("ok"))
-                        result["destination"] = outcome.get("destination", "")
-                        if failed:
-                            result["error"] = outcome.get("error", "could not write the destination")
-                    else:
-                        result["promoted"] = False
-                        result["destination"] = row.get("rehome", {}).get("destination", "")
-                        result["justified"] = row.get("rehome", {}).get("justified", False)
-                    results.append(result)
+                    # `written` says what actually landed, which is not always
+                    # the row's text: the event-shape guard can promote only a
+                    # bullet's trailing "Durable rule:" clause, and `duplicate`
+                    # says the fact was already there. A `conflict` the builder
+                    # carries through is told apart from an ordinary refusal:
+                    # the row is still promotable, just not against the body
+                    # the operator read, so the UI reopens its preview rather
+                    # than reporting a permanent failure.
+                    results.append(proposal_actions.build_accept_result(
+                        row["id"],
+                        accept,
+                        row,
+                        promoted.get(
+                            row["id"], proposal_service.AcceptOutcome()
+                        ).as_dict(),
+                        include_usage=False,
+                    ).as_dict())
                 else:
-                    results.append({"id": row["id"], "action": "dismiss", "dismissed": True})
-        return JSONResponse({"ok": True, "action": action, "results": results})
+                    results.append(proposal_actions.ProposalActionResult(
+                        id=row["id"], action="dismiss", dismissed=True
+                    ).as_dict())
+        return JSONResponse(
+            {
+                "ok": True,
+                "action": action,
+                "results": results,
+                "summary": _batch_summary(action, results),
+            }
+        )
+
+
+def _batch_destination(result: dict[str, Any]) -> str:
+    """Where one batch row landed (or would have), as the summary groups it.
+
+    A region row names its region; the file-writing kinds name their path; a
+    dismiss has no destination at all, which is its own group.
+    """
+    action = str(result.get("action", ""))
+    if action == "edit_region":
+        region = str(result.get("region", ""))
+        return f"ciao:{region}" if region else "ciao:memory"
+    if action == "dismiss":
+        return ""
+    return str(result.get("destination", ""))
+
+
+def _batch_summary(action: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per destination the batch touched, with its per-row outcomes.
+
+    A fifty-row accept used to report fifty independent lines, which is the
+    same information the queue already showed and says nothing about where the
+    facts went. Grouping by destination answers the question a bulk accept
+    actually raises — what changed, and where — while `failed_ids` keeps every
+    per-row failure addressable rather than averaged away.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for result in results:
+        destination = _batch_destination(result)
+        group = groups.get(destination)
+        if group is None:
+            group = {
+                "destination": destination,
+                "action": action,
+                "total": 0,
+                "ok": 0,
+                "failed": 0,
+                "conflicts": 0,
+                "duplicates": 0,
+                "failed_ids": [],
+                "errors": [],
+            }
+            groups[destination] = group
+            order.append(destination)
+        group["total"] += 1
+        # A dismiss reports `dismissed`; an accept reports `promoted`, and a
+        # rehome move reports neither because the move happened before the
+        # grouping — `dismissed` is the only signal it leaves.
+        succeeded = (
+            bool(result.get("promoted"))
+            if "promoted" in result
+            else bool(result.get("dismissed"))
+        )
+        if result.get("duplicate"):
+            group["duplicates"] += 1
+        if succeeded and not result.get("error"):
+            group["ok"] += 1
+            continue
+        group["failed"] += 1
+        if result.get("conflict"):
+            group["conflicts"] += 1
+        group["failed_ids"].append(str(result.get("id", "")))
+        message = str(result.get("error", ""))
+        if message and message not in group["errors"]:
+            group["errors"].append(message)
+    return [groups[key] for key in order]
 
 
 def _accept_journal_writable(config: Any, workspace: str, queue_path: str) -> bool:
@@ -8139,6 +7300,17 @@ async def proposal_action(request: Request) -> JSONResponse:
     stays and the error comes back, because the reverse order loses the fact.
 
     ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
+
+    An optional JSON body carries the review card's two extras:
+
+    * ``expected_revision`` — the destination digest the operator's preview was
+      computed against. A destination that changed since then is refused with
+      409 and a refreshed preview, so an accept can never land on top of an
+      edit nobody saw. Absent means "no preview was shown", which keeps every
+      existing client and the MCP path working unchanged.
+    * ``text`` — an edited wording to promote instead of the bullet's own. The
+      decision history still records the bullet's original text, because that
+      is what the dedupe readers compare a re-extracted fact against.
     """
     config = request.app.state.config
     pid = request.path_params["id"]
@@ -8147,6 +7319,16 @@ async def proposal_action(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
+    # A body is optional here and always has been; a client that sends none
+    # (or sends something unparseable) gets the pre-preview behaviour rather
+    # than a 400 for a field it never had to supply.
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001 — no body, or not JSON: both mean "no extras"
+        raw_body = {}
+    body = raw_body if isinstance(raw_body, dict) else {}
+    expected_revision = str(body.get("expected_revision", "") or "").strip()
+    edited_text = str(body.get("text", "") or "").strip()
     # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
     # Unvalidated, anything that was not "accept" skipped the promotion block
     # below but still fell through to the bullet removal and returned the
@@ -8183,18 +7365,28 @@ async def proposal_action(request: Request) -> JSONResponse:
         # gone by now — a recording failure must not turn a completed dismiss
         # into a 500, or the client's retry 404s on work that succeeded.
         if row["workspace"]:
-            from ciao.memory_proposals import record_dismissal
-
             try:
-                record_dismissal(
+                proposal_actions.record_decision(
                     proposal_service._proposals_file(config, row["workspace"]),
-                    text=row["text"], kind="skill", via="pwa", proposal_id=pid,
+                    action="dismiss",
+                    text=row["text"],
+                    kind="skill",
+                    via="pwa",
+                    workspace=row["workspace"],
+                    proposal_id=pid,
                 )
             except OSError:
                 logger.info("proposals: could not record skill dismissal for %s", pid)
-        return JSONResponse({"id": pid, "action": "dismiss", "dismissed": True})
+        return JSONResponse(
+            proposal_actions.ProposalActionResult(
+                id=pid, action="dismiss", dismissed=True
+            ).as_dict()
+        )
 
-    promoted: dict[str, Any] = {}
+    # What the promotion did, whichever accept ran — one typed outcome, so the
+    # refusals below, the result builder and the decision record read one
+    # shape. A dismiss promotes nothing and leaves it empty.
+    promoted = proposal_service.AcceptOutcome()
     queue = Path(ctx["path"])
     # Claimed BEFORE the promotion and held until the queue rewrite has landed:
     # two tabs accepting the same row both promoted (a doc folded twice, a
@@ -8253,6 +7445,38 @@ async def proposal_action(request: Request) -> JSONResponse:
                     },
                     status_code=409,
                 )
+            # The destination must still be what the operator's preview showed.
+            # Without this, an accept sitting open while a /remember, a nightly
+            # pass or a hand edit changed the region landed on top of a body
+            # nobody had read — the "unseen overwrite" the review card exists to
+            # rule out. The refreshed preview rides along so the client can
+            # re-render the card instead of asking for it again. Off the loop:
+            # it reads the destination.
+            if expected_revision:
+                current = await asyncio.to_thread(
+                    proposal_service.destination_revision, config, row
+                )
+                if current and current != expected_revision:
+                    refreshed = await asyncio.to_thread(
+                        proposal_service.preview_row, config, ctx, edited_text
+                    )
+                    return JSONResponse(
+                        {
+                            "error": "the destination changed since this preview; "
+                            "nothing was written. Review the refreshed change and "
+                            "confirm again.",
+                            "id": pid,
+                            "conflict": True,
+                            "preview": refreshed,
+                        },
+                        status_code=409,
+                    )
+            # An edited wording promotes instead of the bullet's own text. The
+            # queue removal and the decision record below still use `row`: the
+            # dedupe readers compare a re-extracted fact against the ORIGINAL
+            # text, so recording the edit there would let the curator re-queue
+            # the same bullet on its next pass.
+            promote_row = {**row, "text": edited_text} if edited_text else row
             accept = proposal_kinds.accept_for(row["kind"])
             if accept.action == "move_file":
                 target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())
@@ -8270,40 +7494,65 @@ async def proposal_action(request: Request) -> JSONResponse:
                     return JSONResponse(
                         {"error": outcome["error"], "id": pid}, status_code=409
                     )
-                promoted = outcome
+                # The move reports more than an accept does (the rewritten files,
+                # the mover's own result); what the response and the decision
+                # record read from it is where the note landed.
+                promoted = proposal_service.AcceptOutcome(
+                    ok=True, destination=str(outcome.get("destination", ""))
+                )
             elif accept.action == "edit_region":
-                promoted = proposal_service._promote_region_row(config, row)
-                if not promoted.get("ok"):
+                # `?reconcile=1` re-runs the write-time reconcile against the
+                # region's current entries before writing, which is how a fact
+                # the archive-time pass deferred (timed-out call, stale index)
+                # gets resolved rather than appended beside what it supersedes.
+                # Opt-in: it is a model call, and the plain accept is one
+                # synchronous write.
+                reconcile = (
+                    request.query_params.get("reconcile", "").strip().lower()
+                    in {"1", "true", "yes"}
+                )
+                promoted = await proposal_service._promote_region_row(
+                    config, promote_row, reconcile=reconcile
+                )
+                if not promoted.ok:
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
                     # retry. Losing it silently is the one outcome to avoid.
-                    return JSONResponse(
-                        {
-                            "error": promoted.get("error", "could not write the region"),
-                            "id": pid,
-                            "region": promoted.get("region", ""),
-                        },
-                        status_code=409,
-                    )
+                    refusal: dict[str, Any] = {
+                        "error": promoted.error or "could not write the region",
+                        "id": pid,
+                        "region": promoted.region or "",
+                    }
+                    if promoted.deferred:
+                        # The one refusal another `?reconcile=1` can resolve, so
+                        # it is marked as such and carries what it was weighed
+                        # against. Every other refusal here needs a human to
+                        # change something first (an over-cap region, event-shaped
+                        # text), and offering a retry for those would be a button
+                        # that cannot do what it says.
+                        refusal["deferred"] = True
+                        refusal["reason"] = promoted.reason or ""
+                        refusal["competing"] = list(promoted.competing or ())
+                    return JSONResponse(refusal, status_code=409)
             elif accept.action == "fold_doc":
-                promoted = await proposal_service._accept_project_row(config, row)
-                if not promoted.get("ok"):
+                promoted = await proposal_service._accept_project_row(config, promote_row)
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "fold failed"), "id": pid},
+                        {"error": promoted.error or "fold failed", "id": pid},
                         status_code=409,
                     )
             elif accept.action == "write_people_note":
-                promoted = proposal_service._accept_people_row(config, row)
-                if not promoted.get("ok"):
+                promoted = proposal_service._accept_people_row(config, promote_row)
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "could not write the note"), "id": pid},
+                        {"error": promoted.error or "could not write the note", "id": pid},
                         status_code=409,
                     )
             elif accept.action == "append_learnings":
-                promoted = proposal_service._accept_learnings_row(config, row)
-                if not promoted.get("ok"):
+                promoted = proposal_service._accept_learnings_row(config, promote_row)
+                if not promoted.ok:
                     return JSONResponse(
-                        {"error": promoted.get("error", "could not append"), "id": pid},
+                        {"error": promoted.error or "could not append", "id": pid},
                         status_code=409,
                     )
             else:
@@ -8353,71 +7602,63 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     if action == "accept":
         accept = proposal_kinds.accept_for(row["kind"])
-        result = {"id": pid, "action": accept.action, "dismissed": True}
-        if accept.action == "edit_region":
-            result["region"] = promoted.get("region", accept.region)
-            result["promoted"] = True
-            result["usage"] = promoted.get("usage", {})
-            result["leak_warning"] = row.get("leak_warning", False)
-            # See the batch builder: the text written can differ from the row's,
-            # and a duplicate resolves the row without writing anything.
-            if promoted.get("written"):
-                result["written"] = promoted["written"]
-            if promoted.get("duplicate"):
-                result["duplicate"] = True
-        elif accept.action in ("fold_doc", "write_people_note", "append_learnings"):
-            result["promoted"] = True
-            result["destination"] = promoted.get("destination", "")
-        else:
-            # Rehome: the note itself is not moved here. Moving a file and
-            # rewriting every reference to it is `vault_rehome`'s job and it is
-            # reversible through its own receipt; doing half of it from a queue
-            # row would leave the links pointing at a path that moved.
-            result["promoted"] = False
-            result["destination"] = row.get("rehome", {}).get("destination", "")
-            result["justified"] = row.get("rehome", {}).get("justified", False)
-        if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
-            proposal_outcomes.record(
-                kind=row["kind"], action="promoted", workspace=ctx["workspace"], via="pwa",
-            )
+        # The payload shape is the batch route's, built once: an accept that
+        # reports a region, a destination or a rehome candidate must read the
+        # same either way. `usage` is the one field only this route reports.
+        # Rehome rows land in the last branch: the note itself is not moved
+        # there. Moving a file and rewriting every reference to it is
+        # `vault_rehome`'s job and it is reversible through its own receipt;
+        # doing half of it from a queue row would leave the links pointing at
+        # a path that moved.
+        result = proposal_actions.build_accept_result(
+            pid, accept, row, promoted.as_dict(), include_usage=True
+        )
         if removed_ours:
             # Preserve the accepted row's text in the same decision history a
             # dismissal uses: append-time dedupe consults the live queue and
             # that sidecar — never the promoted destination — so the nightly
             # curator would otherwise re-read the transcript and queue the
-            # already-accepted fact again.
-            from ciao.memory_proposals import record_promotion
-
-            record_promotion(
+            # already-accepted fact again. The outcomes tally is the same
+            # call's second half.
+            proposal_actions.record_decision(
                 queue,
+                action="accept",
                 text=str(row.get("text") or ""),
                 kind=str(row.get("kind") or ""),
                 via="pwa",
+                workspace=ctx["workspace"],
                 source=str(row.get("source") or ""),
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
-                outcome="duplicate" if promoted.get("duplicate") else "written",
+                outcome="duplicate" if promoted.duplicate else "written",
                 proposal_id=pid,
+                # See the batch path: the recorded text is the original bullet,
+                # so the receipt reference is the only way back to what an
+                # edited accept actually wrote.
+                receipt_id=promoted.receipt_id or "",
             )
-        return JSONResponse({"ok": True, "result": result})
-    if removed_ours and action == "dismiss":
+        return JSONResponse({"ok": True, "result": result.as_dict()})
+    if removed_ours:
         # Preserve the decided row's text: append-time dedupe consults this
         # history, so without it the nightly curator re-files the fact the
         # operator just rejected while its transcript is still recent.
-        from ciao.memory_proposals import record_dismissal
-
-        record_dismissal(
+        proposal_actions.record_decision(
             queue,
+            action="dismiss",
             text=str(row.get("text") or ""),
             kind=str(row.get("kind") or ""),
             via="pwa",
+            workspace=ctx["workspace"],
             source=str(row.get("source") or ""),
             proposal_id=pid,
         )
-    if removed_ours and proposal_outcomes.is_extraction_kind(row["kind"]):
-        proposal_outcomes.record(
-            kind=row["kind"], action="dismissed", workspace=ctx["workspace"], via="pwa",
-        )
-    return JSONResponse({"ok": True, "result": {"id": pid, "action": "dismiss", "dismissed": True}})
+    return JSONResponse(
+        {
+            "ok": True,
+            "result": proposal_actions.ProposalActionResult(
+                id=pid, action="dismiss", dismissed=True
+            ).as_dict(),
+        }
+    )
 
 
 # ── Operator-action housekeeping strip ───────────────────────────────────

@@ -71,6 +71,17 @@ export interface ProposalKindDescriptor {
   /** What a refused accept falls back to; null surfaces the error instead. */
   fallback: ProposalMergeFallback | null
   /**
+   * Whether this kind's accept can be checked against its destination first.
+   *
+   * Only the bounded-region kinds: `?reconcile=1` compares the fact with the
+   * entries already in the region and either merges over the one it supersedes
+   * or refuses, and nothing else the queue writes into — a person note, a
+   * project doc, the learnings list — has entries to be weighed against. Left
+   * off `GENERIC` on purpose: an unknown kind from a newer server may not be a
+   * region at all, and the query parameter would be silently ignored.
+   */
+  reconcilable?: boolean
+  /**
    * How `discuss` refers to the row when asking for a decision.
    *
    * Row-valued because `GENERIC` has to name a kind it does not know: before
@@ -119,7 +130,7 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
   return (
     `A \`[${row.kind}]\` proposal is queued (${where}) for region \`${region}\` but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
-    `Read \`${row.workspace}/CLAUDE.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
+    `Read \`${row.workspace}/AGENTS.md\` bounded region \`${region}\`, merge this fact there without duplication and within the char limit – curate/consolidate nearby bullets if needed to make room, never exceed the cap.\n\n` +
     `After the region is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss --text-file <file> --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present verbatim, just dismiss. Leave other proposals untouched. Nothing is broken – this is the expected path when the region is over cap or needs curation.`
   )
 }
@@ -194,8 +205,14 @@ function regionKind(label: string, consequence: string): ProposalKindDescriptor 
     consequence: () => consequence,
     canAccept: ALWAYS,
     fallback: REGION_FALLBACK,
+    reconcilable: true,
     discussLabel: () => `a \`${label}\` proposal`,
   }
+}
+
+/** Whether the row's accept can be asked to reconcile before it writes. */
+export function canReconcile(row: ProposalRow): boolean {
+  return descriptorFor(row).reconcilable === true
 }
 
 /** Used for a kind this client does not know about. */

@@ -363,7 +363,10 @@ export type WsEvent =
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
-  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
+  // `stopped` marks the synthetic result a user Stop publishes: a real turn
+  // never carries it. The partial text still renders, but the turn is not an
+  // answer, so it must not raise an unread badge on a backgrounded tab.
+  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
@@ -431,6 +434,10 @@ export type EventsWsMessage =
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
+  // Client mode only: the local node proxy could not reach the host, so it
+  // emits this on the proxied socket and closes. Delivered on /ws/events too,
+  // which is the only socket open when no chat is on screen.
+  | { type: 'host_unreachable' }
 
 export interface InAppToast {
   id: number
@@ -706,6 +713,7 @@ export interface LocalStatus {
   branch: string | null
   dirty: boolean
   dev_mode?: boolean
+  restart_only?: boolean
 }
 
 export interface DeployResult {
@@ -1175,12 +1183,100 @@ export interface ProposalActionResult {
   leak_warning?: boolean
   destination?: string
   justified?: boolean
+  promoted?: boolean
+  duplicate?: boolean
+  written?: string
+  error?: string
+  /** The destination moved since this row's preview; nothing was written and
+   * the row is still queued. Distinct from a plain failure: reopening the
+   * preview is the fix, not giving up on the row. */
+  conflict?: boolean
+}
+
+/** One destination a batch touched, from `POST /api/proposals/batch`.
+ *
+ * A fifty-row accept reports fifty results, which is the same list the queue
+ * already showed. This is the per-destination roll-up the review panel renders
+ * instead; `failed_ids` keeps every per-row failure addressable. */
+export interface ProposalBatchSummary {
+  destination: string
+  action: string
+  total: number
+  ok: number
+  failed: number
+  conflicts: number
+  duplicates: number
+  failed_ids: string[]
+  errors: string[]
+}
+
+/** The 409 body a refused single-row accept returns.
+ *
+ * `deferred` marks the one refusal a fresh `?reconcile=1` retry can resolve on
+ * its own: the fact may supersede something the region already holds and the
+ * reconcile could not say what, so nothing was written and the row is still
+ * queued. Every other refusal (over-cap region, event-shaped text) needs a
+ * person to change something first, which is why the retry is offered on this
+ * one alone. `reason` is why it could not decide and `competing` the region
+ * entries it was weighed against, capped server-side at five.
+ */
+export interface ProposalAcceptRefusal {
+  error?: string
+  id?: string
+  region?: string
+  deferred?: boolean
+  reason?: string
+  competing?: string[]
 }
 
 export interface ProposalBatchResponse {
   ok: boolean
   action: 'accept' | 'dismiss'
   results: ProposalActionResult[]
+  summary?: ProposalBatchSummary[]
+}
+
+/**
+ * What accepting one proposal would write, from `GET /api/proposals/{id}/preview`.
+ *
+ * `before`/`after` are the destination body itself, computed by the same
+ * functions the accept calls — so a stamped learned-at date, a duplicate that
+ * writes nothing, and a learning whose recurrence count is bumped rather than
+ * appended all show as what they are. `exact: false` marks a kind whose result
+ * cannot be known without writing (a `[project]` fold is decided by a model at
+ * accept time), and the card says so rather than showing a guess.
+ *
+ * `revision` is the destination digest this preview was computed against. It
+ * goes back with the accept, which refuses (409) if the destination moved.
+ */
+export interface ProposalPreview {
+  id: string
+  workspace: string
+  kind: string
+  text: string
+  source: string
+  action?: string
+  operation: 'add' | 'update' | 'move' | 'none' | ''
+  destination: string
+  destination_path: string
+  revision: string
+  before: string
+  after: string
+  exact: boolean
+  truncated: boolean
+  can_accept: boolean
+  reason: string
+  /** What joins the destination's units: `\n§\n` for a bounded region (whose
+   * unit is an entry, not a line), `\n` for an ordinary file. */
+  separator: string
+  written?: string
+  added?: string[]
+  leak_warning?: boolean
+}
+
+export interface ProposalPreviewResponse {
+  ok: boolean
+  preview: ProposalPreview
 }
 
 export interface ProposalDismissOlderResponse {
@@ -1213,6 +1309,58 @@ export interface ProposalHistoryRow {
   destination: string
   outcome: string
   proposal_id: string
+  /** The archive transcript this fact came from, when one is still on disk. */
+  source_path?: string
+  /** The receipt that performed this decision. ABSENT — not falsy — for every
+   * decision the receipt protocol never recorded: History renders those as
+   * "No change snapshot available" rather than offering an undo it cannot
+   * honour. */
+  change?: ProposalHistoryChange
+}
+
+/** The receipt behind one history row, from `GET /api/proposals/history`. */
+export interface ProposalHistoryChange {
+  receipt_id: string
+  kind: string
+  status: string
+  destination: string
+  undoable: boolean
+  changed: boolean
+  ts: string
+}
+
+/** One line of a receipt's before/after. Context lines are not sent: what a
+ * History row has to answer is what changed, and a region body reprinted in
+ * full buries the one line that did. */
+export interface MemoryReceiptDiffLine {
+  op: 'added' | 'removed'
+  text: string
+}
+
+/** One receipt with its images, from `GET /api/memory/receipts/{id}`.
+ *
+ * `has_snapshot: false` is the legacy/unsupported case and carries a `reason`;
+ * the card shows that instead of an empty diff. */
+export interface MemoryReceiptDetail {
+  id: string
+  workspace: string
+  kind: string
+  status: string
+  ts: string
+  actor: string
+  source: string
+  destination: string
+  fact_text: string
+  undoable: boolean
+  has_snapshot: boolean
+  changed: boolean
+  error: string
+  reason?: string
+  before?: string
+  after?: string
+  diff?: MemoryReceiptDiffLine[]
+  truncated?: boolean
+  diff_truncated?: boolean
 }
 
 export interface ProposalHistoryResponse {

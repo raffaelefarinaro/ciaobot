@@ -942,6 +942,84 @@ describe('deferred send visibility and re-send de-duplication', () => {
   })
 })
 
+describe('stopped turns', () => {
+  test('clears the spinner when the reply never lands and the server is idle', async () => {
+    // A stopped turn can leave the transcript ending on the user's own row.
+    // reconcileAfterResult used to run out its retry budget and simply give
+    // up, so the composer kept spinning over a turn the server had already
+    // finished -- until the next send replaced it, which is how the user
+    // first noticed the turn had in fact stopped.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-stopped'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ role: 'user', content: 'do the thing', timestamp: '' }]
+      apiGet.mockImplementation(async (url: string) => {
+        if (url.includes('/messages')) {
+          return [{ role: 'user', content: 'do the thing', timestamp: '' }]
+        }
+        return []
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_streaming_done',
+          chat_id: chatId,
+          project_id: 'p1',
+          is_error: false,
+        }),
+      })
+
+      // Past the whole retry ladder (0/300/700/1500/3000/5000ms).
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('keeps the spinner while the server still reports the chat streaming', async () => {
+    // The backstop must not fire on a slow turn: the server is the authority
+    // on whether work is still running.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-slow'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.projectStreaming[chatId] = true
+      store.messages[chatId] = [{ role: 'user', content: 'still working', timestamp: '' }]
+      apiGet.mockImplementation(async (url: string) => {
+        if (url.includes('/messages')) {
+          return [{ role: 'user', content: 'still working', timestamp: '' }]
+        }
+        return []
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p1',
+          title: 't',
+          snippet: '',
+        }),
+      })
+
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('client host connection failures', () => {
   test('recognizes the legacy proxy error', () => {
     expect(isHostConnectionUnavailableMessage(
@@ -998,6 +1076,100 @@ describe('client host connection failures', () => {
     await store.syncLatest()
 
     expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
+  test('a stopped turn renders its partial text without badging the chat', () => {
+    // Every connected client gets this frame, so a backgrounded tab or a second
+    // device would otherwise show an unread marker for the half sentence the
+    // user just cancelled.
+    const store = useProjectStore()
+    const chatId = 'c-stopped-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Let me check the',
+        is_error: false,
+        stopped: true,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.messages[chatId].at(-1)?.content).toBe('Let me check the')
+    expect(store.unread[chatId]).toBeUndefined()
+  })
+
+  test('an ordinary result still badges a chat the user is not watching', () => {
+    const store = useProjectStore()
+    const chatId = 'c-normal-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Here is the answer.',
+        is_error: false,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.unread[chatId]).toBe(1)
+  })
+
+  test('the awareness socket raises the banner with no chat open', () => {
+    // The per-chat socket only exists while a chat is on screen, so on the
+    // home screen nothing used to notice the host was gone -- the app looked
+    // perfectly healthy. /ws/events is proxied too and carries the same frame.
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    expect(events.url).toContain('/ws/events')
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+    expect(store.hostConnectionUnavailable).toBe(true)
+
+    // A keepalive forwarded from the host proves it is back.
+    events.onmessage?.({ data: JSON.stringify({ type: 'keepalive' }) })
+    expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
+  test('a host-unreachable awareness socket backs off instead of respinning', async () => {
+    // The proxy accepts the browser socket before it tries the host, so the
+    // close looks like a healthy blip and took the 50ms path -- twenty
+    // reconnects a second for as long as the host stayed away.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      const countBefore = fakeSockets.length
+
+      events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+      events.close()
+
+      // First retry is still prompt, then the delay grows.
+      await vi.advanceTimersByTimeAsync(60)
+      expect(fakeSockets.length).toBe(countBefore + 1)
+
+      const retry = fakeSockets[fakeSockets.length - 1]
+      retry.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+      retry.close()
+      await vi.advanceTimersByTimeAsync(60)
+      expect(fakeSockets.length).toBe(countBefore + 1)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(fakeSockets.length).toBe(countBefore + 2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('treats the legacy generic event as the same single connection state', () => {

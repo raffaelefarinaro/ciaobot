@@ -60,8 +60,7 @@ def test_os_audit_endpoint_uses_configured_runtime_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    (tmp_path / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
     bounded = tmp_path / "bounded"
     bounded.mkdir()
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(bounded))
@@ -295,27 +294,32 @@ def test_workspace_health_reports_unsynced_custom_assets(tmp_path: Path) -> None
     assert any(check["id"] == "unsynced-subagent-orphan" for check in data["checks"])
 
 
-def test_workspace_health_reports_linked_workspace_guides(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+def test_workspace_health_reports_the_workspace_guide(tmp_path: Path) -> None:
+    """One guide, and no link to check. The `guides-linked` check is gone with
+    the symlink it described (ciao/workspace_guide.py)."""
+    (tmp_path / "AGENTS.md").write_text("# Guide\n", encoding="utf-8")
 
     data = _client(tmp_path).get("/api/workspace-health").json()
 
-    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
-    assert check["status"] == "ok"
-    assert check["path"] == "AGENTS.md"
+    assert not any(c["id"] == "guides-linked" for c in data["checks"])
+    assert not any(c["id"] == "legacy-guide" for c in data["checks"])
+    guide = next(c for c in data["checks"] if c["path"].endswith("AGENTS.md"))
+    assert guide["status"] == "ok"
 
 
-def test_workspace_health_warns_when_workspace_guides_diverge(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text("# Custom runtime guide\n", encoding="utf-8")
+def test_workspace_health_warns_about_a_surviving_legacy_guide(tmp_path: Path) -> None:
+    """A CLAUDE.md beside the guide means Claude Code reads it instead of
+    AGENTS.md, so the rename has not taken effect for this root."""
+    (tmp_path / "AGENTS.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("# Legacy guide\n", encoding="utf-8")
 
     data = _client(tmp_path).get("/api/workspace-health").json()
 
-    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    check = next(c for c in data["checks"] if c["id"] == "legacy-guide")
     assert check["status"] == "warn"
-    assert "different workspace instructions" in check["detail"]
-    assert "sync-skills" in check["action"]
+    assert "reads it instead of" in check["detail"]
+    # Renaming, never copying: the bounded memory regions live in that file.
+    assert "never copy it" in check["action"]
 
 
 def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> None:
@@ -333,7 +337,7 @@ def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> 
     after = resp.json()
 
     # The remedies were applied...
-    assert (tmp_path / "CLAUDE.md").is_file()
+    assert (tmp_path / "AGENTS.md").is_file()
     assert (tmp_path / "memory-vault" / "MEMORY.md").is_file()
     assert (tmp_path / ".claude" / "agents" / "orphan.md").is_symlink()
     # ...and the endpoint returns the fresh (now clean) report.

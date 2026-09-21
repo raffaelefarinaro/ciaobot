@@ -203,7 +203,13 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
         exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
         failures_since=last,
     )
-    if not report.get("error_line_count") and not report.get("failed_jobs"):
+    # ``has_issues`` is the producer's own answer to exactly this question
+    # (``bool(error_log.strip() or failed_jobs)``), so the gate cannot drift
+    # from the report again. It used to re-derive the gate from
+    # ``error_line_count``, a key ``build_issue_report`` never emits — it
+    # emits ``error_log_lines`` — so the error-log half was always falsy and
+    # a boot with tracebacks but no failed job opened no triage chat.
+    if not report.get("has_issues"):
         return False
 
     if last is not None and (now - last).total_seconds() < TRIAGE_COOLDOWN_S:
@@ -229,7 +235,7 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
     logger.info(
         "Startup found %s error line(s) and %d failed job run(s); "
         "dispatching a triage chat",
-        report.get("error_line_count", 0),
+        report.get("error_log_lines", 0),
         len(report.get("failed_jobs") or []),
     )
     await pcm.dispatch_schedule(entry, entry.prompt, model, mode, provider)

@@ -18,7 +18,7 @@ import pytest
 
 from ciao import insights, subagent_tracking
 from ciao.transcripts import _claude_projects_dir
-from ciao.web import routes_api
+from ciao.web import transcript_service
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 
 
@@ -112,9 +112,9 @@ def test_local_session_jsonl_paths_reads_own_root(fake_home: Path) -> None:
     session = "55555555-5555-5555-5555-555555555555"
     path = _write_session(_projects_dir_for(root_a), session)
 
-    assert routes_api._local_session_jsonl_paths(session, root_a) == [path]
+    assert transcript_service._local_session_jsonl_paths(session, root_a) == [path]
     assert (
-        routes_api._local_session_jsonl_paths(session, root_b, agent_root=root_b) == []
+        transcript_service._local_session_jsonl_paths(session, root_b, agent_root=root_b) == []
     )
 
 
@@ -123,7 +123,7 @@ def test_local_session_jsonl_paths_defaults_to_workspace_root(fake_home: Path) -
     session = "66666666-6666-6666-6666-666666666666"
     path = _write_session(_projects_dir_for(root), session)
 
-    assert routes_api._local_session_jsonl_paths(session, root) == [path]
+    assert transcript_service._local_session_jsonl_paths(session, root) == [path]
 
 
 def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
@@ -149,7 +149,7 @@ def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
     # _global_session_matches stats each slug live. Seed the cache to prove
     # freshness comes from the per-slug stat, not the cache age.
     transcripts._global_session_scan_cache = None
-    paths = routes_api._local_session_jsonl_paths(session, root)
+    paths = transcript_service._local_session_jsonl_paths(session, root)
     assert paths == [preferred, elsewhere, third]
 
     # Order: preferred (workspace root) first, then cross-cwd matches.

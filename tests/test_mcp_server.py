@@ -427,7 +427,7 @@ def test_usage_reuses_its_aggregate_until_the_log_changes(
 
     def counting_fold(tools, line):
         folded.append(line)
-        real_fold(tools, line)
+        return real_fold(tools, line)
 
     monkeypatch.setattr(mcp_server, "_fold_telemetry_line", counting_fold)
 
@@ -453,6 +453,191 @@ def test_usage_ignores_telemetry_lines_that_are_not_objects(tmp_path: Path) -> N
     usage = service.usage()
 
     assert usage["total_calls"] == 1
+
+
+def test_usage_window_says_when_nothing_has_been_trimmed(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    _emit(service, 3)
+
+    window = service.usage()["window"]
+
+    assert window["scope"] == "lifetime"
+    assert window["retained_records"] == 3
+    assert window["rolled_up_calls"] == 0
+    assert window["rotated_at"] == ""
+    assert window["max_records"] == mcp_server.TELEMETRY_KEEP_LINES
+    assert "All 3 recorded calls" in window["label"]
+
+
+def test_usage_window_states_the_detail_window_after_a_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+
+    _emit(service, 40)
+
+    usage = service.usage()
+    window = usage["window"]
+    retained = [
+        json.loads(line)
+        for line in service._telemetry_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    # Totals stay lifetime; only the detailed records are windowed, and the
+    # label has to say which part of the count is backed by which.
+    assert usage["total_calls"] == 40
+    assert window["scope"] == "lifetime"
+    assert window["retained_records"] == len(retained)
+    assert window["rolled_up_calls"] == 40 - len(retained)
+    assert window["retained_since"] == min(record["timestamp"] for record in retained)
+    assert window["rotated_at"]
+    assert "older calls are counted from the rolled-up totals only" in window["label"]
+    assert str(window["rolled_up_calls"]) in window["label"]
+
+
+def test_usage_window_survives_a_restart_after_a_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+    _emit(service, 40)
+    before = service.usage()["window"]
+
+    restarted, _plane = _service(tmp_path)
+    after = restarted.usage()["window"]
+
+    assert after["rolled_up_calls"] == before["rolled_up_calls"]
+    assert after["rotated_at"] == before["rotated_at"]
+    assert after["retained_records"] == before["retained_records"]
+    assert after["label"] == before["label"]
+
+
+def test_usage_over_a_large_log_stays_cheap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    service._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    with service._telemetry_path.open("w", encoding="utf-8") as handle:
+        for index in range(mcp_server.TELEMETRY_KEEP_LINES):
+            handle.write(
+                json.dumps(
+                    {
+                        "tool": "memory_read",
+                        "status": "ok",
+                        "duration_ms": 5,
+                        "provider": "claude",
+                        "timestamp": f"2026-07-19T10:00:{index % 60:02d}Z",
+                    }
+                )
+                + "\n"
+            )
+
+    started = time.perf_counter()
+    first = service.usage()
+    cold_seconds = time.perf_counter() - started
+
+    folded: list[str] = []
+    real_fold = mcp_server._fold_telemetry_line
+
+    def counting_fold(tools, line):
+        folded.append(line)
+        return real_fold(tools, line)
+
+    monkeypatch.setattr(mcp_server, "_fold_telemetry_line", counting_fold)
+    warm = service.usage()
+
+    assert first["total_calls"] == mcp_server.TELEMETRY_KEEP_LINES
+    assert warm["total_calls"] == first["total_calls"]
+    # A full-window parse is the worst case the endpoint can face, because
+    # the size guard caps the log at this many records. Generous bound: the
+    # point is that it is bounded work, not a microbenchmark.
+    assert cold_seconds < 2.0
+    # Polling the endpoint again parses nothing at all.
+    assert folded == []
+
+
+def test_tool_arguments_never_reach_the_telemetry_log(tmp_path: Path) -> None:
+    service, control_plane = _service(tmp_path)
+    token, _ = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+    secret = "sk-live-NOTAREALSECRET-452"
+
+    with _client(service) as client:
+        called = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "schedule",
+                "arguments": {"action": "create", "prompt": f"rotate {secret} tonight"},
+            },
+        )
+
+    assert called.status_code == 200
+    assert control_plane.create_calls == 1
+    log = service._telemetry_path.read_text(encoding="utf-8")
+    assert secret not in log
+    assert "prompt" not in log
+    record = json.loads(log.splitlines()[-1])
+    assert record["tool"] == "schedule"
+    assert set(record) == {
+        "timestamp",
+        "surface",
+        "tool",
+        "token_id",
+        "chat_id",
+        "provider",
+        "status",
+        "error_code",
+        "duration_ms",
+    }
+
+
+def test_tool_call_survives_a_telemetry_write_failure(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    token, _ = service.registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+    # A directory where the log belongs makes every append raise OSError,
+    # which stands in for a full disk or a read-only runtime directory.
+    service._telemetry_path.mkdir(parents=True, exist_ok=True)
+
+    with _client(service) as client:
+        called = _rpc(client, token, "tools/call", {"name": "context_get", "arguments": {}})
+
+    assert called.status_code == 200
+    assert called.json()["result"]["isError"] is False
+    # The reader tolerates it too, rather than turning it into a failed poll.
+    assert service.usage()["total_calls"] == 0
+
+
+def test_telemetry_write_tolerates_an_unserialisable_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    def exploding_dumps(*_args: Any, **_kwargs: Any) -> str:
+        raise TypeError("not serialisable")
+
+    monkeypatch.setattr(mcp_server.json, "dumps", exploding_dumps)
+
+    # No exception escapes: telemetry is best-effort, the caller is not.
+    service._record_tool_call(
+        name="memory_read",
+        principal=_chat_create_principal(),
+        status="ok",
+        error_code="",
+        duration_ms=3,
+    )
 
 
 def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:

@@ -3,9 +3,17 @@
     <div
       v-if="clientMode && !onDevicePage"
       class="client-mode-banner"
-      role="status"
+      :class="{ 'is-offline': hostUnreachable }"
+      :role="hostUnreachable ? 'alert' : 'status'"
     >
-      <span>
+      <!-- The host can drop while no chat is open, and the per-chat card that
+           announces it lives inside ChatPanel. This banner is the only piece of
+           chrome present on every screen, so it carries the state too. -->
+      <span v-if="hostUnreachable">
+        <span class="client-mode-banner-spinner" aria-hidden="true"></span>
+        Can’t reach <code>{{ clientHostLabel }}</code> — reconnecting…
+      </span>
+      <span v-else>
         Client mode — everything below is
         <code>{{ clientHostLabel }}</code>
         <template v-if="!clientHasSession"> · host password needed</template>
@@ -90,6 +98,18 @@ const workspaceColor = computed(() => {
   const ws = projectStore.workspaces.find((item) => item.name === active)
   return normalizeWorkspaceColor(ws?.color)
 })
+// True only in client mode: the local node proxy reports it cannot reach the
+// host (see the `host_unreachable` frame handling in the projects store).
+//
+// A mounted ChatPanel renders its own `host-connection-card` from the same
+// flag, with a richer recovery action, so the banner stands down there rather
+// than announcing the same outage twice -- to the eye and to a screen reader.
+// Keyed on the panel actually being on screen rather than on the URL: /chat
+// with no id and /chat/:id/subagent/:id are both chat paths that mount no
+// panel, and those screens need the banner like any other.
+const hostUnreachable = computed(
+  () => projectStore.hostConnectionUnavailable && projectStore.chatPanelsMounted === 0,
+)
 const clientHostLabel = computed(() => {
   const raw = clientHostUrl.value
   if (!raw) return 'remote host'
@@ -229,6 +249,26 @@ watch(showStartup, (show) => {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 12px;
   line-height: 1.4;
+}
+.client-mode-banner.is-offline {
+  background: color-mix(in srgb, var(--error) 22%, var(--bg2));
+}
+.client-mode-banner-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: var(--space-2);
+  vertical-align: baseline;
+  border: 2px solid color-mix(in srgb, var(--fg) 30%, transparent);
+  border-top-color: var(--fg);
+  border-radius: var(--radius-pill);
+  animation: client-mode-banner-spin 0.9s linear infinite;
+}
+@keyframes client-mode-banner-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .client-mode-banner-spinner { animation: none; }
 }
 .client-mode-banner code {
   color: var(--accent, #ff4d6d);

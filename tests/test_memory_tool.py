@@ -263,6 +263,23 @@ def test_read_and_write_region(tmp_path: Path) -> None:
     assert usage["used_chars"] == mt.total_chars(entries)
 
 
+def test_emptying_a_region_restores_the_guide_byte_for_byte(tmp_path: Path) -> None:
+    """Filling a region and emptying it again must be a no-op on the file.
+
+    The empty body used to be written as the heading's own trailing blank line
+    plus one more newline, so every round trip through empty grew the guide by
+    a line. Nothing downstream could see it: the parsed entries and the region
+    digest are both blank either way, so only the bytes tell.
+    """
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    pristine = guide.read_bytes()
+
+    filled = mt.replace_region_body(guide.read_text(encoding="utf-8"), "memory", ["alpha"])
+    assert filled.encode("utf-8") != pristine
+
+    assert mt.replace_region_body(filled, "memory", []).encode("utf-8") == pristine
+
+
 def test_read_region_accepts_legacy_user_alias(tmp_path: Path) -> None:
     guide = _guide_with_regions(
         tmp_path / "CLAUDE.md",

@@ -278,99 +278,28 @@
       </Transition>
       <template v-if="!blockingHistoryLoad">
       <template v-for="(item, i) in renderItems" :key="item.key">
-        <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
-        <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
-          <button
-            type="button"
-            class="trace-summary"
-            :aria-expanded="Boolean(openTraces[i])"
-            @click="toggleTrace(i)"
-          >
-            <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
-            <AppIcon class="trace-icon" name="activity" :size="14" />
-            <span class="trace-label">Activity</span>
-            <span class="trace-meta">
-              <span
-                v-for="part in traceSummaryMetaParts(item.steps, item.subs)"
-                :key="part.key"
-                :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
-              >
-                <span class="part-text-long">{{ part.text }}</span>
-                <span class="part-text-short">{{ part.shortText || part.text }}</span>
-              </span>
-            </span>
-            <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
-          </button>
-          <div v-if="openTraces[i]" class="trace-body" @click="onTraceBodyClick(i, $event)">
-            <template v-for="(step, j) in item.steps" :key="j">
-              <div v-if="step.tool_name === '_activity'" class="trace-tools">
-                <div
-                  v-for="(line, k) in activityLines(step.content)"
-                  :key="k"
-                  class="activity-line"
-                  :class="{ subagent: isSubagentLine(line) }"
-                  v-html="renderActivityLine(line)"
-                ></div>
-              </div>
-              <button
-                v-else-if="step.tool_name === '_filecard'"
-                type="button"
-                class="file-card"
-                @click="openFileCard(step.file_path || step.content)"
-                :title="step.file_path || step.content"
-              >
-                <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="18" />
-                <span class="file-card-main">
-                  <span class="file-card-name">{{ fileCardBasename(step.file_path || step.content) }}</span>
-                  <span class="file-card-meta">
-                    <span class="file-card-action">{{ step.action || 'touched' }}</span>
-                    <span v-if="fileCardDirname(step.file_path || step.content)" class="file-card-dir"> · {{ fileCardDirname(step.file_path || step.content) }}</span>
-                  </span>
-                </span>
-                <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
-              </button>
-              <div v-else-if="step.tool_name === '_thinking'" class="thinking-block">
-                <button
-                  type="button"
-                  class="thinking-toggle"
-                  :aria-expanded="thinkingExpanded"
-                  @click.stop="toggleThinking"
-                >
-                  <span aria-hidden="true">{{ thinkingExpanded ? '\u25BE' : '\u25B8' }}</span>
-                  <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
-                </button>
-                <div v-if="thinkingExpanded" class="trace-text trace-thinking">
-                  <button
-                    v-if="step.lazy && typeof step.i === 'number'"
-                    type="button"
-                    class="thinking-load"
-                    @click.stop="expandLazyStep(step)"
-                  >
-                    Load full reasoning…
-                  </button>
-                  <div v-else v-html="renderMarkdown(step.content)"></div>
-                </div>
-              </div>
-              <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
-            </template>
-            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" :chat-id="chat.chat_id" />
-            <div v-if="item.outputs?.length" class="trace-files">
-              <button
-                v-for="(f, fi) in item.outputs"
-                :key="fi"
-                type="button"
-                class="file-chip"
-                @click.stop="openFileCard(f.file_path)"
-                :title="f.file_path"
-              >
-                <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
-                <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
-                <span v-if="f.action === 'created'" class="file-chip-action">new</span>
-                <span class="file-chip-open" aria-hidden="true">&#8599;</span>
-              </button>
-            </div>
-          </div>
-        </div>
+        <!-- Reasoning trace: intermediate assistant text + tool calls grouped.
+             Rendering lives in ChatTurnActivity; ChatPanel keeps the open/closed
+             map, the markdown cache and the file-viewer wiring. -->
+        <ChatTurnActivity
+          v-if="item.kind === 'trace'"
+          :steps="item.steps"
+          :subs="item.subs"
+          :outputs="item.outputs"
+          :outputs-open="Boolean(openOutputs[i])"
+          :outputs-id="`outputs-${i}`"
+          :open="Boolean(openTraces[i])"
+          :chat-id="chat.chat_id"
+          :thinking-expanded="thinkingExpanded"
+          :render-markdown="renderMarkdown"
+          :render-activity-line="renderActivityLine"
+          @toggle="toggleTrace(i)"
+          @toggle-thinking="toggleThinking"
+          @body-click="onTraceBodyClick(i, $event)"
+          @toggle-outputs="toggleOutputs(i)"
+          @open-file="openFileCard"
+          @expand-step="expandLazyStep"
+        />
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
           <div class="message-row" @click="toggleMessageActions(`user-${i}`, $event)">
@@ -438,23 +367,35 @@
                 <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
                 <span>{{ classifyError(item.msg.content).copy }}</span>
               </div>
-              <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
-                <span class="answer-outputs-label">Outputs</span>
-                <div class="answer-output-files">
-                  <button
-                    v-for="(f, fi) in item.outputs"
-                    :key="fi"
-                    type="button"
-                    class="file-chip"
-                    @click.stop="openFileCard(f.file_path)"
-                    :title="f.file_path"
-                  >
-                    <AppIcon class="file-chip-icon" :name="fileCardIcon(f.file_path)" :size="14" />
-                    <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
-                    <span v-if="f.action === 'created'" class="file-chip-action">new</span>
-                    <span class="file-chip-open" aria-hidden="true">&#8599;</span>
-                  </button>
-                </div>
+              <!-- Outputs: collapsed by default, same disclosure shape as the
+                   Activity summary above (native button, chevron, aria-expanded). -->
+              <div v-if="item.outputs?.length" class="answer-outputs">
+                <button
+                  type="button"
+                  class="outputs-summary"
+                  :aria-expanded="Boolean(openOutputs[i])"
+                  :aria-controls="`outputs-${i}`"
+                  @click.stop="toggleOutputs(i)"
+                >
+                  <span class="outputs-chevron" aria-hidden="true">{{ openOutputs[i] ? '▾' : '▸' }}</span>
+                  <span class="outputs-label">Outputs</span>
+                  <span class="outputs-count">&middot; {{ item.outputs.length }} {{ item.outputs.length === 1 ? 'file' : 'files' }}</span>
+                  <span class="sr-only">, {{ openOutputs[i] ? 'expanded' : 'collapsed' }}</span>
+                </button>
+                <ul v-if="openOutputs[i]" :id="`outputs-${i}`" class="outputs-list">
+                  <li v-for="(f, fi) in item.outputs" :key="fi" class="outputs-row">
+                    <button
+                      type="button"
+                      class="outputs-link"
+                      @click.stop="openFileCard(f.file_path)"
+                      :title="f.file_path"
+                    >
+                      <span class="outputs-name">{{ fileCardBasename(f.file_path) }}</span>
+                      <span class="outputs-open" aria-hidden="true">&#8599;</span>
+                    </button>
+                    <span class="outputs-tag" :class="{ 'outputs-tag--new': outputActionTag(f.action) === 'new' }">{{ outputActionTag(f.action) }}</span>
+                  </li>
+                </ul>
               </div>
               <!-- One footer per turn, on its last bubble. A turn can produce
                    several assistant bubbles, and the fields are spread across
@@ -1192,24 +1133,38 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
+import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
-import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
-import { readChatDraft, readSentPromptHistory, recordSentPrompt, writeChatDraft } from '../lib/chatDrafts'
+import { recordSentPrompt } from '../lib/chatDrafts'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
-import AppIcon, { type AppIconName } from './AppIcon.vue'
+import AppIcon from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
+import {
+  activityLines,
+  buildTurnParts,
+  collectTraceOutputs,
+  fileCardBasename,
+  fileCardDirname,
+  fileCardIcon,
+  findFinalAnswerIndex,
+  formatTokenUsage,
+  isImageFilePath,
+  isSubagentLine,
+  outputActionTag,
+  traceSummaryMetaParts,
+  type TraceOutput,
+} from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import {
@@ -1229,6 +1184,7 @@ import {
 } from '../composables/useMentionPicker'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { subagentPath, shortAgentId } from '../lib/subagentIds'
@@ -1304,70 +1260,36 @@ const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
 const draftChatId = store.activeChatId
-const inputText = ref(readChatDraft(draftChatId))
-const inputRevision = ref(0)
-const inputEl = ref<HTMLTextAreaElement>()
-const promptHistoryIndex = ref(-1)
-const promptHistoryDraft = ref('')
-let settingPromptHistoryText = false
+// The composer, its persisted draft, prompt-history recall and every
+// attachment path (paste, drop, native desktop drop, the image picker) live
+// in useChatComposer. ChatPanel keeps the send path, the pickers and the
+// scroll behaviour, and hands the composable the ids it needs as getters.
+const composer = useChatComposer({
+  draftChatId,
+  chatId: () => chat.value?.chat_id || '',
+  projectId: () => chat.value?.project_id,
+  workspace: () => store.activeWorkspace,
+  vaultFolder: () => project.value?.vault_folder,
+  store,
+})
+const inputText = composer.draft
+const inputEl = composer.input
+const dragOver = composer.dragOver
+const {
+  autoResize,
+  handleDrop,
+  handleFileSelect,
+  handleNativeFileDragEnter,
+  handleNativeFileDragLeave,
+  handleNativeFileDrop,
+  handlePaste,
+  handlePromptHistoryKey,
+  insertImageRef,
+  removePendingImage,
+} = composer
 const isContinuing = ref(false)
 const becomingHost = ref(false)
 const hostHandoverError = ref('')
-
-// ChatLayout keys this panel by chat id, so each instance owns one draft.
-// Persist synchronously to avoid losing the last keystroke when switching
-// chats immediately after typing.
-watch(inputText, (text) => {
-  inputRevision.value += 1
-  if (!settingPromptHistoryText) {
-    promptHistoryIndex.value = -1
-    promptHistoryDraft.value = ''
-    writeChatDraft(draftChatId, text, undefined, {
-      projectId: chat.value?.project_id,
-      workspace: store.activeWorkspace,
-    })
-  }
-}, { flush: 'sync' })
-
-function promptHistory(): string[] {
-  return readSentPromptHistory(draftChatId)
-}
-
-function setPromptHistoryText(text: string): void {
-  settingPromptHistoryText = true
-  inputText.value = text
-  settingPromptHistoryText = false
-  nextTick(() => autoResize())
-}
-
-function handlePromptHistoryKey(e: KeyboardEvent): boolean {
-  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return false
-  const history = promptHistory()
-  if (!history.length) return false
-
-  if (e.key === 'ArrowUp') {
-    if (promptHistoryIndex.value < 0 && inputText.value.trim() !== '') return false
-    e.preventDefault()
-    if (promptHistoryIndex.value < 0) promptHistoryDraft.value = inputText.value
-    promptHistoryIndex.value = promptHistoryIndex.value < 0
-      ? history.length - 1
-      : Math.max(0, promptHistoryIndex.value - 1)
-    setPromptHistoryText(history[promptHistoryIndex.value])
-    return true
-  }
-
-  if (promptHistoryIndex.value < 0) return false
-  e.preventDefault()
-  if (promptHistoryIndex.value >= history.length - 1) {
-    promptHistoryIndex.value = -1
-    setPromptHistoryText(promptHistoryDraft.value)
-    promptHistoryDraft.value = ''
-  } else {
-    promptHistoryIndex.value += 1
-    setPromptHistoryText(history[promptHistoryIndex.value])
-  }
-  return true
-}
 
 async function disconnectAndBecomeHost() {
   if (becomingHost.value) return
@@ -1536,7 +1458,6 @@ const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
-const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
 
 // Post-archive pipeline, reported in the archived-chat footer. Reads through the
@@ -1733,6 +1654,13 @@ const dockRunningAgents = computed(() =>
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
+  // Tell the app-level client-mode banner that this panel is on screen, so it
+  // does not repeat the host-outage notice the card below already carries.
+  store.chatPanelsMounted += 1
+})
+
+onBeforeUnmount(() => {
+  store.chatPanelsMounted = Math.max(0, store.chatPanelsMounted - 1)
 })
 
 // Lightweight 30-second tick powering the "next in Xm" countdown in the
@@ -1828,6 +1756,10 @@ const modelsResponse = ref<ModelsResponse | null>(null)
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
+// Outputs disclosure per render item. Collapsed by default: the file list is
+// a reference, not part of the reply, and a turn that touched many files used
+// to push the answer off screen behind a wall of pills.
+const openOutputs = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
 const forkLoadingKey = ref<string | null>(null)
@@ -2063,6 +1995,10 @@ function toggleTrace(i: number) {
   openTraces.value = { ...openTraces.value, [i]: !openTraces.value[i] }
 }
 
+function toggleOutputs(i: number) {
+  openOutputs.value = { ...openOutputs.value, [i]: !openOutputs.value[i] }
+}
+
 function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
 }
@@ -2076,7 +2012,7 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
-  if (target.closest('.file-card, .file-chip')) return true
+  if (target.closest('.file-card, .answer-outputs')) return true
   if (target.closest('.subagent-panel')) return true
   if (target.closest('code, pre, kbd')) return true
   return false
@@ -3227,12 +3163,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  writeChatDraft(
-    draftChatId,
-    promptHistoryIndex.value < 0 ? inputText.value : promptHistoryDraft.value,
-    undefined,
-    { projectId: chat.value?.project_id, workspace: store.activeWorkspace },
-  )
+  composer.persistDraft()
   window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
   window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
@@ -3286,10 +3217,6 @@ function renderMarkdown(text: string): string {
 
 function renderActivityLine(line: string): string {
   return linkifyText(line, knownFilePaths.value)
-}
-
-function activityLines(content: string): string[] {
-  return content.split('\n').map(line => line.trim()).filter(Boolean)
 }
 
 async function copyMessageText(text: string, key: string): Promise<void> {
@@ -3382,10 +3309,6 @@ onBeforeUnmount(stopSpeaking)
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
 // Used to indent and de-emphasize them so the trace reads "parent → subagent
 // → parent" without the user mistaking subagent work for the parent's own.
-function isSubagentLine(line: string): boolean {
-  return line.trimStart().startsWith('↳')  // ↳
-}
-
 function handleFileLinkClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
@@ -3397,7 +3320,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   const lineAttr = a.getAttribute('data-line')
   const line = lineAttr ? parseInt(lineAttr, 10) : null
   const cid = chat.value?.chat_id || ''
-  if (_IMAGE_EXT_RE.test(path)) {
+  if (isImageFilePath(path)) {
     fileViewer.openImage(path, cid)
   } else {
     fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
@@ -3515,45 +3438,19 @@ function formatTokens(n: number): string {
   return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
 }
 
-
-
 // Image extensions get routed through openImage so the binary streams
 // directly instead of round-tripping through the text endpoint. Everything
 // else (markdown, code, config, plain text) goes through `open`. Binary
 // formats the viewer doesn't render (PDF, docx, xlsx, pptx, zip) fall
 // through to `open`, which will 415 and show a clear error.
-const _IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|tiff?)$/i
-
 function openFileCard(filePath: string): void {
   if (!filePath) return
   const cid = chat.value?.chat_id || ''
-  if (_IMAGE_EXT_RE.test(filePath)) {
+  if (isImageFilePath(filePath)) {
     fileViewer.openImage(filePath, cid)
   } else {
     fileViewer.open(filePath, null, cid)
   }
-}
-
-function fileCardBasename(filePath: string): string {
-  if (!filePath) return ''
-  const cleaned = filePath.replace(/[/\\]+$/, '')
-  const slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'))
-  return slash >= 0 ? cleaned.slice(slash + 1) : cleaned
-}
-
-function fileCardDirname(filePath: string): string {
-  if (!filePath) return ''
-  const slash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
-  return slash > 0 ? filePath.slice(0, slash) : ''
-}
-
-// Emoji cannot inherit currentColor, so file glyphs are SVG names now; see
-// docs/DESIGN_SYSTEM.md rule S4.
-function fileCardIcon(filePath: string): AppIconName {
-  if (_IMAGE_EXT_RE.test(filePath)) return 'image'
-  if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
-  if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
-  return 'file'
 }
 
 /** Fold a turn's footer facts into one record.
@@ -3884,29 +3781,6 @@ watch(
   { deep: true }
 )
 
-function autoResize() {
-  const el = inputEl.value
-  if (!el) return
-  el.style.height = 'auto'
-  // Floor at the shared touch target so an empty composer stays aligned
-  // with the sidebar "+ New Project" row (both 44px inside 61px footers).
-  const next = Math.min(Math.max(el.scrollHeight, 44), 200)
-  el.style.height = next + 'px'
-  const bar = el.closest('.input-bar')
-  if (!bar) return
-  const isTall = bar.classList.contains('tall')
-  // Hysteresis: once tall, stay tall until the text shrinks by ~2 lines;
-  // once short, stay short until it grows past the threshold. This stops
-  // the buttons from flickering when typing hovers near the boundary.
-  const enterTall = el.scrollHeight >= 120
-  const leaveTall = el.scrollHeight < 80
-  if (!isTall && enterTall) {
-    bar.classList.add('tall')
-  } else if (isTall && leaveTall) {
-    bar.classList.remove('tall')
-  }
-}
-
 function handleInput(): void {
   autoResize()
   refreshComposerPickers()
@@ -4030,8 +3904,7 @@ function send() {
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
   const sent = store.sendMessage(chat.value.chat_id, sendText, undefined, () => {
-    writeChatDraft(chat.value.chat_id, '')
-    inputText.value = ''
+    composer.clearDraft(chat.value.chat_id)
   })
   // If the send was deferred (chat WS is down), keep the text in the composer
   // and draft so the user doesn't lose it when the page updates/reloads.
@@ -4325,234 +4198,6 @@ async function handleVoice(blob: Blob) {
 function handleVoiceError(message: string) {
   store.pushErrorToast('Voice dictation unavailable', message)
 }
-async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
-
-type DroppedProjectFile = {
-  path: string
-  vault_path: string
-  absolute_path?: string
-  original_path?: string | null
-  markdown_path?: string | null
-}
-
-type ProjectUploadResult = {
-  saved?: DroppedProjectFile[]
-  errors?: { filename: string; error: string }[]
-  error?: string
-}
-
-type NativeFileDropDetail = {
-  grantId?: string
-  paths?: string[]
-  error?: string
-}
-
-type NativeFileDropResult = {
-  paths?: string[]
-  attachments?: { original_path?: string | null; markdown_path?: string | null }[]
-  image_refs?: string[]
-  errors?: { filename: string; error: string }[]
-  error?: string
-}
-
-async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void> {
-  dragOver.value = false
-  if (detail.error || !detail.grantId) {
-    store.pushErrorToast(
-      'Could not attach file',
-      detail.error || 'The native file-drop grant was missing.',
-    )
-    return
-  }
-  try {
-    const response = await fetch('/api/desktop-drop', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_id: detail.grantId,
-        project_id: project.value?.project_id || '',
-        chat_id: chat.value.chat_id,
-      }),
-    })
-    const result = await response.json().catch(() => ({})) as NativeFileDropResult
-    if (!response.ok) {
-      throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
-    }
-    for (const failure of result.errors || []) {
-      store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
-    }
-    const paths = (result.attachments || []).flatMap((entry) =>
-      [entry.original_path, entry.markdown_path].filter((path): path is string => Boolean(path)))
-    paths.push(...(result.paths || []))
-    if (paths.length) {
-      insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
-    }
-    store.addPendingImageRefs(chat.value.chat_id, result.image_refs || [])
-  } catch (error) {
-    store.pushErrorToast(
-      'Could not attach file',
-      error instanceof Error ? error.message : String(error),
-    )
-  }
-}
-
-function handleNativeFileDragEnter(): void {
-  dragOver.value = true
-}
-
-function handleNativeFileDragLeave(): void {
-  dragOver.value = false
-}
-
-function handleNativeFileDrop(event: Event): void {
-  const detail = (event as CustomEvent<NativeFileDropDetail>).detail || {}
-  void importNativeFileDrop(detail)
-}
-
-async function localDropNeedsUpload(): Promise<boolean> {
-  try {
-    // This endpoint is deliberately handled by the local node instead of the
-    // client proxy, so it reveals whether the browser and agent are on
-    // different computers.
-    const response = await fetch('/api/startup-status', {
-      credentials: 'same-origin',
-    })
-    if (!response.ok) return true
-    const role = String((await response.json()).node_role || '')
-    return role === 'client' || role === 'standby'
-  } catch {
-    // Uploading is the safe fallback: a local-only path would be unusable if
-    // this browser turns out to be connected to a remote host.
-    return true
-  }
-}
-
-async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
-  if (!project.value?.vault_folder) {
-    throw new Error('This project has no folder for uploaded files.')
-  }
-  const form = new FormData()
-  files.forEach((file, index) => form.append(`file${index}`, file, file.name))
-  const response = await fetch(`/api/chats/${chat.value.chat_id}/attachments`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: form,
-  })
-  const result = await response.json().catch(() => ({})) as ProjectUploadResult
-  if (!response.ok) {
-    throw new Error(result.error || `Upload failed (HTTP ${response.status})`)
-  }
-  for (const failure of result.errors || []) {
-    store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
-  }
-  return (result.saved || []).flatMap((file) => {
-    const paths = [file.original_path, file.markdown_path]
-    return (paths.some(Boolean) ? paths : [file.absolute_path || file.vault_path])
-      .filter((path): path is string => Boolean(path))
-  })
-}
-
-async function handleDrop(e: DragEvent) {
-  dragOver.value = false
-  const dt = e.dataTransfer
-  if (!dt) return
-
-  // Capture DataTransfer contents synchronously; browsers may invalidate the
-  // drag store once this event handler yields to the startup-status request.
-  const files: File[] = []
-  const folders: { name: string; file: File | null }[] = []
-  const items = Array.from(dt.items || [])
-  if (items.length) {
-    for (const item of items) {
-      if (item.kind !== 'file') continue
-      const entry = (item as DataTransferItem & {
-        webkitGetAsEntry?: () => { isDirectory?: boolean; name?: string } | null
-      }).webkitGetAsEntry?.()
-      if (entry?.isDirectory) {
-        folders.push({ name: entry.name || 'folder', file: item.getAsFile() })
-        continue
-      }
-      const file = item.getAsFile()
-      if (file) files.push(file)
-    }
-  } else {
-    files.push(...Array.from(dt.files || []))
-  }
-
-  const imageFiles = files.filter(file => file.type.startsWith('image/'))
-  const regularFiles = files.filter(file => !file.type.startsWith('image/'))
-  const paths: string[] = []
-  const needsUpload = regularFiles.length || folders.length
-    ? await localDropNeedsUpload()
-    : false
-
-  const unavailableFolders: string[] = []
-  for (const folder of folders) {
-    const nativePath = needsUpload || !folder.file
-      ? null
-      : nativeAbsoluteFilePath(folder.file)
-    if (nativePath) paths.push(nativePath)
-    else unavailableFolders.push(folder.name)
-  }
-  if (unavailableFolders.length) {
-    store.pushErrorToast(
-      'Could not attach folder',
-      'Drop individual files instead; remote clients and sandboxed browsers cannot expose an absolute folder path.',
-    )
-  }
-
-  if (regularFiles.length) {
-    const uploadFiles: File[] = []
-    for (const file of regularFiles) {
-      const nativePath = needsUpload ? null : nativeAbsoluteFilePath(file)
-      if (nativePath) paths.push(nativePath)
-      else uploadFiles.push(file)
-    }
-    if (uploadFiles.length) {
-      try {
-        paths.push(...await uploadDroppedProjectFiles(uploadFiles))
-      } catch (error) {
-        store.pushErrorToast(
-          'Could not attach file',
-          error instanceof Error ? error.message : String(error),
-        )
-      }
-    }
-  }
-
-  if (paths.length) {
-    insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
-  }
-  if (imageFiles.length) await store.uploadImages(chat.value.chat_id, imageFiles)
-}
-async function handlePaste(e: ClipboardEvent) { const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')); if (items.length) { e.preventDefault(); await store.uploadImages(chat.value.chat_id, items.map(i => i.getAsFile()).filter(Boolean) as File[]) } }
-function removePendingImage(index: number) { store.removePendingImage(index) }
-
-function insertTextAtCursor(token: string) {
-  const el = inputEl.value
-  if (!el) return
-  const start = el.selectionStart ?? 0
-  const end = el.selectionEnd ?? 0
-  const before = inputText.value.slice(0, start)
-  const after = inputText.value.slice(end)
-  // Add a leading space if we're appending to existing text and the token
-  // isn't at the start or already preceded by whitespace.
-  const prefix = start > 0 && !/\s$/.test(before) ? ' ' : ''
-  // Add a trailing space so the user can keep typing.
-  const suffix = ' '
-  inputText.value = before + prefix + token + suffix + after
-  nextTick(() => {
-    const pos = start + prefix.length + token.length + suffix.length
-    el.selectionStart = el.selectionEnd = pos
-    el.focus()
-  })
-}
-
-function insertImageRef(n: number) {
-  insertTextAtCursor(`[Image ${n}]`)
-}
-
 // Cmd+D toggles a voice recording from the composer: first press starts,
 // second press stops (same as the on-screen mic/stop button).
 // When a comment compose popover is open, the shortcut is routed there instead
@@ -5366,353 +5011,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   .retry-card-actions { justify-content: flex-end; }
 }
 
-/* Reasoning trace (intermediate assistant text + tool calls grouped) */
-.trace-block {
-  align-self: flex-start;
-  width: 98%;
-  max-width: 98%;
-  background: transparent;
-  border: 1px dashed var(--border);
-  border-left: 3px solid var(--accent2);
-  border-radius: var(--radius);
-  font-size: var(--text-sm);
-  opacity: 0.85;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  min-width: 0;
-}
-
-.trace-block.live {
-  border-color: var(--accent);
-  opacity: 1;
-}
-.trace-block.live .trace-label { color: var(--accent); font-weight: 600; }
-
-
-.trace-summary {
-  padding: 8px 12px;
-  min-height: var(--touch);
-  width: 100%;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  color: var(--fg2);
-  user-select: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: var(--text-sm);
-  line-height: 1.4;
-  font-family: inherit;
-  text-align: left;
-}
-
-.trace-summary:hover { color: var(--fg); }
-.trace-summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); flex-shrink: 0; }
-.trace-icon { font-size: calc(14px * var(--font-scale)); flex-shrink: 0; }
-.trace-label { color: var(--fg2); white-space: nowrap; flex-shrink: 0; }
-.trace-meta {
-  color: var(--fg2);
-  opacity: 0.7;
-  font-weight: 400;
-  margin-left: auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-xs);
-  display: flex;
-  align-items: center;
-}
-.trace-meta-part {
-  display: inline-flex;
-  align-items: center;
-  white-space: nowrap;
-}
-.trace-meta-part::after {
-  content: "·";
-  margin: 0 6px;
-  opacity: 0.7;
-}
-.trace-meta-part:last-child::after {
-  content: none;
-}
-.trace-meta-part .part-text-short {
-  display: none;
-}
-@media (max-width: 640px) {
-  .trace-meta-part.part-thoughts,
-  .trace-meta-part.part-notes,
-  .trace-meta-part.part-files,
-  .trace-meta-part.part-subagents {
-    display: none;
-  }
-  .trace-meta-part:not(:has(~ .trace-meta-part:not(.part-thoughts):not(.part-notes):not(.part-files):not(.part-subagents)))::after {
-    content: none;
-  }
-  .trace-meta-part .part-text-long {
-    display: none;
-  }
-  .trace-meta-part .part-text-short {
-    display: inline;
-  }
-}
-
-.trace-body {
-  padding: 6px 12px 10px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-.trace-text {
-  color: var(--fg2);
-  font-style: italic;
-  font-size: var(--text-sm);
-  line-height: 1.45;
-  min-width: 0;
-  overflow-wrap: break-word;
-}
-
-.thinking-block {
-  min-width: 0;
-}
-
-.thinking-toggle {
-  min-height: var(--touch);
-  padding: 4px 8px 4px 2px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs);
-  opacity: 0.85;
-}
-
-.thinking-load {
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs);
-  padding: 4px 10px;
-  border-radius: 8px;
-}
-
-.thinking-load:hover {
-  color: var(--fg);
-}
-
-.thinking-toggle:hover { color: var(--fg); }
-.thinking-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.trace-text :deep(a) {
-  color: var(--accent);
-  text-decoration: underline;
-}
-.trace-text :deep(a:hover) {
-  color: var(--accent-strong);
-}
-
-.trace-text :deep(pre) {
-  max-width: 100%;
-  overflow-x: auto;
-}
-
-.trace-text :deep(p) { margin: 2px 0; }
-/* Re-establish list indent — the global `*` reset nukes browser defaults,
-   and without padding-left the outside list-style markers render past the
-   trace block's left border. */
-.trace-text :deep(ul),
-.trace-text :deep(ol) {
-  padding-left: 22px;
-  margin: 2px 0;
-  list-style-position: outside;
-}
-.trace-text :deep(li) { padding-left: 2px; }
-
-/* Thinking-block styling. Visually distinct from regular intermediate
-   text so it reads as "model reasoning" rather than "draft answer". */
-.trace-thinking {
-  opacity: 0.7;
-  border-left: 2px solid var(--fg2);
-  padding-left: 8px;
-  margin-left: 2px;
-}
-
-/* Transient status ticks (e.g. compaction) — one live line, dimmer than
-   regular trace text, no border since it's not a block of reasoning. */
-.trace-status {
-  opacity: 0.6;
-}
-
-.trace-tools {
-  background: var(--bg);
-  border-radius: 4px;
-  padding: 4px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-
-/* Inline file card. Rendered inside the activity trace whenever the agent
-   calls Write/Edit/MultiEdit/NotebookEdit. Tapping opens the FileViewerModal
-   for that path (security-checked server-side by /api/workspace-file). */
-/* Always-visible output chips sit below a final answer. Interrupted turns
-   retain the chips inside Activity so file touches do not disappear. */
-.trace-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 12px 10px;
-}
-.answer-outputs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-.answer-outputs-label {
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-.answer-output-files {
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-.file-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  min-height: var(--touch);
-  padding: 3px 8px;
-  font-size: var(--text-xs);
-  color: var(--fg);
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  cursor: pointer;
-}
-.file-chip:hover {
-  border-color: var(--accent);
-}
-.file-chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.file-chip-action {
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  text-transform: lowercase;
-}
-.file-chip-open {
-  color: var(--fg3);
-  flex-shrink: 0;
-}
-
-.file-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  max-width: 100%;
-  padding: 8px 10px;
-  margin: 2px 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  cursor: pointer;
-  text-align: left;
-  color: inherit;
-  font: inherit;
-  transition: background 0.12s, border-color 0.12s;
-  min-width: 0;
-}
-
-.file-card:hover {
-  background: var(--bg2);
-  border-color: var(--accent2);
-}
-
-.file-card:active {
-  background: var(--bg2);
-}
-
-.file-card-icon {
-  flex: 0 0 auto;
-  font-size: var(--text-lg);
-  line-height: 1;
-}
-
-.file-card-main {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.file-card-name {
-  font-weight: 600;
-  font-size: var(--text-base);
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-card-meta {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 1px;
-}
-
-.file-card-action {
-  color: var(--accent);
-}
-
-.file-card-dir {
-  color: var(--fg2);
-}
-
-.file-card-chevron {
-  flex: 0 0 auto;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  line-height: 1;
-  opacity: 0.7;
-}
-
 /* Activity blocks (live streaming) */
 .activity-block {
   align-self: flex-start;
@@ -5808,27 +5106,6 @@ details[open] > .activity-summary::before {
 .activity-lines {
   padding: 4px 10px 6px;
   border-top: 1px solid var(--border);
-}
-
-.activity-line {
-  padding: 2px 0;
-  color: var(--fg2);
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.45;
-}
-
-/* Subagent activity (parent_tool_use_id was set on the WS event). Indented
-   and dimmed so the trace reads as parent → subagent → parent without the
-   reader having to parse who did what. The bracketed [Explore] / [general]
-   tag at the start of the line carries the actual attribution. */
-.activity-line.subagent {
-  padding-left: 18px;
-  opacity: 0.78;
-  border-left: 2px solid var(--border);
-  margin-left: 4px;
 }
 
 /* "N agents" header pill: background subagents still running after the
@@ -7570,3 +6847,5 @@ details[open] > .activity-summary::before {
    digit could only ever read "1". */
 .loop-banner-manage { text-decoration: none; }
 </style>
+
+<style scoped src="./chatTrace.css"></style>

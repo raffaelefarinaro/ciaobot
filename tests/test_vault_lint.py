@@ -641,6 +641,58 @@ def test_orphan_detection(temp_vault):
     assert "People/Charlie.md" in issues["orphans"]
     assert "People/Bob.md" not in issues["orphans"]
 
+def test_a_root_level_memory_md_clears_an_orphan(tmp_path):
+    """Regression: a MEMORY.md at the vault root was never a memory root.
+
+    `relative` is computed against whatever vault root the caller passed. A
+    shared vault holding workspace directories puts MEMORY.md at
+    `<workspace>/MEMORY.md`, but the per-workspace re-root gives each
+    workspace its own vault, and linting that directly puts it at
+    `MEMORY.md`. The depth check accepted only the former, so on the
+    re-rooted layout linking a note from MEMORY.md could never clear its
+    orphan warning — the note stayed in the report no matter what was done
+    to it.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "MEMORY.md").write_text("- see [Ada](People/Ada.md)\n", encoding="utf-8")
+    (vault / "People" / "Ada.md").write_text("Profile of Ada", encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "People/Ada.md" not in issues["orphans"]
+
+
+def test_a_workspace_level_memory_md_still_clears_an_orphan(tmp_path):
+    """The layout that already worked must keep working."""
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "People").mkdir(parents=True)
+    (vault / "personal" / "MEMORY.md").write_text(
+        "- see [Ada](People/Ada.md)\n", encoding="utf-8"
+    )
+    (vault / "personal" / "People" / "Ada.md").write_text("Profile of Ada", encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "personal/People/Ada.md" not in issues["orphans"]
+
+
+def test_a_memory_md_deeper_than_a_workspace_is_not_a_memory_root(tmp_path):
+    """Only the vault root and a workspace directory count. A MEMORY.md
+    filed inside a notes folder is an ordinary note, and crediting its links
+    would hide real orphans."""
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "Projects" / "People").mkdir(parents=True)
+    (vault / "personal" / "Projects" / "MEMORY.md").write_text(
+        "- see [Ada](People/Ada.md)\n", encoding="utf-8"
+    )
+    (vault / "personal" / "Projects" / "People" / "Ada.md").write_text("Ada", encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "personal/Projects/People/Ada.md" in issues["orphans"]
+
+
 def test_duplicate_detection(temp_vault):
     people = temp_vault / "People"
     (people / "Alice-Smith.md").write_text("Alice Smith", encoding="utf-8")

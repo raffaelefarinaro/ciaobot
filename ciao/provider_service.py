@@ -11,6 +11,7 @@ from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
 from ciao.memory_tool import prune_expired_entries
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
+from ciao.workspace_guide import guide_path
 
 ProviderImpl = BaseProvider
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class ProviderService:
                 else Path(getattr(self._config, "workspace_root", "."))
             )
             result = prune_expired_entries(
-                guide_root / "CLAUDE.md",
+                guide_path(guide_root),
                 vault_root=self._prune_vault_root(),
                 workspace=self._workspace,
             )
