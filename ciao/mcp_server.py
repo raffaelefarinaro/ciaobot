@@ -1043,10 +1043,12 @@ class CiaoMcpService:
         self.server = FastMCP(
             "ciaobot",
             instructions=(
-                "Use these tools for Ciaobot memory, vault, projects, chats, "
-                "schedules, files, and application state. Prefer them "
-                "over curl, the ciao CLI, or direct .runtime edits. All paths "
-                "are relative to the active workspace or vault."
+                "Use these tools for Ciaobot memory, vault, and files. "
+                "Projects, chats, schedules, background runs, and other "
+                "operations are `ciao <noun> <verb>` commands (see the "
+                "ciao-cli skill); prefer them over curl or direct .runtime "
+                "edits. All paths are relative to the active workspace or "
+                "vault."
             ),
             host="127.0.0.1",
             streamable_http_path="/",

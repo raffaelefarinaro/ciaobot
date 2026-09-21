@@ -213,7 +213,7 @@ def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
     assert actions["*"] == "allow"
     assert actions["bash"] == "ask"
     assert "edit" not in actions
-    assert actions[f"{MCP_SERVER_NAME}_project_action"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_vault_review"] == "ask"
 
 
 def test_plan_mode_is_read_only():
@@ -2033,7 +2033,7 @@ def test_destructive_control_plane_tools_still_prompt():
 
     actions = _actions("auto")
     assert actions["*"] == "allow"
-    assert actions[f"{MCP_SERVER_NAME}_project_action"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_vault_review"] == "ask"
 
 
 def test_plan_mode_grants_no_control_plane_allowance():

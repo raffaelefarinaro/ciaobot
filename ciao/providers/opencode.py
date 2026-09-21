@@ -198,10 +198,11 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 # the rare-admin, chat and background/schedule groups moved to the CLI
 # (S2/S3/S4), where their destructive verbs are handled by the argv ask
 # patterns in ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What
-# remains is ``project_action``. Everything else on the control plane is
-# allow-listed.
+# remains MCP-exposed and ``_DESTRUCTIVE`` is ``vault_review``; the auto
+# wildcard above would otherwise allow-list it, so it stays ``ask``. Everything
+# else on the control plane is allow-listed.
 _DESTRUCTIVE_MCP_TOOLS = (
-    "project_action",
+    "vault_review",
 )
 
 # Permission changes cannot be patched onto an existing opencode session.
