@@ -9460,6 +9460,9 @@ class ProjectChatManager:
         try:
             transcriber = AppleDictationTranscriber(self._config.transcription_locale)
             text = await transcriber.transcribe(audio_path)
+            # Repair dictation surface errors with the on-device model. Fail-open:
+            # any failure returns the raw transcript unchanged.
+            text = await transcriber.correct(text)
         except Exception as exc:
             raise ValueError(f"Dictation failed: {exc}") from exc
         return text, 0.0

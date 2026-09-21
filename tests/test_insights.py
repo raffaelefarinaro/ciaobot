@@ -699,6 +699,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         "processed": 2,
         "success": 2,
         "skipped": 0,
+        "gated": 0,
         "errors": 0,
     }
     assert insights.format_backfill_summary(result) == "Processed 2/2: 2 succeeded, 0 skipped."
@@ -766,6 +767,82 @@ def test_fit_apple_input_reserve_matches_an_explicit_smaller_budget() -> None:
     assert native_sidecar.fit_apple_input(
         payload, max_chars=40, reserve=10
     ) == native_sidecar.fit_apple_input(payload, max_chars=30)
+
+
+def _user_jsonl(*texts: str) -> str:
+    return "\n".join(
+        json.dumps({"idx": i + 1, "type": "user", "content": [{"type": "text", "text": t}]})
+        for i, t in enumerate(texts)
+    )
+
+
+def test_explicit_memory_intent_is_detected_in_user_turns() -> None:
+    assert insights._has_explicit_memory_intent(
+        _user_jsonl("please remember that I prefer tabs")
+    )
+    assert insights._has_explicit_memory_intent(
+        _user_jsonl("some chit chat", "save this to my memory")
+    )
+    assert insights._has_explicit_memory_intent(
+        _user_jsonl("/remember: deploy on Fridays")
+    )
+
+
+def test_assistant_self_talk_is_not_explicit_memory_intent() -> None:
+    # "I'll remember to..." from the assistant must not gate a real user request
+    filtered = json.dumps({"idx": 1, "type": "user", "content": [{"type": "text", "text": "ok go ahead"}]}) + "\n" + json.dumps(
+        {"idx": 2, "type": "assistant", "content": [{"type": "text", "text": "I'll remember to check the logs"}]}
+    )
+    assert not insights._has_explicit_memory_intent(filtered)
+
+
+def test_unattended_turn_is_not_explicit_memory_intent() -> None:
+    filtered = json.dumps(
+        {"idx": 1, "type": "user", "unattended": True, "content": [{"type": "text", "text": "remember to sync"}]}
+    )
+    assert not insights._has_explicit_memory_intent(filtered)
+
+
+def test_apple_prefilter_skips_when_model_available_and_verdict_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+    async def fake_respond(prompt, **kw):
+        return "NO"
+    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
+    gated = asyncio.run(insights._apple_prefilter_skips(
+        _user_jsonl("quick debug, nothing durable"),
+        workspace_root=Path("."), session_id="s1", jsonl_root=Path("."),
+    ))
+    assert gated is True
+
+
+def test_apple_prefilter_does_not_skip_when_explicit_remember(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(*a, **k):
+        raise AssertionError("must not call the model when user explicitly asks to remember")
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "respond", fail)
+    gated = asyncio.run(insights._apple_prefilter_skips(
+        _user_jsonl("remember that the API key rotates monthly"),
+        workspace_root=Path("."), session_id="s1", jsonl_root=Path("."),
+    ))
+    assert gated is False
+
+
+def test_apple_prefilter_fails_open_when_model_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
+    async def fail(*a, **k):
+        raise AssertionError("must not call the model when Apple is unavailable")
+    monkeypatch.setattr(native_sidecar, "respond", fail)
+    gated = asyncio.run(insights._apple_prefilter_skips(
+        _user_jsonl("anything at all"),
+        workspace_root=Path("."), session_id="s1", jsonl_root=Path("."),
+    ))
+    assert gated is False
 
 
 def test_max_input_chars_ignores_junk_and_nonpositive_values(

@@ -236,6 +236,123 @@ def _backfill_ceiling() -> int:
     return _env_int("CIAO_INSIGHTS_BACKFILL_MAX", 200)
 
 
+_EXPLICIT_MEMORY_INTENT = re.compile(
+    r"(?:"
+    r"/remember|remember(?: me| this| that)?\b|memoriz\w+|"
+    r"save (?:this|that|the|it)(?: to (?:my )?memory)?\b|"
+    r"add (?:this|that|it)? to (?:my )?memory|"
+    r"note (?:this|that|down)\b|make a note|"
+    r"put (?:this|that|it) (?:in|into) (?:my )?(?:memory|notes)|"
+    r"write (?:this|that|it) (?:to|into) (?:my )?memory|"
+    r"(?:do you )?remembers? that\b|keep (?:this|that) (?:in|for).*memory"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_memory_intent(filtered_jsonl: str) -> bool:
+    """True when a session explicitly asks for a memory write.
+
+    A conservative, exact guard: extraction must not be skipped for any archive
+    the user clearly asked to remember. Checks the user-typed text turns only,
+    so assistant self-talk ("I'll remember to...") and machinery never match.
+    """
+    for line in filtered_jsonl.splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") != "user" or rec.get("unattended"):
+            continue
+        blocks = rec.get("content") or []
+        for block in blocks if isinstance(blocks, list) else []:
+            text = block.get("text") if isinstance(block, dict) else None
+            if isinstance(text, str) and _EXPLICIT_MEMORY_INTENT.search(text):
+                return True
+    return False
+
+
+async def _apple_prefilter_skips(
+    filtered_jsonl: str,
+    *,
+    workspace_root: Path,
+    session_id: str,
+    jsonl_root: Path | None,
+) -> bool:
+    """Ask the on-device model whether an archive holds durable signal.
+
+    Returns True (skip extraction) only when the archive is *provably* low
+    value: the on-device model is available, the user did not explicitly ask to
+    remember anything, and the local classifier finds no durable signal. Any
+    failure — model unavailable, an error, an explicit-remember turn — returns
+    False so extraction proceeds normally rather than silently losing memory.
+    """
+    if not native_sidecar.apple_model_available():
+        return False
+    if _has_explicit_memory_intent(filtered_jsonl):
+        return False
+    try:
+        text = _render_pregate_text(filtered_jsonl)
+        fitted, _ = native_sidecar.fit_apple_input(text)
+        verdict = await native_sidecar.respond(
+            fitted,
+            instructions=_PREGATE_SYSTEM_PROMPT,
+            timeout=_insights_timeout_s(),
+        )
+        return verdict.strip().upper().startswith("NO")
+    except native_sidecar.SidecarError:
+        logger.info(
+            "On-device prefilter unavailable for %s; extracting normally",
+            session_id,
+        )
+        return False
+
+
+def _render_pregate_text(filtered_jsonl: str, *, max_chars: int = 30_000) -> str:
+    """Render filtered JSONL into a compact head+tail transcript for the gate.
+
+    Mirrors the extraction view but caps at a size the on-device model can
+    hold. Head+tail (not newest-lines-only) so a durable fact buried in the
+    middle of a long session is still seen.
+    """
+    parts: list[str] = []
+    for line in filtered_jsonl.splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        blocks = rec.get("content") or []
+        texts: list[str] = [
+            b["text"]
+            for b in blocks
+            if isinstance(b, dict) and isinstance(b.get("text"), str)
+        ]
+        text = " ".join(texts).strip()
+        if not text:
+            continue
+        tag = "USER" if rec.get("type") == "user" else "ASST"
+        parts.append(f"{tag}: {text[:400]}")
+    out = "\n".join(parts)
+    if len(out) > max_chars:
+        head = out[: int(max_chars * 0.55)]
+        tail = out[-int(max_chars * 0.4):]
+        out = head + "\n[...]\n" + tail
+    return out
+
+
+_PREGATE_SYSTEM_PROMPT = """\
+You are a memory pre-filter. A chat session is about to be archived and expensive
+durable-fact extraction may run on it. Decide whether the transcript contains ANY
+durable, reusable fact worth keeping long-term — a decision, a preference, a
+project detail, a setup, a learned rule, a goal, a personal fact.
+
+Pure code debugging with no durable conclusion, a one-off task, or routine
+chit-chat is NOT durable. Ignore framing, scaffolding, tool noise, and system
+boilerplate.
+
+Answer with exactly one word: YES or NO."""
+
+
 def _resolve_insights_call(
     config, model: str, *, provider: str = "claude"
 ) -> tuple[str, str, str | None]:
@@ -1935,6 +2052,7 @@ def _empty_backfill_stats() -> dict[str, int]:
         "processed": 0,
         "success": 0,
         "skipped": 0,
+        "gated": 0,
         "errors": 0,
     }
 
@@ -1954,6 +2072,8 @@ def format_backfill_summary(stats: dict[str, int]) -> str:
         return f"No archives needed backfill ({stats.get('already_done', 0)} already complete)."
 
     summary = f"Processed {processed}/{selected}: {success} succeeded, {skipped} skipped"
+    if stats.get("gated"):
+        summary += f", {stats['gated']} gated (no durable signal)"
     if errors:
         summary += f", {errors} errors"
     return summary + "."
@@ -2205,6 +2325,17 @@ async def backfill_insights_task(
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
                         return "skipped"
+                    if await _apple_prefilter_skips(
+                        filtered,
+                        workspace_root=config.workspace_root,
+                        session_id=session_id,
+                        jsonl_root=jsonl_root,
+                    ):
+                        logger.info(
+                            "On-device prefilter found no durable signal in %s; skipping extraction",
+                            archive_path.name,
+                        )
+                        return "gated"
                     await extract_and_append(
                         archive_path=archive_path,
                         filtered_jsonl=filtered,
@@ -2314,6 +2445,8 @@ async def backfill_insights_task(
             stats["success"] += 1
         elif result == "skipped":
             stats["skipped"] += 1
+        elif result == "gated":
+            stats["gated"] += 1
         else:
             stats["errors"] += 1
     logger.info("Backfill task completed.")

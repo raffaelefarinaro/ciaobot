@@ -127,9 +127,10 @@ _PROBE_TTL_S = 60.0
 _model_available_latch = False
 
 # Foundation Models has a much smaller context window than the cloud models
-# used by the rest of the app. Keep enough of the newest transcript for a
-# useful summary while leaving room for the prompt and instructions.
-APPLE_MAX_INPUT_CHARS = 8_000
+# used by the rest of the app. Measured ceiling on this Mac (M4, macOS 27) is
+# ~44k chars before the session reports a transcript-too-long error, so 40k
+# keeps a safe margin while still holding a useful chunk of the transcript.
+APPLE_MAX_INPUT_CHARS = 40_000
 
 # Routing sentinels for "use Apple's on-device model". "apfel" is the legacy id
 # from when this shelled out to the apfel Homebrew CLI; settings saved before
