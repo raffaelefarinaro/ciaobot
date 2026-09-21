@@ -126,15 +126,15 @@ def test_mcp_and_dispatcher_serve_identical_argument_schemas(tmp_path: Path) -> 
 
 
 def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
-    assert surface_for_chat(tmp_path, "chat-1") == "cli"  # default is CLI since S2
-    (tmp_path / "agent_surface.json").write_text(json.dumps({"chat-1": "mcp", "chat-2": "bogus"}), encoding="utf-8")
-    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
-    assert surface_for_chat(tmp_path, "chat-2") == "cli"
-    assert surface_for_chat(tmp_path, "chat-3") == "cli"
-    (tmp_path / "agent_surface.json").write_text(json.dumps({"*": "cli"}), encoding="utf-8")
-    assert surface_for_chat(tmp_path, "anything") == "cli"  # no wildcard on purpose
-    (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
+    assert surface_for_chat(tmp_path, "chat-1") == "mcp"  # default is MCP (argv rules stay opt-in)
+    (tmp_path / "agent_surface.json").write_text(json.dumps({"chat-1": "cli", "chat-2": "bogus"}), encoding="utf-8")
     assert surface_for_chat(tmp_path, "chat-1") == "cli"
+    assert surface_for_chat(tmp_path, "chat-2") == "mcp"
+    assert surface_for_chat(tmp_path, "chat-3") == "mcp"
+    (tmp_path / "agent_surface.json").write_text(json.dumps({"*": "cli"}), encoding="utf-8")
+    assert surface_for_chat(tmp_path, "anything") == "mcp"  # no wildcard on purpose
+    (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
+    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
 
 
 def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:

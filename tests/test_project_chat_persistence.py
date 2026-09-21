@@ -270,20 +270,19 @@ def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> Non
 
 
 def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
-    from ciao.agent_surface import SURFACE_FILE_NAME
+    from ciao.agent_surface import AGENT_TOKEN_ENV
 
     manager = _make_manager(tmp_path)
     project = manager.create_project("Attached", workspace="work")
     chat = manager.create_chat(project.project_id)
-    # Default surface is CLI since S2; pin this chat to MCP so it still
-    # verifies MCP credential attachment for an MCP-surface chat.
-    (tmp_path / ".runtime" / SURFACE_FILE_NAME).write_text(
-        json.dumps({chat.chat_id: "mcp"}), encoding="utf-8"
-    )
 
     request = manager.build_agent_request(chat, prompt="hi")
+    # Default surface is MCP; the CLI token is injected on every surface so
+    # migrated operations stay reachable via `ciao` either way.
+    assert request.agent_surface == "mcp"
     assert request.mcp_url == "http://127.0.0.1:8443/mcp/"
     assert request.mcp_token == "tok-test"
+    assert request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
 
 
 def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path: Path) -> None:
@@ -307,11 +306,14 @@ def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path:
     # the shell on the CLI surface exactly as a rotated MCP token does.
     assert cli_request.control_token == "tok-test"
 
+    # MCP-pinned chats keep the MCP transport AND the CLI token, so a migrated
+    # operation (e.g. `ciao schedule …`) is reachable on both surfaces.
     mcp_request = manager.build_agent_request(mcp_chat, prompt="hi")
     assert mcp_request.agent_surface == "mcp"
+    assert mcp_request.mcp_url == "http://127.0.0.1:8443/mcp/"
     assert mcp_request.mcp_token == "tok-test"
     assert mcp_request.control_token == "tok-test"
-    assert AGENT_TOKEN_ENV not in mcp_request.extra_env
+    assert mcp_request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
 
 
 @pytest.mark.asyncio

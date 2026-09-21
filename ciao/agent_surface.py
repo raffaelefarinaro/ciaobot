@@ -30,17 +30,19 @@ AGENT_TOKEN_ENV = "CIAO_AGENT_TOKEN"
 #: Base URL the CLI posts to; ``{op}`` is appended.
 AGENT_URL_ENV = "CIAO_AGENT_URL"
 #: Per-chat surface selection for the MCP-versus-CLI migration:
-#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``cli``:
-#: the default surface is the CLI, because slices migrate whole groups off MCP
-#: (a group must never be unreachable on both surfaces), and there is
+#: ``{"<chat_id>": "cli"}`` under the runtime dir. Absent chat means ``mcp``:
+#: the default surface stays MCP so the harness argv allow-rules (which are
+#: bypassable through shell operators — ``ciao x >/dev/null; <cmd>``) only
+#: activate for a chat explicitly pinned to ``cli``, never by default. There is
 #: deliberately no wildcard — the file lives in ``.runtime``, which the model's
-#: shell can write, so one entry must never flip every chat. ``mcp`` remains
-#: selectable per-chat until the ``/mcp`` mount is removed in S6.
+#: shell can write, so one entry must never flip every chat. Migrated
+#: operations are reachable on both surfaces because the CLI token+URL are
+#: injected regardless of surface (see ``build_agent_request``).
 SURFACE_FILE_NAME = "agent_surface.json"
 SURFACES = ("mcp", "cli")
 
 
-def surface_for_chat(runtime_dir: Path, chat_id: str, default: str = "cli") -> str:
+def surface_for_chat(runtime_dir: Path, chat_id: str, default: str = "mcp") -> str:
     """Return ``"cli"`` or ``"mcp"`` for ``chat_id`` from the surface file."""
     try:
         raw = json.loads((runtime_dir / SURFACE_FILE_NAME).read_text(encoding="utf-8"))
