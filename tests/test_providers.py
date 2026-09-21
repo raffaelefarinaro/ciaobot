@@ -106,7 +106,7 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     # must install the hook that forces those calls to stay in the turn,
     # plus the hook that denies the CLI's Monitor watcher (same lifetime
     # problem): both long-running paths must route through
-    # background_run_start instead.
+    # `ciao run start -- …` instead.
     bash_hooks = options.hooks["PreToolUse"]
     matchers = {hook.matcher for hook in bash_hooks}
     assert matchers == {"Bash", "Monitor"}

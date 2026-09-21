@@ -195,16 +195,13 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 # Ciaobot's control-plane mutations that must keep prompting even in the
 # permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
 # tools in ``ciao/mcp_server.py`` for the groups still exposed as MCP tools:
-# the rare-admin and chat groups moved to the CLI (S2/S3), where their
-# destructive verbs are handled by the argv ask patterns in
-# ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What remains is
-# the schedule lifecycle, the background-run start/cancel pair, and
-# ``project_action``. Everything else on the control plane is allow-listed.
+# the rare-admin, chat and background/schedule groups moved to the CLI
+# (S2/S3/S4), where their destructive verbs are handled by the argv ask
+# patterns in ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What
+# remains is ``project_action``. Everything else on the control plane is
+# allow-listed.
 _DESTRUCTIVE_MCP_TOOLS = (
     "project_action",
-    "schedule_action",
-    "background_run_start",
-    "background_run_cancel",
 )
 
 # Permission changes cannot be patched onto an existing opencode session.
@@ -569,8 +566,8 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
 
     Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
     the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
-    chat_delete, project_action, chat_stop, background_run_start — which must
-    keep prompting. opencode names an MCP tool ``<server>_<tool>``.
+    project_action — which must keep prompting. opencode names an MCP tool
+    ``<server>_<tool>``.
     """
     return [
         {"permission": f"{MCP_SERVER_NAME}_{tool}", "pattern": "*", "action": "allow"}

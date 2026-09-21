@@ -398,12 +398,6 @@ MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset(
         "memory_update",
         "vault_search",
         "vault_review",
-        "background_run_start",
-        "background_run_status",
-        "background_run_cancel",
-        "schedules_list",
-        "schedule",
-        "schedule_action",
         "file_surface",
     }
 )

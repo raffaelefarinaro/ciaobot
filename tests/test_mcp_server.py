@@ -42,6 +42,9 @@ class _FakeControlPlane:
     def system_status_get(self, _principal) -> dict:
         return {"ok": True, "data": {"server": "ok"}}
 
+    def memory_status(self, _principal) -> dict:
+        return {"ok": True, "data": {"region": "memory", "used_chars": 12, "char_limit": 2200}}
+
     def schedule_create(self, _principal, **values) -> dict:
         self.create_calls += 1
         self.schedule_create_values = values
@@ -172,7 +175,7 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
             client,
             token,
             "tools/call",
-            {"name": "schedule", "arguments": {"action": "preview", "prompt": "t", "frequency": "manual", "timezone": "UTC", "project_id": "project-1"}},
+            {"name": "memory_status", "arguments": {}},
             request_id=2,
         )
 
@@ -181,18 +184,11 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
     assert result["isError"] is False
     assert result["structuredContent"] == {
         "ok": True,
-        "data": {
-            "prompt": "t", "frequency": "manual",
-            "timezone": "UTC", "project_id": "project-1",
-            "daily_time": "09:00", "archive_policy": "manual",
-            "title": "", "description": "", "provider": "", "model": "",
-            "workspace": "", "interval_minutes": None, "days_of_week": None,
-            "day_of_month": None, "run_at_date": None, "chat_id": None,
-        },
+        "data": {"region": "memory", "used_chars": 12, "char_limit": 2200},
     }
     telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
     record = json.loads(telemetry[-1])
-    assert record["tool"] == "schedule"
+    assert record["tool"] == "memory_status"
     assert record["chat_id"] == "chat-1"
     assert record["provider"] == "claude"
     assert record["status"] == "ok"
@@ -212,7 +208,7 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
             client,
             token,
             "tools/call",
-            {"name": "schedule", "arguments": {"action": "create", "prompt": "do a thing"}},
+            {"name": "memory_update", "arguments": {"region": "memory", "action": "add", "entry": "x"}},
         )
 
     assert called.status_code == 200
@@ -257,8 +253,6 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
         "memory_status",
         "memory_update",
         "vault_search",
-        "schedule",
-        "schedule_action",
     } <= names
 
     # The retired loop tools are gone for good; interval cadence lives on the
@@ -309,6 +303,15 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "chat_archive",
             "chat_delete",
             "chat_stop",
+            # Migrated to `ciao run …` / `ciao schedule …` in S4 (background
+            # runs and schedules): still control-plane operations, just no
+            # longer MCP tools.
+            "background_run_start",
+            "background_run_status",
+            "background_run_cancel",
+            "schedules_list",
+            "schedule",
+            "schedule_action",
             # Moved to PWA Settings / skill / native Glob.
             "workspace_update",
             "workspace_delete",
@@ -351,7 +354,7 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
     assert by_tool["vault_search"]["errors"] == 1
     # Registered-but-never-called tools appear with zero counts.
-    assert by_tool["schedule"]["calls"] == 0
+    assert by_tool["memory_status"]["calls"] == 0
     # Sorted by call count descending, so the busiest tool is first.
     assert usage["tools"][0]["tool"] == "memory_read"
 
@@ -596,18 +599,18 @@ def test_tool_arguments_never_reach_the_telemetry_log(tmp_path: Path) -> None:
             token,
             "tools/call",
             {
-                "name": "schedule",
-                "arguments": {"action": "create", "prompt": f"rotate {secret} tonight"},
+                "name": "memory_update",
+                "arguments": {"region": "memory", "action": "add", "entry": f"rotate {secret} tonight"},
             },
         )
 
     assert called.status_code == 200
-    assert control_plane.create_calls == 1
+    assert control_plane.create_calls == 0
     log = service._telemetry_path.read_text(encoding="utf-8")
     assert secret not in log
     assert "prompt" not in log
     record = json.loads(log.splitlines()[-1])
-    assert record["tool"] == "schedule"
+    assert record["tool"] == "memory_update"
     assert set(record) == {
         "timestamp",
         "surface",
@@ -664,31 +667,20 @@ def test_telemetry_write_tolerates_an_unserialisable_record(
 
 def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="opencode",
+
+    result = _dispatcher_call(
+        service,
+        "schedule",
+        {
+            "action": "preview",
+            "prompt": "test",
+            "frequency": "manual",
+            "timezone": "UTC",
+            "project_id": "project-1",
+        },
     )
 
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "schedule",
-                "arguments": {
-                    "action": "preview",
-                    "prompt": "test",
-                    "frequency": "manual",
-                    "timezone": "UTC",
-                    "project_id": "project-1",
-                },
-            },
-        )
-
-    assert called.json()["result"]["structuredContent"]["ok"] is True
+    assert result["envelope"]["ok"] is True
     assert control_plane.schedule_values is not None
     assert "self" not in control_plane.schedule_values
 
@@ -703,18 +695,21 @@ def _schedule_token(service: CiaoMcpService) -> str:
     return token
 
 
-def _call(service: CiaoMcpService, name: str, arguments: dict) -> dict:
-    """Call one tool over the real MCP transport and return its JSON-RPC result.
+def _dispatcher_call(service: CiaoMcpService, name: str, arguments: dict) -> dict:
+    """Call one operation through the agent dispatcher (the CLI surface).
 
-    Tool-level raises (bad `action`, missing id) come back as `isError` with no
-    structuredContent, so tests read the whole result rather than just the
-    payload.
+    ``ciao schedule …`` / ``ciao run …`` post to ``POST /agent/v1/{op}``,
+    which runs the same shared operation table the MCP adapter used to serve.
+    These tests were ported from the MCP transport when the background-run and
+    schedule groups left MCP in S4; they now assert the dispatcher envelope and
+    its telemetry rather than a JSON-RPC ``tools/call`` result.
     """
-    token = _schedule_token(service)
-    with _client(service) as client:
-        called = _rpc(client, token, "tools/call", {"name": name, "arguments": arguments})
-    result: dict = called.json()["result"]
-    return result
+    from ciao.agent_surface import AgentDispatcher
+
+    status, envelope = asyncio.run(
+        AgentDispatcher(service).dispatch(_schedule_token(service), name, arguments)
+    )
+    return {"status": status, "envelope": envelope}
 
 
 def test_schedule_update_forwards_values_that_equal_the_create_defaults(
@@ -729,7 +724,7 @@ def test_schedule_update_forwards_values_that_equal_the_create_defaults(
     """
     service, control_plane = _service(tmp_path)
 
-    result = _call(
+    result = _dispatcher_call(
         service,
         "schedule",
         {
@@ -742,7 +737,7 @@ def test_schedule_update_forwards_values_that_equal_the_create_defaults(
         },
     )
 
-    assert result["structuredContent"]["ok"] is True
+    assert result["envelope"]["ok"] is True
     # Exactly the fields the caller passed — no omitted field is invented.
     assert control_plane.schedule_updates == [
         (
@@ -762,10 +757,11 @@ def test_schedule_update_refuses_a_payload_with_nothing_to_change(tmp_path: Path
     above stayed invisible."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(service, "schedule", {"action": "update", "schedule_id": "sched-1"})
+    result = _dispatcher_call(service, "schedule", {"action": "update", "schedule_id": "sched-1"})
 
-    assert result["isError"] is True
-    assert "at least one field" in result["content"][0]["text"]
+    assert result["status"] == 400
+    assert result["envelope"]["ok"] is False
+    assert "at least one field" in result["envelope"]["error"]["message"]
     assert control_plane.schedule_updates == []
 
 
@@ -773,9 +769,9 @@ def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -
     """The signature defaults moved to None, so create has to materialize them."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(service, "schedule", {"action": "create", "prompt": "do a thing"})
+    result = _dispatcher_call(service, "schedule", {"action": "create", "prompt": "do a thing"})
 
-    assert result["structuredContent"]["ok"] is True
+    assert result["envelope"]["ok"] is True
     assert control_plane.schedule_create_values is not None
     assert control_plane.schedule_create_values["daily_time"] == "09:00"
     assert control_plane.schedule_create_values["timezone"] == "UTC"
@@ -793,13 +789,14 @@ def test_update_refuses_to_clear_a_prompt(tmp_path: Path) -> None:
     prompt would keep firing on nothing."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(
+    result = _dispatcher_call(
         service,
         "schedule",
         {"action": "update", "schedule_id": "sched-1", "prompt": ""},
     )
 
-    assert result["isError"] is True
+    assert result["status"] == 400
+    assert result["envelope"]["ok"] is False
     assert control_plane.schedule_updates == []
 
 

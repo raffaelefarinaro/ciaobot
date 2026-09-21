@@ -172,6 +172,24 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     assert chat_group <= set(service.operation_table)
 
 
+def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S4 removed the background-run and schedule groups from the MCP catalog
+    but the dispatcher must still run them as `ciao run …` / `ciao schedule …`
+    commands."""
+    from ciao import mcp_server
+
+    group = {
+        "background_run_start", "background_run_status", "background_run_cancel",
+        "schedules_list", "schedule", "schedule_action",
+    }
+    service, _ = _service(tmp_path)
+    # None of the group is an MCP tool any more…
+    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
+    assert not (group & listed)
+    # …but each is still a dispatcher operation the CLI routes to.
+    assert group <= set(service.operation_table)
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -198,7 +216,11 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
             ("schedule", {"action": "create", "prompt": "digest", "frequency": "weekly", "days_of_week": ["mon", "tue"], "daily_time": "09:00", "interval_minutes": 0}),
         ),
         (["schedule", "update", "s1", "--title", "T"], ("schedule", {"action": "update", "schedule_id": "s1", "title": "T"})),
+        (["schedule", "preview", "--prompt", "draft", "--frequency", "weekly"], ("schedule", {"action": "preview", "prompt": "draft", "frequency": "weekly"})),
         (["schedule", "pause", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "pause"})),
+        (["schedule", "resume", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "resume"})),
+        (["schedule", "run", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "run"})),
+        (["schedule", "delete", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "delete"})),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),

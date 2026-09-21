@@ -5,7 +5,7 @@ background shell commands to run in the foreground and denies detached
 invocations (``nohup … &``, a bare trailing ``&``, ``setsid``/``disown``),
 and one on ``Monitor`` denies the CLI's built-in watcher. All of those paths
 die with the CLI subprocess and never deliver a completion to this chat, so
-the denials point the model at the managed ``background_run_start`` MCP tool.
+the denials point the model at the managed ``ciao run start -- …`` command.
 A background process belongs to the Claude SDK subprocess and is stopped when
 the turn ends, while its terminal notification is not emitted until a later
 turn resumes the session.
@@ -37,16 +37,16 @@ BACKGROUND_RUN_GUIDANCE = (
     "Ciaobot does not run detached shell processes from the Claude CLI: they "
     "belong to the CLI subprocess and are lost when it reconnects, and their "
     "completion is never delivered back to this chat. For a long-running "
-    "command use the `background_run_start` MCP tool instead (it survives CLI "
-    "restarts and wakes this chat with the exit code, log tail and log path). "
-    "Use `background_run_status` only if you need the state mid-turn."
+    "command use `ciao run start -- <cmd>` instead (it survives CLI restarts "
+    "and wakes this chat with the exit code, log tail and log path). "
+    "Use `ciao run status <id>` only if you need the state mid-turn."
 )
 
 # Detached-shell shapes we deny. Quoted substrings, heredoc bodies, and
 # comments are stripped before matching, but quotes are not parsed, so an
 # unquoted odd `&` in text (e.g. ``echo a & b``) remains a known false
 # positive. A wrongly denied command is acceptable: it only asks the model
-# to rephrase or use ``background_run_start``, it never runs anything.
+# to rephrase or use ``ciao run start``, it never runs anything.
 _DETACHED_SHELL_RE = re.compile(
     r"(^|[;&|]\s*)nohup\s"              # nohup anywhere as a command start
     r"|(?<![&>|<\\])&(?![&>|])"         # a standalone & (not &&, 2>&1, >&, <&, |&, &>, \&)
@@ -115,7 +115,7 @@ def build_foreground_bash_hook():
     trailing ``&``, ``setsid``/``disown``): those belong to the CLI
     subprocess too and are lost when it reconnects, with no completion ever
     delivered to the chat. The deny reason points at the managed
-    ``background_run_start`` MCP tool instead of rewriting the command.
+    ``ciao run start -- …`` command instead of rewriting the command.
 
     Background ``Agent`` calls are intentionally untouched. Ciaobot has a
     separate durable watcher and UI state for those.
@@ -156,8 +156,8 @@ def build_foreground_bash_hook():
                         "Ciaobot kept this Bash command in the foreground because "
                         "background shell processes stop when the SDK turn ends. "
                         "Wait for the tool result before replying. If you expect "
-                        "this to take minutes, cancel it and use the "
-                        "`background_run_start` MCP tool instead: a foreground "
+                        "this to take minutes, cancel it and use "
+                        "`ciao run start -- <cmd>` instead: a foreground "
                         "Bash command that outlives its timeout is moved to the "
                         "CLI's own background tracking, which this hook cannot "
                         "intercept and whose result is frequently never "
@@ -176,8 +176,8 @@ def build_monitor_deny_hook():
     A Monitor watcher is owned by the CLI subprocess: it dies on reconnect
     and its terminal notification is only emitted when a later turn resumes
     the session, so a monitored long run can finish silently. The deny
-    reason steers the model to Ciaobot's managed ``background_run_start``
-    MCP tool, which survives restarts and wakes the chat on completion.
+    reason steers the model to Ciaobot's managed ``ciao run start -- …``
+    command, which survives restarts and wakes the chat on completion.
     """
 
     async def on_pre_tool_use(
