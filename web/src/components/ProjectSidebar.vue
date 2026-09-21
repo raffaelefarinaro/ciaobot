@@ -1377,7 +1377,11 @@ async function fetchGuide(): Promise<void> {
     // nothing.
     if (bare.includes(candidate) && qualifiedErrored) break
     try {
-      const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
+      // `exact=1`: no fuzzy fallback. Without it, asking for
+      // `<ws>/AGENTS.md` on a workspace that has no guide yet
+      // filename-matches another workspace's and returns it with a 200,
+      // so the card would render someone else's guide as this one's.
+      const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
       if (seq !== guideFetchSeq) return
       if (resp.status === 404) continue
       // Keep trying the remaining candidates rather than giving up on the

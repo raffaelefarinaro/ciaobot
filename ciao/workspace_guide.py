@@ -90,13 +90,47 @@ def _tracked(root: Path, name: str) -> bool:
     return proc.returncode == 0
 
 
-def _unlink(root: Path, path: Path) -> None:
-    """Remove `path`, telling git about it when the file is tracked."""
-    if _tracked(root, path.name):
+def _commit_guide_change(root: Path, message: str, *paths: str) -> None:
+    """Commit exactly `paths`, so the tree the migration touched ends clean.
+
+    ``--no-verify`` and ``--no-gpg-sign`` because this is Ciaobot's own
+    bookkeeping commit, not the operator's: a repo-level ``pre-commit`` hook
+    or a global ``commit.gpgsign = true`` would otherwise fail the commit and
+    leave the rename *staged* — a dirty tracked tree, which is the exact
+    condition this function exists to avoid, plus a staged change the
+    operator's next commit would silently carry.
+    """
+    committed = _git(
+        root,
+        "-c", "user.name=Ciaobot",
+        "-c", "user.email=ciaobot@localhost",
+        "commit", "-q", "--no-verify", "--no-gpg-sign",
+        "-m", message,
+        "--", *paths,
+    )
+    if committed.returncode != 0:
+        logger.warning(
+            "could not commit the guide change in %s: %s",
+            root,
+            committed.stderr.strip(),
+        )
+
+
+def _unlink(root: Path, path: Path, *, commit: bool = False) -> None:
+    """Remove `path`, telling git about it when the file is tracked.
+
+    `commit` is for the callers that finish here rather than going on to
+    `_rename`: without it the deletion is left staged, which is the same
+    dirty tracked tree a plain rename used to leave.
+    """
+    tracked = _tracked(root, path.name)
+    if tracked:
         removed = _git(root, "rm", "-q", "--cached", "--force", path.name)
         if removed.returncode != 0:
             logger.warning("git rm --cached failed for %s", path)
     path.unlink()
+    if tracked and commit:
+        _commit_guide_change(root, f"chore(workspace): drop {path.name}", path.name)
 
 
 def _rename(root: Path, source: Path, destination: Path) -> None:
@@ -126,20 +160,12 @@ def _rename(root: Path, source: Path, destination: Path) -> None:
         logger.warning("git mv failed for %s: %s", source, moved.stderr.strip())
         source.rename(destination)
         return
-    committed = _git(
+    _commit_guide_change(
         root,
-        "-c", "user.name=Ciaobot",
-        "-c", "user.email=ciaobot@localhost",
-        "commit", "-q",
-        "-m", f"chore(workspace): rename {source.name} to {destination.name}",
-        "--", source.name, destination.name,
+        f"chore(workspace): rename {source.name} to {destination.name}",
+        source.name,
+        destination.name,
     )
-    if committed.returncode != 0:
-        logger.warning(
-            "could not commit the guide rename in %s: %s",
-            root,
-            committed.stderr.strip(),
-        )
 
 
 def _merge_bodies(agents_text: str, legacy_text: str) -> str:
@@ -208,7 +234,7 @@ def migrate_root(root: Path | str) -> str:
         # CLAUDE.md is itself a symlink at AGENTS.md (this repo's own shape,
         # and anything a user set up that way). Just drop it.
         if legacy_is_link and agents_is_file:
-            _unlink(base, legacy)
+            _unlink(base, legacy, commit=True)
             return "relinked"
 
         if not legacy_is_file:
@@ -241,7 +267,11 @@ def migrate_root(root: Path | str) -> str:
         _unlink(base, agents)
         _rename(base, legacy, agents)
         return "merged"
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
+        # SubprocessError too: `_git` has a timeout, and TimeoutExpired is not
+        # an OSError, so it used to escape the documented "failed" contract
+        # and unwind whole callers (agent_assets' repair loop has no per-root
+        # guard).
         logger.exception("workspace guide migration failed for %s", base)
         return "failed"
 

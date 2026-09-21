@@ -256,3 +256,67 @@ def test_history_follows_the_renamed_guide(tmp_path: Path) -> None:
         cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout
     assert "seed the guide" in log
+
+
+def test_dropping_a_legacy_symlink_leaves_a_clean_tree(tmp_path: Path) -> None:
+    """The shape this repo itself has: AGENTS.md real, CLAUDE.md linked at it.
+
+    Regression: this branch only unlinked, so `git rm --cached` left a staged
+    deletion behind — the same dirty tracked tree the rename fix exists to
+    avoid, and a change the operator's next bare `git commit` would carry.
+    """
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "init")
+
+    assert wg.migrate_root(tmp_path) == "relinked"
+
+    assert _status(tmp_path) == ""
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_a_signing_repo_still_ends_clean(tmp_path: Path) -> None:
+    """Regression: `commit.gpgsign = true` failed the commit and left the
+    rename staged. A repo-level pre-commit hook did the same. This is
+    Ciaobot's own bookkeeping commit, so it skips both."""
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "init")
+    _git(tmp_path, "config", "commit.gpgsign", "true")
+
+    assert wg.migrate_root(tmp_path) == "renamed"
+
+    assert _status(tmp_path) == ""
+    assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_a_hanging_hook_reports_failed_instead_of_raising(tmp_path, monkeypatch) -> None:
+    """`_git` has a timeout, and TimeoutExpired is not an OSError — it used to
+    escape the documented "failed" contract and unwind whole callers."""
+    import subprocess
+
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+
+    _git(tmp_path, "init", "-q", ".")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "init")
+
+    real = wg._git
+
+    def _hang(root, *args):
+        # ls-files answers (so the guide is seen as tracked); the move hangs,
+        # which is where a wedged pre-commit or index lock actually bites.
+        if args[:1] == ("ls-files",):
+            return real(root, *args)
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    monkeypatch.setattr(wg, "_git", _hang)
+
+    assert wg.migrate_root(tmp_path) == "failed"
+    # And the guide is still readable under its old name, so nothing is lost.
+    assert _remembered((tmp_path / "CLAUDE.md").read_text(encoding="utf-8"))
+    assert wg.guide_path(tmp_path).name == "CLAUDE.md"
