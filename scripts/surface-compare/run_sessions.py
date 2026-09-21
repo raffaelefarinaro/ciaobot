@@ -89,6 +89,8 @@ class RunRecord:
     error: str = ""
     memory_changed: bool = False
     schedules_created: list[str] = field(default_factory=list)
+    other_activity_seen: bool = False
+    cleanup_notes: list[str] = field(default_factory=list)
     activity: list[str] = field(default_factory=list)
 
 
@@ -280,12 +282,25 @@ class Runner:
             if bash_calls > len(rec.control_plane_calls):
                 rec.fallback_signals.append(f"{bash_calls - len(rec.control_plane_calls)} Bash calls not matched by a ciao record")
 
-        # Cleanup.
+        # Cleanup — only artifacts this run can prove it created. The runner
+        # targets a live instance, so another chat or automation may change
+        # memory or add a schedule during the turn; restoring a global snapshot
+        # or deleting "every new schedule" would destroy that legitimate state.
         try:
             if rec.memory_changed and not self.args.keep_memory:
-                self.memory_file.write_text(memory_before, encoding="utf-8")
+                marker = check.split(":", 1)[1] if check.startswith("memory_contains:") else ""
+                if marker:
+                    self._remove_memory_entries_containing(marker)
+                elif rec.other_activity_seen:
+                    rec.cleanup_notes.append("memory changed with other chats active; left as is (inspect by hand)")
+                else:
+                    self.memory_file.write_text(memory_before, encoding="utf-8")
+            titles = self._schedule_titles()
             for sid in rec.schedules_created:
-                self.inst.delete(f"/api/schedules/{sid}")
+                if run in titles.get(sid, ""):
+                    self.inst.delete(f"/api/schedules/{sid}")
+                else:
+                    rec.cleanup_notes.append(f"schedule {sid} appeared during the turn but is not tagged with this run; left as is")
             produced = self.workspace_root / f"surface-compare/{run}.md"
             if produced.exists():
                 produced.unlink()
@@ -305,7 +320,10 @@ class Runner:
         seen_requests: set[str] = set()
         while time.time() < deadline:
             await asyncio.sleep(2.0)
-            active = rec.chat_id in self.inst.active_chat_ids()
+            active_ids = self.inst.active_chat_ids()
+            active = rec.chat_id in active_ids
+            if active_ids - {rec.chat_id}:
+                rec.other_activity_seen = True
             chat = self.inst.chat(rec.chat_id) or {}
             pending = chat.get("pending_permission") or ""
             if pending:
@@ -332,6 +350,18 @@ class Runner:
             self.inst.post(f"/api/chats/{rec.chat_id}/stop")
         except Exception:  # noqa: BLE001
             pass
+
+    def _remove_memory_entries_containing(self, marker: str) -> None:
+        """Drop only the region entries this run added (they carry ``marker``)."""
+        text = self.memory_file.read_text(encoding="utf-8")
+        m = re.search(r"(<!-- ciao:memory:start[^>]*-->)(.*?)(<!-- ciao:memory:end -->)", text, re.S)
+        if not m:
+            return
+        body = m.group(2)
+        kept = [entry for entry in body.split("§") if marker not in entry]
+        new_body = "§".join(kept)
+        if new_body != body:
+            self.memory_file.write_text(text[: m.start(2)] + new_body + text[m.end(2):], encoding="utf-8")
 
     def _schedule_ids(self) -> set[str]:
         try:
@@ -395,7 +425,10 @@ class Runner:
                 except (ValueError, KeyError):
                     pass
             done = len(finished)
-        (self.workspace_root / "surface-compare").mkdir(exist_ok=True)
+        probe_dir = self.workspace_root / "surface-compare"
+        if probe_dir.exists():
+            raise SystemExit(f"{probe_dir} already exists; refusing to reuse a directory this run did not create")
+        probe_dir.mkdir()
         for repeat in range(self.args.repeats):
             for prompt in prompts:
                 for provider in providers:
@@ -405,7 +438,14 @@ class Runner:
                         rec = await self.run_one(repeat, prompt, provider, surface)
                         done += 1
                         print(f"[{done}/{total}] {rec.run}: completed={rec.completed} ops={[c['tool'] for c in rec.control_plane_calls]} cards={rec.approval_cards} {rec.duration_s}s {rec.error}", flush=True)
-        shutil.rmtree(self.workspace_root / "surface-compare", ignore_errors=True)
+        # Per-run files were unlinked after each session; the directory was
+        # created by this run (checked above), so removing it only removes
+        # what this run left behind.
+        leftovers = [p for p in probe_dir.iterdir()] if probe_dir.exists() else []
+        if leftovers:
+            print(f"leaving {probe_dir}: unexpected files {sorted(p.name for p in leftovers)}", flush=True)
+        else:
+            shutil.rmtree(probe_dir, ignore_errors=True)
         if self.args.delete_project:
             self.inst.delete(f"/api/projects/{self.project_id}")
 

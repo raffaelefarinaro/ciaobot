@@ -355,3 +355,22 @@ def test_leading_json_flag_still_routes_to_the_agent_parser(
     assert agent_cli.is_agent_invocation(["--json", "vault", "search", "x"])
     assert cli.main(["--json", "vault", "search", "x"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"
+
+
+def test_route_rejects_before_reading_an_unauthenticated_or_oversized_body(tmp_path: Path) -> None:
+    from ciao.web import routes_agent
+
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        anonymous = client.post("/agent/v1/context_get", content=b"x" * 64)
+        assert anonymous.status_code == 401
+        huge = client.post(
+            "/agent/v1/vault_search",
+            headers={"Authorization": f"Bearer {token}"},
+            content=b'{"query": "' + b"a" * (routes_agent.MAX_BODY_BYTES + 10) + b'"}',
+        )
+        assert huge.status_code == 413
+        assert huge.json()["error"]["code"] == "payload_too_large"
+        ok = _post(client, token, "context_get")
+        assert ok.status_code == 200
