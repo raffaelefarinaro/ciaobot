@@ -221,6 +221,12 @@ export const useProjectStore = defineStore('projects', () => {
   // enter chat history: reconnect attempts can repeat indefinitely and would
   // otherwise create one error bubble (and one "Fix this error" action) each.
   const hostConnectionUnavailable = ref(false)
+  // How many ChatPanels are on screen. ChatPanel renders its own
+  // host-connection-card from the flag above, so the global banner uses this
+  // to avoid announcing the same outage twice. A count, not a boolean: the
+  // layout declares ChatPanel twice (mobile and desktop branches) and a
+  // chat switch mounts the new panel before the old one unmounts.
+  const chatPanelsMounted = ref(0)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -5118,7 +5124,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage, hostConnectionUnavailable,
+    serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,

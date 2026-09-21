@@ -101,15 +101,14 @@ const workspaceColor = computed(() => {
 // True only in client mode: the local node proxy reports it cannot reach the
 // host (see the `host_unreachable` frame handling in the projects store).
 //
-// An open chat renders its own `host-connection-card` from the same flag, with
-// a richer recovery action, so the banner stands down there rather than
-// announcing the same outage twice -- to the eye and to a screen reader. Every
-// other screen has no such card, which is the gap this banner exists to close.
-const onChatPage = computed(() =>
-  route.path === '/chat' || route.path.startsWith('/chat/'),
-)
+// A mounted ChatPanel renders its own `host-connection-card` from the same
+// flag, with a richer recovery action, so the banner stands down there rather
+// than announcing the same outage twice -- to the eye and to a screen reader.
+// Keyed on the panel actually being on screen rather than on the URL: /chat
+// with no id and /chat/:id/subagent/:id are both chat paths that mount no
+// panel, and those screens need the banner like any other.
 const hostUnreachable = computed(
-  () => projectStore.hostConnectionUnavailable && !onChatPage.value,
+  () => projectStore.hostConnectionUnavailable && projectStore.chatPanelsMounted === 0,
 )
 const clientHostLabel = computed(() => {
   const raw = clientHostUrl.value

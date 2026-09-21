@@ -6,9 +6,8 @@ import { mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import App from '../../App.vue'
 
-let chatRoute = false
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ path: chatRoute ? '/chat/abc' : '/' }),
+  useRoute: () => ({ path: '/' }),
   useRouter: () => ({ push: vi.fn() }),
 }))
 
@@ -83,21 +82,24 @@ describe('client-mode banner connectivity state', () => {
     expect(wrapper.find('.client-mode-banner').classes()).not.toContain('is-offline')
   })
 
-  it('stands down on a chat page, where the chat renders its own card', async () => {
-    // ChatPanel shows a host-connection-card from the same flag, with a richer
-    // recovery action. Two alerts for one outage is a duplicate announcement
-    // for a screen reader as much as a visual one.
-    chatRoute = true
-    try {
-      const { wrapper, store } = await mountApp()
-      store.hostConnectionUnavailable = true
-      await wrapper.vm.$nextTick()
+  it('stands down while a ChatPanel carries the outage card itself', async () => {
+    // Two alerts for one outage is a duplicate announcement for a screen
+    // reader as much as a visual one. Keyed on the panel being mounted, not on
+    // the URL: /chat with no id and the subagent sub-route are chat paths that
+    // mount no panel, so they still need the banner.
+    const { wrapper, store } = await mountApp()
+    store.hostConnectionUnavailable = true
+    store.chatPanelsMounted = 1
+    await wrapper.vm.$nextTick()
 
-      const banner = wrapper.find('.client-mode-banner')
-      expect(banner.classes()).not.toContain('is-offline')
-      expect(banner.text()).toContain('Client mode')
-    } finally {
-      chatRoute = false
-    }
+    let banner = wrapper.find('.client-mode-banner')
+    expect(banner.classes()).not.toContain('is-offline')
+    expect(banner.text()).toContain('Client mode')
+
+    // Leaving the chat hands the notice back to the banner.
+    store.chatPanelsMounted = 0
+    await wrapper.vm.$nextTick()
+    banner = wrapper.find('.client-mode-banner')
+    expect(banner.classes()).toContain('is-offline')
   })
 })

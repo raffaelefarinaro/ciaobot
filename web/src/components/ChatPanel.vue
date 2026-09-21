@@ -1676,6 +1676,13 @@ const dockRunningAgents = computed(() =>
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
+  // Tell the app-level client-mode banner that this panel is on screen, so it
+  // does not repeat the host-outage notice the card below already carries.
+  store.chatPanelsMounted += 1
+})
+
+onBeforeUnmount(() => {
+  store.chatPanelsMounted = Math.max(0, store.chatPanelsMounted - 1)
 })
 
 // Lightweight 30-second tick powering the "next in Xm" countdown in the
