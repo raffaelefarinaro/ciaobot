@@ -1132,16 +1132,14 @@
                       <p v-if="profile.email" class="gws-profile-email">{{ profile.email }}</p>
                       <p class="hint hint--compact"><code>{{ profile.name }}</code> profile</p>
                     </div>
-                    <div class="gws-profile-header-actions">
-                      <span class="badge" :class="gwsProfileBadgeClass(profile)">
-                        {{ gwsProfileStatus(profile) }}
-                      </span>
-                      <button
-                        class="btn-small btn-danger"
-                        :disabled="gwsSavingProfile === profile.name"
-                        @click="removeGwsProfile(profile)"
-                      >Remove account</button>
-                    </div>
+                    <span class="badge gws-profile-badge" :class="gwsProfileBadgeClass(profile)">
+                      {{ gwsProfileStatus(profile) }}
+                    </span>
+                    <button
+                      class="btn-small btn-danger gws-profile-remove"
+                      :disabled="gwsSavingProfile === profile.name"
+                      @click="removeGwsProfile(profile)"
+                    >Remove account</button>
                   </div>
                   <p class="gws-profile-purpose">{{ profile.purpose }}</p>
                   <div v-if="profile.examples.length" class="gws-example-row">
@@ -1169,13 +1167,41 @@
                         {{ profile.client_secret_present ? 'present' : 'missing' }}
                       </span>
                     </div>
-                    <div v-if="profile.setup_command">
-                      <span class="dev-label">Login</span>
-                      <code class="gws-command">{{ profile.setup_command }}</code>
-                    </div>
-                    <div v-if="profile.headless_auth_command">
-                      <span class="dev-label">Headless</span>
-                      <code class="gws-command">{{ profile.headless_auth_command }}</code>
+                  </div>
+
+                  <!--
+                    Recovery commands. They are only useful while the account is
+                    not connected, so once it is authenticated they collapse
+                    behind a "Manual setup" disclosure instead of adding noise.
+                  -->
+                  <div
+                    v-if="profile.setup_command || profile.headless_auth_command"
+                    class="gws-manual-block"
+                  >
+                    <button
+                      v-if="profile.configured"
+                      type="button"
+                      class="gws-manual-toggle"
+                      :aria-expanded="gwsManualOpen[profile.name] ? 'true' : 'false'"
+                      :aria-controls="`gws-manual-${profile.name}`"
+                      @click="toggleGwsManual(profile.name)"
+                    >
+                      <span class="gws-manual-toggle-icon" aria-hidden="true">i</span>
+                      Manual setup
+                    </button>
+                    <div
+                      v-if="!profile.configured || gwsManualOpen[profile.name]"
+                      :id="`gws-manual-${profile.name}`"
+                      class="gws-profile-meta gws-manual-panel"
+                    >
+                      <div v-if="profile.setup_command">
+                        <span class="dev-label">Login</span>
+                        <code class="gws-command">{{ profile.setup_command }}</code>
+                      </div>
+                      <div v-if="profile.headless_auth_command">
+                        <span class="dev-label">Headless</span>
+                        <code class="gws-command">{{ profile.headless_auth_command }}</code>
+                      </div>
                     </div>
                   </div>
 
@@ -1307,7 +1333,6 @@
                         </button>
                         <button
                           class="btn-small btn-outline-danger"
-                          style="border-color: var(--error); color: var(--error);"
                           @click="disconnectGwsProfile(profile.name, true)"
                           :disabled="gwsSavingProfile === profile.name"
                         >
@@ -2394,6 +2419,15 @@ function gwsProfileStatus(profile: GwsProfile): string {
   if (profile.configured) return 'Authenticated'
   if (profile.client_secret_present) return 'Ready to auth'
   return 'Needs OAuth client'
+}
+
+// Per-profile disclosure state for the recovery commands. Authenticated
+// profiles keep them collapsed; unauthenticated ones render them inline and
+// never consult this map.
+const gwsManualOpen = ref<Record<string, boolean>>({})
+
+function toggleGwsManual(name: string): void {
+  gwsManualOpen.value = { ...gwsManualOpen.value, [name]: !gwsManualOpen.value[name] }
 }
 
 function gwsProfileBadgeClass(profile: GwsProfile): string {
@@ -4698,33 +4732,43 @@ a.btn-secondary {
 .gws-profile-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
   gap: var(--space-3);
   margin-top: var(--space-3);
 }
+/* Equal-height cards: the grid stretches each card, and the action row is
+   pushed to the bottom (margin-top: auto) so both columns line up however
+   much description or how many chips one of them carries. */
 .gws-profile-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
+  height: 100%;
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg) 72%, transparent);
 }
+/* Title, status chip and Remove share one wrapping row. No absolute or
+   negative positioning: the title shrinks (min-width: 0) and the chip and
+   button hold their size, so nothing can ever overprint the title. */
 .gws-profile-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
 }
+/* `flex: 1 1 0` (not `auto`): flex wrapping is decided on the base size, so a
+   content-sized heading would push the chip and button onto their own line
+   instead of letting the title wrap inside the row. */
 .gws-profile-heading {
+  flex: 1 1 0;
   min-width: 0;
 }
-.gws-profile-header-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
+.gws-profile-badge,
+.gws-profile-remove {
+  flex: 0 0 auto;
 }
 .gws-account-add {
   display: flex;
@@ -4746,9 +4790,11 @@ a.btn-secondary {
 }
 .gws-profile-title {
   margin: 0;
+  min-width: 0;
   color: var(--fg);
   font-size: var(--text-sm);
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 .gws-profile-purpose {
   margin: 0;
@@ -4760,7 +4806,7 @@ a.btn-secondary {
 .gws-workspace-chips {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-1);
   min-width: 0;
 }
 .gws-chip {
@@ -4781,8 +4827,8 @@ a.btn-secondary {
 .gws-profile-meta {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: var(--space-2);
+  gap: var(--space-2);
+  padding-top: var(--space-3);
   border-top: 1px solid var(--border);
   color: var(--fg2);
   font-size: var(--text-xs);
@@ -4817,11 +4863,52 @@ a.btn-secondary {
   font-size: var(--text-xs);
   font-weight: 500;
 }
+/* Pinned to the bottom of the card so both columns' buttons share a baseline. */
 .gws-profile-actions {
-  margin-top: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-3);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+.gws-manual-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.gws-manual-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.gws-manual-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+.gws-manual-toggle-icon {
+  display: grid;
+  place-items: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1;
+}
+.gws-manual-panel {
+  border-top: none;
+  padding-top: 0;
 }
 .gws-action-hint {
   margin: 0;
@@ -4829,26 +4916,33 @@ a.btn-secondary {
   font-size: var(--text-xs);
 }
 .file-upload-btn {
-  display: inline-block;
+  display: block;
   text-align: center;
   cursor: pointer;
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 6px 12px;
+  padding: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
   color: var(--fg);
   font-weight: 500;
-  width: fit-content;
+  width: 100%;
 }
 .file-upload-btn:hover {
   background: var(--bg2);
   border-color: var(--fg3);
 }
+/* One stacked, full-width block: every card's actions then have identical
+   widths whatever the column, and they stay comfortable on touch. */
 .gws-btn-group {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--space-2);
-  flex-wrap: wrap;
+}
+.gws-btn-group > .btn-small,
+.gws-btn-group > .btn-primary {
+  width: 100%;
 }
 .gws-auth-flow-box {
   background: var(--bg3);
@@ -4881,6 +4975,19 @@ a.btn-secondary {
   display: flex;
   gap: var(--space-2);
   margin-top: var(--space-1);
+}
+.gws-flow-buttons > button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* Touch layouts keep every card control at the 44px minimum. */
+@media (pointer: coarse) {
+  .gws-profile-card .btn-small,
+  .gws-profile-card .btn-primary,
+  .gws-profile-card .file-upload-btn,
+  .gws-manual-toggle {
+    min-height: var(--touch);
+  }
 }
 .btn-outline-danger {
   background: transparent;
@@ -4923,9 +5030,10 @@ a.btn-secondary {
   .gws-profile-list {
     grid-template-columns: 1fr;
   }
-  .gws-profile-header {
-    flex-direction: column;
-    align-items: stretch;
+  /* Single column: the heading takes the full row and the chip + Remove wrap
+     onto the line below it rather than squeezing against the title. */
+  .gws-profile-heading {
+    flex: 1 1 100%;
   }
   .critique-picker-summary {
     min-height: 44px;
