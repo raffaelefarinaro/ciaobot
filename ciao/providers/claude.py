@@ -524,7 +524,7 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using Claude Code CLI: %s", system_cli)
 
 
-        system_prompt = system_prompt_payload("")
+        system_prompt = system_prompt_payload("", surface=request.agent_surface)
 
         options = ClaudeAgentOptions(
             model=requested_model,

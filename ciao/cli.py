@@ -3108,6 +3108,14 @@ def _eval_command(args: argparse.Namespace) -> int:
         include = tuple(
             item.strip() for item in (args.include or "").split(",") if item.strip()
         )
+        catalog_text = (
+            args.catalog_file.read_text(encoding="utf-8")
+            if getattr(args, "catalog_file", None) else None
+        )
+        core_prompt_text = (
+            args.core_prompt_file.read_text(encoding="utf-8")
+            if getattr(args, "core_prompt_file", None) else None
+        )
         eval_report = asyncio.run(
             behavioral_eval.run_model_eval(
                 catalog,
@@ -3119,6 +3127,8 @@ def _eval_command(args: argparse.Namespace) -> int:
                 concurrency=args.concurrency,
                 include=include,
                 timeout_s=args.timeout,
+                catalog_text=catalog_text,
+                core_prompt_text=core_prompt_text,
             )
         )
         out = Path(args.out) if args.out else behavioral_eval.default_report_path(args.label)
@@ -4897,6 +4907,17 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument(
         "--json", action="store_true", help="Emit the structured report as JSON."
     )
+    eval_run.add_argument(
+        "--catalog-file", type=Path, default=None,
+        help=(
+            "Render this file's text as the agent surface instead of the MCP tool "
+            "list (the MCP-versus-CLI comparison). Recorded in provenance."
+        ),
+    )
+    eval_run.add_argument(
+        "--core-prompt-file", type=Path, default=None,
+        help="Swap the shipped system_prompt.md text for this file's text in the probe.",
+    )
     eval_run.set_defaults(func=_eval_command)
 
     eval_compare = eval_sub.add_parser(
@@ -5070,10 +5091,20 @@ def _resolve_critique_paths(args: list[str]) -> list[str]:
     return out
 
 
+_AGENT_NOUNS = frozenset({"memory", "vault", "file", "chat", "schedule", "context", "help"})
+
+
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list and argv_list[0] in _AGENT_NOUNS:
+        # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
+        # before building the operator parser so a call from a chat costs
+        # interpreter start-up, not this module's import graph.
+        from ciao.agent_cli import main as agent_main
+
+        return agent_main(argv_list)
     if argv_list[:1] == ["public-preflight"]:
         return public_release.main(argv_list[1:])
     if argv_list[:1] == ["package-smoke"]:

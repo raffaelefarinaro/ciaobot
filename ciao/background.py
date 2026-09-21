@@ -93,6 +93,7 @@ _FORBIDDEN_ENV_KEYS = frozenset({
     "DYLD_LIBRARY_PATH",
     "DYLD_FRAMEWORK_PATH",
     "CIAO_MCP_SESSION_TOKEN",
+    "CIAO_AGENT_TOKEN",
 })
 
 # Stripped from the inherited environment before the child sees it. Same
@@ -101,6 +102,7 @@ _FORBIDDEN_ENV_KEYS = frozenset({
 # keys that authenticate the server itself.
 _STRIPPED_ENV_KEYS = frozenset({
     "CIAO_MCP_SESSION_TOKEN",
+    "CIAO_AGENT_TOKEN",
     "PWA_AUTH_TOKEN",
 })
 

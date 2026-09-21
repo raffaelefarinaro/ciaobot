@@ -116,6 +116,10 @@ class AgentRequest:
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
+    # Which agent surface this turn runs on: ``"mcp"`` attaches the Ciaobot MCP
+    # server; ``"cli"`` attaches none and hands the shell ``CIAO_AGENT_TOKEN``
+    # instead (``ciao/agent_surface.py``). Selects the core prompt variant too.
+    agent_surface: str = "mcp"
     # Ephemeral managed-process MCP credentials. The Ciaobot MCP control plane
     # is the only agent-facing control surface, so a request always carries a
     # url/token pair -- ``build_agent_request`` raises rather than dispatch a

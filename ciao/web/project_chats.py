@@ -65,6 +65,7 @@ import yaml
 
 from ciao import job_runs, subagent_tracking
 from ciao.subagent_tracking import SubagentInfo
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, surface_for_chat
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -5463,6 +5464,7 @@ class ProjectChatManager:
         project = self._projects.get(chat.project_id)
         mcp_url = ""
         mcp_token = ""
+        agent_url = ""
         if service is None or project is None:
             if require_mcp:
                 logger.error(
@@ -5478,6 +5480,21 @@ class ProjectChatManager:
                 )
         else:
             mcp_url, mcp_token = service.credentials_for_chat(chat, project)
+            agent_url = str(getattr(service, "agent_url", "") or "")
+
+        extra_env = self._build_extra_env(chat)
+        agent_surface = "mcp"
+        if mcp_token:
+            agent_surface = surface_for_chat(
+                Path(self._config.state_path).parent, chat.chat_id
+            )
+            if agent_surface == "cli":
+                # CLI surface: no MCP server for this chat. The same scoped
+                # token reaches the foreground shell as the agent CLI's bearer
+                # capability; background runs strip it (ciao/background.py).
+                extra_env[AGENT_URL_ENV] = agent_url
+                extra_env[AGENT_TOKEN_ENV] = mcp_token
+                mcp_url, mcp_token = "", ""
 
         return AgentRequest(
             prompt=full_prompt,
@@ -5487,9 +5504,10 @@ class ProjectChatManager:
             display_prompt=final_display_prompt,
             resume_session=resume_session,
             images=images or [],
-            extra_env=self._build_extra_env(chat),
+            extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
+            agent_surface=agent_surface,
             mcp_url=mcp_url,
             mcp_token=mcp_token,
             context_digest=context_digest,

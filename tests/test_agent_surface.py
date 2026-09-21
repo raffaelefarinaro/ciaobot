@@ -1,0 +1,221 @@
+"""The agent CLI surface: dispatcher, route, CLI mapping and prompt variant."""
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao import agent_cli
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, surface_for_chat
+from ciao.core_prompt import system_prompt_payload
+from ciao.web.routes_agent import agent_dispatch_endpoint
+from tests.test_mcp_server import _service
+
+
+def _client(service) -> TestClient:
+    app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
+    app.state.mcp_service = service
+    return TestClient(app, base_url="http://127.0.0.1:18443")
+
+
+def _token(service, chat_id: str = "chat-1", workspace: str = "personal") -> str:
+    token, _ = service.registry.issue(
+        chat_id=chat_id, project_id="project-1", workspace=workspace, provider="claude"
+    )
+    return token
+
+
+def _post(client: TestClient, token: str, op: str, arguments: dict | None = None):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return client.post(f"/agent/v1/{op}", headers=headers, json=arguments if arguments is not None else {})
+
+
+def test_dispatch_requires_a_valid_bearer_token(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    with _client(service) as client:
+        assert _post(client, "", "context_get").status_code == 401
+        bad = _post(client, "not-a-token", "context_get")
+    assert bad.status_code == 401
+    assert bad.json()["error"]["code"] == "unauthorized"
+
+
+def test_dispatch_runs_the_registered_tool_and_tags_telemetry_cli(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(client, token, "context_get")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {"chat_id": "chat-1", "workspace": "personal", "system": {"server": "ok"}},
+    }
+    record = json.loads(service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["surface"] == "cli"
+    assert record["tool"] == "context_get"
+    assert record["chat_id"] == "chat-1"
+    assert record["status"] == "ok"
+
+
+def test_unknown_operation_and_bad_arguments_are_envelopes_with_telemetry(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        unknown = _post(client, token, "frobnicate")
+        bad = _post(client, token, "vault_search", {"query": "x", "limit": "many"})
+        not_object = client.post(
+            "/agent/v1/vault_search", headers={"Authorization": f"Bearer {token}"}, content=b"[1,2]"
+        )
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "unknown_operation"
+    assert bad.status_code == 400
+    assert bad.json()["ok"] is False
+    assert bad.json()["error"]["code"] == "invalid_request"
+    assert not_object.status_code == 400
+    records = [json.loads(line) for line in service._telemetry_path.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["tool"] == "vault_search"
+    assert records[-1]["status"] == "error"
+    assert records[-1]["error_code"] == "invalid_request"
+    assert records[-1]["surface"] == "cli"
+
+
+def test_plan_mode_gate_applies_through_the_cli_surface(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(client, token, "memory_update", {"region": "memory", "action": "add", "entry": "x"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
+def test_mcp_surface_telemetry_is_still_tagged_mcp(tmp_path: Path) -> None:
+    from tests.test_mcp_server import _client as _mcp_client, _rpc
+
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    with _mcp_client(service) as client:
+        _rpc(client, token, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
+        _rpc(client, token, "tools/call", {"name": "context_get", "arguments": {}}, request_id=2)
+    record = json.loads(service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["surface"] == "mcp"
+
+
+def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
+    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
+    (tmp_path / "agent_surface.json").write_text(json.dumps({"chat-1": "cli", "chat-2": "bogus"}), encoding="utf-8")
+    assert surface_for_chat(tmp_path, "chat-1") == "cli"
+    assert surface_for_chat(tmp_path, "chat-2") == "mcp"
+    assert surface_for_chat(tmp_path, "chat-3") == "mcp"
+    (tmp_path / "agent_surface.json").write_text(json.dumps({"*": "cli"}), encoding="utf-8")
+    assert surface_for_chat(tmp_path, "anything") == "cli"
+    (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
+    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["context", "get"], ("context_get", {})),
+        (["memory", "status"], ("memory_status", {})),
+        (
+            ["memory", "update", "--region", "profile", "--action", "replace", "--match", "old", "--entry", "new"],
+            ("memory_update", {"region": "profile", "action": "replace", "entry": "new", "match": "old"}),
+        ),
+        (["vault", "search", "who is Sofia", "--limit", "3"], ("vault_search", {"query": "who is Sofia", "limit": 3})),
+        (["vault", "review", "list"], ("vault_review", {"action": "list"})),
+        (["vault", "review", "keep", "--candidate", "c1"], ("vault_review", {"action": "decide", "candidate_id": "c1", "disposition": "keep"})),
+        (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
+        (["chat", "list", "--project", "p1"], ("chats_list", {"project_id": "p1"})),
+        (["chat", "archive"], ("chat_archive", {"chat_id": ""})),
+        (["chat", "delete", "--chat", "c9"], ("chat_delete", {"chat_id": "c9"})),
+        (["schedule", "list"], ("schedules_list", {})),
+        (
+            ["schedule", "create", "--prompt", "digest", "--frequency", "weekly", "--days-of-week", "mon,tue", "--daily-time", "09:00", "--interval-minutes", "0"],
+            ("schedule", {"action": "create", "prompt": "digest", "frequency": "weekly", "days_of_week": ["mon", "tue"], "daily_time": "09:00", "interval_minutes": 0}),
+        ),
+        (["schedule", "update", "s1", "--title", "T"], ("schedule", {"action": "update", "schedule_id": "s1", "title": "T"})),
+        (["schedule", "pause", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "pause"})),
+    ],
+)
+def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, dict]) -> None:
+    parser = agent_cli.build_parser()
+    assert agent_cli.resolve(parser.parse_args(argv)) == expected
+
+
+def test_cli_rejects_bad_enums_before_any_request(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["memory", "update", "--region", "memory", "--action", "append", "--entry", "x"])
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'append'" in capsys.readouterr().err
+
+
+def test_cli_without_a_session_prints_an_envelope_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(AGENT_URL_ENV, raising=False)
+    assert agent_cli.main(["vault", "search", "x"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False
+    assert out["error"]["code"] == "no_agent_session"
+
+
+def test_cli_posts_the_operation_with_the_bearer_token(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict = {}
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["auth"] = request.get_header("Authorization")
+        seen["body"] = json.loads(request.data)
+        return _Response(json.dumps({"ok": True, "data": [{"path": "People/Sofia.md"}]}).encode())
+
+    monkeypatch.setattr(agent_cli.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv(AGENT_TOKEN_ENV, "tok-1")
+    monkeypatch.setenv(AGENT_URL_ENV, "http://127.0.0.1:8443/agent/v1/")
+    assert agent_cli.main(["vault", "search", "Sofia", "--limit", "2"]) == 0
+    assert seen == {
+        "url": "http://127.0.0.1:8443/agent/v1/vault_search",
+        "auth": "Bearer tok-1",
+        "body": {"query": "Sofia", "limit": 2},
+    }
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent_cli.main(["help"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("---\nname: ciao-cli")
+    assert "vault search" in out
+
+
+def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
+    mcp = system_prompt_payload("")["append"]
+    cli = system_prompt_payload("", surface="cli")["append"]
+    assert "MCP tools" in mcp and "`memory_update`" in mcp
+    assert "ciao help" in cli and "ciao memory update" in cli and "ciao vault search" in cli
+    for name in ("memory_update", "vault_search", "file_surface", "background_run_start", "MCP tools"):
+        assert name not in cli, name
+
+
+def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli
+
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    assert cli.main(["memory", "status"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"

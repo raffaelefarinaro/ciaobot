@@ -279,6 +279,30 @@ def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
     assert request.mcp_token == "tok-test"
 
 
+def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path: Path) -> None:
+    from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, SURFACE_FILE_NAME
+
+    manager = _make_manager(tmp_path)
+    manager._mcp_service.agent_url = "http://127.0.0.1:8443/agent/v1/"  # type: ignore[union-attr]
+    project = manager.create_project("Surface", workspace="work")
+    cli_chat = manager.create_chat(project.project_id)
+    mcp_chat = manager.create_chat(project.project_id)
+    (tmp_path / ".runtime" / SURFACE_FILE_NAME).write_text(
+        json.dumps({cli_chat.chat_id: "cli"}), encoding="utf-8"
+    )
+
+    cli_request = manager.build_agent_request(cli_chat, prompt="hi")
+    assert cli_request.agent_surface == "cli"
+    assert cli_request.mcp_url == "" and cli_request.mcp_token == ""
+    assert cli_request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
+    assert cli_request.extra_env[AGENT_URL_ENV] == "http://127.0.0.1:8443/agent/v1/"
+
+    mcp_request = manager.build_agent_request(mcp_chat, prompt="hi")
+    assert mcp_request.agent_surface == "mcp"
+    assert mcp_request.mcp_token == "tok-test"
+    assert AGENT_TOKEN_ENV not in mcp_request.extra_env
+
+
 @pytest.mark.asyncio
 async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)

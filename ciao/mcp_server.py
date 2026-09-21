@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import json
 import logging
@@ -231,6 +232,12 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
 }
 
 
+#: Which agent surface produced the current tool call: ``"mcp"`` for the
+#: streamable-HTTP adapter, ``"cli"`` when ``ciao.agent_surface`` dispatched it.
+#: Read by ``_record_tool_call`` so ``mcp_tool_calls.jsonl`` keeps one schema.
+_SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_surface", default="mcp")
+
+
 @dataclass(slots=True)
 class _Session:
     principal: McpPrincipal
@@ -381,6 +388,14 @@ class CiaoMcpService:
     def url(self) -> str:
         # Starlette's Mount canonicalizes the inner root to a trailing slash.
         return f"http://127.0.0.1:{int(self.config.pwa_port)}/mcp/"
+
+    #: Exposed for ``ciao.agent_surface.AgentDispatcher``.
+    surface_var = _SURFACE_VAR
+
+    @property
+    def agent_url(self) -> str:
+        """Base URL of the agent CLI transport; the operation name is appended."""
+        return f"http://127.0.0.1:{int(self.config.pwa_port)}/agent/v1/"
 
     def credentials_for_chat(self, chat: Any, project: Any) -> tuple[str, str]:
         token, _principal = self.registry.issue(
@@ -1081,7 +1096,7 @@ class CiaoMcpService:
     ) -> None:
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "surface": "mcp",
+            "surface": _SURFACE_VAR.get(),
             "tool": name,
             "token_id": principal.token_id if principal else "",
             "chat_id": principal.chat_id if principal else "",

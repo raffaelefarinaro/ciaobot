@@ -1903,3 +1903,110 @@ def test_code_revision_falls_back_to_the_package_version(tmp_path: Path) -> None
 
     assert revision == f"pkg-{__version__}"
     assert revision  # never the empty string that made releases indistinguishable
+
+
+# ── Surface comparison: catalog / core-prompt overrides and CLI aliases ─────
+
+
+def _cli_aliases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mapping: dict[str, str]) -> None:
+    path = tmp_path / "commands.json"
+    path.write_text(json.dumps(mapping), encoding="utf-8")
+    monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", path)
+    be.cli_command_operations.cache_clear()
+
+
+def test_cli_invocation_maps_to_its_operation_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _cli_aliases(monkeypatch, tmp_path, {"vault search": "vault_search", "chat delete": "chat_delete", "schedule enable": "schedule_action"})
+    try:
+        assert be._bare_tool_name("ciao vault search --limit 5 'x'") == "vault_search"
+        assert be._bare_tool_name("Bash(ciao chat delete --chat c1)") == "chat_delete"
+        assert be._bare_tool_name("`ciao schedule enable sched-1`") == "schedule_action"
+        # The prefix is optional: a probe may report the bare command.
+        assert be._bare_tool_name("vault search") == "vault_search"
+        assert be._bare_tool_name("chat delete --chat c2") == "chat_delete"
+        # Read-only vault review verbs score as their own names, not as the
+        # deferred mutating tool.
+        assert be._bare_tool_name("ciao vault review list") == "vault_review_list"
+        assert be._bare_tool_name("vault review show People/X.md") == "vault_review_inspect"
+        # Unknown CLI commands and plain MCP names are untouched.
+        assert be._bare_tool_name("ciao frobnicate now") == "ciao frobnicate now"
+        assert be._bare_tool_name("Read") == "read"
+        assert be._bare_tool_name("mcp__ciaobot__vault_search") == "vault_search"
+        assert be._tools_match(("ciao vault search q",), ("vault_search",))
+    finally:
+        be.cli_command_operations.cache_clear()
+
+
+def test_missing_or_malformed_alias_file_means_no_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", tmp_path / "absent.json")
+    be.cli_command_operations.cache_clear()
+    try:
+        assert be.cli_command_operations() == {}
+        assert be._bare_tool_name("ciao vault search") == "ciao vault search"
+        (tmp_path / "bad.json").write_text("[1, 2]", encoding="utf-8")
+        monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", tmp_path / "bad.json")
+        be.cli_command_operations.cache_clear()
+        assert be.cli_command_operations() == {}
+    finally:
+        be.cli_command_operations.cache_clear()
+
+
+def test_probe_prompt_catalog_and_core_prompt_overrides() -> None:
+    scenario = _scenario("isolation-no-foreign-workspace-write")
+    default_system, _ = be.build_probe_prompts(scenario, ("vault_search", "memory_update"))
+    assert "[EVAL TOOL CATALOG]\nmemory_update, vault_search" in default_system or "vault_search, memory_update" in default_system
+
+    system, user = be.build_probe_prompts(
+        scenario,
+        ("vault_search",),
+        catalog_text="# ciao-cli\n\nRun `ciao vault search QUERY`.\n",
+        core_prompt_text="CORE-PROMPT-VARIANT",
+    )
+    assert "[EVAL TOOL CATALOG]\n# ciao-cli" in system
+    assert "vault_search, " not in system
+    assert "CORE-PROMPT-VARIANT" in system
+    from ciao.core_prompt import _system_instructions
+
+    shipped = _system_instructions()
+    assert shipped and shipped not in system
+    assert be.PROBE_INSTRUCTIONS.strip() in system
+    assert scenario.prompt in user
+
+
+def test_catalog_override_changes_provenance_hash() -> None:
+    catalog = be.load_scenarios()
+    fixed = ("a", "b")
+    base = be.build_provenance(
+        provider="claude", model="m", core_prompt_text="x", guide_text="g",
+        scenario_set=catalog, tool_names=fixed,
+    )
+    alt = be.build_provenance(
+        provider="claude", model="m", core_prompt_text="x", guide_text="g",
+        scenario_set=catalog, tool_names=("skill text",),
+    )
+    assert base.tool_catalog_sha256 != alt.tool_catalog_sha256
+    assert base.fingerprint() != alt.fingerprint()
+
+
+def test_run_model_eval_threads_surface_overrides_to_the_caller() -> None:
+    catalog = be.load_scenarios()
+    seen: list[str] = []
+
+    async def fake(prompt: str, *, system_prompt: str, model: str, provider: str, timeout_s: float) -> str:
+        seen.append(system_prompt)
+        return json.dumps({"tools": [], "writes": [], "answer": "I do not know.", "deferred": []})
+
+    report = asyncio.run(
+        be.run_model_eval(
+            catalog, provider="claude", model="fake", caller=fake,
+            include=("isolation-no-foreign-workspace-write",),
+            catalog_text="SURFACE-DOC", core_prompt_text="VARIANT-CORE",
+        )
+    )
+    assert report.sample_size == 1
+    assert seen and "SURFACE-DOC" in seen[0] and "VARIANT-CORE" in seen[0]
+    assert report.provenance.tool_count == 1

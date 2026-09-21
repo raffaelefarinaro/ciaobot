@@ -909,7 +909,7 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _chat_system_instructions(self, request: AgentRequest) -> str:
         """Return the compact core for normal chats, never bounded memory."""
-        payload = system_prompt_payload("") or {}
+        payload = system_prompt_payload("", surface=request.agent_surface) or {}
         return str(payload.get("append") or "")
 
     def _runtime_root(self) -> str:
