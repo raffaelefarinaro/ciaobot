@@ -82,9 +82,10 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
             "headers": {"Authorization": "Bearer secret-session-token"},
         }
     }
-    # The MCP path carries the compact shared core, not a second memory block
-    # or a provider-specific transport recipe.
-    assert "Prefer the managed Ciaobot MCP tools" in options.system_prompt["append"]
+    # The MCP path carries the compact shared core (the single CLI-first
+    # prompt), not a second memory block or a provider-specific recipe.
+    assert "Prefer the managed Ciaobot MCP tools" not in options.system_prompt["append"]
+    assert "ciao vault search" in options.system_prompt["append"]
     # Ciaobot's own non-destructive control plane is pre-approved so Auto
     # mode's classifier stops raising an Approve/Deny card for "create the
     # automation you just asked for". Destructive tools stay off the allowlist.
