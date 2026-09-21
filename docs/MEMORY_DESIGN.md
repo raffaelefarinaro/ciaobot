@@ -32,7 +32,7 @@ files, and ChatGPT's injected profile beside on-demand history search. In
 Ciaobot the core is the two fenced regions in each agent root's `CLAUDE.md`
 (`ciao:memory` ~3000 chars, `ciao:profile` ~1375), loaded natively by every
 session; the long tail is the vault plus archived transcripts behind
-`vault_search` (SQLite FTS5).
+`ciao vault search` (SQLite FTS5).
 
 The core is deliberately small because an always-injected memory has a real cost:
 it spends context on every turn and, worse, it asserts itself before the
@@ -61,7 +61,7 @@ outperforms any pipeline that summarizes those sources away.
 | Write-time dedup: ADD/UPDATE/NOOP against neighbors | Mem0 (arXiv:2504.19413); entity resolution at write beats query-time cleanup | `plan_region_reconcile`: one model call per region (a capped region fits whole in a prompt) decides add / covered / update-entry-N; fail-soft to plain append |
 | Bi-temporal stamps; invalidate, don't delete | Zep/Graphiti (arXiv:2501.13956); ChatGPT's per-insight date ranges | `[as-of:]`/`[expires:]` (world time) from extraction; trailing learned-at `[YYYY-MM-DD]` (system time) on every promotion; replaced entries go to the `Memory-Consolidations.md` undo log, so "current truth" and history both survive |
 | Age is evidence, not a defect | Generative Agents' recency scoring (arXiv:2304.03442); MemoryBank decay | `memory-audit` reports aging (`as-of` ≥ 90d, learned ≥ 180d, per-type note horizons) as *informational* findings the nightly curator re-verifies — nothing expires automatically except explicit `[expires:]` |
-| Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `vault_search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
+| Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `ciao vault search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
 | Consolidate episodes into cited rules | Generative Agents' reflection: derived memories cite their sources | Learnings entries carry `[key] [first → last] (xN) — sources: chat ids`; recurrence counting is mechanical, promotion at x3 cites its episodes; connections only among retrieved items |
 | Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; archive time auto-applies NEW region facts only when they are confident and state-shaped, an attended "remember" is explicit, and the unattended curator never promotes a new region fact — it may only consolidate what is already there, under the undo-log rule |
 | The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | System-schedule chats keep insights (audit trail) but cannot write memory; extraction prompts refuse machinery rules; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
@@ -115,7 +115,7 @@ outperforms any pipeline that summarizes those sources away.
   IS a full agent session with tools and memory that re-judges everything
   queued. The middle path, if extraction ever needs more context, is
   fact-augmented extraction: *code* retrieves the region and top-k
-  `vault_search` hits and puts them in the one-shot prompt — the model gets
+  `ciao vault search` hits and puts them in the one-shot prompt — the model gets
   the context without getting the tools.
 - **Automatic forgetting** — disuse and age are *signals to a curator with
   an undo log*, never triggers for deletion. A personal assistant that

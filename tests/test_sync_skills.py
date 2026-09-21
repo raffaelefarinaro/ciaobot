@@ -609,7 +609,9 @@ def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
     memory = workspace / ".claude" / "agents" / "memory.md"
     assert memory.is_file()
     assert sync_skills._is_managed_stock_agent(memory)
-    assert "vault_search" in memory.read_text(encoding="utf-8")
+    content = memory.read_text(encoding="utf-8")
+    assert "ciao vault search" in content
+    assert "vault_search" not in content
     assert result.stock_agents_installed == 3
 
 
@@ -621,7 +623,9 @@ def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    assert "vault_search" in memory.read_text(encoding="utf-8")
+    content = memory.read_text(encoding="utf-8")
+    assert "ciao vault search" in content
+    assert "vault_search" not in content
 
 
 def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
