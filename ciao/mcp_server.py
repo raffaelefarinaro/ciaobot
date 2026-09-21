@@ -13,7 +13,7 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
@@ -370,6 +370,12 @@ class Operation:
     annotations: ToolAnnotations
     description: str
     fn: Callable[..., Awaitable[dict[str, Any]]]
+
+    def __post_init__(self) -> None:
+        # Normalise module-level docstrings (4-space continuation indent) so
+        # both the MCP tool description and the dispatcher's surface read
+        # cleanly; the raw `__doc__` keeps the function-body indentation.
+        self.description = inspect.cleandoc(self.description)
 
     def bind(self, service: Any) -> _NamedPartial:
         """A partial with ``service`` bound, so only the tool arguments remain.
@@ -1835,12 +1841,6 @@ class CiaoMcpService:
         except (OSError, TypeError, ValueError):
             logger.debug("Failed to record MCP tool telemetry", exc_info=True)
 
-    def _tool(self, *args: Any, **kwargs: Any):
-        name = str(kwargs.get("name") or (args[0] if args else ""))
-        if name:
-            self._tool_names.add(name)
-        return self.server.tool(*args, **kwargs)
-
     def _register_tools(self) -> None:
         """Register exactly the operations in ``MCP_EXPOSED_OPERATIONS``.
 
@@ -1852,7 +1852,11 @@ class CiaoMcpService:
         pydantic validation are identical by construction.
         """
         for name in sorted(MCP_EXPOSED_OPERATIONS):
-            operation = OPERATIONS_BY_NAME[name]
+            operation = OPERATIONS_BY_NAME.get(name)
+            if operation is None:
+                raise ValueError(
+                    f"MCP_EXPOSED_OPERATIONS lists unknown operation '{name}'."
+                )
             self._tool_names.add(name)
             self.server.add_tool(
                 operation.bind(self),
@@ -1861,6 +1865,8 @@ class CiaoMcpService:
                 description=operation.description,
                 structured_output=True,
             )
+
+
 def _write_mcp_env_values(path: Path, updates: dict[str, str]) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()

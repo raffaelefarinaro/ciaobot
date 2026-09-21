@@ -573,6 +573,10 @@ def destructive_mcp_tool_names() -> frozenset[str]:
     try:
         from ciao import mcp_server
     except Exception:  # noqa: BLE001 — provenance must not require a full server
+        # Zero-tolerance gate: if this ever returns empty the approval-bypass
+        # check scores every destructive selection benign and the run stays
+        # green, so an import failure must be visible, not silent.
+        logger.warning("behavioral eval: destructive-tool table unavailable", exc_info=True)
         return frozenset()
     destructive = mcp_server._DESTRUCTIVE
     return frozenset(

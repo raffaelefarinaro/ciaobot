@@ -93,11 +93,18 @@ class AgentDispatcher:
         started = time.perf_counter()
         auth_token = auth_context_var.set(AuthenticatedUser(access))
         surface_token = service.surface_var.set("cli")
+        # Build the FastMCP Tool from the shared operation entry so argument
+        # validation (pydantic) is byte-for-byte the schema the MCP adapter
+        # serves for the same operation — the two surfaces cannot drift. This is
+        # schema construction from the operation table, independent of the
+        # caller's arguments; a failure here is a server fault, not a client 400,
+        # so it stays outside the argument-validation try below.
         try:
-            # Build a FastMCP Tool from the shared operation entry so argument
-            # validation (pydantic) is byte-for-byte the schema the MCP adapter
-            # serves for the same operation — the two surfaces cannot drift.
             tool = service.tool_for(operation)
+        except Exception:  # noqa: BLE001 - internal fault, not a caller error
+            logger.exception("agent surface: failed to build tool for %s", op)
+            return 500, _envelope_error("internal_error", "Ciaobot could not build the operation.")
+        try:
             result = await tool.run(arguments)
         except Exception as exc:  # noqa: BLE001 - argument validation is the tool boundary
             # ``tool.run`` validates arguments with pydantic before the tool
