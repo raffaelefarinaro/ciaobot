@@ -106,17 +106,23 @@ _MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
 class ControlPlaneError(ValueError):
     """Stable application error returned by MCP adapters."""
 
+    suggestions: list[str] | None = None
+
     def __init__(self, code: str, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
 
     def payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "code": self.code,
             "message": str(self),
             "retryable": self.retryable,
         }
+        suggestions = getattr(self, "suggestions", None)
+        if suggestions:
+            payload["suggestions"] = suggestions
+        return payload
 
 
 def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
@@ -1641,9 +1647,21 @@ class CiaoControlPlane:
         ``stream_state`` is ``"active"`` when a turn is currently streaming for
         this chat, or ``"none"`` otherwise. It says nothing about whether a
         client is attached to that turn.
+
+        On a ``file_not_found`` miss the error carries ``data.suggestions`` —
+        up to three nearest existing paths under the workspace root, ranked by
+        basename similarity to the requested path — so the caller can offer a
+        correction instead of guessing.
         """
         root = Path(self.config.workspace_root).resolve()
-        target = self._safe_relative(root, path, must_exist=True)
+        try:
+            target = self._safe_relative(root, path, must_exist=True)
+        except ControlPlaneError as exc:
+            if exc.code == "file_not_found":
+                suggestions = self._file_surface_suggestions(root, path)
+                if suggestions:
+                    exc.suggestions = suggestions
+            raise
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
         viewers, stream_state = self._file_surface_signal(principal.chat_id)
@@ -1654,6 +1672,40 @@ class CiaoControlPlane:
                 "stream_state": stream_state,
             }
         )
+
+    def _file_surface_suggestions(self, root: Path, requested: str) -> list[str]:
+        """Nearest existing paths under ``root`` for a missing ``file_surface`` path.
+
+        Ranks every file under the workspace root by basename-stem similarity to
+        the requested path and returns the top three relative paths, so the
+        caller can offer a concrete correction when a surfaced path did not exist.
+        """
+        wanted = Path(requested).name
+        wanted_stem = Path(requested).stem.lower()
+        candidates: list[tuple[int, str]] = []
+        try:
+            files = root.rglob("*")
+        except OSError:
+            return []
+        for candidate in files:
+            if not candidate.is_file():
+                continue
+            stem = candidate.stem.lower()
+            # Tiered by match kind, then by stem length so a shorter, closer
+            # name wins within a tier. A substring match (either direction)
+            # always outranks an unrelated name, which is the point of the
+            # suggestion.
+            if stem == wanted_stem:
+                score = 0
+            elif wanted_stem and wanted_stem in stem:
+                score = -1 - len(wanted_stem)
+            elif wanted_stem and stem in wanted_stem:
+                score = -2 - len(stem)
+            else:
+                score = -1000 - (len(stem) or 1)
+            candidates.append((score, candidate.relative_to(root).as_posix()))
+        candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+        return [path for _score, path in candidates[:3]]
 
     def _file_surface_signal(self, chat_id: str) -> tuple[int, str]:
         """Client-presence and stream-state signal for ``file_surface``.
