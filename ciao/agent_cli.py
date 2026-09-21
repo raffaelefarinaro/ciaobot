@@ -166,11 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--mode", default=None)
     create.add_argument("--prompt", default=None)
     send = chat.add_parser("send")
-    send.add_argument("--chat", required=True)
+    send.add_argument("--chat", default="", help="Defaults to the calling chat.")
     send.add_argument("--prompt", required=True)
     for verb in ("stop", "continue"):
         sub = chat.add_parser(verb)
-        sub.add_argument("--chat", required=True)
+        sub.add_argument("--chat", default="", help="Defaults to the calling chat.")
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list")
