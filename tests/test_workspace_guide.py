@@ -501,6 +501,28 @@ def test_a_legacy_symlink_to_an_external_guide_is_not_discarded(
     assert not (tmp_path / "CLAUDE.md").exists()
 
 
+def test_a_non_alias_agents_link_merges_instead_of_replacing(tmp_path: Path) -> None:
+    """AGENTS.md symlinked at a shared guide, with a distinct local CLAUDE.md.
+
+    The old relink branch assumed the Ciaobot-created alias shape without
+    checking and replaced the link with the legacy file, so every
+    instruction the shared guide supplied vanished from this workspace.
+    The merge reads through the link instead and materializes locally.
+    """
+    (tmp_path / "shared.md").write_text("# Team instructions\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("shared.md")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    guide = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Team instructions" in guide, "the shared instructions must survive"
+    assert _remembered(guide), "the local regions must survive"
+    assert (tmp_path / "shared.md").read_text(encoding="utf-8") == "# Team instructions\n"
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "AGENTS.md").is_symlink()
+
+
 def test_a_legacy_symlink_that_really_is_our_alias_is_just_dropped(
     tmp_path: Path,
 ) -> None:

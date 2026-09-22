@@ -350,16 +350,24 @@ def migrate_root(root: Path | str) -> str:
                 agents.unlink()
             return "noop"
 
-        if agents_is_link:
-            # The shape Ciaobot created: AGENTS.md -> CLAUDE.md.
+        if agents_is_link and (not legacy_is_file or _aliases(agents, legacy)):
+            # The shape Ciaobot created: AGENTS.md -> CLAUDE.md (or no
+            # legacy file at all). A link pointing anywhere else is not an
+            # alias — it is handled by the divergent merge below, which
+            # reads through the link and materializes locally.
             agents_tracked = _tracked(base, agents.name)
             _unlink(base, agents)
             _rename(base, legacy, agents, also_tracked=agents_tracked)
             return "relinked"
 
-        if not agents_is_file:
+        if not agents_is_file and not agents_is_link:
             _rename(base, legacy, agents)
             return "renamed"
+
+        # Both real, or a non-alias AGENTS.md symlink beside a real legacy
+        # file. The link is read through as the agents side; the merge below
+        # unlinks the link itself (never its target) and the rename
+        # materializes the merged guide under the AGENTS.md name.
 
         # Both real. Compare before merging: identical copies need no backup.
         agents_text = agents.read_text(encoding="utf-8")
