@@ -35,14 +35,14 @@ class RestartDrainingError(RuntimeError):
         super().__init__(message)
 
 
-class McpUnavailableError(RuntimeError):
+class AgentSurfaceUnavailableError(RuntimeError):
     """Raised when a turn cannot be built because the control plane is down.
 
-    The Ciaobot MCP server is the only agent-facing control surface, so there
-    is nothing to degrade to: a turn dispatched without it would run an agent
-    that cannot see or change anything in Ciaobot. ``_drive``'s error handler
-    publishes this as a normal failed turn, so the user sees why instead of
-    getting a silently crippled answer.
+    The Ciaobot agent surface is the only agent-facing control surface, so
+    there is nothing to degrade to: a turn dispatched without it would run an
+    agent that cannot see or change anything in Ciaobot. ``_drive``'s error
+    handler publishes this as a normal failed turn, so the user sees why
+    instead of getting a silently crippled answer.
     """
 
 
@@ -65,7 +65,7 @@ import yaml
 
 from ciao import job_runs, subagent_tracking
 from ciao.subagent_tracking import SubagentInfo
-from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, surface_for_chat
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import BridgeConfig
 from ciao.context.capsule import (
     build_context_capsule,
@@ -5455,53 +5455,39 @@ class ProjectChatManager:
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
-        # The Ciaobot MCP control plane is the only agent-facing control
+        # The Ciaobot agent control plane is the only agent-facing control
         # surface. There is no CLI/direct-file fallback to degrade to, so a
         # missing server or project fails the turn here rather than dispatching
         # an agent that silently cannot reach Ciaobot. stream_chat's caller
         # turns this into a durable error turn in the transcript.
         service = self._mcp_service
         project = self._projects.get(chat.project_id)
-        mcp_url = ""
-        mcp_token = ""
         agent_url = ""
         if service is None or project is None:
             if require_mcp:
                 logger.error(
-                    "Ciaobot MCP unavailable for chat %s (service=%s, project=%s)",
+                    "Ciaobot agent surface unavailable for chat %s (service=%s, project=%s)",
                     chat.chat_id,
                     service is not None,
                     project is not None,
                 )
-                raise McpUnavailableError(
-                    "Ciaobot's MCP control plane is not running, so this chat "
+                raise AgentSurfaceUnavailableError(
+                    "Ciaobot's agent control plane is not running, so this chat "
                     "cannot start a turn. Finish first-run setup or restart "
                     "Ciaobot, then try again."
                 )
         else:
-            mcp_url, mcp_token = service.credentials_for_chat(chat, project)
             agent_url = str(getattr(service, "agent_url", "") or "")
 
         extra_env = self._build_extra_env(chat)
-        agent_surface = "mcp"
-        if mcp_token:
-            agent_surface = surface_for_chat(
-                Path(self._config.state_path).parent, chat.chat_id
-            )
-            # The CLI token+URL reach the foreground shell on *both* surfaces
-            # (not only when agent_surface == "cli"): slices migrate whole
-            # groups off the MCP catalog as they move to the CLI, so a chat
-            # whose surface is MCP or unpinned must still be able to run the
-            # migrated operations via `ciao <noun> <verb>` — otherwise a group
-            # is unreachable on both surfaces. The argv allow-rules, which are
-            # bypassable through shell operators, stay gated to chats explicitly
-            # pinned to "cli" (never the default).
+        if service is not None and project is not None:
+            # Every chat is CLI since S6: the token+URL reach the foreground
+            # shell so ``ciao <noun> <verb>`` can call the control plane.
+            # Background runs strip the token (ciao/background.py), which is
+            # the "outlives the turn" protection.
+            _url, token = service.credentials_for_chat(chat, project)
             extra_env[AGENT_URL_ENV] = agent_url
-            extra_env[AGENT_TOKEN_ENV] = mcp_token
-            if agent_surface == "cli":
-                # CLI-surface chat: no MCP server; the token already above is
-                # its capability. Background runs strip it (ciao/background.py).
-                mcp_url, mcp_token = "", ""
+            extra_env[AGENT_TOKEN_ENV] = token
 
         return AgentRequest(
             prompt=full_prompt,
@@ -5514,9 +5500,6 @@ class ProjectChatManager:
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
-            agent_surface=agent_surface,
-            mcp_url=mcp_url,
-            mcp_token=mcp_token,
             context_digest=context_digest,
             context_session_id=context_session_id,
             stable_context_prefix=self._stable_context_prefix(chat),

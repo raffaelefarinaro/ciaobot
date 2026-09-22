@@ -1,4 +1,13 @@
-"""Authenticated MCP adapter for Ciaobot's application control plane."""
+"""Agent control surface for Ciaobot's application control plane.
+
+The Ciaobot MCP adapter was removed in S6; every operation now runs as a
+``ciao <noun> <verb>`` command through the agent dispatcher
+(``ciao/agent_surface.py``). What remains here is the transport-free core the
+dispatcher needs: the operation table, the bearer-token registry, the
+``_invoke`` envelope/plan-mode gate/telemetry, and the third-party project MCP
+server management surfaced by Settings (which is the agent's *external* tools
+and is unrelated to Ciaobot's own surface).
+"""
 
 from __future__ import annotations
 
@@ -12,24 +21,20 @@ import re
 import secrets
 import threading
 import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
-from mcp.server.auth.settings import AuthSettings
-from pydantic import AnyHttpUrl
-from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools.base import Tool
 from mcp.types import ToolAnnotations
 
 from ciao.control_plane import (
+    AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
-    McpPrincipal,
 )
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
@@ -233,20 +238,20 @@ _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
 }
 
 
-#: Which agent surface produced the current tool call: ``"mcp"`` for the
-#: streamable-HTTP adapter, ``"cli"`` when ``ciao.agent_surface`` dispatched it.
-#: Read by ``_record_tool_call`` so ``mcp_tool_calls.jsonl`` keeps one schema.
-_SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_surface", default="mcp")
+#: Which agent surface produced the current tool call: ``"cli"`` since S6 —
+#: the MCP adapter is gone. Read by ``_record_tool_call`` so
+#: ``mcp_tool_calls.jsonl`` keeps one schema.
+_SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_surface", default="cli")
 
 
 @dataclass(slots=True)
 class _Session:
-    principal: McpPrincipal
+    principal: AgentPrincipal
     token: str
     expires_at: int
 
 
-class McpSessionRegistry:
+class AgentSessionRegistry:
     """In-memory verifier for short-lived managed-process bearer tokens."""
 
     def __init__(self, ttl_seconds: int = 12 * 60 * 60) -> None:
@@ -262,7 +267,7 @@ class McpSessionRegistry:
         project_id: str,
         workspace: str,
         provider: str,
-    ) -> tuple[str, McpPrincipal]:
+    ) -> tuple[str, AgentPrincipal]:
         key = (chat_id, provider)
         now = int(time.time())
         with self._lock:
@@ -281,7 +286,7 @@ class McpSessionRegistry:
                 # RLock so re-entering it here is safe.
                 self.revoke(existing.token)
             token = secrets.token_urlsafe(36)
-            principal = McpPrincipal(
+            principal = AgentPrincipal(
                 token_id=secrets.token_hex(8),
                 chat_id=chat_id,
                 project_id=project_id,
@@ -343,16 +348,14 @@ class McpSessionRegistry:
 
 
 # ── Module-level operation table ────────────────────────────────────────────
-# The control-plane operations are defined once here, shared by both surfaces.
-# ``_register_tools`` registers the names in ``MCP_EXPOSED_OPERATIONS`` as MCP
-# tools (the set shrinks slice by slice and is deleted in S6); the agent
-# dispatcher resolves the same table. Each operation is a function
-# ``(service, **kwargs) -> envelope`` that calls ``service._invoke`` with the
-# same scoping, mode gate, and telemetry the MCP tools always used. Binding the
-# first argument through ``Operation.bind`` (a ``functools.partial``) drops
-# ``service`` from the signature, so FastMCP's ``Tool.from_function`` builds the
-# exact same argument schema and pydantic validation for the MCP tool and the
-# dispatcher alike — argument validation stays identical by construction.
+# The control-plane operations are defined once here and resolved by the agent
+# dispatcher. Each operation is a function ``(service, **kwargs) -> envelope``
+# that calls ``service._invoke`` with the same scoping, mode gate, and telemetry
+# the MCP tools always used. Binding the first argument through
+# ``Operation.bind`` (a ``functools.partial``) drops ``service`` from the
+# signature, so the dispatcher's ``Tool.from_function`` builds the exact
+# argument schema and pydantic validation for every operation — argument
+# validation stays identical by construction.
 
 
 class _NamedPartial(functools.partial):
@@ -364,7 +367,7 @@ class _NamedPartial(functools.partial):
 
 @dataclass(slots=True)
 class Operation:
-    """One control-plane operation shared by the MCP registry and agent CLI."""
+    """One control-plane operation run by the agent CLI dispatcher."""
 
     name: str
     annotations: ToolAnnotations
@@ -390,18 +393,12 @@ class Operation:
         return bound
 
 
-#: Operations still exposed as MCP tools. Shrinks slice by slice as groups
-#: migrate to ``ciao <noun> <verb>``; deleted outright in S6. Empty since S5:
-#: every operation runs through the agent dispatcher as a ``ciao …`` command.
-MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset()
-
-
 async def _op_context_get(service: CiaoMcpService) -> dict[str, Any]:
     """Return the active Ciaobot workspace, project, chat, provider, and
     control surface, plus local server/startup/active-chat status folded
     in under the ``system`` key (the former system_status_get)."""
 
-    def _op(cp: CiaoControlPlane, p: McpPrincipal) -> dict[str, Any]:
+    def _op(cp: CiaoControlPlane, p: AgentPrincipal) -> dict[str, Any]:
         result = cp.context_get(p)
         status = cp.system_status_get(p)
         data = result.get("data") if isinstance(result, dict) else None
@@ -657,7 +654,7 @@ async def _op_chat_handover(service: CiaoMcpService, chat_id: str = "", provider
     history. With provider and model both empty, this just clears the
     current provider session in place (the former chat_new_session)."""
 
-    def _op(cp: CiaoControlPlane, p: McpPrincipal) -> Any:
+    def _op(cp: CiaoControlPlane, p: AgentPrincipal) -> Any:
         if not provider and not model:
             return cp.chat_new_session(p, chat_id)
         return cp.chat_handover(
@@ -1016,11 +1013,11 @@ OPERATIONS_BY_NAME: dict[str, Operation] = {operation.name: operation for operat
 
 
 class CiaoMcpService:
-    """Own the FastMCP server, authentication, tool catalog, and telemetry."""
+    """Own the operation table, token registry, telemetry, and dispatcher support."""
 
     def __init__(self, config: Any) -> None:
         self.config = config
-        self.registry = McpSessionRegistry()
+        self.registry = AgentSessionRegistry()
         self.control_plane: CiaoControlPlane | None = None
         self._tool_names: set[str] = set()
         self.operation_table: dict[str, Operation] = dict(OPERATIONS_BY_NAME)
@@ -1032,50 +1029,20 @@ class CiaoMcpService:
         self._telemetry_totals_path = Path(config.state_path).parent / "mcp_tool_calls_totals.json"
         self._usage_lock = threading.Lock()
         self._usage_cache: tuple[tuple[Any, ...], _UsageAggregate] | None = None
-        issuer = f"http://127.0.0.1:{int(config.pwa_port)}"
-        self.server = FastMCP(
-            "ciaobot",
-            instructions=(
-                "Every Ciaobot operation is a `ciao <noun> <verb>` command "
-                "(memory, vault, projects, chats, schedules, background runs, "
-                "files; see the ciao-cli skill). This MCP server registers no "
-                "Ciaobot operations; use the ciao CLI rather than curl or "
-                "direct .runtime edits. All paths are relative to the active "
-                "workspace or vault."
-            ),
-            host="127.0.0.1",
-            streamable_http_path="/",
-            json_response=True,
-            stateless_http=True,
-            token_verifier=self.registry,
-            auth=AuthSettings(
-                # pydantic coerces the str to AnyHttpUrl during validation.
-                issuer_url=cast(AnyHttpUrl, issuer),
-                required_scopes=["ciaobot"],
-                resource_server_url=None,
-            ),
-        )
-        self._register_tools()
-        self.http_app = self.server.streamable_http_app()
 
     def bind(self, control_plane: CiaoControlPlane) -> None:
         self.control_plane = control_plane
-
-    @property
-    def url(self) -> str:
-        # Starlette's Mount canonicalizes the inner root to a trailing slash.
-        return f"http://127.0.0.1:{int(self.config.pwa_port)}/mcp/"
 
     #: Exposed for ``ciao.agent_surface.AgentDispatcher``.
     surface_var = _SURFACE_VAR
 
     def tool_for(self, operation: Operation) -> Tool:
-        """A FastMCP ``Tool`` for one operation, built the same way MCP registers it.
+        """A ``Tool`` for one operation, built from the shared operation table.
 
         The dispatcher builds a fresh :class:`Tool` from the shared operation
         entry (via :meth:`Operation.bind`) so its pydantic argument validation
-        is byte-for-byte the schema the MCP adapter serves for the same
-        operation — the two surfaces cannot drift apart.
+        is byte-for-byte the schema the operation defines — the CLI surface
+        and any future transport cannot drift apart.
         """
         return Tool.from_function(
             operation.bind(self),
@@ -1097,12 +1064,7 @@ class CiaoMcpService:
             workspace=project.workspace,
             provider=chat.provider,
         )
-        return self.url, token
-
-    @asynccontextmanager
-    async def lifespan(self):
-        async with self.server.session_manager.run():
-            yield
+        return self.agent_url, token
 
     def status(self) -> dict[str, Any]:
         workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
@@ -1110,7 +1072,7 @@ class CiaoMcpService:
             # Retained for the PWA status payload's shape. The control plane is
             # mandatory, so a live service is by definition enabled.
             "enabled": True,
-            "url": self.url,
+            "url": self.agent_url,
             "bound": self.control_plane is not None,
             "tool_count": len(self._tool_names),
             "tools": sorted(self._tool_names),
@@ -1708,24 +1670,24 @@ class CiaoMcpService:
         except OSError:
             logger.debug("Failed to trim the MCP telemetry log", exc_info=True)
 
-    def _principal(self) -> McpPrincipal:
+    def _principal(self) -> AgentPrincipal:
         access = get_access_token()
         if access is None or not isinstance(access.claims, dict):
-            raise ControlPlaneError("unauthorized", "A managed Ciaobot MCP session is required.")
-        principal = McpPrincipal.from_claims(access.claims)
+            raise ControlPlaneError("unauthorized", "A managed Ciaobot agent session is required.")
+        principal = AgentPrincipal.from_claims(access.claims)
         if not principal.token_id:
-            raise ControlPlaneError("unauthorized", "The MCP session has no principal.")
+            raise ControlPlaneError("unauthorized", "The agent session has no principal.")
         return principal
 
     async def _invoke(
         self,
         name: str,
-        operation: Callable[[CiaoControlPlane, McpPrincipal], Any],
+        operation: Callable[[CiaoControlPlane, AgentPrincipal], Any],
         *,
         mutating: bool = False,
     ) -> dict[str, Any]:
         started = time.perf_counter()
-        principal: McpPrincipal | None = None
+        principal: AgentPrincipal | None = None
         status = "ok"
         error_code = ""
         value: Any = None
@@ -1758,7 +1720,7 @@ class CiaoMcpService:
             status = "error"
             error_code = "internal_error"
             self._last_error = str(exc)
-            logger.exception("Ciaobot MCP tool %s failed internally", name)
+            logger.exception("Ciaobot agent operation %s failed internally", name)
             return {
                 "ok": False,
                 "error": {
@@ -1781,7 +1743,7 @@ class CiaoMcpService:
         self,
         *,
         name: str,
-        principal: McpPrincipal | None,
+        principal: AgentPrincipal | None,
         status: str,
         error_code: str,
         duration_ms: int,
@@ -1818,31 +1780,6 @@ class CiaoMcpService:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
         except (OSError, TypeError, ValueError):
             logger.debug("Failed to record MCP tool telemetry", exc_info=True)
-
-    def _register_tools(self) -> None:
-        """Register exactly the operations in ``MCP_EXPOSED_OPERATIONS``.
-
-        The operation bodies, annotations, and docstrings live in the
-        module-level :data:`OPERATIONS` table (shared with the agent
-        dispatcher) rather than here as closures. Each entry is bound to this
-        service and registered with the same ``Tool.from_function`` metadata
-        FastMCP builds for any tool, so the MCP schema and the dispatcher's
-        pydantic validation are identical by construction.
-        """
-        for name in sorted(MCP_EXPOSED_OPERATIONS):
-            operation = OPERATIONS_BY_NAME.get(name)
-            if operation is None:
-                raise ValueError(
-                    f"MCP_EXPOSED_OPERATIONS lists unknown operation '{name}'."
-                )
-            self._tool_names.add(name)
-            self.server.add_tool(
-                operation.bind(self),
-                name=name,
-                annotations=operation.annotations,
-                description=operation.description,
-                structured_output=True,
-            )
 
 
 def _write_mcp_env_values(path: Path, updates: dict[str, str]) -> None:
