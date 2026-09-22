@@ -63,36 +63,26 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
         model="sonnet",
         mode="auto",
         provider="claude",
-        mcp_url="http://127.0.0.1:8443/mcp/",
-        mcp_token="secret-session-token",
     )
 
     await provider._ensure_connected(request)
 
     options = captured["options"]
-    # Strict mode must NOT be forced on the chat path: it restricts the CLI to
-    # only the ciaobot server and suppresses the account's claude.ai connector
-    # MCPs (mcp__claude_ai_*). Connectors stay loaded so they remain reachable.
-    # The ciaobot server is still injected.
-    assert options.strict_mcp_config is False
-    assert options.mcp_servers == {
-        "ciaobot": {
-            "type": "http",
-            "url": request.mcp_url,
-            "headers": {"Authorization": "Bearer secret-session-token"},
-        }
-    }
-    # The MCP path carries the compact shared core (the single CLI-first
+    # No Ciaobot MCP server is attached since S6; the control surface is the
+    # `ciao` CLI in the shell. claude.ai connector MCPs stay loaded (they are
+    # fetched from the login, not declared in mcp_servers).
+    assert options.mcp_servers is None or options.mcp_servers == {}
+    # The CLI surface carries the compact shared core (the single CLI-first
     # prompt), not a second memory block or a provider-specific recipe.
     assert "Prefer the managed Ciaobot MCP tools" not in options.system_prompt["append"]
     assert "ciao vault search" in options.system_prompt["append"]
     # Ciaobot's own non-destructive control plane is pre-approved so Auto
     # mode's classifier stops raising an Approve/Deny card for "create the
-    # automation you just asked for". Destructive tools stay off the allowlist.
-    assert "mcp__ciaobot__schedule" in options.allowed_tools
-    assert "mcp__ciaobot__chat_delete" not in options.allowed_tools
-    assert "mcp__ciaobot__loop" not in options.allowed_tools
-    assert "mcp__ciaobot__loop_action" not in options.allowed_tools
+    # automation you just asked for". Destructive verbs stay off the allowlist.
+    assert "Bash(ciao schedule create:*)" in options.allowed_tools
+    assert "Bash(ciao chat delete:*)" not in options.allowed_tools
+    assert "Bash(ciao run start:*)" not in options.allowed_tools
+    assert "mcp__ciaobot__" not in " ".join(options.allowed_tools)
     # The bundled schedule/loop skills are removed from the model's context
     # (not merely denied): a denied-but-listed skill still gets picked, which
     # is how "create a loop" ended up as a cloud-routine Skill call.
@@ -144,8 +134,6 @@ async def test_claude_does_not_duplicate_native_guide_memory(
         model="sonnet",
         mode="auto",
         provider="claude",
-        mcp_url="http://127.0.0.1:8443/mcp/",
-        mcp_token="secret",
     )
 
     await provider._ensure_connected(request)
@@ -160,8 +148,7 @@ async def test_claude_does_not_duplicate_native_guide_memory(
 @pytest.mark.asyncio
 async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeypatch) -> None:
     """Plan mode's contract is "propose, don't act"; an allow rule would
-    punch a hole in it, so the allowlist is withheld there even though the
-    ciaobot MCP server is still mounted."""
+    punch a hole in it, so the CLI allowlist is withheld there."""
     captured = {}
 
     class FakeClient:
@@ -181,13 +168,10 @@ async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeyp
         model="sonnet",
         mode="plan",
         provider="claude",
-        mcp_url="http://127.0.0.1:8443/mcp/",
-        mcp_token="secret-session-token",
     )
 
     await provider._ensure_connected(request)
 
-    assert captured["options"].mcp_servers  # server still mounted
     assert captured["options"].allowed_tools == []
 
 
@@ -948,16 +932,14 @@ async def test_manual_and_plan_modes_pre_approve_nothing(
         model="sonnet",
         mode=mode,
         provider="claude",
-        mcp_url="http://127.0.0.1:8443/mcp/",
-        mcp_token="secret-session-token",
     )
 
     await provider._ensure_connected(request)
 
     allowed = captured["options"].allowed_tools or []
-    assert "mcp__ciaobot__schedule" not in allowed
-    assert "mcp__ciaobot__memory_update" not in allowed
-    assert "mcp__ciaobot__chat_send" not in allowed
+    assert "Bash(ciao schedule create:*)" not in allowed
+    assert "Bash(ciao memory update:*)" not in allowed
+    assert "Bash(ciao chat send:*)" not in allowed
 
 
 @pytest.mark.parametrize("mode", ["normal", "plan"])
@@ -966,9 +948,9 @@ def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings(mode)  # type: ignore[arg-type]
-    allowed = {r["permission"] for r in rules if r.get("action") == "allow"}
-    assert "ciaobot_schedule" not in allowed
-    assert "ciaobot_memory_update" not in allowed
+    bash_patterns = " ".join(r.get("pattern", "") for r in rules if r.get("permission") == "bash")
+    assert "ciao schedule create" not in bash_patterns
+    assert "ciao memory update" not in bash_patterns
 
 
 def test_opencode_auto_mode_still_pre_approves_the_control_plane() -> None:
@@ -976,9 +958,12 @@ def test_opencode_auto_mode_still_pre_approves_the_control_plane() -> None:
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings("auto")
-    allowed = {r["permission"] for r in rules if r.get("action") == "allow"}
-    assert "ciaobot_schedule" in allowed
-    assert "ciaobot_chat_delete" not in allowed
+    bash_allow = " ".join(
+        r.get("pattern", "") for r in rules
+        if r.get("permission") == "bash" and r.get("action") == "allow"
+    )
+    assert "ciao schedule create" in bash_allow
+    assert "ciao chat delete" not in bash_allow
 
 
 @pytest.mark.asyncio

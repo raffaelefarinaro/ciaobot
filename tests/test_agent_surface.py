@@ -13,7 +13,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import agent_cli
-from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, surface_for_chat
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.core_prompt import system_prompt_payload
 from ciao.web.routes_agent import agent_dispatch_endpoint
 from tests.test_mcp_server import _service
@@ -94,85 +94,26 @@ def test_plan_mode_gate_applies_through_the_cli_surface(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
-def test_mcp_surface_telemetry_is_still_tagged_mcp(tmp_path: Path) -> None:
-    from tests.test_mcp_server import _client as _mcp_client, _rpc
-
-    service, _ = _service(tmp_path)
-    token = _token(service)
-    with _mcp_client(service) as client:
-        _rpc(client, token, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
-        # Since S5 the MCP catalog is empty (every operation is a `ciao …`
-        # command), so there is no Ciaobot tool to call over the MCP transport.
-        listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-    assert listed == set()
-    assert service._tool_names == set()
-
-
-def test_mcp_and_dispatcher_serve_identical_argument_schemas(tmp_path: Path) -> None:
-    """Both surfaces validate arguments through the same operation table.
-
-    The MCP adapter and the dispatcher build their :class:`Tool` from the same
-    module-level ``OPERATIONS`` entry via ``Tool.from_function``, so a bad
-    flag must be rejected identically on either surface. This is the invariant
-    the operation-table refactor exists to guarantee.
-    """
-    from ciao import mcp_server
-
-    service, _ = _service(tmp_path)
-    for name in mcp_server.MCP_EXPOSED_OPERATIONS:
-        mcp_tool = service.server._tool_manager.get_tool(name)
-        assert mcp_tool is not None, name
-        cli_tool = service.tool_for(mcp_server.OPERATIONS_BY_NAME[name])
-        assert cli_tool.parameters == mcp_tool.parameters, name
-    # S5 emptied the MCP catalog: nothing to compare over MCP, and every
-    # operation is dispatched through the shared table instead.
-    assert mcp_server.MCP_EXPOSED_OPERATIONS == frozenset()
-
-
-def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
-    assert surface_for_chat(tmp_path, "chat-1") == "mcp"  # default is MCP (argv rules stay opt-in)
-    (tmp_path / "agent_surface.json").write_text(json.dumps({"chat-1": "cli", "chat-2": "bogus"}), encoding="utf-8")
-    assert surface_for_chat(tmp_path, "chat-1") == "cli"
-    assert surface_for_chat(tmp_path, "chat-2") == "mcp"
-    assert surface_for_chat(tmp_path, "chat-3") == "mcp"
-    (tmp_path / "agent_surface.json").write_text(json.dumps({"*": "cli"}), encoding="utf-8")
-    assert surface_for_chat(tmp_path, "anything") == "mcp"  # no wildcard on purpose
-    (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
-    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
-
-
 def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S2 removed the rare-admin group from the MCP catalog but the dispatcher
     must still run them as `ciao <noun> <verb>` commands."""
-    from ciao import mcp_server
-
     removed = {
         "context_get", "gws_status", "projects_list", "project_get",
         "project", "project_action", "workspaces_list",
     }
     service, _ = _service(tmp_path)
-    # None of the removed group is an MCP tool any more…
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-    assert not (removed & listed)
-    # …but each is still a dispatcher operation the CLI routes to.
     assert removed <= set(service.operation_table)
 
 
 def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S3 removed the chat-lifecycle group from the MCP catalog but the
     dispatcher must still run them as `ciao chat …` commands."""
-    from ciao import mcp_server
-
     chat_group = {
         "chats_list", "chat_get", "chat_create", "chat_update", "chat_send",
         "chat_continue", "chat_retry", "chat_handover", "chat_archive",
         "chat_delete", "chat_stop",
     }
     service, _ = _service(tmp_path)
-    # None of the chat group is an MCP tool any more…
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-    assert not (chat_group & listed)
-    # …but each is still a dispatcher operation the CLI routes to.
     assert chat_group <= set(service.operation_table)
 
 
@@ -180,17 +121,11 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
     """S4 removed the background-run and schedule groups from the MCP catalog
     but the dispatcher must still run them as `ciao run …` / `ciao schedule …`
     commands."""
-    from ciao import mcp_server
-
     group = {
         "background_run_start", "background_run_status", "background_run_cancel",
         "schedules_list", "schedule", "schedule_action",
     }
     service, _ = _service(tmp_path)
-    # None of the group is an MCP tool any more…
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-    assert not (group & listed)
-    # …but each is still a dispatcher operation the CLI routes to.
     assert group <= set(service.operation_table)
 
 
@@ -424,15 +359,13 @@ def test_dispatch_requires_the_ciaobot_scope(tmp_path: Path, monkeypatch: pytest
     assert response.json()["error"]["code"] == "forbidden"
 
 
-def test_provider_reuse_key_changes_when_the_surface_flips() -> None:
+def test_provider_reuse_key_is_the_agent_token() -> None:
     from ciao.models import agent_control_token, provider_reuse_key
 
-    mcp = SimpleNamespace(mcp_token="tok", extra_env={}, agent_surface="mcp")
-    cli = SimpleNamespace(mcp_token="", extra_env={AGENT_TOKEN_ENV: "tok"}, agent_surface="cli")
-    none = SimpleNamespace(mcp_token="", extra_env={}, agent_surface="mcp")
-    assert agent_control_token(mcp) == agent_control_token(cli) == "tok"
-    assert provider_reuse_key(mcp) != provider_reuse_key(cli)
-    assert provider_reuse_key(none) == ""
+    with_token = SimpleNamespace(extra_env={AGENT_TOKEN_ENV: "tok"})
+    without = SimpleNamespace(extra_env={})
+    assert agent_control_token(with_token) == provider_reuse_key(with_token) == "tok"
+    assert provider_reuse_key(without) == ""
 
 
 def test_json_flag_is_not_stripped_from_the_run_command_payload() -> None:
@@ -724,7 +657,7 @@ async def test_claude_cli_surface_pre_approves_ciao_commands_not_mcp_tools(
     monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
 
     await provider._ensure_connected(
-        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude", agent_surface="cli")
+        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude")
     )
     allowed = captured["options"].allowed_tools
     assert "Bash(ciao memory status:*)" in allowed
@@ -733,45 +666,16 @@ async def test_claude_cli_surface_pre_approves_ciao_commands_not_mcp_tools(
     assert not [entry for entry in allowed if entry.startswith("Bash(ciao memory:")]
     assert "Bash(ciao vault review keep:*)" not in allowed  # destructive: still a card
     assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
-    assert not captured["options"].mcp_servers  # no MCP server is attached on this surface
+    assert not captured["options"].mcp_servers  # no MCP server is attached
 
 
 @pytest.mark.asyncio
-async def test_claude_mcp_surface_rules_are_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao.execution_modes import auto_approved_mcp_tool_names
-    from ciao.models import AgentRequest
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(
-        tmp_path,
-        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
-    )
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    await provider._ensure_connected(
-        AgentRequest(
-            prompt="t", model="sonnet", mode="auto", provider="claude",
-            mcp_url="http://127.0.0.1:8443/mcp/", mcp_token="tok",
-        )
-    )
-    assert captured["options"].allowed_tools == auto_approved_mcp_tool_names()
-
-
-def test_opencode_cli_auto_rules_follow_the_generic_bash_ask() -> None:
+async def test_opencode_cli_auto_rules_follow_the_generic_bash_ask() -> None:
     """Last-match-wins: a rule that must win goes after the one it overrides."""
     from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
     from ciao.providers.opencode import mode_settings
 
-    _agent, rules = mode_settings("auto", agent_surface="cli")
+    _agent, rules = mode_settings("auto")
     bash = [rule for rule in rules if rule["permission"] == "bash"]
     assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
     assert bash[1:] == [
@@ -789,13 +693,6 @@ def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
     trailing `ask` row would narrow it under last-match-wins."""
     from ciao.providers.opencode import mode_settings
 
-    assert mode_settings(mode, agent_surface="cli") == mode_settings(mode)  # type: ignore[arg-type]
-
-
-def test_opencode_mcp_surface_rules_are_unchanged() -> None:
-    from ciao.providers.opencode import mode_settings
-
-    _agent, rules = mode_settings("auto")
-    assert [rule for rule in rules if rule["permission"] == "bash"] == [
-        {"permission": "bash", "pattern": "*", "action": "ask"}
-    ]
+    rules = mode_settings(mode)[1]
+    bash = [rule for rule in rules if rule["permission"] == "bash"]
+    assert not any(rule.get("pattern", "").startswith("ciao ") for rule in bash)
