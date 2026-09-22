@@ -522,7 +522,6 @@ function stopDetailDrag() {
 // per frame: getComputedStyle forces a style recalc, which is not something to
 // do inside a RAF loop.
 const themeColors = reactive({
-  light: false,
   label: 'rgba(231,232,240,0.85)',
   edge: 'rgba(150,160,190,0.35)',
   edgeDim: 'rgba(120,126,150,0.14)',
@@ -532,7 +531,6 @@ const themeColors = reactive({
 })
 function refreshThemeColors() {
   const light = isLightTheme.value
-  themeColors.light = light
   themeColors.label = light ? 'rgba(32,33,48,0.88)' : 'rgba(231,232,240,0.85)'
   themeColors.edge = light ? 'rgba(80,86,120,0.35)' : 'rgba(150,160,190,0.35)'
   themeColors.edgeDim = light ? 'rgba(120,126,150,0.18)' : 'rgba(120,126,150,0.14)'

@@ -589,6 +589,26 @@ def test_a_note_deleted_outside_the_workflow_is_recorded(tmp_path: Path) -> None
     assert len([r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]) == 1
 
 
+def test_a_project_moved_to_completed_is_not_recorded_vanished(tmp_path: Path) -> None:
+    """Closing a project moves its doc; the exemption must not read that as a delete."""
+    _note(tmp_path, "projects/active/demo/demo.md", "A project still in flight.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    target = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    target.parent.mkdir(parents=True)
+    source.rename(target)
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=True) == []
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+def test_only_projects_completed_is_exempt(tmp_path: Path) -> None:
+    _note(tmp_path, "Ideas/completed/Loose.md", "An unlinked note.")
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert [c.path for c in candidates] == ["memory-vault/Ideas/completed/Loose.md"]
+
+
 def test_a_read_only_listing_never_writes_a_vanished_row(tmp_path: Path) -> None:
     """A listing that appends to the ledger is not the listing it claims to be."""
     _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")

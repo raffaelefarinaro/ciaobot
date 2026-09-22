@@ -45,7 +45,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -2535,10 +2536,10 @@ def _is_already_applied(
 _ENTITY_SUBJECT_RE = re.compile(
     r"^(?P<type>[^:]{1,40}?)\s*:\s*(?P<name>.+?)(?:\s+[-–—]\s|\s*[(;,:]|$)"
 )
-_MD_LINK_RE = re.compile(r"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]|\[([^\]]+)\]\([^)]*\)")
 # Project folder names that are containers, not a project a fact belongs to.
 _ROUTING_SKIP_PROJECTS = frozenset({"general"})
-_MIN_ROUTABLE_NAME = 4
+# Shorter names ("mo", "ux") match too much prose to count as a mention.
+_MIN_ENTITY_MENTION = 4
 _ISO_DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 
 
@@ -2564,10 +2565,21 @@ def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
             for entry in folder.iterdir():
                 if not entry.is_dir() or entry.name.lower() in _ROUTING_SKIP_PROJECTS:
                     continue
-                for doc in (entry / f"{entry.name}.md", entry / "README.md"):
+                # README first, the order the app's own project-doc lookup
+                # uses (`project_chats._project_doc_file`), so a folder with
+                # both routes facts to the doc the app treats as canonical.
+                for doc in (entry / "README.md", entry / f"{entry.name}.md"):
                     if doc.is_file():
                         projects.setdefault(entity_key(entry.name), doc)
                         break
+        # The roster also lists single-file projects (``projects/<name>.md``);
+        # a ``[project: <name>]`` tag naming one must resolve here too, or it
+        # falls through to the chat's own doc.
+        projects_dir = vault_root / "projects"
+        if projects_dir.is_dir():
+            for doc in projects_dir.glob("*.md"):
+                if doc.is_file() and doc.stem.lower() not in _ROUTING_SKIP_PROJECTS:
+                    projects.setdefault(entity_key(doc.stem), doc)
         people_dir = vault_root / _PEOPLE_DIR
         if people_dir.is_dir():
             for note in people_dir.glob("*.md"):
@@ -2577,18 +2589,44 @@ def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
     return projects, people
 
 
-def _mentioned_projects(text: str, projects: dict[str, Path]) -> set[str]:
-    """Known project keys named in *text* as a whole word (slug or spaced form)."""
-    lowered = text.lower()
-    hits: set[str] = set()
-    for key in projects:
-        if len(key) < _MIN_ROUTABLE_NAME:
-            continue
+def project_name(doc: Path) -> str:
+    """The roster name of a project doc: its folder, or a single file's stem."""
+    return doc.stem if doc.parent.name == "projects" else doc.parent.name
+
+
+def entity_mention_counts(text: str, keys: Iterable[str]) -> dict[str, int]:
+    """How often each entity key is named in *text* as a whole word.
+
+    A key matches in its spaced or hyphenated spelling ("finn cummins",
+    "finn-cummins"). One alternation, longest spelling first, scans the text
+    once however many entities the vault has; the longest name wins where
+    names overlap, so "finn cummins" is not also a mention of "finn".
+    """
+    forms: dict[str, list[str]] = {}
+    for key in keys:
         for form in {key, key.replace(" ", "-")}:
-            if re.search(rf"(?<![\w-]){re.escape(form)}(?![\w-])", lowered):
-                hits.add(key)
-                break
-    return hits
+            if len(form) >= _MIN_ENTITY_MENTION:
+                forms.setdefault(form, []).append(key)
+    if not forms or not text:
+        return {}
+    pattern = re.compile(
+        r"(?<![\w-])("
+        + "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+        + r")(?![\w-])"
+    )
+    counts: dict[str, int] = {}
+    for match in pattern.finditer(text.lower()):
+        for key in forms[match.group(1)]:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _unwrap_links(text: str) -> str:
+    """Markdown links and wikilinks replaced by the words they display."""
+    from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
+
+    text = MARKDOWN_LINK_RE.sub(lambda m: m.group("label"), text)
+    return WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
 
 
 def _known_project_doc(payload: str, projects: dict[str, Path]) -> Path | None:
@@ -2627,30 +2665,21 @@ def _address_tagged(
     normalized to the existing note's stem, so "Finn Cummins" lands in
     ``People/Finn-Cummins.md`` rather than creating a second note.
     """
-    def readdress(target: str, payload: str) -> MemoryProposal:
-        return MemoryProposal(
-            target=target,
-            text=proposal.text,
-            source_section=proposal.source_section,
-            payload=payload,
-            citations=proposal.citations,
-        )
-
     if proposal.target == "people" and proposal.payload:
         stem = people.get(entity_key(proposal.payload))
-        return readdress("people", stem) if stem else proposal
+        return replace(proposal, payload=stem) if stem else proposal
     if proposal.target != "project":
         return proposal
     named = _known_project_doc(proposal.payload, projects)
     if named is not None and named != own_doc:
-        return readdress("project", str(named))
+        return replace(proposal, payload=str(named))
     if own_doc is not None:
         # The chat's resolved canonical doc is authoritative over a path the
         # model invented; only a roster name can move a fact elsewhere.
-        return None if fold_wrote else readdress("project", own_doc_path or str(own_doc))
+        return None if fold_wrote else replace(proposal, payload=own_doc_path or str(own_doc))
     # A General chat has no project document to own a project-scoped fact.
     # Keep the claim reviewable, never an unroutable project row.
-    return readdress("review", "")
+    return replace(proposal, target="review", payload="")
 
 
 def _route_to_known_entity(
@@ -2675,36 +2704,36 @@ def _route_to_known_entity(
     through a model call that can answer "already covered", so a routed row
     is a proposal, not a write.
     """
-    if proposal.target != "review":
+    from ciao.fact_candidates import UNREADABLE_SECTION
+
+    # An unreadable structured row is a parse failure waiting for a human;
+    # re-addressing it by the names it mentions could hand it to a doc the
+    # fold already read, which drops it without anyone seeing it.
+    if proposal.target != "review" or proposal.source_section == UNREADABLE_SECTION:
         return proposal
     text = proposal.text
 
     def routed(target: str, payload: str) -> MemoryProposal:
-        return MemoryProposal(
-            target=target,
-            text=text,
-            source_section=proposal.source_section,
-            payload=payload,
-            citations=proposal.citations,
-        )
+        return replace(proposal, target=target, payload=payload)
 
     if proposal.source_section == "New entities":
         # Unwrap links first: "project: [Wedding](./projects/...) - ..." names
         # Wedding, and the subject pattern would otherwise stop at the "(".
-        plain = _MD_LINK_RE.sub(lambda m: m.group(1) or m.group(2), text)
-        subject = _ENTITY_SUBJECT_RE.match(plain)
+        subject = _ENTITY_SUBJECT_RE.match(_unwrap_links(text))
         if subject:
             key = entity_key(subject.group("name").split(" / ")[0])
-            is_person = re.search(r"\b(?:person|people)\b", subject.group("type"), re.I)
-            if (key in people and is_person) or key in projects:
+            person = key in people and bool(
+                re.search(r"\b(?:person|people)\b", subject.group("type"), re.I)
+            )
+            if person or key in projects:
                 if not _ISO_DATE_RE.search(text):
                     return None
-                if key in people and is_person:
+                if person:
                     return routed("people", people[key])
                 return routed("project", str(projects[key]))
-    named = _mentioned_projects(text, projects)
+    named = list(entity_mention_counts(text, projects))
     if len(named) == 1:
-        return routed("project", str(projects[named.pop()]))
+        return routed("project", str(projects[named[0]]))
     return proposal
 
 
@@ -2723,6 +2752,14 @@ def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]
     for item in _split_sections(insights_md).get("Vault changes", []):
         _kind, _payload, citations, text = _peel_trailing_metadata(item)
         path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
+        # The citation rule asks for vault paths as relative Markdown links,
+        # so "[Mo](./People/Mo.md) - ..." names People/Mo.md — and a name with
+        # spaces is written `[Mo](<./People/Mo Salah.md>)`.
+        from ciao.vault_links import MARKDOWN_LINK_RE
+
+        link = MARKDOWN_LINK_RE.fullmatch(path)
+        if link:
+            path = link.group("angle") or link.group("bare") or path
         if path and citations:
             out.append((path, frozenset(citations)))
     return out
@@ -2741,7 +2778,12 @@ def _written_this_session(
 
     Precision-first, two signals together: the bullet cites a turn that a
     vault change also cites, and it names that changed file in backticks.
+    A User correction is never suppressed: "run tests via `scripts/test.sh`"
+    can share a turn with the edit to that script and still be a standing
+    preference the file itself does not state.
     """
+    if proposal.source_section == "User corrections":
+        return False
     if not proposal.citations or not changes:
         return False
     cited = set(proposal.citations)
@@ -2833,8 +2875,8 @@ def proposals_from_archive(
             if project_doc_path
             else None
         )
-        addressed = [
-            _address_tagged(
+        def route(p: MemoryProposal) -> MemoryProposal | None:
+            addressed = _address_tagged(
                 p,
                 projects,
                 people,
@@ -2842,34 +2884,37 @@ def proposals_from_archive(
                 own_doc_path=project_doc_path,
                 fold_wrote=project_fold_wrote,
             )
-            for p in proposals
-        ]
-        consumed = sum(1 for p in addressed if p is None)
-        if consumed:
+            routed = (
+                _route_to_known_entity(addressed, projects, people)
+                if addressed is not None
+                else None
+            )
+            if routed is None:
+                return None
+            if routed.target == "review" and routed.source_section == "Decisions":
+                # Same rule as `propose_from_insights`, for the [project]
+                # decisions a General chat demoted to review above.
+                return None
+            if (
+                project_fold_wrote
+                and own_doc is not None
+                and routed.target == "project"
+                and Path(routed.payload) == own_doc
+            ):
+                # The fold already read these insights into the chat's own doc.
+                return None
+            return routed
+
+        routed_all = [route(p) for p in proposals]
+        dropped = sum(1 for p in routed_all if p is None)
+        if dropped:
             logger.info(
-                "memory proposals: doc fold consumed %d project fact(s) from %s",
-                consumed,
+                "memory proposals: dropped %d fact(s) already folded, restated, "
+                "or with no destination from %s",
+                dropped,
                 archive_path.name,
             )
-        proposals = [p for p in addressed if p is not None]
-
-        if any(p.target == "review" for p in proposals):
-            proposals = [
-                routed
-                for routed in (_route_to_known_entity(p, projects, people) for p in proposals)
-                # Same rule as `propose_from_insights`: a Decision with no
-                # destination is a one-off choice, not a question for a human.
-                # This catches the [project] decisions a General chat demoted.
-                if routed is not None
-                and not (routed.target == "review" and routed.source_section == "Decisions")
-            ]
-            if project_fold_wrote and project_doc_path:
-                # The fold already read these insights into the chat's own doc.
-                own_doc = _resolve_doc_path(workspace_vault_root, project_doc_path)
-                proposals = [
-                    p for p in proposals
-                    if not (p.target == "project" and Path(p.payload) == own_doc)
-                ]
+        proposals = [p for p in routed_all if p is not None]
         session_changes = _session_vault_changes(body)
 
         # Extra guard before creating a review card: if the chat already

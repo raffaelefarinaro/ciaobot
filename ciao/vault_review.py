@@ -335,11 +335,6 @@ def _generate_candidates(
         path = str(entry.path)
         if any(part.casefold() == "workspace" for part in Path(path).parts):
             continue
-        # A completed project is a closed record, not a live note: nothing
-        # links to it by design, and `Still true` would stamp `updated: today`
-        # onto a `Closed …` file. Same class of exemption as templates below.
-        if any(part.casefold() == "completed" for part in Path(path).parts):
-            continue
         # A template is not a stale note: it has no facts to verify and nothing
         # links to it by design, so every rule here fires on one. The linter
         # already exempts them from duplicate detection for the same reason.
@@ -353,6 +348,14 @@ def _generate_candidates(
         present_paths.add(path)
         digest = content_hash(raw)
         present_digests.add(digest)
+        # A completed project is a closed record, not a live note: nothing
+        # links to it by design, and `Still true` would stamp `updated: today`
+        # onto a `Closed …` file. Same class of exemption as templates. Skipped
+        # only after it is counted as present, so a project moved from
+        # active/ to completed/ reads as a move, not a vanished note.
+        parts = [part.casefold() for part in Path(path).parts]
+        if any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:])):
+            continue
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
         # `entry.type` is the raw frontmatter string. The two type filters below

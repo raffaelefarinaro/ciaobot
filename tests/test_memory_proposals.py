@@ -3012,3 +3012,75 @@ def test_session_write_suppression_matches_the_name_the_file_defines(tmp_path: P
     )
 
     assert mp.proposals_from_archive(archive, vault) is None
+
+
+def test_named_single_file_project_routes_to_its_doc(tmp_path: Path) -> None:
+    """The roster lists projects/<name>.md; its tag must not fall to the own doc."""
+    vault = _known_vault(tmp_path)
+    (vault / "projects" / "garden.md").write_text("# Garden\n", encoding="utf-8")
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose raised beds over ground rows for every season. [idx=3] [project: garden]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault, project_doc_path=str(own))
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["kind"] for r in rows] == ["project"]
+    assert rows[0]["target"].endswith("projects/garden.md")
+
+
+def test_unreadable_row_naming_the_own_project_is_not_dropped(tmp_path: Path) -> None:
+    """A parse failure is a human's question even when it names a known project."""
+    from ciao.fact_candidates import UNREADABLE_SECTION
+
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        f"## {UNREADABLE_SECTION}\n"
+        "- The ai-native-sdk listing ships skills only, never MCP. [review]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["kind"] for r in rows] == ["review"]
+
+
+def test_session_write_suppression_reads_a_markdown_link_path(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "AGENTS.md")
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose a standing drafts command in `work/commands/styleit.md` "
+        "as the standard way to polish drafts. [idx=21] [memory]\n"
+        "## Vault changes\n"
+        "- [styleit](./work/commands/styleit.md) - new command created. [idx=21]\n",
+    )
+
+    assert mp.proposals_from_archive(archive, vault, guide_path=guide) is None
+
+
+def test_user_correction_is_never_suppressed_as_a_session_write(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## User corrections\n"
+        "- Run tests via `scripts/test.sh`, never pytest directly. "
+        "Durable rule: run tests via scripts/test.sh. [idx=4] [memory]\n"
+        "## Vault changes\n"
+        "- scripts/test.sh - added a coverage flag. [idx=4]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert any("scripts/test.sh" in r["text"] for r in mp.list_proposals(out))

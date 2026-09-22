@@ -1310,12 +1310,16 @@ def test_known_context_block_carries_regions_and_roster(tmp_path):
     (vault / "People").mkdir(parents=True)
     (vault / "People" / "Elena.md").write_text("# Elena\n", encoding="utf-8")
     (vault / "projects" / "active" / "Wedding").mkdir(parents=True)
+    (vault / "projects" / "active" / "Wedding" / "README.md").write_text("# Wedding\n", encoding="utf-8")
+    # A folder with no doc cannot receive a routed fact, so it is not offered.
+    (vault / "projects" / "active" / "Empty").mkdir(parents=True)
 
     block = _known_context_block(guide, vault)
     assert block.startswith("## Known context")
     assert "Prefers plain engineering notes." in block
     assert "Known people: Elena" in block
     assert "Known projects: Wedding" in block
+    assert "Empty" not in block
     # Absent inputs mean no context section at all, not an empty header.
     assert _known_context_block(None, None) == ""
     assert _known_context_block(tmp_path / "missing.md", tmp_path / "nope") == ""

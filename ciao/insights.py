@@ -157,26 +157,22 @@ def _known_context_block(
                 parts.extend(f"- {entry}" for entry in entries)
     except Exception:  # noqa: BLE001 — context is optional
         logger.exception("Known-context: could not read regions")
+    projects: dict[str, Path] = {}
+    people: dict[str, str] = {}
     try:
         if vault_root is not None and vault_root.exists():
-            people = sorted(
-                p.stem for p in (vault_root / "People").glob("*.md")
-            )[:_KNOWN_CONTEXT_MAX_NAMES]
-            if people:
-                parts.append("Known people: " + ", ".join(people))
-            projects: set[str] = set()
-            projects_dir = vault_root / "projects"
-            for bucket in ("active", "completed"):
-                folder = projects_dir / bucket
-                if folder.is_dir():
-                    projects.update(
-                        p.name for p in folder.iterdir() if p.is_dir()
-                    )
-            if projects_dir.is_dir():
-                projects.update(p.stem for p in projects_dir.glob("*.md"))
-            if projects:
-                names = sorted(projects)[:_KNOWN_CONTEXT_MAX_NAMES]
-                parts.append("Known projects: " + ", ".join(names))
+            # The same roster `memory_proposals` resolves `[project: <name>]`
+            # and `[people: <Name>]` against, so the prompt never offers a
+            # name code cannot route (a folder with no doc, `general`).
+            from ciao.memory_proposals import known_entities, project_name
+
+            projects, people = known_entities(vault_root)
+            names = sorted(people.values())[:_KNOWN_CONTEXT_MAX_NAMES]
+            if names:
+                parts.append("Known people: " + ", ".join(names))
+            names = sorted({project_name(doc) for doc in projects.values()})
+            if names:
+                parts.append("Known projects: " + ", ".join(names[:_KNOWN_CONTEXT_MAX_NAMES]))
     except Exception:  # noqa: BLE001 — context is optional
         logger.exception("Known-context: could not build entity roster")
     if not parts:
@@ -194,7 +190,7 @@ def _known_context_block(
     notes = ""
     if transcript and vault_root is not None:
         try:
-            notes = _entity_notes_block(vault_root, transcript)
+            notes = _entity_notes_block(vault_root, transcript, projects, people)
         except Exception:  # noqa: BLE001 — context is optional
             logger.exception("Known-context: could not excerpt entity notes")
     return block + "\n\n" + notes
@@ -207,7 +203,6 @@ _ENTITY_NOTES_MAX = 8
 _ENTITY_NOTE_MAX_LINES = 6
 _ENTITY_NOTE_LINE_CHARS = 240
 _ENTITY_NOTES_MAX_CHARS = 8000
-_MIN_ENTITY_MENTION = 4
 
 
 def _archive_body_for_mentions(archive_path: Path) -> str:
@@ -220,34 +215,34 @@ def _archive_body_for_mentions(archive_path: Path) -> str:
 
 def _note_excerpt(path: Path) -> str:
     """A note's ``description:`` plus its newest body lines, each clipped."""
+    from ciao.vault_index import FENCED_CODE_RE, FRONTMATTER_RE, _parse_frontmatter
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    lines = text.splitlines()
-    description = ""
-    body_start = 0
-    if lines and lines[0].strip() == "---":
-        for index, line in enumerate(lines[1:], start=1):
-            if line.strip() == "---":
-                body_start = index + 1
-                break
-            if line.startswith("description:"):
-                description = line.split(":", 1)[1].strip().strip("'\"")
-    body = [
+    description = str(_parse_frontmatter(text).get("description") or "").strip()
+    match = FRONTMATTER_RE.match(text)
+    body = FENCED_CODE_RE.sub("", text[match.end():] if match else text)
+    lines = [
         line.strip()
-        for line in lines[body_start:]
-        if line.strip() and not line.lstrip().startswith(("#", "<!--", "|", "```"))
+        for line in body.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "<!--", "|"))
     ][-_ENTITY_NOTE_MAX_LINES:]
-    out = [f"description: {description}"] if description else []
-    for line in body:
+    out = [f"description: {' '.join(description.split())}"] if description else []
+    for line in lines:
         if len(line) > _ENTITY_NOTE_LINE_CHARS:
             line = line[: _ENTITY_NOTE_LINE_CHARS - 1].rstrip() + "…"
         out.append(line)
     return "\n".join(out)
 
 
-def _entity_notes_block(vault_root: Path, transcript: str) -> str:
+def _entity_notes_block(
+    vault_root: Path,
+    transcript: str,
+    projects: dict[str, Path],
+    people: dict[str, str],
+) -> str:
     """Excerpts of the known people/project notes the transcript mentions.
 
     The roster alone told the model which names exist but not what their
@@ -256,30 +251,19 @@ def _entity_notes_block(vault_root: Path, transcript: str) -> str:
     doc says exactly that. Each excerpt is headed by the destination tag that
     routes to it, so the tag the model writes is the one code resolves.
     """
-    from ciao.memory_proposals import known_entities
+    from ciao.memory_proposals import entity_mention_counts, project_name
 
-    projects, people = known_entities(vault_root)
-    lowered = transcript.lower()
-    counts: list[tuple[int, str, Path]] = []
+    notes: dict[str, tuple[str, Path]] = {}
     for key, doc in projects.items():
-        forms = {key, key.replace(" ", "-")}
-        hits = sum(
-            len(re.findall(rf"(?<![\w-]){re.escape(form)}(?![\w-])", lowered))
-            for form in forms
-            if len(form) >= _MIN_ENTITY_MENTION
-        )
-        if hits:
-            counts.append((hits, f"[project: {doc.parent.name}]", doc))
+        notes[key] = (f"[project: {project_name(doc)}]", doc)
     for key, stem in people.items():
-        if len(key) < _MIN_ENTITY_MENTION:
-            continue
-        hits = len(re.findall(rf"(?<![\w-]){re.escape(key)}(?![\w-])", lowered))
-        if hits:
-            counts.append((hits, f"[people: {stem}]", vault_root / "People" / f"{stem}.md"))
-    counts.sort(key=lambda row: -row[0])
+        notes.setdefault(key, (f"[people: {stem}]", vault_root / "People" / f"{stem}.md"))
+    counts = entity_mention_counts(transcript, notes)
+    ranked = sorted(counts, key=lambda key: -counts[key])
     sections: list[str] = []
     total = 0
-    for _hits, tag, path in counts[:_ENTITY_NOTES_MAX]:
+    for key in ranked[:_ENTITY_NOTES_MAX]:
+        tag, path = notes[key]
         excerpt = _note_excerpt(path)
         if not excerpt:
             continue
@@ -1347,7 +1331,10 @@ async def run_archive_pipeline(
                     if note:
                         run.extra["fallback"] = note
                         logger.info("Insights %s", note)
-                    context_block = _known_context_block(
+                    # Off the loop: a vault walk, note reads and a scan of the whole
+                    # transcript would otherwise stall every chat on this server.
+                    context_block = await asyncio.to_thread(
+                        _known_context_block,
                         guide_path,
                         proposal_vault_root,
                         transcript=(
