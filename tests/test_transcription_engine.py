@@ -149,6 +149,9 @@ async def test_transcribe_voice_is_free(tmp_path, monkeypatch):
 
 
 def test_correct_fails_open_when_model_unavailable(monkeypatch):
+    # The constructor gate is a different test (above); these pin `correct`,
+    # so they run wherever the suite runs — including Linux and app-less CI.
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
     monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
 
     async def should_not_call(*a, **k):
@@ -160,6 +163,7 @@ def test_correct_fails_open_when_model_unavailable(monkeypatch):
 
 
 def test_correct_fails_open_on_model_error(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
     monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
 
     async def fail(*a, **k):
@@ -171,6 +175,7 @@ def test_correct_fails_open_on_model_error(monkeypatch):
 
 
 def test_correct_returns_repaired_text(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
     monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
 
     async def fake_respond(prompt, **kw):
