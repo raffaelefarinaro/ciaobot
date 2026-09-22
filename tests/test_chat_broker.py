@@ -109,6 +109,21 @@ def test_extract_file_touches_from_bash_creates() -> None:
     ) == [{"file_path": "memory-vault/notes/there.md", "action": "created"}]
 
 
+def test_extract_file_touches_from_cli_file_surface() -> None:
+    """The CLI surface's `ciao file surface <path>` surfaces as the pinned-panel
+    `surfaced` touch (the same signal the MCP file_surface tool carried)."""
+    from ciao.web.chat_broker import extract_file_touches
+
+    assert extract_file_touches(
+        "Bash", {"command": "ciao file surface out/report.md"}
+    ) == [{"file_path": "out/report.md", "action": "surfaced"}]
+    assert extract_file_touches(
+        "Bash", {"command": "file surface memory-vault/People/Sofia.md"}
+    ) == [{"file_path": "memory-vault/People/Sofia.md", "action": "surfaced"}]
+    # Other `ciao` commands are not surfacing.
+    assert extract_file_touches("Bash", {"command": "ciao vault search x"}) == []
+
+
 def test_event_to_json_prefers_precomputed_file_touches() -> None:
     payload = event_to_json(
         ToolUseEvent(

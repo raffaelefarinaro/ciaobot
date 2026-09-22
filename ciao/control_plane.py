@@ -9,7 +9,9 @@ knowledge of ``.runtime`` JSON layouts.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -61,6 +63,31 @@ _GWS_HEALTH_STALE_AFTER = 1200.0
 _SUGGESTION_SKIP_DIRS: frozenset[str] = frozenset(
     {".git", ".runtime", ".venv", ".mypy_cache", ".pytest_cache", "node_modules", "Logs", "__pycache__"}
 )
+
+
+def _suggestion_score(wanted_stem: str, stem: str) -> int:
+    """A higher-is-better similarity of ``stem`` to ``wanted_stem``.
+
+    Exact name wins, then substring containment either way, then edit-distance
+    similarity so a typo like ``reprot.md`` vs ``report.md`` outranks an
+    unrelated filename. Everything ranks (never ``None``) so the caller keeps a
+    full suggestion list; only the *ordering* separates a genuine match from
+    an unrelated fallback.
+    """
+    if not wanted_stem or not stem:
+        return -2000
+    if stem == wanted_stem:
+        return 1000
+    if wanted_stem in stem:
+        return 700 - (len(stem) - len(wanted_stem))
+    if stem in wanted_stem:
+        return 600 - (len(wanted_stem) - len(stem))
+    ratio = difflib.SequenceMatcher(None, wanted_stem, stem).ratio()
+    if ratio >= 0.8:
+        return int(500 * ratio)
+    # Unrelated fallback, ranked below any edit-similar or substring match but
+    # still present so a miss returns a full suggestion list.
+    return -1000 - (len(stem) or 1)
 
 @dataclass(frozen=True, slots=True)
 class AgentPrincipal:
@@ -1696,32 +1723,24 @@ class CiaoControlPlane:
         """
         wanted_stem = Path(requested).stem.lower()
         candidates: list[tuple[int, str]] = []
-        # The walk is bounded and lazy: `rglob` touches no filesystem until we
-        # iterate, so the `try` must wrap the iteration (and any OSError from
-        # `os.scandir` that pathlib does not swallow) to fall back gracefully
-        # instead of replacing the intended file_not_found with an unrelated
-        # error. Heavy and hidden subtrees (node_modules, .git, .runtime, Logs)
-        # are skipped to keep the scan bounded and the suggestions relevant.
+        # Walk with `os.walk` so heavy/hidden subtrees are pruned *before* they
+        # are descended into (``rglob`` would still traverse them), keeping the
+        # scan bounded on the event loop. Any OSError mid-walk degrades to the
+        # candidates collected so far rather than replacing the intended
+        # file_not_found with an unrelated error.
         try:
-            for candidate in root.rglob("*"):
-                if any(part in _SUGGESTION_SKIP_DIRS for part in candidate.parts):
-                    continue
-                if not candidate.is_file():
-                    continue
-                stem = candidate.stem.lower()
-                # Tiered by match kind, then by stem length so a shorter, closer
-                # name wins within a tier. A substring match (either direction)
-                # always outranks an unrelated name, which is the point of the
-                # suggestion.
-                if stem == wanted_stem:
-                    score = 0
-                elif wanted_stem and wanted_stem in stem:
-                    score = -1 - len(wanted_stem)
-                elif wanted_stem and stem in wanted_stem:
-                    score = -2 - len(stem)
-                else:
-                    score = -1000 - (len(stem) or 1)
-                candidates.append((score, candidate.relative_to(root).as_posix()))
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in _SUGGESTION_SKIP_DIRS and not d.startswith(".")
+                ]
+                for name in filenames:
+                    stem = os.path.splitext(name)[0].lower()
+                    score = _suggestion_score(wanted_stem, stem)
+                    if score is None:
+                        continue
+                    rel = os.path.relpath(os.path.join(dirpath, name), root)
+                    candidates.append((score, rel))
         except OSError:
             logger.debug("file_surface suggestions: workspace walk failed", exc_info=True)
         candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
