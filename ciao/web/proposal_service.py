@@ -1220,8 +1220,16 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     out["destination_path"] = str(guide)
     out["leak_warning"] = bool(row.get("leak_warning"))
     try:
-        ensure_regions(guide)
-        entries, diags = read_region(guide, region)
+        # Read-only: unlike the accept path below, a preview must never create
+        # the guide or append region markers (`ensure_regions` does both when
+        # they are absent). A workspace newer than its last skill sync simply
+        # previews against empty regions: the accept prepares the destination
+        # when it runs, against the same empty body, so the revision
+        # handshake still lines up.
+        if guide.exists():
+            entries, diags = read_region(guide, region)
+        else:
+            entries, diags = [], []
     except (OSError, ValueError) as exc:
         out["reason"] = f"could not read {guide}: {exc}"
         return out

@@ -151,29 +151,37 @@ export const useProposalsStore = defineStore('proposals', () => {
   const receiptErrors = ref<Record<string, string>>({})
   const receiptLoading = ref<Set<string>>(new Set())
 
-  function isReceiptLoading(id: string): boolean {
-    return receiptLoading.value.has(id)
+  /** Receipt ids are content-derived (`mrcpt_<sha>`), so the same id can name
+   * different operations in different workspaces. Every cache slot below is
+   * keyed by workspace + id, never by id alone. */
+  function receiptKey(id: string, workspace = ''): string {
+    return `${workspace}${id}`
+  }
+
+  function isReceiptLoading(id: string, workspace = ''): boolean {
+    return receiptLoading.value.has(receiptKey(id, workspace))
   }
 
   async function loadReceipt(id: string, workspace = ''): Promise<MemoryReceiptDetail | null> {
-    if (receipts.value[id]) return receipts.value[id]
+    const key = receiptKey(id, workspace)
+    if (receipts.value[key]) return receipts.value[key]
     const busySet = new Set(receiptLoading.value)
-    busySet.add(id)
+    busySet.add(key)
     receiptLoading.value = busySet
     try {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
       const detail = await api.get<MemoryReceiptDetail>(`/api/memory/receipts/${id}${query}`)
-      if (detail) receipts.value = { ...receipts.value, [id]: detail }
+      if (detail) receipts.value = { ...receipts.value, [key]: detail }
       return detail ?? null
     } catch (e) {
       receiptErrors.value = {
         ...receiptErrors.value,
-        [id]: e instanceof Error ? e.message : 'Could not read the change',
+        [key]: e instanceof Error ? e.message : 'Could not read the change',
       }
       return null
     } finally {
       const next = new Set(receiptLoading.value)
-      next.delete(id)
+      next.delete(key)
       receiptLoading.value = next
     }
   }
@@ -184,8 +192,9 @@ export const useProposalsStore = defineStore('proposals', () => {
    * retried. */
   async function undoReceipt(id: string, workspace = ''): Promise<{ ok: boolean; error?: string }> {
     setBusy(id, true)
+    const key = receiptKey(id, workspace)
     const next = { ...receiptErrors.value }
-    delete next[id]
+    delete next[key]
     receiptErrors.value = next
     try {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
@@ -193,14 +202,14 @@ export const useProposalsStore = defineStore('proposals', () => {
       // The change is reversed, so the cached image describes an operation that
       // no longer holds; History refetches and the row re-reads it.
       const without = { ...receipts.value }
-      delete without[id]
+      delete without[key]
       receipts.value = without
       invalidateHistory()
       await fetch({ force: true })
       return { ok: true }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Undo failed'
-      receiptErrors.value = { ...receiptErrors.value, [id]: msg }
+      receiptErrors.value = { ...receiptErrors.value, [key]: msg }
       return { ok: false, error: msg }
     } finally {
       setBusy(id, false)
@@ -450,9 +459,15 @@ export const useProposalsStore = defineStore('proposals', () => {
       const conflicted = (reply?.results ?? []).filter(r => r.conflict).map(r => r.id)
       if (conflicted.length) conflictIds.value = new Set([...conflictIds.value, ...conflicted])
       // Previews of rows that are gone would otherwise be handed to the next
-      // batch as revisions for ids the server no longer knows.
-      for (const id of ids) dropPreview(id)
+      // batch as revisions for ids the server no longer knows — but a
+      // conflicted row is still queued, and dropping its preview here would
+      // also clear its conflict flag (see dropPreview) and leave the next
+      // bulk accept with no revision: the guarded write would silently
+      // downgrade to unguarded on exactly the rows known to have moved.
+      // Those rows stay, and are re-previewed below onto fresh state.
+      for (const id of ids) if (!conflicted.includes(id)) dropPreview(id)
       await fetch({ force: true })
+      for (const id of conflicted) await loadPreview(id)
       invalidateHistory()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
@@ -600,7 +615,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   return {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, batch, dismissOlderThan,
     previews, previewErrors, isPreviewLoading, loadPreview, dropPreview, conflictIds, lastBatchSummary,
-    receipts, receiptErrors, isReceiptLoading, loadReceipt, undoReceipt,
+    receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,

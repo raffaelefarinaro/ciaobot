@@ -370,7 +370,27 @@ def migrate_root(root: Path | str) -> str:
         # it. The guide stays readable under its old name either way.
         if not _write_backup(base / f"{GUIDE_NAME}.bak", agents_text):
             return "failed"
-        legacy.write_text(_merge_bodies(agents_text, legacy_text), encoding="utf-8")
+        merged = _merge_bodies(agents_text, legacy_text)
+        if legacy_is_link:
+            # A symlink at the legacy name points at a guide this root does
+            # not own (an alias of AGENTS.md returned above). Replacing the
+            # link would repoint the root at a new file instead of updating
+            # the shared guide, so this path keeps writing through it.
+            legacy.write_text(merged, encoding="utf-8")
+        else:
+            # Atomic swap: a crash or a full disk mid-write must not leave a
+            # truncated guide behind. ``os.replace`` is atomic on one
+            # filesystem, and the temp file lives beside the target so it is.
+            tmp = base / f"{LEGACY_GUIDE_NAME}.merge.tmp"
+            try:
+                tmp.write_text(merged, encoding="utf-8")
+                os.replace(tmp, legacy)
+            except OSError:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
         agents_tracked = _tracked(base, agents.name)
         _unlink(base, agents)
         _rename(base, legacy, agents, also_tracked=agents_tracked)

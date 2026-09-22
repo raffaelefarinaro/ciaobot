@@ -1931,7 +1931,13 @@ def _file_surface_plane(
 ) -> CiaoControlPlane:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    config = SimpleNamespace(workspace_root=workspace)
+    # `file_surface` roots at the principal's agent root (the workspace
+    # boundary), so the fixture names one the way a rerooted install does.
+    config = SimpleNamespace(
+        workspace_root=workspace,
+        workspace=lambda name: object() if name == "personal" else None,
+        agent_root=lambda name: workspace,
+    )
     return CiaoControlPlane(
         config,
         project_chat_manager=_StreamPcm(stream),

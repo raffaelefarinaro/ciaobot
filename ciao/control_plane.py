@@ -264,7 +264,15 @@ class CiaoControlPlane:
         project = self.pcm.get_project(project_id)
         if project is None:
             raise ControlPlaneError("project_not_found", f"Project '{project_id}' was not found.")
-        self._workspace(principal, project.workspace)
+        try:
+            self._workspace(principal, project.workspace)
+        except ControlPlaneError as exc:
+            if exc.code == "workspace_forbidden":
+                # A foreign-but-existent id must read exactly like a nonexistent
+                # one: otherwise the two codes form an existence oracle over
+                # project ids in other workspaces.
+                raise ControlPlaneError("project_not_found", f"Project '{project_id}' was not found.") from exc
+            raise
         return project
 
     def _resolve_project_id(self, principal: AgentPrincipal, ref: str) -> str:
@@ -1694,7 +1702,13 @@ class CiaoControlPlane:
         basename similarity to the requested path — so the caller can offer a
         correction instead of guessing.
         """
-        root = Path(self.config.workspace_root).resolve()
+        workspace = self._workspace(principal)
+        # Root at the principal's own agent root, not the install root: sibling
+        # workspaces live beside it, and both the existence check and the
+        # suggestion walk would otherwise read across the workspace boundary.
+        # Pre-reroot this resolves to the install root itself, so nothing
+        # changes there; post-reroot it is the workspace's own directory.
+        root = Path(self.config.agent_root(workspace)).resolve()
         try:
             target = self._safe_relative(root, path, must_exist=True)
         except ControlPlaneError as exc:

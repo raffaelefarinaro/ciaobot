@@ -38,6 +38,40 @@ def _write_session(projects_dir: Path, session_id: str) -> Path:
     return path
 
 
+def _write_nested_subagent(projects_dir: Path, session_id: str, agent: str, text: str) -> Path:
+    """Write one nested subagent JSONL (the ``<sid>/subagents/*.jsonl`` layout)."""
+    path = projects_dir / session_id / "subagents" / f"{agent}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
+def test_local_subagent_transcripts_stay_inside_their_agent_root(fake_home: Path) -> None:
+    """A session id resumed or copied under another cwd must not mix that
+    root's subagent transcripts into this chat's panel: the nested-subagent
+    slug scan used to ignore `agent_root` while the parent-session lookup
+    beside it already scoped to it."""
+    root_a = fake_home / "a"
+    root_b = fake_home / "b"
+    session = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    _write_nested_subagent(_projects_dir_for(root_a), session, "agent-x", "from a")
+    _write_nested_subagent(_projects_dir_for(root_b), session, "agent-y", "from b")
+
+    scoped = transcript_service._local_subagent_transcripts(session, root_a, agent_root=root_a)
+    assert [entry["agent_id"] for entry in scoped] == ["agent-x"]
+
+    # Without a root the global net still reads every slug, as today.
+    unscoped = transcript_service._local_subagent_transcripts(session, root_a)
+    assert sorted(entry["agent_id"] for entry in unscoped) == ["agent-x", "agent-y"]
+
+
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``Path.home()`` at a temp dir so slugs land under it."""

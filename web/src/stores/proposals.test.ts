@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
 import { useProposalsStore } from './proposals'
-import type { ProposalHistoryRow, ProposalRow, ProposalsResponse } from '../lib/types'
+import type { ProposalHistoryRow, ProposalPreview, ProposalRow, ProposalsResponse } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -467,5 +467,58 @@ describe('proposal history', () => {
 
     expect(store.historyError).toBe('history is unreachable')
     expect(store.error).toBe('an unread accept failure')
+  })
+})
+describe('batch conflicts stay guarded', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  function preview(id: string, revision: string): ProposalPreview {
+    return {
+      id, workspace: 'personal', kind: 'memory', text: 't', source: '',
+      operation: 'add', destination: 'ciao:memory', destination_path: '/g',
+      revision, before: '', after: 't', exact: true, truncated: false,
+      can_accept: true, reason: '', separator: '\n§\n',
+    }
+  }
+
+  it('keeps the conflict flag and refreshes the preview so a retry stays guarded', async () => {
+    const store = useProposalsStore()
+    store.previews = { r1: preview('r1', 'rev-1'), r2: preview('r2', 'rev-2') }
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true, action: 'accept', summary: [],
+      results: [
+        { id: 'r1', action: 'edit_region', dismissed: false, conflict: true },
+        { id: 'r2', action: 'edit_region', dismissed: true, promoted: true },
+      ],
+    })
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url.includes('/preview')) return { preview: preview('r1', 'rev-1-fresh') }
+      return { rows: [] }
+    })
+
+    await store.batch(['r1', 'r2'], 'accept')
+
+    // The first batch sends both revisions.
+    expect(vi.mocked(api.post).mock.calls[0][1]).toMatchObject({
+      revisions: { r1: 'rev-1', r2: 'rev-2' },
+    })
+    // The conflicted row keeps its flag and is re-previewed onto fresh
+    // state; the accepted row's preview is gone. Before the fix, dropPreview
+    // erased both, and the retry below sent no revisions at all.
+    expect(store.conflictIds.has('r1')).toBe(true)
+    expect(store.previews['r1']?.revision).toBe('rev-1-fresh')
+    expect(store.previews['r2']).toBeUndefined()
+
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true, action: 'accept', summary: [],
+      results: [{ id: 'r1', action: 'edit_region', dismissed: true, promoted: true }],
+    })
+    await store.batch(['r1'], 'accept')
+    expect(vi.mocked(api.post).mock.calls[1][1]).toMatchObject({
+      revisions: { r1: 'rev-1-fresh' },
+    })
   })
 })

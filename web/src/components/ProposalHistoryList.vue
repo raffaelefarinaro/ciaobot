@@ -42,11 +42,11 @@ async function toggleChange(row: ProposalHistoryRow) {
 }
 
 function receiptFor(row: ProposalHistoryRow) {
-  return row.change ? store.receipts[row.change.receipt_id] : undefined
+  return row.change ? store.receipts[store.receiptKey(row.change.receipt_id, row.workspace)] : undefined
 }
 
 function receiptError(row: ProposalHistoryRow): string {
-  return row.change ? (store.receiptErrors[row.change.receipt_id] ?? '') : ''
+  return row.change ? (store.receiptErrors[store.receiptKey(row.change.receipt_id, row.workspace)] ?? '') : ''
 }
 
 /** Undo is offered ONLY where a receipt can honour it, and the server checks
@@ -264,13 +264,13 @@ const filtersHideEverything = computed(
                 changes were tracked, so what it wrote cannot be shown or undone.
               </p>
               <template v-else>
-                <p v-if="store.isReceiptLoading(row.change.receipt_id)" class="ph-change-none" role="status">Loading the change…</p>
+                <p v-if="store.isReceiptLoading(row.change.receipt_id, row.workspace)" class="ph-change-none" role="status">Loading the change…</p>
                 <!-- Above the change, not instead of it. A refused undo is the
                      common case here, and replacing the diff with the refusal
                      left the operator reading "undo would remove unrelated
                      facts" with no sight of the change it was talking about. -->
                 <p v-if="receiptError(row)" class="ph-change-error" role="alert">{{ receiptError(row) }}</p>
-                <template v-if="!store.isReceiptLoading(row.change.receipt_id) && receiptFor(row)">
+                <template v-if="!store.isReceiptLoading(row.change.receipt_id, row.workspace) && receiptFor(row)">
                   <p v-if="!receiptFor(row)!.has_snapshot" class="ph-change-none">
                     No change snapshot available.<template v-if="receiptFor(row)!.reason"> {{ receiptFor(row)!.reason }}.</template>
                   </p>

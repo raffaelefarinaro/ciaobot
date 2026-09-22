@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.agent_surface import AgentDispatcher
+from ciao.web.auth import is_loopback_client
 
 #: Upper bound on one agent request body. ``chat_handover``/``chat_fork`` with
 #: carried history are the largest legitimate callers and stay far below this.
@@ -62,6 +63,16 @@ async def agent_dispatch_endpoint(request: Request) -> JSONResponse:
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     op = str(request.path_params.get("op") or "")
+    # Loopback-only: the only legitimate caller is the `ciao` CLI in a managed
+    # provider shell on this machine (`agent_url` is hardcoded to 127.0.0.1),
+    # so a token presented from anywhere else is rejected before it is even
+    # checked — with PWA_HOST=0.0.0.0 this route is reachable from the LAN,
+    # and a leaked token must not become a remote control plane.
+    if not is_loopback_client(request):
+        return JSONResponse(
+            {"ok": False, "error": {"code": "forbidden", "message": "The agent surface is only reachable from this machine.", "retryable": False}},
+            status_code=403,
+        )
     # Authenticate before touching the body: with PWA_HOST=0.0.0.0 this route
     # is reachable from the LAN, and buffering an unauthenticated upload first
     # would let anyone fill memory before the 401. Then read the body in

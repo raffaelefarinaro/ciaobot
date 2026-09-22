@@ -438,6 +438,56 @@ describe('ProposalHistoryList changes and undo', () => {
     wrapper.unmount()
   })
 
+  it('keeps same-id receipts from two workspaces apart', async () => {
+    // Receipt ids are content-derived, so the same id can name different
+    // operations in different workspaces. The cache is keyed by workspace +
+    // id: without that, whichever workspace loaded first wins everywhere.
+    const change = {
+      receipt_id: 'mrcpt_same', kind: 'region_apply', status: 'applied',
+      destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+    }
+    const rows = [
+      historyRow({ id: 'h1', workspace: 'personal', change }),
+      historyRow({ id: 'h2', workspace: 'work', change }),
+    ]
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memory/receipts/')) {
+        const ws = url.includes('workspace=work') ? 'work' : 'personal'
+        const fact = ws === 'work' ? 'Work fact' : 'Personal fact'
+        return Promise.resolve({
+          id: 'mrcpt_same', workspace: ws, kind: 'region_apply', status: 'applied',
+          ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+          destination: 'ciao:memory', fact_text: fact,
+          undoable: true, has_snapshot: true, changed: true, error: '',
+          before: '- An older fact.', after: `- An older fact.\n- ${fact}`,
+          diff: [{ op: 'added', text: `- ${fact}` }],
+        })
+      }
+      return Promise.resolve({ rows, total: rows.length, truncated: false })
+    })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+    // Personal first: loads and caches the receipt under that workspace.
+    useProjectStore().activeWorkspace = 'personal'
+    await nextTick()
+    await flushPromises()
+    await wrapper.findAll('.ph-change-toggle')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ph-change').text()).toContain('Personal fact')
+
+    // Then work: the same receipt id must load that workspace's own detail,
+    // not the cached personal one.
+    useProjectStore().activeWorkspace = 'work'
+    await nextTick()
+    await flushPromises()
+    await wrapper.findAll('.ph-change-toggle')[0].trigger('click')
+    await flushPromises()
+    const workChange = wrapper.find('.ph-change')
+    expect(workChange.text()).toContain('Work fact')
+    expect(workChange.text()).not.toContain('Personal fact')
+    wrapper.unmount()
+  })
+
   it('keeps the change on screen when an undo is refused', async () => {
     // A refused undo is the common failure here. Replacing the diff with the
     // refusal left the operator reading "undo would remove unrelated facts"

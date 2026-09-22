@@ -59,7 +59,7 @@ const olderThanDays = ref(30)
  * would take the reason and the competing entries away the moment they became
  * relevant, and the retry that resolves it belongs next to them.
  */
-const deferredById = ref<Record<string, { reason: string; competing: string[] }>>({})
+const deferredById = ref<Record<string, { reason: string; competing: string[]; text?: string; expectedRevision?: string }>>({})
 
 function deferredFor(row: ProposalRow) {
   return deferredById.value[row.id]
@@ -183,8 +183,14 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   }
   // A refusal that is not a conflict (an over-cap guard, a people note that
   // needs a manual merge) still has the kind's merge-chat fallback behind it.
+  // The pending edit rides along into the deferral: without it the retry
+  // below would resend the original bullet, silently replacing the wording
+  // the operator just approved.
   closePreview()
-  await handleAcceptRefusal(row, result.error || '', result.payload)
+  await handleAcceptRefusal(row, result.error || '', result.payload, {
+    text: edited || undefined,
+    expectedRevision: preview.revision,
+  })
 }
 
 // Proposal → chat link: when an accept fallback or skill implement spawns a
@@ -549,15 +555,29 @@ async function reconcileFirst(row: ProposalRow) {
  *
  * No further confirmation: this is only reachable from a row that already
  * refused an accept the operator confirmed on the card, so the consent it would
- * ask for has been given for this exact write.
+ * ask for has been given for this exact write. The stashed edit and revision
+ * go back with it, so the retry cannot land the original bullet over the
+ * approved wording, nor land on a destination nobody looked at.
  */
 async function retryReconcile(row: ProposalRow) {
-  const result = await store.act(row.id, 'accept', '', { reconcile: true })
+  const pending = deferredFor(row)
+  const result = await store.act(row.id, 'accept', '', {
+    reconcile: true,
+    expectedRevision: pending?.expectedRevision,
+    text: pending?.text,
+  })
   if (result.ok) {
     clearDeferred(row.id)
     return
   }
-  if (result.conflict) return
+  if (result.conflict) {
+    // The store already adopted the refreshed preview; show it. The deferred
+    // card stays behind it would offer a second "try again" against a
+    // revision the server just refused.
+    clearDeferred(row.id)
+    previewId.value = row.id
+    return
+  }
   await handleAcceptRefusal(row, result.error || '', result.payload)
 }
 
@@ -590,7 +610,7 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     await api.post(`/api/proposals/${row.id}/accept${query}`)
     clearDeferred(row.id)
-    await store.fetch()
+    await store.fetch({ force: true })
     // `store.fetch` deliberately leaves history alone, so this direct post -
     // the only mutation that does not go through `store.act` - has to say so
     // itself. Without it the accepted decision and the tab badge stayed stale
@@ -618,14 +638,22 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
  * check can resolve on its own, so it becomes a state on the row rather than
  * an agent spawned to merge the fact by hand.
  */
-async function handleAcceptRefusal(row: ProposalRow, msg: string, payload?: unknown) {
+async function handleAcceptRefusal(
+  row: ProposalRow,
+  msg: string,
+  payload?: unknown,
+  pending?: { text?: string; expectedRevision?: string },
+) {
   const deferral = deferralFrom(payload)
   if (deferral) {
     // Checked before the merge chat, which every region kind falls back to on
     // any refusal. A deferral already has a cheaper remedy — one more retry,
     // against the entries the row now names — so spawning an agent to merge by
     // hand would skip past the fix and leave a chat to clean up.
-    deferredById.value = { ...deferredById.value, [row.id]: deferral }
+    deferredById.value = {
+      ...deferredById.value,
+      [row.id]: { ...deferral, ...pending },
+    }
     return
   }
   const fallback = descriptorFor(row).fallback

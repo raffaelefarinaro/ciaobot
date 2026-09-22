@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
@@ -248,7 +249,23 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
     if raw is None:
         return None
     try:
-        text = Path(raw[1:]).read_text(encoding="utf-8") if raw.startswith("@") else raw
+        if raw.startswith("@"):
+            # Same credential boundary as the provider file tools: an `@`
+            # read needs only one generic `ciao …` approval, so without this
+            # a workspace `.env` (or anything under `.runtime/`/`secrets/`)
+            # could be embedded into a vault-persisted handover with no more
+            # consent than the command itself. An agent with shell access can
+            # `cat` anyway; this path must not make it cheaper.
+            candidate = Path(raw[1:]).expanduser()
+            resolved = candidate.resolve()
+            if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+                raise UsageError(
+                    f"--messages refuses credential-adjacent paths ({raw[1:]}): "
+                    "pass the content inline instead."
+                )
+            text = candidate.read_text(encoding="utf-8")
+        else:
+            text = raw
         messages = json.loads(text)
     except (OSError, ValueError) as exc:
         raise UsageError(f"--messages must be @file.json or inline JSON: {exc}") from exc

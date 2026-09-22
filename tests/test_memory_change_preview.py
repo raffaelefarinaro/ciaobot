@@ -332,9 +332,12 @@ def test_batch_fails_only_the_row_whose_destination_moved(tmp_path: Path) -> Non
     learning = _row(client, "learnings")
     preview = client.get(f"/api/proposals/{stale['id']}/preview").json()["preview"]
 
-    # Move the region out from under the stale card.
-    from ciao.memory_tool import update_region
+    # Move the region out from under the stale card. The guide is created
+    # explicitly: the preview used to create it as a side effect, which is
+    # exactly the write-on-a-read path the read-only preview closed.
+    from ciao.memory_tool import ensure_regions, update_region
 
+    ensure_regions(_guide(config))
     update_region(_guide(config), "memory", action="add", entry="An unrelated fact.")
 
     body = client.post(
@@ -771,3 +774,22 @@ def test_a_file_preview_separates_by_line(tmp_path: Path) -> None:
     row = _row(client, "learnings")
     preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
     assert preview["separator"] == "\n"
+
+
+def test_a_region_preview_reads_without_creating_the_guide(tmp_path: Path) -> None:
+    """The preview is a read path: on a workspace newer than its last skill
+    sync it previews against empty regions instead of creating the guide or
+    appending markers (`ensure_regions` does both when they are absent). The
+    accept still prepares the destination when it runs, against the same
+    empty body, so the revision handshake lines up."""
+    from ciao.workspace_guide import guide_path
+
+    config = _vault(tmp_path)
+    guide = guide_path(config.agent_root("personal"))
+    assert not guide.exists()
+    client = _client(config)
+    row = _row(client, "memory", "check-first")
+    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
+    assert preview["operation"] == "add"
+    assert not preview.get("reason")
+    assert not guide.exists(), "a GET preview must not create the guide"

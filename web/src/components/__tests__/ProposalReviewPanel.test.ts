@@ -1383,13 +1383,47 @@ describe('reconcile before writing', () => {
     // And the row is still queued, because nothing was written.
     expect(wrapper.findAll('.pr-row')).toHaveLength(1)
 
-    // Retrying reconciles again, against the region as it stands now.
+    // Retrying reconciles again, against the region as it stands now — pinned
+    // to the same revision the card showed, so the retry cannot land on a
+    // destination nobody looked at.
     apiPost.mockResolvedValue({} as never)
     await wrapper.find('.pr-actions--deferred .btn-primary').trigger('click')
     await flushPromises()
 
-    expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {})
+    expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+      expected_revision: 'rev-1',
+    })
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a deferred edited accept retries with the approved wording, not the original bullet', async () => {
+    // The operator edited the wording, checked first, and the check deferred.
+    // The retry must resend the approved text with its revision: resending
+    // the original bullet would silently replace what was just approved, and
+    // resending no revision would leave the retry unguarded.
+    mockQueue({}, { text: 'Remember the other thing' })
+    apiPost.mockRejectedValueOnce(refusal(deferral))
+    const wrapper = await openCard()
+
+    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'edit suggestion')!.trigger('click')
+    await nextTick()
+    await wrapper.find('.pr-card-edit-input').setValue('Remember the other thing')
+    await wrapper.find('.pr-card-edit .btn-primary').trigger('click')
+    await flushPromises()
+    await clickCard(wrapper, 'check first')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-actions--deferred').exists()).toBe(true)
+
+    apiPost.mockResolvedValue({} as never)
+    await wrapper.find('.pr-actions--deferred .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+      expected_revision: 'rev-1',
+      text: 'Remember the other thing',
+    })
     wrapper.unmount()
   })
 

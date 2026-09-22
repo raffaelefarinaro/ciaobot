@@ -19,10 +19,10 @@ from ciao.web.routes_agent import agent_dispatch_endpoint
 from tests.test_mcp_server import _service
 
 
-def _client(service) -> TestClient:
+def _client(service, *, peer: tuple[str, int] = ("127.0.0.1", 5555)) -> TestClient:
     app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
     app.state.mcp_service = service
-    return TestClient(app, base_url="http://127.0.0.1:18443")
+    return TestClient(app, base_url="http://127.0.0.1:18443", client=peer)
 
 
 def _token(service, chat_id: str = "chat-1", workspace: str = "personal") -> str:
@@ -648,3 +648,128 @@ def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
     rules = mode_settings(mode)[1]
     bash = [rule for rule in rules if rule["permission"] == "bash"]
     assert not any(rule.get("pattern", "").startswith("ciao ") for rule in bash)
+
+
+# ── release-gate fixes (v0.18.0) ───────────────────────────────────────────
+#
+# The release review found real issues in the new surface; each fix below
+# carries the regression that proves it, and each test fails on the code as
+# it was before the fix.
+
+
+def test_agent_route_rejects_non_loopback_peers_before_auth(tmp_path: Path) -> None:
+    """`agent_url` is hardcoded to 127.0.0.1: the only legitimate caller is on
+    this machine, so a token presented from anywhere else is refused before it
+    is even checked — a leaked token must not become a remote control plane."""
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    remote = _client(service, peer=("203.0.0.1", 9))
+    with remote:
+        denied = _post(remote, token, "context_get")
+        anonymous = _post(remote, "", "context_get")
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "forbidden"
+    assert anonymous.status_code == 403
+
+
+def _two_workspace_plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A real control plane over two sibling workspaces, post-reroot shape."""
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.control_plane import AgentPrincipal, CiaoControlPlane
+
+    config = CiaoConfig(        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    # The seam the re-rooting migration flips: per-workspace directories.
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, name: tmp_path / name)
+    pcm = SimpleNamespace(get_active_stream=lambda chat_id: None)
+    plane = CiaoControlPlane(
+        config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
+    )
+    principal = AgentPrincipal(
+        token_id="t", chat_id="c", project_id="p", workspace="personal", provider="claude"
+    )
+    return plane, principal
+
+
+def test_file_surface_is_scoped_to_the_principal_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`file_surface` used to root at the install root, so a chat in one
+    workspace could surface — and get filename suggestions from — a sibling
+    workspace. Both the existence check and the suggestion walk stay inside
+    the principal's own agent root now."""
+    from ciao.control_plane import ControlPlaneError
+
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "personal" / "notes.md").write_text("hi", encoding="utf-8")
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "secret-plan.md").write_text("x", encoding="utf-8")
+    plane, principal = _two_workspace_plane(tmp_path, monkeypatch)
+
+    assert plane.file_surface(principal, "notes.md")["ok"] is True
+
+    # Served before the fix (the file exists under the old install root);
+    # refused after, because it is outside the principal's root.
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.file_surface(principal, "work/secret-plan.md")
+    assert excinfo.value.code == "file_not_found"
+    # The message echoes the caller's own path; the suggestions must not name
+    # anything outside the principal's workspace.
+    suggestions = excinfo.value.payload().get("suggestions", [])
+    assert not [s for s in suggestions if s.startswith("work")]
+
+    # The miss path walks for near matches: before the fix that walk covered
+    # the sibling workspace and disclosed its filenames.
+    with pytest.raises(ControlPlaneError) as miss:
+        plane.file_surface(principal, "secret-plan.md")
+    assert miss.value.code == "file_not_found"
+    leaked = miss.value.payload().get("suggestions", [])
+    assert not [s for s in leaked if "secret-plan" in s and s.startswith("work")]
+
+
+def test_project_lookup_hides_foreign_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreign-but-existent project id used to read `workspace_forbidden`
+    while a nonexistent one read `project_not_found` — an existence oracle
+    over other workspaces' project ids. Both read as not-found now."""
+    from ciao.control_plane import ControlPlaneError
+
+    foreign = SimpleNamespace(project_id="w1", name="Work", workspace="work")
+    pcm = SimpleNamespace(
+        get_project=lambda pid: foreign if pid == "w1" else None,
+        get_active_stream=lambda chat_id: None,
+    )
+    plane, principal = _two_workspace_plane(tmp_path, monkeypatch)
+    plane.pcm = pcm
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane._project(principal, "w1")
+    assert excinfo.value.code == "project_not_found"
+    assert "forbidden" not in str(excinfo.value).lower()
+
+    with pytest.raises(ControlPlaneError) as missing:
+        plane._project(principal, "no-such-project")
+    assert missing.value.code == "project_not_found"
+
+
+def test_handover_messages_refuse_credential_paths(tmp_path: Path) -> None:
+    """`--messages @file` needs only one generic `ciao …` approval, so without
+    this a workspace `.env` could be embedded into a vault-persisted handover
+    with no more consent than the command itself."""
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=x", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError, match="credential"):
+        agent_cli._handover_messages(f"@{secret}")
+
+    plain = tmp_path / "notes.json"
+    plain.write_text('[{"role": "user"}]', encoding="utf-8")
+    assert agent_cli._handover_messages(f"@{plain}") == [{"role": "user"}]

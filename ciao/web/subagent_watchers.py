@@ -472,7 +472,10 @@ class SubagentWatchers:
                     # replacement watcher skips this: it already owns the slot
                     # and will publish the real count on its first tick.
                     self.publish_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
+                self._background_agents_last.pop(chat_id, None)
+            # A superseded watcher leaves the replacement's count alone: it
+            # already published on its first tick, and wiping the baseline
+            # here would make the next tick republish a duplicate event.
 
     async def _watch_opencode(
         self, chat_id: str, project_id: str
@@ -509,7 +512,9 @@ class SubagentWatchers:
                     # See the Claude watcher: never leave clients holding a
                     # count we have stopped maintaining.
                     self.publish_count(chat_id, project_id, 0)
-            self._background_agents_last.pop(chat_id, None)
+                self._background_agents_last.pop(chat_id, None)
+            # A superseded watcher must not wipe the replacement's baseline
+            # (see the Claude watcher above).
 
     def unwoken_tasks(
         self, chat_id: str, tasks: list[SubagentInfo]

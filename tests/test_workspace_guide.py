@@ -108,6 +108,29 @@ def test_two_real_guides_are_merged_and_backed_up(tmp_path: Path) -> None:
     assert "my own rule" in (tmp_path / "AGENTS.md.bak").read_text(encoding="utf-8")
 
 
+def test_a_failed_merge_swap_leaves_the_legacy_guide_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merged body is swapped into place atomically: a crash or a full
+    disk mid-write must not leave a truncated CLAUDE.md behind, and no temp
+    file may be left in the workspace."""
+    import os
+
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Mine\n- my own rule\n", encoding="utf-8")
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom)
+
+    assert wg.migrate_root(tmp_path) == "failed"
+
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == REGIONS
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == "# Mine\n- my own rule\n"
+    assert list(tmp_path.glob("*.merge.tmp")) == []
+
+
 def test_identical_copies_need_no_backup(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")

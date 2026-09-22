@@ -583,11 +583,28 @@ def _local_subagent_transcripts(
         # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
         # dirs the cached listing already knows, so a stale-slug pileup
         # cannot turn this fallback into a multi-second scandir storm.
-        candidate_dirs = [
-            entry
-            for entry in projects_root.iterdir()
-            if entry.is_dir() and (entry / session_id / "subagents").is_dir()
-        ]
+        if agent_root is not None:
+            # Same isolation as `_local_session_jsonl_paths` above: the
+            # preferred slug already scopes to this root's own projects dir,
+            # so a session id resumed or copied under another cwd cannot mix
+            # another root's subagent transcripts into this chat's panel.
+            try:
+                from ciao.transcripts import _claude_projects_dir
+            except ImportError:
+                candidate_dirs = []
+            else:
+                preferred_slug = _claude_projects_dir(agent_root)
+                candidate_dirs = (
+                    [preferred_slug]
+                    if preferred_slug.is_dir() and (preferred_slug / session_id / "subagents").is_dir()
+                    else []
+                )
+        else:
+            candidate_dirs = [
+                entry
+                for entry in projects_root.iterdir()
+                if entry.is_dir() and (entry / session_id / "subagents").is_dir()
+            ]
     except OSError:
         candidate_dirs = []
     nested_paths: list[Path] = []
